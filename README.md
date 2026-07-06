@@ -10,8 +10,8 @@
 **Just say it. It's edited.**
 
 [![License](https://img.shields.io/badge/license-GPL%20v3-blue)](./LICENSE)
-[![Stars](https://img.shields.io/github/stars/yourorg/ClipTalk?style=social)](https://github.com/yourorg/ClipTalk)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/yourorg/ClipTalk/releases)
+[![Stars](https://img.shields.io/github/stars/GML-MMGroup/ClipTalk?style=social)](https://github.com/GML-MMGroup/ClipTalk)
+[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/GML-MMGroup/ClipTalk/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865f2)](https://discord.gg/yourlink)
 
 **English** · [简体中文](./README_zh.md) · [Live Demo](#) · [Documentation](#)
