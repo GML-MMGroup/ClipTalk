@@ -1,7 +1,7 @@
 <div align="center">
 
 <!-- 👇 在这里替换成你的封面 Banner 图（就用我们之前设计的那张海报） -->
-<img src="./assets/banner.png" alt="ClipTalk Banner" width="100%" />
+<img src="./assets/banner_zh.png" alt="ClipTalk Banner" width="100%" />
 
 # ClipTalk ✂️
 
