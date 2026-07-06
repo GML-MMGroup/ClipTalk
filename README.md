@@ -196,4 +196,5 @@ Discord · Twitter/X · WeChat Group
 Made with ❤️ by the ClipTalk Team
 
 </div>
+
 ```
