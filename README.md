@@ -156,6 +156,7 @@ or extend the toolbox with your own.
 ---
 
 ## 🏗️ How It Works
+```
 💬 "Cut out Mr. Wang's scenes"
 ↓
 🤖 Agent plans the edit
@@ -163,7 +164,7 @@ or extend the toolbox with your own.
 📝 Read subtitles → 🔊 Voice ID → 👤 Face tracking → 🧭 Locate segments
 ↓
 ✂️ Cut clips → 🎞️ Compose → ✅ Done
-
+```
 One instruction in, finished clips out — every step visible in the
 agent's working log.
 
@@ -175,6 +176,7 @@ agent's working log.
 git clone https://github.com/yourorg/ClipTalk.git
 cd ClipTalk
 # 安装与启动步骤，待补充
+```
 See the Documentation for configuration and API keys.
 
 🤝 Contributing
@@ -196,5 +198,3 @@ Discord · Twitter/X · WeChat Group
 Made with ❤️ by the ClipTalk Team
 
 </div>
-
-```
