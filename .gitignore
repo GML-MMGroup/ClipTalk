@@ -1,0 +1,59 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+
+# Runtime media, models, task state and generated outputs
+data/
+*.log
+*.pid
+*.sqlite3
+*.db
+/*.mp4
+/*.mov
+/*.mkv
+/*.avi
+/*.webm
+
+# Tests and temporary work
+test-results/
+playwright-report/
+tmp/
+
+# Generated README preview (the product entry point is static/index.html)
+/README.md
+/README_zh.md
+/index.html
+/readme1-preview.html
+/README_zh-preview.html
+/readme-preview-assets/
+/tools/readme-preview.html
+
+# Local design drafts and uncategorized root screenshots
+/2.png
+/11.png
+/12.png
+/13.png
+/14.png
+/15.png
+/02cb93c285fbcb0eea606ba8ae460af8.png
+/50edb229b88ef0effbee51476648c2f6.png
+/5fc8a97848f55921ca09fe96508c475b.png
+/design/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store

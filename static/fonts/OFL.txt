@@ -1,0 +1,9 @@
+Noto Sans SC is distributed under the SIL Open Font License, Version 1.1.
+
+Copyright 2022 The Noto Project Authors
+
+Source package: https://github.com/notofonts/noto-cjk
+Web subset source: https://fontsource.org/fonts/noto-sans-sc
+
+The full license text is available at:
+https://scripts.sil.org/OFL

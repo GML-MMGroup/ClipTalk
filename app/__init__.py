@@ -1,0 +1,1 @@
+"""Standalone VLM highlight cutter."""

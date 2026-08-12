@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090f14" />
+    <meta name="description" content="使用视觉大模型与富语音分析发现、审核并合成视频高光。" />
+    <title>ClipTalk</title>
+    <link rel="icon" type="image/png" href="/static/assets/cliptalk-icon.png" />
+    <link rel="preload" href="/static/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/generative-loaders.css?v=20260811-loader-runtime-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260812-brand-lockup-1" />
+  </head>
+  <body>
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand-cluster"><a class="brand" href="/" aria-label="ClipTalk 首页">
+          <span class="brand-lockup-frame" aria-hidden="true">
+            <svg viewBox="100 230 1520 454" role="presentation" focusable="false">
+              <image href="/static/assets/cliptalk-lockup-source.png" width="1672" height="941" />
+            </svg>
+          </span>
+        </a><button id="homeButton" type="button" class="home-button" title="返回全部任务" aria-label="返回全部任务"><span aria-hidden="true">‹</span> 全部任务</button><i class="brand-circuit" aria-hidden="true"></i></div>
+      <div class="top-actions">
+        <button id="engineState" class="engine" type="button" title="查看模型状态"><i></i><span>正在检查视觉模型</span><b>⌄</b></button>
+        <button id="settingsButton" class="top-button settings-button" type="button"><span>⚙</span> 设置</button>
+      </div>
+    </header>
+
+    <main class="studio home-mode">
+      <section id="homeView" class="home-view" aria-label="全部任务">
+        <header class="home-heading">
+          <div><div class="home-eyebrow">AI VIDEO EDITING WORKSPACE</div><h1>全部任务</h1><p>从真实视频中发现精彩瞬间，再由 AI 筛选、排序并组合成片。</p></div>
+          <div class="home-summary"><span><b id="homeTaskCount">0</b><small>个任务</small></span><span><b id="homeAssetCount">0</b><small>个视频</small></span><span><b id="homeOutputCount">0</b><small>条成片</small></span></div>
+        </header>
+        <section class="home-section"><div class="home-section-heading"><div><small>RECENT TASKS</small><h2>最近编辑</h2></div><span>自动保存任务 · 记录成片版本</span></div>
+          <div id="homeTaskGrid" class="home-task-grid"><article class="home-create-card"><button type="button" data-home-create><span>＋</span><strong>创建新任务</strong><small>拖入视频或点击选择素材</small></button><p>AI 会先理解需求，再开始视觉分析。</p></article><div class="home-loading-card"><span data-generative-loader="inline" data-loader-variant="orbit" data-loader-size="34" data-loader-label="正在读取最近任务"></span><strong>正在读取最近任务</strong><small>正在恢复视频封面与成片版本</small></div></div>
+        </section>
+      </section>
+      <aside class="chat-panel glass-panel">
+        <header class="panel-header">
+          <div class="director"><span class="director-orb-slot" id="directorThinkingOrb" data-thinking-orb data-orb-state="shaping" data-orb-size="30" data-orb-theme="light" data-orb-label="等待素材"></span><div><strong>AI 高光导演</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
+          <ol id="directorStageNav" class="director-stage-flow" aria-label="高光剪辑流程">
+            <li data-director-flow="brief"><span>1</span><div><strong>准备</strong><small>确认要求并准备媒体</small></div></li>
+            <li data-director-flow="analysis"><span>2</span><div><strong>AI 分析</strong><small>发现并整理高光事件</small></div></li>
+            <li data-director-flow="compose"><span>3</span><div><strong>生成成片</strong><small>合成、预览并下载</small></div></li>
+          </ol>
+        </header>
+        <section id="directorTaskSummary" class="director-task-summary" aria-live="polite">
+          <small>当前任务</small><strong>等待创建任务</strong><p>上传视频后，AI 会先确认你的剪辑目标。</p>
+        </section>
+
+        <section id="chatMessages" class="chat-messages" aria-live="polite">
+          <article class="chat-message assistant">
+            <span class="avatar">AI</span>
+            <div class="bubble"><small>高光导演</small><p>请先上传视频。我会发现精彩镜头，把属于同一事件的镜头整理在一起供你审核。</p></div>
+          </article>
+          <div id="chatStageHost" class="chat-stage-host" aria-live="polite"></div>
+        </section>
+
+        <form id="chatForm" class="chat-composer">
+          <div class="chat-input-shell composer-homepage-beam" data-border-beam data-beam-size="md" data-beam-color="ocean" data-beam-theme="dark" data-beam-strength="0.38" data-beam-duration="4.8" data-beam-brightness="1.08" data-beam-saturation="0.88" data-beam-hue-range="18" data-beam-radius="12">
+            <textarea id="chatInput" maxlength="500" rows="2" disabled placeholder="请输入指令或补充需求……"></textarea>
+            <button id="sendButton" type="submit" disabled title="发送" aria-label="发送"><span data-ui-icon="send" aria-hidden="true"></span></button>
+          </div>
+          <div class="chat-compose-actions"><select id="chatComposeSubtitleMode" class="chat-compose-subtitle hidden" aria-label="合成字幕方式"><option value="none" selected>不添加字幕</option><option value="burn">添加 AI 字幕</option></select><button id="chatComposeButton" class="chat-compose-button hidden" type="button">✦ 开始合成</button><button id="chatComposeRecommendedButton" class="chat-compose-recommended hidden" type="button">按 AI 推荐事件合成（不使用时间轴选区）</button><button id="chatComposePlanButton" class="chat-compose-plan hidden" type="button">AI 智能规划</button></div>
+          <small>Enter 发送 · Shift+Enter 换行</small>
+        </form>
+      </aside>
+
+      <div class="panel-resizer panel-resizer-left" data-panel-resizer="left" role="separator" aria-label="调整 AI 助手面板宽度" aria-orientation="vertical" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+
+      <section class="review-panel glass-panel">
+        <div id="uploadView" class="upload-view">
+          <div class="intro">
+            <p>VLM + LLM EDITORIAL WORKFLOW</p>
+            <h1>从真实画面中发现高光<br /><em>再剪成节奏清晰的成片</em></h1>
+            <span>VLM 负责发现画面、对白和声音中的精彩瞬间，LLM 再根据你的要求筛选、排序并组合高光片段，生成节奏更紧凑的成片。</span>
+          </div>
+          <form id="uploadForm" class="upload-card" onsubmit="return false">
+            <label class="drop-zone" id="dropZone">
+              <input id="videoInput" name="video" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm,.m4v,.avi" required />
+              <span>＋</span><strong id="fileLabel">拖入视频，或点击选择</strong><small>MP4 / MOV / MKV / WebM / M4V / AVI</small>
+            </label>
+            <div id="localPreviewPanel" class="local-preview hidden">
+              <video id="localPreviewVideo" controls preload="auto" playsinline></video>
+              <div><strong>源视频已就绪</strong><small>请在 AI 高光导演中确认剪辑要求</small></div>
+            </div>
+          </form>
+        </div>
+
+        <div id="reviewView" class="review-view hidden">
+          <header class="review-header">
+            <div class="asset-heading"><span class="file-icon">▶</span><div><small id="reviewKicker">SOURCE VIDEO</small><h2 id="reviewTitle">源视频</h2></div><span id="reviewStatus" class="review-status">等待分析</span></div>
+            <div class="asset-actions"><span id="assetDuration" class="asset-chip">时长 --:--</span><span id="assetResolution" class="asset-chip">分辨率 --</span><div id="reviewLayoutSwitch" class="review-layout-switch" role="group" aria-label="审核工作区布局"><button type="button" data-review-layout-mode="landscape" aria-pressed="true" title="横向布局，仅调整工作区，不改变视频方向">横向布局</button><button type="button" data-review-layout-mode="portrait" aria-pressed="false" title="竖向布局，仅调整工作区，不改变视频方向">竖向布局</button></div><select id="videoViewSelect" class="video-view-select" aria-label="选择视频预览"><option value="source">源视频</option></select><a id="downloadButton" class="download-button hidden" href="#">下载 MP4</a><button id="subtitleButton" class="download-button hidden" type="button">下载字幕 SRT</button></div>
+          </header>
+
+          <div id="reviewStage" class="review-stage">
+            <div class="viewer-shell" id="viewerShell">
+              <div class="media-frame" id="mediaFrame">
+                <video id="mainVideo" preload="metadata" playsinline></video>
+                <span id="viewerBadge">源视频</span>
+                <div id="playerNotice" class="player-notice hidden" role="status"><span id="playerMediaLoader" class="player-media-loader hidden" data-generative-loader="image" data-loader-active="false" data-loader-variant="scan" data-loader-size="84" data-loader-radius="12" data-loader-label="正在准备视频预览"></span><strong>视频暂时无法播放</strong><p></p><button id="playerRetry" type="button">重新加载</button></div>
+                <div class="player-controls">
+                  <button id="playerPlay" class="player-primary-play" type="button" aria-label="播放" data-state="paused" data-tooltip="播放" ></button>
+                  <button id="playerPrevious" class="player-segment-nav" type="button" aria-label="跳转到上一段高光" aria-keyshortcuts="P" data-tooltip="上一段高光 · 只切换预览，不展开详情" disabled>‹</button>
+                  <button id="playerNext" class="player-segment-nav" type="button" aria-label="跳转到下一段高光" aria-keyshortcuts="N" data-tooltip="下一段高光 · 只切换预览，不展开详情" disabled>›</button>
+                  <button id="playerMute" class="player-mute-button" type="button" aria-label="静音" aria-pressed="false" data-state="on" data-tooltip="静音">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path class="speaker-shape" d="M4 9h4l5-4v14l-5-4H4z"></path>
+                      <path class="sound-wave" d="M16 8.5a5.5 5.5 0 0 1 0 7"></path>
+                      <path class="sound-wave sound-wave-wide" d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+                      <path class="mute-slash" d="m4 4 16 16"></path>
+                    </svg>
+                  </button>
+                  <input id="playerVolume" class="player-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" />
+                  <span id="playerClock">00:00 / 00:00</span>
+                  <input id="playerSeek" class="player-seek" type="range" min="0" max="1000" value="0" aria-label="播放进度" />
+                  <button id="playerRate" type="button">1.0×</button>
+                  <button id="playerFullscreen" class="player-fullscreen-button" type="button" aria-label="进入全屏" aria-pressed="false" data-state="enter" data-tooltip="进入全屏">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <g class="fullscreen-enter-icon">
+                        <path d="M4 9V4h5"></path><path d="M15 4h5v5"></path>
+                        <path d="M20 15v5h-5"></path><path d="M9 20H4v-5"></path>
+                      </g>
+                      <g class="fullscreen-exit-icon">
+                        <path d="M9 4v5H4"></path><path d="M15 9h5V4"></path>
+                        <path d="M15 20v-5h5"></path><path d="M9 15H4v5"></path>
+                      </g>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <section id="evidencePanel" class="evidence-panel evidence-placeholder">
+              <header><div><small id="clipTime">审核说明</small><h3 id="clipTitle">选择事件或镜头</h3></div><div class="evidence-header-actions"><b id="clipScore"></b><button id="closeEvidenceButton" type="button" aria-label="清空当前详情">×</button></div></header>
+              <p id="clipReason">点击下方时间轴中的事件或镜头，在这里查看内容说明、时间范围和判断依据。</p>
+              <div id="clipTranscript" class="clip-transcript hidden" aria-label="候选对应转写"></div>
+              <div id="clipEvidenceMeta" class="clip-evidence-meta"></div>
+              <ul id="clipEvidence"></ul>
+              <div class="clip-actions"><button id="addToChatButton" class="add-to-chat-button hidden" type="button">加入对话选区</button><button id="keepButton" class="hidden" type="button">下载该片段</button><button id="replaceButton" class="hidden" type="button">删除片段</button></div>
+            </section>
+          </div>
+
+          <div class="timeline-resizer" id="timelineResizer" role="separator" aria-label="调整视频与时间线高度" aria-orientation="horizontal" tabindex="0" title="上下拖动调整视频与时间线高度"></div>
+
+          <section id="timelinePanel" class="timeline-panel hidden" aria-label="视频审核时间轴">
+            <header>
+              <div><strong>智能剪辑时间线</strong><span id="timelineHint">点击事件查看内容说明</span></div>
+              <section id="timelineEventSummary" class="timeline-event-summary hidden" aria-live="polite">
+                <div><small id="timelineEventSummaryType">当前事件</small><strong id="timelineEventSummaryTitle"></strong></div>
+                <p id="timelineEventSummaryText"></p>
+                <span id="timelineEventSummaryTime"></span>
+              </section>
+              <div class="timeline-review-controls">
+                <button id="timelineFitReview" type="button" aria-pressed="true">显示全片</button>
+                <button id="timelineFocusReview" type="button" disabled>缩放到当前事件</button>
+                <button id="timelineLocatePlayhead" class="timeline-locate-playhead hidden" type="button">回到播放头</button>
+                <b><span id="timelineCurrent">00:00.0</span> / <span id="timelineDuration">00:00.0</span></b>
+              </div>
+            </header>
+            <div class="timeline-toolbar">
+              <div class="timeline-tool-group" aria-label="显示模式"><div class="timeline-view-switch"><button id="timelineWaveMode" class="active" type="button">波形</button><button id="timelineFrameMode" type="button">关键帧</button></div></div>
+              <div class="timeline-tool-group" aria-label="缩放"><button id="timelineZoomOut" type="button" title="缩小时间轴">−</button><button id="timelineFit" type="button">适应全片</button><button id="timelineZoomIn" type="button" title="放大时间轴">＋</button></div>
+              <div class="timeline-tool-group" aria-label="手动选区"><button id="timelineManualSelectToggle" type="button" aria-pressed="false" title="开启后在源视频时间轴上拖动选择任意片段">手动选区</button></div>
+              <div class="timeline-tool-group timeline-layer-switch" aria-label="时间轴辅助图层">
+                <button id="timelineCutsToggle" class="active" type="button" aria-pressed="true" title="显示或隐藏镜头切点">切点</button>
+              </div>
+              <label class="speaker-filter">说话人<select id="speakerFilter" aria-label="按说话人筛选"><option value="all">全部</option></select></label>
+              <span class="timeline-toolbar-spacer"></span>
+            </div>
+            <details id="timelineInsights" class="timeline-insights hidden">
+              <summary><span>剪辑依据</span><b id="timelineInsightsCount">0 项</b><em>点击记录可定位时间轴</em></summary>
+              <div id="timelineInsightsList"></div>
+            </details>
+            <div id="timelineOverview" class="timeline-overview">
+              <div id="timelineOverviewClips"></div><i id="timelineViewWindow"></i><b id="timelineOverviewPlayhead"></b>
+            </div>
+            <div id="timelineViewport" class="timeline-viewport waveform-mode">
+              <div class="timeline-track-labels" aria-hidden="true"><span>事件</span><span>镜头</span><span>画面</span><span>音频</span></div>
+              <div id="timelineTrackContent" class="timeline-track-content">
+                <canvas id="waveformCanvas"></canvas>
+                <div id="timelineLinkedRanges" class="timeline-linked-ranges" aria-hidden="true"></div>
+                <div id="timelineThumbnails" class="timeline-thumbnails"></div>
+                <div id="timelineSceneCuts" class="timeline-scene-cuts"></div>
+                <svg id="timelineEventRelations" class="timeline-event-relations" aria-hidden="true" focusable="false"></svg>
+                <div id="timelineLabels" class="timeline-labels"></div>
+                <div id="timelineClips" class="timeline-clips"></div>
+                <div id="timelineShotMarkers" class="timeline-shot-markers"></div>
+                <div id="timelineSelection" class="timeline-selection hidden">
+                  <button class="timeline-handle start" type="button" aria-label="调整开始时间"></button>
+                  <span></span>
+                  <button class="timeline-handle end" type="button" aria-label="调整结束时间"></button>
+                </div>
+                <i id="timelinePlayhead" class="timeline-playhead"></i>
+              </div>
+            </div>
+            <footer><span><i class="legend-candidate"></i>高光镜头</span><span><i class="legend-recommended"></i>AI 推荐事件</span><span><i class="legend-selected"></i>当前选中</span><span><i class="legend-playhead"></i>播放头</span><span id="waveformState" class="generative-inline-status" data-tone="loading"><span class="generative-inline-motion" data-generative-loader="inline" data-loader-variant="signal" data-loader-size="15" data-loader-label="正在准备音频波形"></span><b class="generative-status-label">正在准备音频波形…</b></span><span id="timelineThumbnailState" class="timeline-thumbnail-state generative-inline-status" data-tone="loading"><span class="generative-inline-motion" data-generative-loader="inline" data-loader-variant="glyph" data-loader-size="15" data-loader-label="正在准备画面缩略图"></span><b class="generative-status-label">正在准备画面缩略图…</b></span><div id="timelineSelectionActions" class="timeline-selection-actions hidden"><span id="timelineSelectionSummary"></span><label>开始 <input id="timelineSelectionStartInput" type="number" min="0" step="0.01" aria-label="选区开始时间（秒）"></label><label>结束 <input id="timelineSelectionEndInput" type="number" min="0" step="0.01" aria-label="选区结束时间（秒）"></label><button id="timelineSelectionPreview" type="button">预览</button><button id="timelineSelectionCancel" type="button">取消</button><button id="timelineSelectionConfirm" type="button">确认选区</button><button id="timelineSelectionCompose" type="button">确认后合成</button></div></footer>
+          </section>
+
+        </div>
+      </section>
+
+      <div class="panel-resizer panel-resizer-right" data-panel-resizer="right" role="separator" aria-label="调整高光审核面板宽度" aria-orientation="vertical" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+
+      <aside class="review-rail glass-panel">
+        <header class="rail-header"><div><small>AI REVIEW</small><strong id="railTitle">事件审核</strong></div><button id="openCandidateDrawer" type="button" disabled>镜头候选</button></header>
+        <section id="jobStatus" class="analysis-console hidden" aria-label="AI 分析进度">
+          <div class="progress-orb" id="progressOrb"><span>AI</span><b id="jobPercent">0%</b></div>
+          <div class="analysis-copy"><small>AI 分析进度</small><div class="analysis-detail-heading"><span id="pipelineThinkingOrb" class="thinking-orb-slot pipeline-thinking-orb hidden" data-thinking-orb data-orb-state="working" data-orb-size="20" data-orb-theme="light" data-orb-label="AI 正在分析"></span><strong id="jobDetail">准备中</strong></div><p id="jobElapsed">任务已运行 00:00</p><div class="progress-facts"><span id="jobStageProgress">阶段准备中</span><span id="jobModel">系统</span><span id="jobEta">等待阶段结果</span></div><i class="analysis-progress"><b id="jobProgress"></b></i></div>
+          <ol id="jobStageList" class="stage-chain">
+            <li data-phase="prepare"><i></i><span>准备</span></li>
+            <li data-phase="analysis"><i></i><span>AI 分析</span></li>
+            <li data-phase="output"><i></i><span>生成成片</span></li>
+          </ol>
+          <div id="analysisDecision" class="analysis-decision hidden"></div>
+          <button id="cancelButton" type="button">停止分析</button>
+          <p id="jobError" class="hidden"></p>
+        </section>
+        <div id="railBody" class="rail-body"><div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="shaping" data-orb-size="64" data-orb-theme="light" data-orb-label="等待分析任务"></span><strong>等待分析任务</strong><p>上传素材后，这里会显示事件高光、内部镜头与输出状态。</p></div></div>
+        <section id="clipSection" class="clip-section hidden">
+          <header><div><small>OUTPUT VERSIONS</small><h3>高光成片</h3></div><div class="clip-header-actions"><span id="clipSummary"></span><button id="outputReeditButton" type="button">返回事件审核</button></div></header>
+          <div id="clipStrip" class="clip-strip"></div>
+        </section>
+        <section id="railOutput" class="rail-output hidden"></section>
+      </aside>
+    </main>
+
+    <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+    <aside id="candidateDrawer" class="candidate-drawer" aria-hidden="true">
+      <header><div><small>RAW VISUAL MOMENTS</small><strong id="candidateDrawerTitle">精彩镜头候选</strong></div><button id="closeCandidateDrawer" type="button">×</button></header>
+      <p>这些是视觉模型精修后的源镜头，可预览或补充到事件成片中。</p>
+      <input id="candidateDrawerSearch" class="candidate-drawer-search" type="search" placeholder="搜索镜头标题、对白或说话人">
+      <div id="candidateDrawerList" class="candidate-drawer-list"></div>
+    </aside>
+
+    <div id="settingsBackdrop" class="settings-backdrop hidden"></div>
+    <div id="settingsPanel" class="settings-panel model-settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header><div><small>MODEL CONNECTIONS</small><strong id="settingsTitle">模型配置</strong><p>分别配置画面分析与剪辑规划，新设置仅用于之后创建的任务。</p></div><button id="closeSettings" type="button" aria-label="关闭设置">×</button></header>
+      <nav class="model-role-tabs" aria-label="模型职责">
+        <button type="button" class="active" data-model-role="vision" aria-selected="true"><strong>视觉分析</strong><small>发现事件与镜头边界</small></button>
+        <button type="button" data-model-role="llm" aria-selected="false"><strong>剪辑规划</strong><small>理解需求与编排成片</small></button>
+      </nav>
+      <form id="visionSettingsForm" class="vision-settings-form model-settings-view" data-model-view="vision">
+        <section class="vision-provider-section">
+          <div class="settings-section-heading"><strong>模型服务</strong><span id="visionActiveSummary">正在读取配置</span></div>
+          <div id="visionProviderList" class="vision-provider-list" role="tablist" aria-label="选择视觉模型服务"></div>
+        </section>
+        <section class="vision-credential-section">
+          <label class="vision-field"><span>API Key</span><div class="vision-secret-input"><input id="visionApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴 API Key"><button id="toggleVisionKey" type="button">显示</button></div><small id="visionKeyHint">密钥保存在当前服务实例中，界面不会回显完整内容。</small></label>
+          <label id="visionBaseUrlField" class="vision-field"><span>接口地址</span><input id="visionBaseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1"><small>兼容接口可填写根地址或完整的 /chat/completions 地址。</small></label>
+          <div class="vision-connect-row"><button id="discoverVisionModels" type="button" class="vision-connect-button">验证连接并读取列表</button><p id="visionConnectionStatus" class="vision-connection-status" aria-live="polite">填写密钥后验证连接。</p></div>
+        </section>
+        <section class="vision-model-section">
+          <div class="settings-section-heading"><strong>视觉模型</strong><span id="visionModelCount">等待验证</span></div>
+          <label class="vision-field"><span>账号可见模型</span><select id="visionModelSelect" disabled><option value="">验证连接后显示模型</option></select><small>列表来自服务商接口；视觉理解能力仍取决于具体模型和账号权限。</small></label>
+          <button id="toggleManualVisionModel" type="button" class="vision-manual-toggle">找不到模型？手动填写模型 ID</button>
+          <label id="visionManualModelField" class="vision-field hidden"><span>模型 ID</span><input id="visionModelManual" type="text" autocomplete="off" spellcheck="false" placeholder="输入服务商提供的视觉模型 ID"></label>
+        </section>
+        <details class="vision-advanced-settings">
+          <summary><span>兼容参数</span><small>仅在服务商明确要求时调整</small></summary>
+          <div>
+            <label class="vision-field"><span>思考模式</span><select id="visionThinkingType"><option value="">不发送该参数</option><option value="disabled">关闭</option><option value="enabled">开启</option><option value="auto">自动</option></select></label>
+            <label class="vision-field"><span>JSON 输出</span><select id="visionResponseFormat"><option value="json_object">JSON Object</option><option value="none">不发送该参数</option></select></label>
+          </div>
+        </details>
+        <footer><span id="visionSaveHint">保存后无需重启服务</span><button id="saveVisionSettings" type="submit" class="primary">保存配置</button></footer>
+      </form>
+      <form id="llmSettingsForm" class="vision-settings-form model-settings-view hidden" data-model-view="llm">
+        <section class="llm-mode-section">
+          <div class="settings-section-heading"><strong>配置方式</strong><span id="llmActiveSummary">正在读取配置</span></div>
+          <div class="llm-mode-options" role="radiogroup" aria-label="剪辑规划模型配置方式">
+            <button id="llmReuseVision" type="button" data-llm-mode="reuse_vision" role="radio" aria-checked="true"><strong>复用视觉配置</strong><small>仅适合同时支持文本规划的模型</small></button>
+            <button id="llmUseIndependent" type="button" data-llm-mode="independent" role="radio" aria-checked="false"><strong>独立配置</strong><small>为剪辑规划指定另一模型</small></button>
+          </div>
+          <p id="llmReuseNotice" class="llm-reuse-notice">无需重复填写密钥。新任务会用创建时的视觉模型进行剪辑规划，请确认该模型支持稳定的文本和结构化输出。</p>
+        </section>
+        <div id="llmIndependentSettings" class="llm-independent-settings hidden">
+          <section class="vision-provider-section">
+            <div class="settings-section-heading"><strong>模型服务</strong><span>文本与推理模型</span></div>
+            <div id="llmProviderList" class="vision-provider-list llm-provider-list" role="tablist" aria-label="选择剪辑规划模型服务"></div>
+          </section>
+          <section class="vision-credential-section">
+            <label class="vision-field"><span>API Key</span><div class="vision-secret-input"><input id="llmApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴 API Key"><button id="toggleLlmKey" type="button">显示</button></div><small id="llmKeyHint">密钥保存在当前服务实例中，界面不会回显完整内容。</small></label>
+            <label id="llmBaseUrlField" class="vision-field"><span>接口地址</span><input id="llmBaseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1"><small id="llmBaseUrlHelp">兼容接口可填写服务根地址。</small></label>
+            <div class="vision-connect-row"><button id="discoverLlmModels" type="button" class="vision-connect-button">验证连接并读取列表</button><p id="llmConnectionStatus" class="vision-connection-status" aria-live="polite">填写密钥后验证连接。</p></div>
+          </section>
+          <section class="vision-model-section">
+            <div class="settings-section-heading"><strong>剪辑规划模型</strong><span id="llmModelCount">等待验证</span></div>
+            <label class="vision-field"><span>账号可见模型</span><select id="llmModelSelect" disabled><option value="">验证连接后显示模型</option></select><small>列表来自服务商接口；模型还需要稳定输出文本，结构化 JSON 能力有助于生成可靠方案。</small></label>
+            <button id="toggleManualLlmModel" type="button" class="vision-manual-toggle">找不到模型？手动填写模型 ID</button>
+            <label id="llmManualModelField" class="vision-field hidden"><span>模型 ID</span><input id="llmModelManual" type="text" autocomplete="off" spellcheck="false" placeholder="输入服务商提供的文本模型 ID"></label>
+          </section>
+          <details class="vision-advanced-settings">
+            <summary><span>兼容参数</span><small>仅在服务商明确要求时调整</small></summary>
+            <div>
+              <label class="vision-field"><span>思考模式</span><select id="llmThinkingType"><option value="">不发送该参数</option><option value="disabled">关闭</option><option value="enabled">开启</option><option value="auto">自动</option></select></label>
+              <label class="vision-field"><span>JSON 输出</span><select id="llmResponseFormat"><option value="json_object">JSON Object</option><option value="none">不发送该参数</option></select></label>
+            </div>
+          </details>
+        </div>
+        <footer><span id="llmSaveHint">保存后无需重启服务</span><button id="saveLlmSettings" type="submit" class="primary">保存配置</button></footer>
+      </form>
+      <details class="runtime-settings-summary">
+        <summary>查看运行环境</summary>
+        <dl><div><dt>视觉模型</dt><dd id="settingsModel">检查中</dd></div><div><dt>剪辑规划模型</dt><dd id="settingsLlmModel">检查中</dd></div><div><dt>富语音模型</dt><dd id="settingsSpeech">检查中</dd></div><div><dt>语音计算设备</dt><dd id="settingsSpeechDevice">自动选择</dd></div><div><dt>视觉分析后端</dt><dd id="settingsBackend">检查中</dd></div><div><dt>输出策略</dt><dd>保持源分辨率 · H.264</dd></div><div><dt>本地渲染</dt><dd id="settingsFfmpeg">检查中</dd></div></dl>
+      </details>
+    </div>
+    <div id="actionConfirm" class="action-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="actionConfirmTitle">
+      <div class="action-confirm-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.36" data-beam-duration="2.8" data-beam-radius="15"><header><div><small>确认操作</small><strong id="actionConfirmTitle">请确认</strong></div><button id="actionConfirmClose" type="button" aria-label="关闭">×</button></header><p id="actionConfirmSummary"></p><ul id="actionConfirmDetails"></ul><div id="actionConfirmOrderList" class="action-confirm-order-list hidden"></div><label id="actionConfirmOrderWrap" class="action-confirm-order hidden"><span>合成顺序</span><select id="actionConfirmOrder"><option value="selection">按选择顺序 · 保持你的编排</option></select><small id="actionConfirmOrderHint"></small></label><div id="actionConfirmWarning" class="action-confirm-warning"></div><footer><button id="actionConfirmCancel" type="button">返回修改</button><button id="actionConfirmOk" class="primary" type="button">确认执行</button></footer></div>
+    </div>
+    <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="/static/thinking-orbs.js?v=20260806-subtitle-label-69" defer></script>
+    <script src="/static/generative-loaders.js?v=20260811-loader-runtime-2" defer></script>
+    <script src="/static/border-beam.js?v=20260811-border-beam-2" defer></script>
+    <script src="/static/ui-icons.js?v=20260811-send-icon-1" defer></script>
+    <script src="/static/app.js?v=20260812-trustworthy-progress-1" defer></script>
+  </body>
+</html>
