@@ -38,9 +38,9 @@
 
 ## 📰 News
 
-- **[2026-XX-XX]** 🎉 ClipTalk is now open-source!
-- **[2026-XX-XX]** 🚀 Released Voice ID — target any speaker by name across hours of footage.
-- **[2026-XX-XX]** ✨ Added one-command highlight generation for livestreams.
+- **[2026‑07‑10]** 🎉 ClipTalk is now open‑source!
+- **[2026‑08‑12]** 🚀 Added one‑command highlight generation for videos.
+- **[2026‑08‑12]** ✨ Added conversational editing feature.
 
 <!-- 后续更新持续追加到这里 -->
 
