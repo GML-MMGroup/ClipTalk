@@ -192,16 +192,6 @@ See the Documentation for configuration and API keys.
 🤝 Contributing
 We welcome contributions of all kinds! Please see our Contributing Guide to get started.
 
-📄 License
-This project is licensed under the GNU General Public License v3.0.
-
-You are free to run, study, share, and modify this software. Any distributed
-derivative work must also be released under the GPL v3, keeping the software
-free for all users. See the LICENSE file for the full text.
-
-💬 Community
-Discord · Twitter/X · WeChat Group
-<div align="center">
 
 ⭐ If you find ClipTalk useful, please give us a star!
 
