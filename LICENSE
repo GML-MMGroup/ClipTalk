@@ -1,185 +1,272 @@
-                PERSONAL AND NON-COMMERCIAL LICENSE
-                
-                      Version 1.0, 2026
-                
-                Copyright (C) 2026 [GML-MMGroup]
+NON-COMMERCIAL ATTRIBUTION LICENSE
 
-This license applies to [ClipTalk], including its source code,
-documentation, assets, and other materials distributed with the project,
-unless otherwise explicitly stated.
+Version 1.1, 2026
 
-Everyone is permitted to copy and distribute verbatim copies of this
-license document, but changing this license document is not allowed.
+Copyright (C) 2026 GML-MMGroup
 
-                        Terms and Conditions
-Personal and Non-Commercial Use
+This License applies to ClipTalk, including its source code, documentation, models, model weights, configuration files, assets, and other materials distributed with the project, unless otherwise explicitly stated.
 
-Permission is hereby granted, free of charge, to any individual to use,
-copy, study, run, and modify this software for personal and
-non-commercial purposes.
+Everyone is permitted to copy and distribute verbatim copies of this License document, but modification of this License document is not permitted.
 
-Permitted non-commercial purposes include, but are not limited to,
-personal projects, education, academic research, experimentation,
-learning, and hobby use.
+Terms and Conditions
+1. Non-Commercial Use Only
 
-No separate permission is required for such non-commercial use.
+Permission is hereby granted, free of charge, to any person or legal entity to access, use, copy, run, study, analyze, test, modify, adapt, and create derivative works from this Software solely for non-commercial purposes and subject to the terms of this License.
 
-Modification and Attribution
+The identity or legal form of the user is irrelevant. This License applies equally to individuals, companies, corporations, universities, research institutions, non-profit organizations, government entities, and other organizations.
 
-You may modify, adapt, translate, extend, or create derivative works
-based on this software for non-commercial purposes.
+Use is permitted only where the purpose and actual use are non-commercial.
 
-Any modified or derivative copy of this software must preserve the
-original copyright notice and attribution to the original author.
+Permitted non-commercial purposes may include, without limitation:
 
-If a modified or derivative version is published, distributed, shared,
-or otherwise made available to other persons, you must:
+a) learning and education;
 
-a) clearly identify the original author and the original project;
+b) academic and scientific research;
 
-b) retain the original copyright notice;
+c) experimentation and evaluation;
 
-c) include a copy of this license;
+d) benchmarking and testing;
 
-d) provide a reference to the original project or repository where
-   reasonably possible; and
+e) security research;
 
-e) clearly state that the software has been modified and that the
-   modified version is not the original version.
+f) personal or institutional research projects that do not have a commercial purpose;
 
-You may not claim the original work as your own, remove the original
-author's attribution, or imply that your modifications were created,
-approved, or endorsed by the original author unless such permission
-has been explicitly granted.
+g) modification, adaptation, and technical improvement; and
 
-Redistribution
+h) other activities that do not directly or indirectly pursue revenue, monetary compensation, commercial advantage, or commercial exploitation.
 
-You may copy and redistribute the original software or modified versions
-of the software for non-commercial purposes.
+No separate permission is required for uses that fully comply with the non-commercial requirements of this License.
 
-Redistribution must preserve this license, the original copyright
-notice, and the attribution requirements described above.
+2. Learning, Training, Adaptation, and Evolution
 
-You may not sell, sublicense for payment, commercially distribute, or
-otherwise receive direct or indirect commercial compensation from the
-redistribution of this software without prior written authorization
-from the copyright holder.
+For non-commercial purposes, you may use the Software to study, learn, experiment, train, retrain, fine-tune, adapt, optimize, improve, extend, or otherwise evolve the Software or systems derived from it.
 
-Commercial Use
+This permission includes, where technically applicable:
 
-Commercial use is not granted under this license.
+a) self-learning;
 
-Any person, company, corporation, partnership, organization, institution,
-or other legal entity wishing to use this software for commercial
-purposes must first obtain separate written authorization or a
-commercial license from the copyright holder.
+b) automated or autonomous improvement;
 
-Commercial use includes, but is not limited to:
+c) fine-tuning and retraining;
 
-a) selling this software or a modified version of this software;
+d) parameter or weight adaptation;
 
-b) including this software or substantial portions of it in a paid
-   product, application, platform, or service;
+e) model or system optimization;
 
-c) using this software to provide paid services to customers;
+f) iterative learning or evolutionary processes;
 
-d) offering this software or a derivative work through a paid SaaS,
-   hosted service, subscription service, or commercial API;
+g) creation of modified models, software, components, or derivative systems; and
 
-e) using this software as part of a revenue-generating product or
-   business operation;
+h) research into new capabilities based on the Software.
 
-f) commercially licensing, sublicensing, or distributing this
-   software;
+All such activities must remain strictly non-commercial.
 
-g) using this software in a customer-facing commercial production
-   environment; or
+Any modified, trained, adapted, improved, evolved, or derivative version remains subject to the attribution requirements of this License when it is copied, published, distributed, shared, demonstrated, deployed, or otherwise made available to another person or entity.
 
-h) otherwise using this software primarily for monetary compensation,
-   commercial advantage, or revenue generation.
+Nothing in this section grants any commercial rights.
 
-Commercial use is prohibited unless separate authorization has been
-obtained from the copyright holder.
+3. Attribution
 
-Companies and Organizations
+The original copyright notice and attribution to the original author and project must not be removed, obscured, replaced, or misrepresented.
 
-Companies and organizations may access, inspect, study, evaluate, and
-test this software solely for internal evaluation, research, security
-review, compatibility testing, or other non-commercial evaluation
-purposes.
+All copies of the Software, including modified or derivative copies, must retain the following attribution:
 
-This permission does not grant the right to deploy the software as part
-of a commercial product, production service, customer-facing system, or
-revenue-generating business activity.
+ClipTalk — Copyright (C) 2026 GML-MMGroup
 
-Such use requires a separate commercial license.
+Where the Software or any modified, adapted, trained, improved, evolved, or derivative version is published, distributed, shared, demonstrated, deployed, or otherwise made available to another person or entity, the recipient or audience must be reasonably informed that the work is based on ClipTalk.
 
-Commercial Licensing
+Such attribution must, where reasonably possible:
 
-Commercial licenses and additional permissions may be available from
-the copyright holder.
+a) identify GML-MMGroup as the original copyright holder or author;
+
+b) identify ClipTalk as the original project;
+
+c) retain the original copyright notice;
+
+d) include a copy of this License;
+
+e) provide a reference to the original project or repository; and
+
+f) clearly state when the Software has been modified, adapted, trained, improved, or otherwise changed.
+
+You may not:
+
+a) claim the original Software as your own work;
+
+b) remove or conceal the original attribution;
+
+c) falsely represent a derivative work as the original ClipTalk project; or
+
+d) state or imply that GML-MMGroup has created, approved, sponsored, certified, or endorsed your modified or derivative version without explicit written permission.
+
+4. Modification and Derivative Works
+
+You may modify, adapt, translate, extend, train, retrain, fine-tune, improve, optimize, or otherwise create derivative works based on the Software, provided that:
+
+a) the activity is strictly non-commercial;
+
+b) the attribution requirements of this License are satisfied;
+
+c) the original copyright notice is retained;
+
+d) this License is included with any distributed copy; and
+
+e) modified or derivative versions are clearly identified as modified versions and not represented as the original Software.
+
+Permission to create derivative works does not grant permission to use such derivative works commercially.
+
+A derivative work created under this License does not become commercially usable merely because substantial modifications have been made to the original Software.
+
+5. Non-Commercial Redistribution
+
+You may copy and redistribute the original Software or modified or derivative versions solely for non-commercial purposes.
+
+Redistribution must preserve:
+
+a) this License;
+
+b) the original copyright notice;
+
+c) attribution to GML-MMGroup and ClipTalk; and
+
+d) a clear statement identifying any material modifications.
+
+You may not charge a license fee, access fee, subscription fee, service fee, distribution fee, or other compensation for access to or use of the Software or a derivative work without prior written commercial authorization from the copyright holder.
+
+You may not receive direct or indirect commercial compensation from the redistribution of the Software or derivative works.
+
+6. Commercial Use Prohibited
+
+Commercial use is not granted under this License.
+
+Any commercial use of the Software, whether by an individual or by any legal entity, requires separate prior written authorization or a commercial license from the copyright holder.
+
+Commercial use includes, without limitation:
+
+a) selling the Software or any modified or derivative version;
+
+b) licensing or sublicensing the Software for payment;
+
+c) incorporating the Software or a substantial part of it into a paid product, application, platform, device, or service;
+
+d) using the Software to provide paid services;
+
+e) offering the Software or a derivative work through a paid SaaS, hosted service, subscription service, cloud service, or commercial API;
+
+f) using the Software as part of a revenue-generating product, service, workflow, or business operation;
+
+g) deploying the Software in a customer-facing commercial environment;
+
+h) deploying the Software in a production environment for commercial business operations;
+
+i) using the Software internally to provide a material commercial or operational advantage to a business;
+
+j) using the Software to produce, develop, support, operate, improve, or maintain a commercial product or service;
+
+k) using the Software in research, development, training, evaluation, or experimentation primarily intended to result in commercial exploitation;
+
+l) using the Software in work performed for a paying customer or client;
+
+m) using the Software under a commercial contract;
+
+n) receiving advertising revenue, subscription revenue, service revenue, licensing revenue, transaction revenue, or other monetary compensation materially connected to use of the Software;
+
+o) using the Software to reduce costs or replace paid resources as part of ordinary commercial production or business operations where such use provides a material commercial advantage; or
+
+p) otherwise using the Software primarily for monetary compensation, revenue generation, commercial exploitation, or commercial advantage.
+
+Commercial use remains prohibited regardless of whether:
+
+a) the Software itself is sold;
+
+b) customers are given direct access to the Software;
+
+c) the Software is visible to end users;
+
+d) the Software is only one component of a larger system;
+
+e) the Software has been modified;
+
+f) the Software has been trained, retrained, fine-tuned, adapted, improved, or evolved;
+
+g) the commercial product or service is distributed free of charge while generating revenue through another mechanism; or
+
+h) attribution to the original project is provided.
+
+7. Research and Commercially Sponsored Activities
+
+Research, education, experimentation, training, and evaluation are permitted only where their actual purpose and use are non-commercial.
+
+A research or educational label does not by itself make an activity non-commercial.
+
+Use may constitute commercial use where, for example:
+
+a) the activity is performed primarily on behalf of a commercial customer;
+
+b) the activity is performed under a commercial services agreement;
+
+c) the results are primarily intended for incorporation into a commercial product or service;
+
+d) the Software is used as part of commercial product development;
+
+e) the activity directly supports revenue-generating operations; or
+
+f) the primary purpose of the activity is commercial exploitation or commercial advantage.
+
+8. Commercial Licensing
+
+Commercial licenses and additional permissions may be separately available from the copyright holder.
 
 To request permission for commercial use, contact:
 
-[xuhongbo@gml.ac.cn]
+xuhongbo@gml.ac.cn
 
-Granting access to the source code does not constitute permission for
-commercial use.
+Access to the source code, models, weights, documentation, or other project materials does not constitute permission for commercial use.
 
-No commercial rights are granted unless explicitly provided in writing
-by the copyright holder.
+No commercial rights are granted unless explicitly provided in writing by the copyright holder.
 
-Attribution Does Not Grant Commercial Rights
+9. Attribution Does Not Grant Commercial Rights
 
-Compliance with the attribution requirements of this license does not
-grant permission for commercial use.
+Compliance with the attribution requirements of this License does not grant permission for commercial use.
 
-Commercial use requires separate authorization even when the original
-author is fully credited.
+Commercial use requires separate written authorization even if the original author and project are fully credited.
 
-No Trademark Rights
+Modification, fine-tuning, retraining, adaptation, improvement, or evolution of the Software does not remove this requirement.
 
-This license does not grant permission to use any trade name, trademark,
-service mark, logo, project name, branding, or other identifying marks
-of the copyright holder, except where reasonably necessary to identify
-the original source of the software for attribution purposes.
+10. No Trademark Rights
 
-Reservation of Rights
+This License does not grant permission to use any trade name, trademark, service mark, logo, branding, or other identifying mark belonging to the copyright holder, except where reasonably necessary to identify the original source of the Software for attribution purposes.
 
-All rights not expressly granted by this license are reserved by the
-copyright holder.
+No modified or derivative work may be presented in a manner that falsely suggests that it is an official version of ClipTalk or is approved, sponsored, or endorsed by GML-MMGroup.
 
-In particular, all commercial licensing rights remain exclusively with
-the copyright holder unless separately granted in writing.
+11. Reservation of Rights
 
-Termination
+All rights not expressly granted under this License are reserved by the copyright holder.
 
-Any permission granted under this license automatically terminates if
-you violate any term of this license.
+In particular, all rights relating to commercial use, commercial licensing, commercial distribution, and commercial exploitation remain exclusively reserved to the copyright holder unless separately granted in writing.
 
-Upon termination, you must immediately cease the unauthorized use,
-distribution, or commercialization of the software.
+12. Termination
 
-Permissions may be restored only with explicit authorization from the
-copyright holder or after the violation has been remedied and the
-copyright holder has accepted such remedy.
+Any rights granted under this License automatically terminate immediately upon violation of any term of this License.
 
-Disclaimer of Warranty
+Upon termination, you must immediately cease all use, copying, modification, distribution, deployment, or other exercise of rights that is not otherwise permitted by applicable law or separately authorized by the copyright holder.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
-NONINFRINGEMENT.
+Termination does not eliminate any liability arising from a prior violation.
 
-THE COPYRIGHT HOLDER MAKES NO REPRESENTATION OR WARRANTY THAT THE
-SOFTWARE WILL BE ERROR-FREE, SECURE, OR SUITABLE FOR ANY PARTICULAR
-PURPOSE.
+Rights under this License may be restored only:
 
-Limitation of Liability
+a) by explicit written authorization from the copyright holder; or
 
-IN NO EVENT SHALL THE COPYRIGHT HOLDER, AUTHORS, OR CONTRIBUTORS BE
-LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+b) after the violation has been fully remedied and the copyright holder has expressly accepted the remedy.
 
-                        END OF TERMS AND CONDITIONS
+13. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NONINFRINGEMENT.
+
+THE COPYRIGHT HOLDER, AUTHORS, AND CONTRIBUTORS MAKE NO REPRESENTATION OR WARRANTY THAT THE SOFTWARE WILL BE ERROR-FREE, SECURE, COMPLETE, RELIABLE, OR SUITABLE FOR ANY PARTICULAR PURPOSE.
+
+14. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE COPYRIGHT HOLDER, AUTHORS, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, LOSSES, COSTS, OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT, NEGLIGENCE, STRICT LIABILITY, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE, ITS USE, ITS MODIFICATION, ITS DISTRIBUTION, OR OTHER DEALINGS IN THE SOFTWARE.
+
+END OF TERMS AND CONDITIONS
