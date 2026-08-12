@@ -51,6 +51,16 @@
 > Real editing tasks completed by ClipTalk with a single instruction.
 > <!-- 在这里放不同场景的剪辑案例，建议用 GIF 对比：原始素材 → 指令 → 成片 -->
 
+<div align="center">
+  <a href="./assets/showcase/conversational-highlight-editing.mp4">
+    <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk conversational highlight editing workflow" width="900" />
+  </a>
+  <br />
+  <sub><b>“Make a highlight from the best moments.”</b> — ClipTalk analyzes the footage, presents the event timeline, and delivers multiple AI-edited versions. <a href="./assets/showcase/conversational-highlight-editing.mp4">Watch the full MP4</a>.</sub>
+</div>
+
+<br />
+
 <table>
   <tr>
     <td align="center"><b>📺 Livestream Highlights</b><br/><img src="./assets/cases/livestream.gif" width="240"/></td>
