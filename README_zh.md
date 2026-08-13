@@ -197,9 +197,9 @@ python -m pip install -r requirements-audiovisual.txt
 bash start.sh
 ```
 
-终端显示 Uvicorn 已启动后，在运行 ClipTalk 的同一台电脑上打开
-**<http://127.0.0.1:5180>**。这是默认的本机地址，并非所有部署环境都固定
-使用该地址；如果修改了 `HIGHLIGHT_PORT`，请使用实际配置的端口。
+终端显示 Uvicorn 已启动后，直接打开终端输出的完整地址。本机运行时地址
+格式为 `http://127.0.0.1:<HIGHLIGHT_PORT>`；默认端口是 `5180`，但终端显示
+的始终是当前配置实际使用的端口。
 
 #### 配置模型
 
@@ -257,8 +257,9 @@ docker compose up --build
 ```
 
 等待容器进入健康状态，然后在 Docker 所在电脑上打开
-**<http://127.0.0.1:5180>**，在**设置**中配置视觉模型与剪辑规划模型。
-Docker 会把上传素材、模型缓存、任务记录和成片输出保存在由 Docker 管理的
+`http://127.0.0.1:<CLIPTALK_PORT>`，在**设置**中配置视觉模型与剪辑规划
+模型。`CLIPTALK_PORT` 读取自 `.env`，默认值为 `5180`。Docker 会把上传
+素材、模型缓存、任务记录和成片输出保存在由 Docker 管理的
 `cliptalk-data` 数据卷中。`docker compose down` 会保留数据；执行
 `docker compose down -v` 会永久删除该数据卷。
 
@@ -280,10 +281,10 @@ PyTorch 镜像，速度会低于原生 Linux x86_64 环境。
 
 | ClipTalk 运行位置 | 应打开的地址 |
 | --- | --- |
-| 与浏览器在同一台电脑 | `http://127.0.0.1:5180` |
-| 远程服务器或虚拟机 | `http://<服务器 IP>:5180` |
-| 本机运行并自定义了 `HIGHLIGHT_PORT` | 将 `5180` 替换为实际端口 |
-| Docker 自定义了 `CLIPTALK_PORT` | 将 `5180` 替换为实际端口 |
+| 本机运行，与浏览器在同一台电脑 | Uvicorn 输出的地址：`http://127.0.0.1:<HIGHLIGHT_PORT>` |
+| Docker，与浏览器在同一台电脑 | `http://127.0.0.1:<CLIPTALK_PORT>` |
+| 本机运行在远程服务器 | `http://<服务器 IP>:<HIGHLIGHT_PORT>` |
+| Docker 运行在远程服务器 | `http://<服务器 IP>:<CLIPTALK_PORT>` |
 
 Docker 默认只绑定 `127.0.0.1`。如需远程访问 Docker，请编辑 `.env`，同时
 配置监听地址和访问令牌：
@@ -295,13 +296,13 @@ HIGHLIGHT_ACCESS_TOKEN=请替换为足够长的随机令牌
 
 非 Docker 的远程部署则需要在运行 `bash start.sh` 前设置
 `HIGHLIGHT_HOST=0.0.0.0` 和相同的访问令牌。随后在服务器防火墙或云安全组
-中放行 TCP 端口 `5180`，并访问
-`http://<服务器 IP>:5180/?token=<你的令牌>`。不要在其他设备上访问
+中放行实际配置的 `HIGHLIGHT_PORT`，并访问
+`http://<服务器 IP>:<HIGHLIGHT_PORT>/?token=<你的令牌>`。不要在其他设备上访问
 `127.0.0.1`，因为它始终指向当前设备自身。若服务需要暴露到公网，建议
 使用带身份验证的 HTTPS 反向代理，不要直接公开开发服务器。
 
-如果 Docker 宿主机的 `5180` 已被占用，可在 `.env` 中设置
-`CLIPTALK_PORT=8080`，然后打开 `http://127.0.0.1:8080`。
+如果 Docker 的默认端口已被占用，可在 `.env` 中将 `CLIPTALK_PORT` 改为
+任意空闲端口，然后使用该端口访问。
 
 ### 🔧 可选环境变量
 
@@ -317,10 +318,11 @@ cp .env.example .env
 `HIGHLIGHT_DATA_ROOT`、`VISION_*`、`LLM_*` 以及 SenseVoice 的设备和
 模型选项。不要提交 `.env` 或任何 API Key。
 
-可以通过以下命令查看默认本机服务状态：
+使用与启动时相同的端口查看本机服务状态：
 
 ```bash
-curl -s http://127.0.0.1:5180/api/health | python -m json.tool
+SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # Docker 请改用 CLIPTALK_PORT
+curl -s "http://127.0.0.1:${SERVICE_PORT}/api/health" | python -m json.tool
 ```
 
 `ok: true` 只表示 HTTP 服务存活。开始分析前，还应确认

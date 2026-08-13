@@ -207,10 +207,10 @@ python -m pip install -r requirements-audiovisual.txt
 bash start.sh
 ```
 
-After the terminal reports that Uvicorn is running, open
-**<http://127.0.0.1:5180>** in a browser on the same computer. This is the
-default local address, not a universal deployment URL. If you changed
-`HIGHLIGHT_PORT`, use the configured port instead.
+After the terminal reports that Uvicorn is running, open the exact URL shown
+in that terminal. For a local installation its format is
+`http://127.0.0.1:<HIGHLIGHT_PORT>`; the default port is `5180`, but the
+displayed value always follows your current configuration.
 
 #### Configure the models
 
@@ -273,8 +273,9 @@ docker compose up --build
 ```
 
 Wait until the container is healthy, then open
-**<http://127.0.0.1:5180>** on the Docker host and configure the
-vision/planning models from **Settings**. Docker stores uploaded media, model
+`http://127.0.0.1:<CLIPTALK_PORT>` on the Docker host and configure the
+vision/planning models from **Settings**. `CLIPTALK_PORT` comes from `.env`
+and defaults to `5180`. Docker stores uploaded media, model
 caches, task records, and rendered outputs in the Docker-managed
 `cliptalk-data` volume. `docker compose down` preserves that volume;
 `docker compose down -v` permanently removes it.
@@ -298,10 +299,10 @@ than running on a native Linux x86_64 host.
 
 | Where ClipTalk runs | Address to open |
 | --- | --- |
-| On the same computer as the browser | `http://127.0.0.1:5180` |
-| On a remote server or VM | `http://<server-ip>:5180` |
-| Local run with a custom `HIGHLIGHT_PORT` | Replace `5180` with that port |
-| Docker with a custom `CLIPTALK_PORT` | Replace `5180` with that port |
+| Local run, same computer | The URL printed by Uvicorn: `http://127.0.0.1:<HIGHLIGHT_PORT>` |
+| Docker, same computer | `http://127.0.0.1:<CLIPTALK_PORT>` |
+| Local run on a remote server | `http://<server-ip>:<HIGHLIGHT_PORT>` |
+| Docker on a remote server | `http://<server-ip>:<CLIPTALK_PORT>` |
 
 Docker binds to `127.0.0.1` by default. For remote Docker access, edit `.env`
 and set both a bind address and an access token:
@@ -312,15 +313,16 @@ HIGHLIGHT_ACCESS_TOKEN=replace-with-a-long-random-token
 ```
 
 For a non-Docker remote deployment, set `HIGHLIGHT_HOST=0.0.0.0` and the same
-access token before running `bash start.sh`. Then allow TCP port `5180` in the
-server firewall/security group and open
-`http://<server-ip>:5180/?token=<your-token>`. Do not use `127.0.0.1` from
+access token before running `bash start.sh`. Then allow the configured
+`HIGHLIGHT_PORT` in the server firewall/security group and open
+`http://<server-ip>:<HIGHLIGHT_PORT>/?token=<your-token>`. Do not use
+`127.0.0.1` from
 another device—it always points back to that device itself. For an
 internet-facing deployment, put ClipTalk behind an authenticated HTTPS reverse
 proxy instead of exposing the development server directly.
 
-If port `5180` is already in use with Docker, set `CLIPTALK_PORT=8080` in
-`.env` and open `http://127.0.0.1:8080`.
+If the default port is already in use with Docker, set `CLIPTALK_PORT` to a
+free port in `.env`, then open the address using that value.
 
 ### 🔧 Optional environment configuration
 
@@ -337,10 +339,11 @@ Common options include `HIGHLIGHT_HOST`, `HIGHLIGHT_PORT`,
 `HIGHLIGHT_DATA_ROOT`, `VISION_*`, `LLM_*`, and the SenseVoice device/model
 settings. Do not commit `.env` or API keys.
 
-Inspect the default local service with:
+Inspect a local service with the same port used to start it:
 
 ```bash
-curl -s http://127.0.0.1:5180/api/health | python -m json.tool
+SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # use CLIPTALK_PORT for Docker
+curl -s "http://127.0.0.1:${SERVICE_PORT}/api/health" | python -m json.tool
 ```
 
 `ok: true` means that the HTTP service is alive. Before starting an analysis,
