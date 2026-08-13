@@ -61,7 +61,7 @@
 
 <table>
   <tr>
-    <td align="center"><b>📺 Livestream Highlights</b><br/><img src="./assets/cases/livestream.gif" width="240"/></td>
+    <td align="center"><b>📰 News &amp; Broadcast Highlights</b><br/><img src="./assets/cases/news-broadcast.gif" width="240"/></td>
     <td align="center"><b>🧵 DIY &amp; Craft Tutorials</b><br/><img src="./assets/cases/diy-craft.gif" width="240"/></td>
     <td align="center"><b>📦 Product Demos</b><br/><img src="./assets/cases/product.gif" width="240"/></td>
   </tr>
