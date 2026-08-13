@@ -4,7 +4,6 @@ import base64
 import json
 import re
 import threading
-import time
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -97,8 +96,10 @@ class OpenAICompatibleVisionClient:
         self.timeout_seconds = timeout_seconds
         self._active_lock = threading.Lock()
         self._active_client: httpx.Client | None = None
+        self._cancelled = threading.Event()
 
     def cancel(self) -> None:
+        self._cancelled.set()
         with self._active_lock:
             client = self._active_client
         if client is not None:
@@ -141,6 +142,8 @@ class OpenAICompatibleVisionClient:
         maximum_tokens: int,
         system_prompt: str = "",
     ) -> dict[str, Any]:
+        if self._cancelled.is_set():
+            raise ArkRequestError(f"{self.provider_name}请求已取消")
         messages: list[dict[str, Any]] = []
         if system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt.strip()})
@@ -158,6 +161,8 @@ class OpenAICompatibleVisionClient:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         last_error: Exception | None = None
         for attempt in range(2):
+            if self._cancelled.is_set():
+                raise ArkRequestError(f"{self.provider_name}请求已取消")
             try:
                 with httpx.Client(timeout=httpx.Timeout(self.timeout_seconds, connect=20.0)) as client:
                     with self._active_lock:
@@ -188,14 +193,20 @@ class OpenAICompatibleVisionClient:
                 return parsed
             except ArkRequestError as error:
                 last_error = error
+                if self._cancelled.is_set():
+                    raise ArkRequestError(f"{self.provider_name}请求已取消") from error
                 if not error.retryable or attempt == 1:
                     raise
-                time.sleep(1.5 * (attempt + 1))
+                if self._cancelled.wait(1.5 * (attempt + 1)):
+                    raise ArkRequestError(f"{self.provider_name}请求已取消") from error
             except (httpx.HTTPError, ValueError) as error:
                 last_error = error
+                if self._cancelled.is_set():
+                    raise ArkRequestError(f"{self.provider_name}请求已取消") from error
                 if attempt == 1:
                     break
-                time.sleep(1.5 * (attempt + 1))
+                if self._cancelled.wait(1.5 * (attempt + 1)):
+                    raise ArkRequestError(f"{self.provider_name}请求已取消") from error
         raise ArkRequestError(str(last_error or f"{self.provider_name}请求失败"))
 
 
@@ -272,8 +283,10 @@ class AnthropicCompatibleClient:
         self.timeout_seconds = timeout_seconds
         self._active_lock = threading.Lock()
         self._active_client: httpx.Client | None = None
+        self._cancelled = threading.Event()
 
     def cancel(self) -> None:
+        self._cancelled.set()
         with self._active_lock:
             client = self._active_client
         if client is not None:
@@ -283,6 +296,8 @@ class AnthropicCompatibleClient:
                 pass
 
     def complete_json(self, prompt: str, *, maximum_tokens: int = 2200, system_prompt: str = "") -> dict[str, Any]:
+        if self._cancelled.is_set():
+            raise ArkRequestError("Anthropic 兼容接口请求已取消")
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": maximum_tokens,
@@ -299,6 +314,8 @@ class AnthropicCompatibleClient:
         }
         last_error: Exception | None = None
         for attempt in range(2):
+            if self._cancelled.is_set():
+                raise ArkRequestError("Anthropic 兼容接口请求已取消")
             try:
                 with httpx.Client(timeout=httpx.Timeout(self.timeout_seconds, connect=20.0)) as client:
                     with self._active_lock:
@@ -324,12 +341,18 @@ class AnthropicCompatibleClient:
                 return parsed
             except ArkRequestError as error:
                 last_error = error
+                if self._cancelled.is_set():
+                    raise ArkRequestError("Anthropic 兼容接口请求已取消") from error
                 if not error.retryable or attempt == 1:
                     raise
-                time.sleep(1.5 * (attempt + 1))
+                if self._cancelled.wait(1.5 * (attempt + 1)):
+                    raise ArkRequestError("Anthropic 兼容接口请求已取消") from error
             except (httpx.HTTPError, ValueError) as error:
                 last_error = error
+                if self._cancelled.is_set():
+                    raise ArkRequestError("Anthropic 兼容接口请求已取消") from error
                 if attempt == 1:
                     break
-                time.sleep(1.5 * (attempt + 1))
+                if self._cancelled.wait(1.5 * (attempt + 1)):
+                    raise ArkRequestError("Anthropic 兼容接口请求已取消") from error
         raise ArkRequestError(str(last_error or "Anthropic 兼容接口请求失败"))

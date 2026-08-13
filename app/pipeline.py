@@ -11,16 +11,20 @@ from typing import Any, Callable
 
 from PIL import Image
 
+from .edit_boundaries import annotate_candidate_boundaries
 from .ark_client import VisionModelClient
-from .event_groups import allocate_event_group_budget, build_event_groups, event_groups_total
+from .event_groups import allocate_event_group_budget, build_event_groups, event_groups_total, split_event_groups_at_scene_cuts
 from .media import (
     SampledFrame,
     VideoInfo,
     create_contact_sheet,
     create_director_contact_sheet,
+    detect_silence_intervals,
+    detect_scene_changes_in_ranges,
     extract_audio_waveform,
     extract_frames_at_times,
     extract_uniform_frames,
+    silence_intervals_from_waveform,
     probe_video,
     render_clip,
     validate_rendered_clip,
@@ -38,7 +42,7 @@ from .speech import analyze_speech, speech_evidence, transcript_context
 
 
 ProgressCallback = Callable[[float, str, str], None]
-ANALYSIS_CACHE_VERSION = f"visual-highlights-v8-peak-budget-{PROMPT_VERSION}"
+ANALYSIS_CACHE_VERSION = f"visual-highlights-v12-sentence-units-{PROMPT_VERSION}"
 
 
 class ModelDecisionRequired(RuntimeError):
@@ -241,12 +245,22 @@ def _refined_candidate(
     if allowed_times:
         ordered_times = sorted(set(allowed_times))
         step = max((right - left for left, right in zip(ordered_times, ordered_times[1:])), default=1.0)
-        start = validated_model_time(raw.get("start_seconds"), ordered_times, tolerance=step * .8)
-        end = validated_model_time(raw.get("end_seconds"), ordered_times, tolerance=step * .8)
+        # Boundary sheets represent intervals between sampled frames. Accept a
+        # model boundary up to one sampling step from the nearest visible
+        # frame, especially at the physical end of a video where FFmpeg may
+        # not decode the final requested timestamp.
+        start = validated_model_time(raw.get("start_seconds"), ordered_times, tolerance=step * 1.1)
+        end = validated_model_time(raw.get("end_seconds"), ordered_times, tolerance=step * 1.1)
         start = start if start is not None else min(ordered_times, key=lambda item: abs(item - fallback.start))
         end = end if end is not None else min(ordered_times, key=lambda item: abs(item - fallback.end))
-    minimum = min(4.0, duration)
-    if end - start < minimum:
+    # Respect the candidate's semantic core instead of imposing a universal
+    # four-second floor. Short actions and reactions are valid physical shots;
+    # spoken candidates already carry a longer minimum keep duration.
+    minimum = min(duration, max(.8, fallback.minimum_keep_seconds or .8))
+    # Frame sampling quantises model boundaries. A nominal four-second range
+    # can become 3.95s after snapping; that is still valid and must not be
+    # replaced by the broad coarse fallback range.
+    if end - start < minimum - .15:
         center = (fallback.start + fallback.end) / 2
         fallback_duration = max(4.0, min(30.0, fallback.duration)) if automatic_duration else target_seconds
         start = max(0.0, center - fallback_duration / 2)
@@ -319,6 +333,55 @@ def candidate_text_similarity(left: HighlightCandidate, right: HighlightCandidat
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
+def speech_signal_candidates(
+    segments: list[dict[str, Any]], *, video_duration: float, maximum: int = 4,
+) -> list[HighlightCandidate]:
+    """Promote strong audio/dialogue evidence into visually verified candidates."""
+    candidates: list[HighlightCandidate] = []
+    for item in segments:
+        start = max(0.0, _number(item.get("start"), 0.0))
+        end = min(video_duration, max(start, _number(item.get("end"), start)))
+        text = str(item.get("text") or "").strip()
+        duration = end - start
+        if duration < .8 or duration > 45 or not text:
+            continue
+        emotion = str(item.get("emotion") or "neutral").lower()
+        events = [str(value) for value in item.get("audioEvents") or []]
+        score = 74.0 + min(10.0, len(text) / 14.0)
+        if emotion not in {"", "neutral", "unknown"}:
+            score += 8.0
+        if any(value in {"applause", "laughter", "cry", "cough"} for value in events):
+            score += 7.0
+        if len(text) < 8 and not events and emotion in {"", "neutral", "unknown"}:
+            continue
+        evidence = [f"语音内容：{text[:120]}"]
+        if emotion not in {"", "neutral", "unknown"}:
+            evidence.append(f"情绪信号：{emotion}")
+        if events:
+            evidence.append("声音事件：" + "、".join(events[:4]))
+        candidates.append(HighlightCandidate(
+            start=round(start, 3), end=round(end, 3), score=min(96.0, score),
+            title=(text[:28] + "…") if len(text) > 28 else text,
+            reason="由完整对白、情绪或声音事件触发，仍需视觉模型验证画面价值。",
+            evidence=evidence, role="对白/声音高光", possible_event="视听高光",
+            audio_evidence={
+                "transcriptExcerpt": text[:500], "emotion": emotion,
+                "audioEvents": events, "source": "sensevoice",
+            },
+            peak_start=round(start, 3), peak_end=round(end, 3),
+            minimum_keep_seconds=round(duration, 3), boundary_confidence=.9,
+        ))
+    ranked = sorted(candidates, key=lambda item: (-item.score, item.start))
+    selected: list[HighlightCandidate] = []
+    for candidate in ranked:
+        if any(max(candidate.start, item.start) < min(candidate.end, item.end) for item in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) >= max(1, maximum):
+            break
+    return selected
+
+
 def image_average_hash(path: Path) -> str:
     with Image.open(path) as image:
         pixels = list(image.convert("L").resize((8, 8), Image.Resampling.LANCZOS).getdata())
@@ -358,7 +421,13 @@ def select_montage_moments(candidates: list[HighlightCandidate], count: int) -> 
     """Keep multiple complementary shots from one event while removing temporal/visual duplicates."""
     selected: list[HighlightCandidate] = []
     for candidate in sorted(candidates, key=lambda item: (-item.score, item.start)):
-        if any(max(candidate.start, other.start) < min(candidate.end, other.end) for other in selected):
+        # Frame timestamps are quantised, so two adjacent shots can overlap by
+        # a few milliseconds after snapping. Treat that as a shared cut point,
+        # not as a duplicate moment.
+        if any(
+            min(candidate.end, other.end) - max(candidate.start, other.start) > .12
+            for other in selected
+        ):
             continue
         selected.append(candidate)
         if len(selected) >= count:
@@ -581,6 +650,9 @@ class HighlightPipeline:
         theme: str,
         analysis_mode: str,
         transcript_available: bool,
+        speech_segments: list[dict[str, Any]],
+        silence_intervals: list[dict[str, Any]],
+        scene_cuts: list[float],
         speech_error: str,
         speech_analysis: dict[str, Any],
         exclusions: list[tuple[float, float]],
@@ -588,7 +660,20 @@ class HighlightPipeline:
         progress: ProgressCallback,
         degraded: bool = False,
     ) -> dict[str, Any]:
+        candidates = annotate_candidate_boundaries(
+            candidates,
+            speech_segments=speech_segments,
+            silences=silence_intervals,
+            duration=float(info.get("duration") or 0) or None,
+        )
+        if not scene_cuts:
+            scene_cuts = detect_scene_changes_in_ranges(
+                source,
+                [(float(candidate.get("start") or 0), float(candidate.get("end") or 0)) for candidate in candidates],
+                ffmpeg=self.ffmpeg,
+            )
         event_groups = build_event_groups(candidates, grouping)
+        event_groups = split_event_groups_at_scene_cuts(event_groups, scene_cuts)
         event_groups, recommended_group_ids = allocate_event_group_budget(
             event_groups,
             total_target_seconds=total_target_seconds,
@@ -617,6 +702,14 @@ class HighlightPipeline:
             "durationStatus": duration_status,
             "durationGap": round(total_target_seconds - allocated_total, 3) if total_target_seconds is not None else 0.0,
             "durationTolerance": .1,
+            "durationUpperLimit": round(
+                float(total_target_seconds) + max(5.0, float(total_target_seconds) * .15), 3,
+            ) if total_target_seconds is not None else None,
+            "eventReductionReason": next((
+                str(group.get("eventReductionReason"))
+                for group in event_groups
+                if group.get("id") in recommended_group_ids and group.get("eventReductionReason")
+            ), ""),
             "theme": theme,
             "selectionBackend": self.selection_backend,
             "analysisMode": analysis_mode,
@@ -657,6 +750,7 @@ class HighlightPipeline:
         total_target_seconds: float | None = None,
         requested_count: int | None = None,
         resume_action: str | None = None,
+        scene_cuts: list[float] | None = None,
     ) -> dict[str, Any]:
         exclusions = [
             (max(0.0, float(start)), max(0.0, float(end)))
@@ -710,6 +804,9 @@ class HighlightPipeline:
                 theme=theme,
                 analysis_mode=analysis_mode,
                 transcript_available=bool(checkpoint.get("transcriptAvailable")),
+                speech_segments=list(checkpoint.get("speechSegments") or []),
+                silence_intervals=list((checkpoint.get("audioWaveform") or {}).get("silences") or []),
+                scene_cuts=list(checkpoint.get("sceneCuts") or scene_cuts or []),
                 speech_error=str(checkpoint.get("speechRecognitionError") or ""),
                 speech_analysis=dict(checkpoint.get("speechAnalysis") or {}),
                 exclusions=exclusions,
@@ -809,8 +906,20 @@ class HighlightPipeline:
                     audio_waveform = extract_audio_waveform(
                         source, ffmpeg=self.ffmpeg, bins=waveform_bins, sample_rate=1000,
                         duration=info.duration, progress_callback=report_waveform_progress,
+                        cancelled=cancelled,
                     )
-                    audio_waveform.update({"schemaVersion": 3, "duration": info.duration, "hasAudio": True})
+                    silence_intervals = silence_intervals_from_waveform(
+                        audio_waveform, duration=info.duration,
+                    )
+                    if not silence_intervals and not audio_waveform.get("rms"):
+                        try:
+                            silence_intervals = detect_silence_intervals(source, ffmpeg=self.ffmpeg)
+                        except Exception:
+                            silence_intervals = []
+                    audio_waveform.update({
+                        "schemaVersion": 3, "duration": info.duration, "hasAudio": True,
+                        "silences": silence_intervals,
+                    })
                     waveform_cache = work_directory / "timeline-waveform.json"
                     waveform_cache.parent.mkdir(parents=True, exist_ok=True)
                     waveform_cache.write_text(json.dumps(audio_waveform, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -892,6 +1001,7 @@ class HighlightPipeline:
                 progress_callback=report_sampling_progress,
                 progress_batch_size=4,
                 progress_first_batch_size=1,
+                cancelled=cancelled,
             )
             if len(frames) < 2:
                 raise RuntimeError("视频可用画面不足，无法进行视觉高光分析")
@@ -986,6 +1096,11 @@ class HighlightPipeline:
 
         progress(.50, "coarse_vlm", f"已完成 {len(pages)}/{len(pages)} 组画面分析")
 
+        audio_candidates = (
+            speech_signal_candidates(speech_segments, video_duration=info.duration)
+            if analysis_mode == "audiovisual" and speech_segments else []
+        )
+        coarse.extend(audio_candidates)
         if not coarse:
             raise RuntimeError("视觉大模型没有发现可用高光，请调整主题后重试")
         if exclusions:
@@ -1005,7 +1120,12 @@ class HighlightPipeline:
             target_seconds=target_seconds,
             count=count,
         )
-        refinement_pool = sorted(coarse, key=lambda item: -item.score)[:refinement_target]
+        # Adjacent moments can be different physical shots belonging to the
+        # same event. Do not apply title/one-second-gap deduplication before
+        # visual refinement, otherwise a complete event can collapse into one
+        # shot. Exact overlaps are removed here; semantic/visual deduplication
+        # is deferred until the model has refined the real boundaries.
+        refinement_pool = select_montage_moments(coarse, refinement_target)
         refined: list[HighlightCandidate] = []
         for index, candidate in enumerate(refinement_pool):
             if cancelled():
@@ -1026,6 +1146,7 @@ class HighlightPipeline:
                 automatic_duration and index < 2 and window < info.duration and candidate.score >= 90
             ) else 1
             for pass_index in range(maximum_passes):
+                previous_refined = refined_candidate
                 window_start = max(0.0, min(info.duration - window, center - window / 2))
                 window_end = min(info.duration, window_start + window)
                 frame_count = 11 if automatic_duration else 9
@@ -1066,14 +1187,30 @@ class HighlightPipeline:
                 if result.get("keep") is False:
                     keep_candidate = False
                     break
-                refined_candidate = _refined_candidate(
+                next_refined = _refined_candidate(
                     result,
-                    refined_candidate,
+                    previous_refined,
                     duration=info.duration,
                     target_seconds=target_seconds,
                     automatic_duration=automatic_duration,
                     allowed_times=[frame.time for frame in detail_frames],
                 )
+                # An expanded observation window may tempt the model to jump
+                # to a neighbouring event. A boundary-refinement pass is only
+                # allowed to refine/extend the same temporal moment.
+                shared_seconds = max(
+                    0.0,
+                    min(previous_refined.end, next_refined.end)
+                    - max(previous_refined.start, next_refined.start),
+                )
+                required_shared = min(
+                    1.0,
+                    min(previous_refined.duration, next_refined.duration) * .2,
+                )
+                if pass_index > 0 and shared_seconds < required_shared:
+                    refined_candidate = previous_refined
+                    break
+                refined_candidate = next_refined
                 if pass_index + 1 >= maximum_passes or not touches_refinement_boundary(
                     refined_candidate,
                     window_start=window_start,
@@ -1137,6 +1274,8 @@ class HighlightPipeline:
         if discovery_only:
             candidates = [{
                 "index": index,
+                "candidateId": f"candidate_{index}",
+                "semanticUnitId": f"semantic_{index}",
                 "start": candidate.start,
                 "end": candidate.end,
                 "duration": round(candidate.duration, 3),
@@ -1184,6 +1323,8 @@ class HighlightPipeline:
                 "phase": "event_director_ready", "video": asdict(info),
                 "candidates": candidates, "contentProfile": content_profile,
                 "directorSheet": str(director_sheet), "transcriptAvailable": bool(speech_segments),
+                "speechSegments": speech_segments, "audioWaveform": audio_waveform,
+                "sceneCuts": list(scene_cuts or []),
                 "speechRecognitionError": speech_error, "speechAnalysis": speech_analysis, "usage": usage,
             }
             write_analysis_checkpoint(work_directory, director_checkpoint)
@@ -1211,6 +1352,9 @@ class HighlightPipeline:
                 content_profile=content_profile, total_target_seconds=total_target_seconds,
                 requested_count=requested_count, theme=theme, analysis_mode=analysis_mode,
                 transcript_available=bool(speech_segments), speech_error=speech_error,
+                speech_segments=speech_segments,
+                silence_intervals=list(audio_waveform.get("silences") or []),
+                scene_cuts=list(scene_cuts or []),
                 speech_analysis=speech_analysis,
                 exclusions=exclusions, usage=usage, progress=progress,
             )

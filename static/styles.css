@@ -2934,8 +2934,15 @@ body.settings-open { overflow: hidden; }
 .director-task-summary p { margin: 4px 0 7px; color: #77736c; font-size: 10px; line-height: 1.4; }
 .director-task-summary > div { display: flex; flex-wrap: wrap; gap: 5px; }
 .director-task-summary > div span { padding: 4px 6px; border: 1px solid #e8dfd2; border-radius: 5px; color: #8a857d; background: #fff; font-size: 9px; }
-.director-orb-slot { width: 30px; height: 30px; flex: 0 0 30px; display: block; border-radius: 9px; overflow: hidden; background: #f2eee7; }
-.director-orb-slot canvas { width: 30px !important; height: 30px !important; display: block; }
+.director-brand-icon {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: block;
+  object-fit: contain;
+  background: transparent;
+  animation: none;
+}
 .director-workspace { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; background: transparent; }
 .director-context-summary { margin: 10px 11px 0; padding: 9px 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; border: 1px solid #e4d7c2; border-radius: 9px; color: #77736c; background: #fffaf2; font-size: 10px; }
 .director-context-summary > div { min-width: 0; flex: 1 1 100%; display: flex; align-items: baseline; gap: 7px; }
@@ -2970,6 +2977,7 @@ body.settings-open { overflow: hidden; }
 .inline-stage-chain li.done { color: #8b6a3e; }.inline-stage-chain li.current { color: #815ca4; font-weight: 700; }
 .inline-progress-cancel { grid-column: 1 / -1; justify-self: end; min-height: 27px; padding: 0 10px; border: 1px solid #d8bc91; border-radius: 7px; color: #875e25; background: #fffaf1; font-size: 10px; }
 .inline-progress-cancel:hover { border-color: #bd8536; background: #fff; }
+.inline-progress-cancel:disabled { cursor: wait; opacity: .62; box-shadow: none !important; }
 /* Chat readability: the dialogue is the primary workflow surface. Keep
    labels secondary, but make actual instructions and AI replies comfortable
    to read without zooming the whole application. */
@@ -5950,8 +5958,8 @@ select:focus-visible,
 }
 .chat-input-shell.composer-homepage-beam .vp-border-beam-overlay {
   --beam-stroke-opacity: 0;
-  --beam-inner-opacity: .72;
-  --beam-bloom-opacity: .58;
+  --beam-inner-opacity: .84;
+  --beam-bloom-opacity: .74;
 }
 .chat-input-shell.composer-homepage-beam .vp-border-beam-overlay::after {
   display: none !important;
@@ -5975,17 +5983,17 @@ select:focus-visible,
   z-index: 6;
 }
 .chat-input-shell.composer-homepage-beam.is-focused {
-  filter: drop-shadow(0 8px 19px rgba(87, 102, 190, .16));
+  filter: drop-shadow(0 9px 23px rgba(87, 102, 190, .26));
 }
 .chat-input-shell.composer-homepage-beam.is-sending {
-  filter: drop-shadow(0 9px 24px rgba(112, 83, 190, .22));
+  filter: drop-shadow(0 10px 29px rgba(112, 83, 190, .34));
 }
 .chat-input-shell.is-focused,
 .chat-input-shell.has-text {
-  filter: drop-shadow(0 7px 15px rgba(189, 133, 54, .16));
+  filter: drop-shadow(0 8px 19px rgba(189, 133, 54, .24));
 }
 .chat-input-shell.is-sending {
-  filter: drop-shadow(0 8px 20px rgba(189, 133, 54, .24));
+  filter: drop-shadow(0 9px 25px rgba(189, 133, 54, .34));
 }
 .inline-analysis-progress.vp-border-beam-host,
 .auto-compose-progress.vp-border-beam-host,
@@ -6930,16 +6938,15 @@ select:focus-visible,
 }
 
 /* ClipTalk brand lockup --------------------------------------------------
-   Use the supplied lockup as one indivisible brand asset.  Rebuilding the
-   wordmark with locally available fonts changed both its silhouette and
-   palette, especially on Linux where the reference faces are unavailable. */
+   Header and director share the same clean icon source. The former
+   auto-matted lockup left visible background pixels on dark surfaces. */
 .topbar .brand {
   gap: 0;
-  padding: 2px 6px 2px 4px;
-  border: 1px solid rgba(214, 221, 218, .16);
-  border-radius: 11px;
-  background: #fff;
-  box-shadow: 0 5px 18px rgba(0, 0, 0, .18), inset 0 1px 0 rgba(255, 255, 255, .9);
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
   transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
 }
 
@@ -6947,23 +6954,38 @@ select:focus-visible,
   width: 160px;
   height: 48px;
   flex: 0 0 160px;
-  display: block;
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: visible;
   border-radius: 8px;
-  background: #fff;
+  background: transparent;
 }
 
-.topbar .brand-lockup-frame svg {
-  width: 100%;
-  height: 100%;
+.topbar .brand-lockup-icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
   display: block;
+  object-fit: contain;
+  object-position: center;
+  filter: drop-shadow(0 3px 8px rgba(99, 217, 77, .16));
+}
+
+.topbar .brand-wordmark-image {
+  min-width: 0;
+  width: 105px;
+  height: 34px;
+  display: block;
+  object-fit: contain;
+  object-position: left center;
 }
 
 .topbar .brand:hover,
 .topbar .brand:focus-visible {
   transform: translateY(-1px);
-  border-color: rgba(190, 235, 66, .48);
-  box-shadow: 0 7px 22px rgba(0, 0, 0, .24), 0 0 0 1px rgba(183, 236, 42, .14);
+  border-color: rgba(190, 235, 66, .24);
+  box-shadow: 0 0 18px rgba(183, 236, 42, .08);
 }
 
 .topbar .brand:focus-visible {
@@ -6972,12 +6994,67 @@ select:focus-visible,
   outline-offset: 4px;
 }
 
+.topbar .brand {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  transform: translate(-50%, -50%);
+}
+
+.topbar .brand-cluster,
+.topbar .top-actions {
+  position: relative;
+  z-index: 2;
+}
+
+.topbar .brand:hover,
+.topbar .brand:focus-visible {
+  transform: translate(-50%, calc(-50% - 1px));
+}
+
+@media (min-width: 901px) {
+  .topbar .engine {
+    width: clamp(220px, 30vw, 360px);
+    max-width: 360px;
+  }
+
+  .topbar .engine span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 @media (max-width: 720px) {
   .topbar .brand-lockup-frame {
-    width: 140px;
+    width: 130px;
     height: 42px;
-    flex-basis: 140px;
+    flex-basis: 130px;
   }
+
+  .topbar .brand-lockup-icon {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .topbar .brand-wordmark-image {
+    width: 86px;
+    height: 29px;
+  }
+
+  .topbar .engine {
+    width: 34px;
+    min-width: 34px;
+    max-width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .topbar .engine span,
+  .topbar .engine b { display: none; }
 }
 
 /* Evidence inspector typography -----------------------------------------
@@ -7770,7 +7847,8 @@ select:focus-visible,
 
 .studio.director-merged:not(.home-mode) .chat-input-shell.composer-homepage-beam .vp-border-beam-overlay {
   --beam-stroke-opacity: 0;
-  --beam-bloom-opacity: .18;
+  --beam-inner-opacity: .88;
+  --beam-bloom-opacity: .36;
 }
 
 /* Review pane ----------------------------------------------------------- */
@@ -8540,4 +8618,156 @@ select:focus-visible,
     animation: none;
     opacity: .72;
   }
+}
+
+/* Timeline shot cards v5 -------------------------------------------------
+   A shot is represented once: one readable card centred on its source-time
+   midpoint. The proportional range button remains as an invisible hit area,
+   while the SVG range below the card owns the start/end semantics. */
+.timeline-viewport .timeline-clips .timeline-clip,
+.timeline-viewport .timeline-clips .timeline-clip.source-event,
+.timeline-viewport[data-timeline-mode="overview"] .timeline-clips .timeline-clip,
+.timeline-viewport[data-timeline-mode="overview"] .timeline-clips .timeline-clip.source-event,
+.timeline-viewport:not(.output-comparison-mode) .timeline-clips .timeline-clip.active,
+.timeline-viewport:not(.output-comparison-mode) .timeline-clips .timeline-clip.source-event.active {
+  height: var(--timeline-shot-card-height) !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  opacity: 0 !important;
+}
+
+.timeline-viewport .timeline-clip > .timeline-shot-caption {
+  display: none !important;
+}
+
+.timeline-viewport[data-timeline-mode="overview"] .timeline-shot-markers,
+.timeline-viewport[data-timeline-mode="detail"] .timeline-shot-markers {
+  display: block !important;
+}
+
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.recommended:not(.active),
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.group-active:not(.active),
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.relation-hover:not(.active) {
+  left: var(--timeline-shot-marker-left, 0) !important;
+  top: var(--timeline-shot-marker-top, 0) !important;
+  width: var(--timeline-shot-marker-width, 112px) !important;
+  min-width: 0 !important;
+  height: var(--timeline-shot-card-height) !important;
+  padding: 0 9px !important;
+  justify-content: flex-start !important;
+  gap: 7px !important;
+  overflow: hidden !important;
+  border: 0 !important;
+  border-radius: 5px !important;
+  color: #d5dfe2 !important;
+  background: #1b272e !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: color .16s ease, background .16s ease !important;
+}
+
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker:hover,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker:focus-visible,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.relation-hover:not(.active) {
+  color: #e8f0f2 !important;
+  background: #263740 !important;
+  outline: 1px solid rgba(139, 174, 184, .42) !important;
+  outline-offset: -1px !important;
+}
+
+.timeline-viewport:not(.output-comparison-mode) .timeline-shot-markers > .timeline-shot-marker.active,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.active {
+  border: 0 !important;
+  color: #e8f6f7 !important;
+  background: #28505a !important;
+  box-shadow: inset 3px 0 0 #78b6c2 !important;
+  outline: 0 !important;
+}
+
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker > b,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker > em,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.active > b,
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker.active > em {
+  overflow: hidden !important;
+  color: inherit !important;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
+}
+
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker > b {
+  flex: 0 0 auto;
+  font-size: 10px !important;
+  font-weight: 650 !important;
+}
+
+.timeline-viewport .timeline-shot-markers > .timeline-shot-marker > em {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: #b9c7cb !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+}
+
+.timeline-shot-range-line,
+.timeline-shot-centre-guide {
+  fill: none;
+  stroke: #60747d;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: .58;
+  transition: stroke .16s ease, stroke-width .16s ease, opacity .16s ease;
+}
+
+.timeline-shot-centre-guide {
+  stroke-dasharray: 2 2;
+  opacity: .4;
+}
+
+.timeline-shot-range-end {
+  fill: #71858e;
+  stroke: #0b141b;
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+  opacity: .9;
+  transition: fill .16s ease, opacity .16s ease;
+}
+
+.timeline-shot-range.recommended .timeline-shot-range-line,
+.timeline-shot-range.recommended .timeline-shot-centre-guide {
+  stroke: #6f9993;
+}
+
+.timeline-shot-range.recommended .timeline-shot-range-end {
+  fill: #79a59e;
+}
+
+.timeline-shot-range.active .timeline-shot-range-line,
+.timeline-shot-range.active .timeline-shot-centre-guide,
+.timeline-shot-range.used-in-output .timeline-shot-range-line,
+.timeline-shot-range.used-in-output .timeline-shot-centre-guide,
+.timeline-shot-range.relation-hover .timeline-shot-range-line,
+.timeline-shot-range.relation-hover .timeline-shot-centre-guide {
+  stroke: #82bdc7;
+  stroke-width: 1.35;
+  opacity: .95;
+}
+
+.timeline-shot-range.active .timeline-shot-range-end,
+.timeline-shot-range.used-in-output .timeline-shot-range-end,
+.timeline-shot-range.relation-hover .timeline-shot-range-end {
+  fill: #8bc6cf;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-viewport .timeline-shot-markers > .timeline-shot-marker,
+  .timeline-shot-range-line,
+  .timeline-shot-centre-guide,
+  .timeline-shot-range-end { transition: none !important; }
 }

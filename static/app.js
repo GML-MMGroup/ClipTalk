@@ -108,12 +108,12 @@ function updateComposerBeam() {
   // Beam homepage. Output-version buttons keep the compact edge tracer so the
   // two interactions communicate different states.
   updateBorderBeam(shell, sending
-    ? { size: "md", color: "ocean", strength: .82, duration: 1.65, brightness: 1.22, saturation: 1.02, hueRange: 24, active: true }
+    ? { size: "md", color: "ocean", strength: .96, duration: 1.35, brightness: 1.38, saturation: 1.15, hueRange: 30, active: true }
     : focused
-      ? { size: "md", color: "ocean", strength: .68, duration: 2.35, brightness: 1.18, saturation: .98, hueRange: 22, active: true }
+      ? { size: "md", color: "ocean", strength: .86, duration: 1.9, brightness: 1.32, saturation: 1.1, hueRange: 28, active: true }
       : hasText
-        ? { size: "md", color: "ocean", strength: .54, duration: 3.25, brightness: 1.12, saturation: .94, hueRange: 20, active: true }
-        : { size: "md", color: "ocean", strength: disabled ? .2 : .38, duration: disabled ? 6.2 : 4.8, brightness: 1.08, saturation: .88, hueRange: 18, active: true });
+        ? { size: "md", color: "ocean", strength: .72, duration: 2.7, brightness: 1.24, saturation: 1.04, hueRange: 24, active: true }
+        : { size: "md", color: "ocean", strength: disabled ? .32 : .56, duration: disabled ? 5.2 : 3.8, brightness: disabled ? 1.12 : 1.18, saturation: disabled ? .94 : 1, hueRange: disabled ? 20 : 22, active: true });
 }
 
 function setComposerSending(sending) {
@@ -607,8 +607,8 @@ function renderDirectorTaskSummary(job = currentJob) {
   const outputCount = jobOutputCount(job);
   const compositionComplete = compositionIsComplete(job);
   const status = compositionComplete
-    ? `${outputCount} 个成片版本已完成${job.status === "awaiting_confirmation" ? " · 仍可继续审核事件" : ""}`
-    : job.status === "awaiting_confirmation" ? "等待你审核事件"
+    ? `${outputCount} 个成片版本已完成${job.status === "awaiting_confirmation" ? " · 事件和镜头均可单独下载" : ""}`
+    : job.status === "awaiting_confirmation" ? "事件已就绪 · 待审核"
       : job.status === "completed" ? "成片已完成" : job.detail || "任务进行中";
   const stageLabels = { brief: "需求确认", analysis: "AI 分析", events: "事件审核", compose: "生成成片" };
   summary.innerHTML = `<small>当前任务 · ${stageLabels[directorFlowStage(job)]}</small><strong title="${escapeHtml(job.filename || objective)}">${escapeHtml(job.filename || objective)}</strong><p>${escapeHtml(status)}</p><div><span>${duration ? `源视频 ${formatClock(duration)}` : "源视频待准备"}</span>${target ? `<span>目标 ${target.toFixed(1)} 秒</span>` : ""}</div>`;
@@ -1745,7 +1745,10 @@ function timelineDensityProfile(viewportHeight, detailMode) {
   return {
     name: compact ? "compact" : expanded ? "expanded" : "standard",
     maximumLabelLanes: compact ? 1 : 2,
-    maximumShotLanes: compact ? 1 : (detailMode && height >= 290 ? 2 : 1),
+    // Shot cards keep their source-time centre. Dense cards may only move to
+    // another vertical lane; they are never pushed left or right away from
+    // the frame range they describe.
+    maximumShotLanes: compact ? 1 : (expanded ? 3 : 2),
     labelLaneHeight: compact ? 32 : expanded ? 40 : 36,
     relationHeight: compact ? 10 : expanded ? 14 : 12,
     shotLaneHeight: compact ? 34 : expanded ? 44 : 40,
@@ -1772,7 +1775,7 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
   const labelLaneHeight = eventLabelsHeight / Math.max(1, labelLanes);
   const shotLaneHeight = Math.max(28, (shotRowHeight - 4) / Math.max(1, shotLanes));
   const eventCardHeight = clampTimelineValue(labelLaneHeight - 8, 32, 44);
-  const shotCardHeight = clampTimelineValue(shotLaneHeight - 8, 30, 40);
+  const shotCardHeight = clampTimelineValue(shotLaneHeight - 8, 24, 36);
   return {
     ...profile,
     height,
@@ -3000,25 +3003,37 @@ function updateTimeline() {
     item._timelineShotMarkerHidden = false;
   });
 
-  const shotLaneEnds = [];
-  if (timelineDetailMode) numberedShots.forEach((item) => {
+  const shotLaneIntervals = Array.from({ length: densityProfile.maximumShotLanes }, () => []);
+  numberedShots.forEach((item) => {
     const markerText = String(item._timelineShotMarkerText || item._timelineShotNumber || "");
     const markerRole = String(item._timelineShotMarkerRole || "镜头");
-    const badgeWidth = Math.min(176, Math.max(72, markerText.length * 10.5 + Array.from(markerRole).length * 12 + 30));
-    const anchor = Number(item._timelineShotAnchor ?? 0);
-    let badgeLeft = Math.max(0, Math.min(trackWidth - badgeWidth, anchor - badgeWidth / 2));
-    let lane = shotLaneEnds.findIndex((end) => badgeLeft >= end + 4);
-    if (lane < 0 && shotLaneEnds.length < densityProfile.maximumShotLanes) lane = shotLaneEnds.length;
-    if (lane < 0) lane = shotLaneEnds.indexOf(Math.min(...shotLaneEnds));
-    const occupiedUntil = Number(shotLaneEnds[lane] || 0);
-    if (badgeLeft < occupiedUntil + 4 && occupiedUntil + 4 + badgeWidth <= trackWidth) badgeLeft = occupiedUntil + 4;
+    const badgeWidth = Math.min(trackWidth, Math.min(210, Math.max(112, markerText.length * 10.5 + Array.from(markerRole).length * 12 + 38)));
+    const visibleStart = Math.max(view.start, Number(item.start) || 0);
+    const visibleEnd = Math.min(view.end, Number(item.end) || visibleStart);
+    const rangeStart = Math.max(0, Math.min(trackWidth, timelinePercentInView(visibleStart) / 100 * trackWidth));
+    const rangeEnd = Math.max(rangeStart, Math.min(trackWidth, timelinePercentInView(visibleEnd) / 100 * trackWidth));
+    const anchor = Math.max(0, Math.min(trackWidth, (rangeStart + rangeEnd) / 2));
+    // Preserve the temporal centre. Clamping happens only at viewport edges;
+    // the SVG anchor line below points back to the exact source-time centre.
+    const badgeLeft = Math.max(0, Math.min(trackWidth - badgeWidth, anchor - badgeWidth / 2));
+    const badgeRight = badgeLeft + badgeWidth;
+    const laneScores = shotLaneIntervals.map((intervals) => intervals.reduce((score, interval) => (
+      score + Math.max(0, Math.min(badgeRight, interval.right) - Math.max(badgeLeft, interval.left))
+    ), 0));
+    let lane = laneScores.findIndex((score) => score === 0);
+    if (lane < 0) lane = laneScores.indexOf(Math.min(...laneScores));
     item._timelineShotLane = Math.max(0, lane);
     item._timelineShotBadgeLeft = badgeLeft;
     item._timelineShotBadgeWidth = badgeWidth;
     item._timelineShotMarkerTarget = anchor;
-    shotLaneEnds[item._timelineShotLane] = Math.max(shotLaneEnds[item._timelineShotLane] || 0, badgeLeft + badgeWidth);
+    item._timelineShotRangeStart = rangeStart;
+    item._timelineShotRangeEnd = rangeEnd;
+    shotLaneIntervals[item._timelineShotLane].push({ left: badgeLeft, right: badgeRight });
   });
-  const shotLanes = timelineDetailMode ? Math.max(1, Math.min(densityProfile.maximumShotLanes, shotLaneEnds.length || 1)) : 1;
+  const usedShotLanes = numberedShots.length
+    ? Math.max(...numberedShots.map((item) => Number(item._timelineShotLane || 0))) + 1
+    : 1;
+  const shotLanes = Math.max(1, Math.min(densityProfile.maximumShotLanes, usedShotLanes));
   const layout = timelineTrackLayout(viewportHeight, timelineDetailMode, labelLanes, shotLanes);
   labelLaneHeight = layout.labelLaneHeight;
   shotLaneHeight = layout.shotLaneHeight;
@@ -3051,17 +3066,19 @@ function updateTimeline() {
     const relationTargets = numberedShots.map((item) => {
       const position = items.indexOf(item);
       const relation = timelineRelationForItem(item, position);
-      if (!relation.relationKey || Number(item.end) <= view.start || Number(item.start) >= view.end) return null;
-      const shotLane = timelineDetailMode ? Number(item._timelineShotLane || 0) : 0;
+      if (Number(item.end) <= view.start || Number(item.start) >= view.end) return null;
+      const shotLane = Number(item._timelineShotLane || 0);
       const shotTop = layout.eventRowHeight + shotLane * shotLaneHeight + Math.max(2, (shotLaneHeight - layout.shotCardHeight) / 2);
-      const visibleStart = Math.max(view.start, Number(item.start) || 0);
-      const visibleEnd = Math.min(view.end, Number(item.end) || visibleStart);
-      const proportionalCenter = (timelinePercentInView(visibleStart) + timelinePercentInView(visibleEnd)) / 200 * trackWidth;
       const markerCenter = Number(item._timelineShotBadgeLeft || 0) + Number(item._timelineShotBadgeWidth || 0) / 2;
       return {
+        item,
+        position,
         relationKey: relation.relationKey,
-        x: Math.max(0, Math.min(trackWidth, timelineDetailMode ? markerCenter : proportionalCenter)),
+        x: Math.max(0, Math.min(trackWidth, markerCenter)),
         y: shotTop,
+        lineY: Math.min(layout.eventRowHeight + layout.shotRowHeight - 3, shotTop + layout.shotCardHeight + 3),
+        rangeStart: Number(item._timelineShotRangeStart || 0),
+        rangeEnd: Number(item._timelineShotRangeEnd || 0),
       };
     }).filter(Boolean);
     const bandMarkup = labelEntries.flatMap((entry) => {
@@ -3071,6 +3088,15 @@ function updateTimeline() {
         const width = Math.max(3, fragment.width / 100 * trackWidth);
         return `<rect class="timeline-event-band${stateClasses}" data-timeline-relation="${entry.relationKey}" x="${x.toFixed(2)}" y="${layout.eventRowHeight.toFixed(2)}" width="${width.toFixed(2)}" height="${layout.shotRowHeight.toFixed(2)}" rx="6" ry="6"></rect>`;
       });
+    }).join("");
+    const shotRangeMarkup = relationTargets.map((target) => {
+      const parentEntry = labelEntries.find((entry) => entry.relationKey === target.relationKey);
+      const isActive = timelineItemIsActive(target.item);
+      const stateClasses = `${parentEntry?.isRecommendedEvent ? " recommended" : ""}${isActive ? " active" : ""}${outputComparison && target.item._output ? " used-in-output" : ""}`;
+      const start = Math.max(0, Math.min(trackWidth, target.rangeStart));
+      const end = Math.max(start, Math.min(trackWidth, target.rangeEnd));
+      const markerTarget = Math.max(start, Math.min(end || start, Number(target.item._timelineShotMarkerTarget || target.x)));
+      return `<g class="timeline-shot-range${stateClasses}"${target.relationKey ? ` data-timeline-relation="${target.relationKey}"` : ""}><line class="timeline-shot-range-line" x1="${start.toFixed(2)}" y1="${target.lineY.toFixed(2)}" x2="${end.toFixed(2)}" y2="${target.lineY.toFixed(2)}"></line><line class="timeline-shot-centre-guide" x1="${target.x.toFixed(2)}" y1="${(target.y + layout.shotCardHeight).toFixed(2)}" x2="${markerTarget.toFixed(2)}" y2="${target.lineY.toFixed(2)}"></line><circle class="timeline-shot-range-end start" cx="${start.toFixed(2)}" cy="${target.lineY.toFixed(2)}" r="2.5"></circle><circle class="timeline-shot-range-end end" cx="${end.toFixed(2)}" cy="${target.lineY.toFixed(2)}" r="2.5"></circle></g>`;
     }).join("");
     const curveMarkup = labelEntries.flatMap((entry) => {
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
@@ -3095,7 +3121,7 @@ function updateTimeline() {
       const shotPoints = targets.map((target) => `<circle class="timeline-connection-point shot-point${stateClasses}" data-timeline-relation="${entry.relationKey}" cx="${target.x.toFixed(2)}" cy="${target.y.toFixed(2)}" r="3.2"></circle>`);
       return [eventPoint, ...shotPoints];
     }).join("");
-    relations.innerHTML = `${bandMarkup}${curveMarkup}${connectionPointMarkup}`;
+    relations.innerHTML = `${bandMarkup}${shotRangeMarkup}${curveMarkup}${connectionPointMarkup}`;
   }
   const linkedRanges = $("#timelineLinkedRanges");
   if (linkedRanges) {
@@ -3156,16 +3182,11 @@ function updateTimeline() {
     const clipTitle = [item._group?.title || item.chapterTitle || item.title, shotCaption, item.role || "精彩镜头"].filter(Boolean).join(" · ");
     const clipDescription = item.reason || item.summary || item._group?.summary || "";
     const shotNumber = Number(item._timelineShotNumber || 0);
-    const shotLane = timelineDetailMode ? Number(item._timelineShotLane || 0) : 0;
+    const shotLane = Number(item._timelineShotLane || 0);
     const clipTop = layout.eventRowHeight + shotLane * shotLaneHeight + Math.max(2, (shotLaneHeight - layout.shotCardHeight) / 2);
     const { eventNumber, relationKey } = timelineRelationForItem(item, position);
-    const clipPixelWidth = Math.max(1, (Number(item.end) - Number(item.start)) / view.duration * trackWidth);
-    const formattedShotNumber = String(shotNumber || position + 1).padStart(2, "0");
-    const captionClasses = ["timeline-shot-caption", clipPixelWidth < 96 ? "compact" : "", clipPixelWidth < 52 ? "micro" : ""].filter(Boolean).join(" ");
-    const visibleShotNumber = clipPixelWidth < 52 ? `S${formattedShotNumber}` : (clipPixelWidth < 96 ? `镜头 ${formattedShotNumber}` : formattedShotNumber);
-    const caption = `<span class="${captionClasses}" aria-hidden="true"><b>${escapeHtml(visibleShotNumber)}</b><em>${escapeHtml(shotCaption)}</em></span>`;
     const outputSegmentAttribute = item._output ? ` data-output-segment-index="${Number(item._outputSegmentIndex)}"` : "";
-    return `<button type="button" class="${classes}" data-timeline-position="${position}"${outputSegmentAttribute} data-event-sequence="${eventNumber || ""}"${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="left:${timelinePercentInView(item.start)}%;width:${Math.max(.2, (Number(item.end) - Number(item.start)) / view.duration * 100)}%;--timeline-clip-top:${clipTop}px" title="${escapeHtml([outputComparison ? `成片顺序 ${String(shotNumber).padStart(2, "0")}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, `${formatTime(item.start)} → ${formatTime(item.end)}`, clipDescription].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([outputComparison ? `成片顺序 ${shotNumber}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, clipDescription].filter(Boolean).join("，"))}">${caption}</button>`;
+    return `<button type="button" class="${classes}" data-timeline-position="${position}"${outputSegmentAttribute} data-event-sequence="${eventNumber || ""}"${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="left:${timelinePercentInView(item.start)}%;width:${Math.max(.2, (Number(item.end) - Number(item.start)) / view.duration * 100)}%;--timeline-clip-top:${clipTop}px" title="${escapeHtml([outputComparison ? `成片顺序 ${String(shotNumber).padStart(2, "0")}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, `${formatTime(item.start)} → ${formatTime(item.end)}`, clipDescription].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([outputComparison ? `成片顺序 ${shotNumber}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, clipDescription].filter(Boolean).join("，"))}"></button>`;
   }).join("") : "";
   clips?.querySelectorAll("[data-timeline-position]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -3178,7 +3199,7 @@ function updateTimeline() {
   }));
   bindTimelineRelationHover(clips);
   const markers = $("#timelineShotMarkers");
-  if (markers) markers.innerHTML = duration > 0 && timelineDetailMode ? items.map((item, position) => {
+  if (markers) markers.innerHTML = duration > 0 ? items.map((item, position) => {
     if (outputComparison && !item._output) return "";
     const shotNumber = Number(item._timelineShotNumber || 0);
     const showMarker = shotNumber && Number(item.end) > view.start && Number(item.start) < view.end;
@@ -3188,13 +3209,13 @@ function updateTimeline() {
     const groupActive = Boolean(item._group && activeCanonicalEventId === String(item._group.id || ""));
     const markerText = String(item._timelineShotMarkerText || shotNumber);
     const markerRole = String(item._timelineShotMarkerRole || timelineShotRole(item));
-    const markerWidth = Number(item._timelineShotBadgeWidth || 48);
+    const markerWidth = Number(item._timelineShotBadgeWidth || 112);
     const markerTop = layout.eventRowHeight + Number(item._timelineShotLane || 0) * shotLaneHeight + Math.max(2, (shotLaneHeight - layout.shotCardHeight) / 2);
-    const markerClasses = ["timeline-shot-marker", outputComparison && item._output ? "comparison-output-shot" : "", markerWidth < 96 ? "compact" : "", groupActive ? "group-active" : "", active ? "active" : ""].filter(Boolean).join(" ");
-    const visibleMarkerNumber = markerWidth < 96 ? `镜头 ${markerText}` : markerText;
+    const markerClasses = ["timeline-shot-marker", outputComparison && item._output ? "comparison-output-shot" : "", groupActive ? "group-active" : "", active ? "active" : ""].filter(Boolean).join(" ");
+    const visibleMarkerNumber = `镜头 ${markerText}`;
     const markerContent = `<b>${escapeHtml(visibleMarkerNumber)}</b><em>${escapeHtml(markerRole)}</em>`;
     const title = [eventNumber ? `事件 E${eventNumber}` : "", `镜头 ${shotNumber}`, markerRole, `${formatTime(item.start)} → ${formatTime(item.end)}`, item.reason || item.summary || item._group?.summary || ""].filter(Boolean).join(" · ");
-    return `<button type="button" class="${markerClasses}" data-timeline-marker-position="${position}"${item._output ? ` data-output-segment-index="${Number(item._outputSegmentIndex)}"` : ""}${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="--timeline-shot-marker-left:${Number(item._timelineShotBadgeLeft || 0)}px;--timeline-shot-marker-top:${markerTop}px;--timeline-shot-marker-width:${markerWidth}px" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${markerContent}</button>`;
+    return `<button type="button" class="${markerClasses}" data-timeline-marker-position="${position}"${item._output ? ` data-output-segment-index="${Number(item._outputSegmentIndex)}"` : ""}${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="--timeline-shot-marker-left:${Number(item._timelineShotBadgeLeft || 0)}px;--timeline-shot-marker-top:${markerTop}px;--timeline-shot-marker-width:${markerWidth}px;--timeline-shot-anchor-offset:${Number(item._timelineShotMarkerTarget || 0) - Number(item._timelineShotBadgeLeft || 0)}px" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${markerContent}</button>`;
   }).join("") : "";
   markers?.querySelectorAll("[data-timeline-marker-position]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -3341,11 +3362,49 @@ function setDirectorState(text, running = false) {
   dot?.classList.toggle("running", running);
 }
 
+function directorStatusForJob(job = currentJob) {
+  if (!job) return { text: "等待素材", running: false };
+
+  const autoCompositionStatus = String(job.autoComposition?.status || "");
+  const autoCompositionRunning = ["queued", "running"].includes(autoCompositionStatus);
+  if (autoCompositionRunning) {
+    const completed = Math.max(0, Number(job.autoComposition?.completedVersions) || 0);
+    const total = Math.max(0, Number(job.autoComposition?.totalVersions) || 0);
+    return {
+      text: total > 0 ? `正在生成成片 · 已完成 ${Math.min(completed, total)}/${total} 个` : "正在生成成片",
+      running: true,
+    };
+  }
+
+  const outputCount = jobOutputCount(job);
+  if (outputCount > 0) return { text: `${outputCount} 个成片已生成`, running: false };
+
+  if (job.status === "briefing") return { text: "正在理解需求", running: false };
+  if (job.status === "brief_confirmation") return { text: "等待你确认需求", running: false };
+  if (job.status === "awaiting_model_decision") return { text: "需要处理", running: false };
+  if (job.status === "awaiting_confirmation") return { text: "事件已就绪 · 待审核", running: false };
+  if (job.status === "completed") return { text: "已完成", running: false };
+  if (job.status === "failed") return { text: "任务失败", running: false };
+  if (["cancelled", "cancelling"].includes(String(job.status || ""))) return { text: "已停止", running: false };
+
+  const pipelineRunning = isPipelineRunningStatus(job.status);
+  const rendering = ["rendering", "render", "edit_planning", "auto_composition"].includes(String(job.stage || ""));
+  return {
+    text: pipelineRunning && rendering ? "正在生成成片" : pipelineRunning ? "正在分析" : "任务进行中",
+    running: pipelineRunning,
+  };
+}
+
+function updateDirectorState(job = currentJob) {
+  const status = directorStatusForJob(job);
+  setDirectorState(status.text, status.running);
+}
+
 function thinkingMessageMarkup(config, job = null) {
   if (!config) return "";
   return `<article class="chat-message assistant thinking-message" role="status">
     <span class="avatar thinking-avatar"><span class="thinking-orb-slot" data-thinking-orb data-orb-state="${escapeHtml(config.state)}" data-orb-size="30" data-orb-theme="light" data-orb-label="${escapeHtml(config.label)}"></span></span>
-    <div class="bubble" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.38" data-beam-duration="2.8" data-beam-radius="13"><small>高光导演</small><p>${escapeHtml(config.label)}</p></div>
+    <div class="bubble" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.58" data-beam-duration="2.25" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="16" data-beam-radius="13"><small>高光导演</small><p>${escapeHtml(config.label)}</p></div>
   </article>`;
 }
 
@@ -3407,7 +3466,8 @@ function inlineAnalysisProgressMarkup(job) {
   const stageLabel = contract.stage.label || "当前阶段";
   const model = contract.activity.model || job?.model || "系统";
   const stageBarPercent = stageMode === "completed" ? 100 : stagePercent;
-  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.68" data-beam-duration="2.55" data-beam-brightness="1.3" data-beam-saturation="0.94" data-beam-hue-range="10" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${waiting}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${percent}%</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>流程完成度</span><b data-inline-workflow-percent>${percent}%</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${percent}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed=".9" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>当前阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>已运行 ${formatClock(elapsedSeconds)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel>停止分析</button></section>`;
+  const cancelling = String(job?.status || "") === "cancelling";
+  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.84" data-beam-duration="2.05" data-beam-brightness="1.42" data-beam-saturation="1.06" data-beam-hue-range="14" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${waiting}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${percent}%</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>流程完成度</span><b data-inline-workflow-percent>${percent}%</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${percent}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed="1.08" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>当前阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>已运行 ${formatClock(elapsedSeconds)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel${cancelling ? " disabled" : ""}>${cancelling ? "正在停止…" : "停止分析"}</button></section>`;
 }
 
 function autoCompositionVersionFacts(job) {
@@ -3467,7 +3527,7 @@ function autoCompositionProgressMarkup(job) {
   const { percent } = facts;
   const stateLabel = state.status === "queued" ? "等待后台启动" : "后台运行";
   const versionHint = autoCompositionProgressHint(job, facts);
-  return `<section class="auto-compose-progress" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.72" data-beam-duration="2.35" data-beam-brightness="1.32" data-beam-saturation="0.96" data-beam-hue-range="10" data-beam-radius="11" role="progressbar" aria-label="自动成片进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="auto-compose-progress-head"><span class="thinking-orb-slot" data-thinking-orb data-orb-state="composing" data-orb-size="24" data-orb-theme="light" data-orb-label="自动成片"></span><div><small>AI 自动成片 · ${stateLabel}</small><strong data-auto-compose-detail>${escapeHtml(detail)}</strong></div><b data-auto-compose-count>${percent}%</b></div><div class="auto-compose-progress-track"><i data-auto-compose-bar style="width:${percent}%"></i></div><p data-auto-compose-versions>${escapeHtml(versionHint)}</p></section>`;
+  return `<section class="auto-compose-progress" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.88" data-beam-duration="1.85" data-beam-brightness="1.46" data-beam-saturation="1.08" data-beam-hue-range="14" data-beam-radius="11" role="progressbar" aria-label="自动成片进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="auto-compose-progress-head"><span class="thinking-orb-slot" data-thinking-orb data-orb-state="composing" data-orb-size="24" data-orb-theme="light" data-orb-label="自动成片"></span><div><small>AI 自动成片 · ${stateLabel}</small><strong data-auto-compose-detail>${escapeHtml(detail)}</strong></div><b data-auto-compose-count>${percent}%</b></div><div class="auto-compose-progress-track"><i data-auto-compose-bar style="width:${percent}%"></i></div><p data-auto-compose-versions>${escapeHtml(versionHint)}</p></section>`;
 }
 
 function updateAutoCompositionProgress(job = currentJob) {
@@ -3809,11 +3869,12 @@ function renderConversation(job) {
     const currentTimelineSegments = currentTimelineGroups.flatMap((group) => group.segments || []);
     const generatedVersions = jobOutputVersions(job).filter((version) => (version.outputs || []).length);
     const generatedOutputs = generatedVersions.flatMap((version) => version.outputs || []);
+    const timelineEditedSinceOutput = timelineEditedAfterLatestOutput(job, generatedVersions);
+    const timelineHasMatchingOutput = generatedOutputs.some((output) => timelineSegmentsMatch(currentTimelineSegments, output.segments || []));
     const timelineHasUnrenderedChanges = !pendingSelection
-      && timelineEditedAfterLatestOutput(job, generatedVersions)
       && currentTimelineSegments.length > 0
       && generatedOutputs.length > 0
-      && !generatedOutputs.some((output) => timelineSegmentsMatch(currentTimelineSegments, output.segments || []));
+      && !timelineHasMatchingOutput;
     const allocated = pendingSelection
       ? eventGroupsForReview.reduce((sum, group) => sum + (group.segments || []).reduce((inner, segment) => inner + Number(segment.duration || (Number(segment.end) - Number(segment.start)) || 0), 0), 0)
       : currentTimelineSegments.reduce((sum, segment) => sum + Number(segment.duration || (Number(segment.end) - Number(segment.start)) || 0), 0);
@@ -3822,6 +3883,7 @@ function renderConversation(job) {
       generatedVersionCount: generatedVersions.length,
       groupIds: currentTimelineGroups.map((group) => group.id),
       pendingSelection,
+      timelineEditedSinceOutput,
       timelineHasUnrenderedChanges,
       timelineSegmentCount,
       visibleRecommendedCount: visibleRecommended.length,
@@ -3830,9 +3892,9 @@ function renderConversation(job) {
     html += `<article class="chat-message assistant recommendation-message"><span class="avatar">AI</span><div class="recommendation-wrap">
       <section class="recommendation-card event-recommendation">
         <header><div><small>${pendingSelection ? "已选时间轴片段" : "VLM 精修与事件归组"}</small><strong>${pendingSelection ? `已准备 ${timelineSegmentCount} 个镜头` : `精修保留 ${refinedCandidateCount} 个候选镜头 · 归并为 ${eventGroupsForReview.length} 个事件`}</strong></div><b>${pendingSelection ? "待确认顺序" : `推荐 ${visibleRecommended.length} 个事件`}</b></header>
-        <div class="duration-budget${budgetClass}"><span><b>${pendingSelection ? "已选片段" : timelineHasUnrenderedChanges ? "当前时间轴" : "推荐成片"} ${allocated.toFixed(1)} 秒</b>${target ? ` / 单条目标 ${target.toFixed(1)} 秒` : " · AI 推荐"}</span><i><b style="width:${target ? Math.min(100, allocated / target * 100) : 100}%"></b></i></div>
-        <p>${pendingSelection ? "这些是你刚从时间轴选中的片段。可以逐个预览并调整顺序，确认无误后直接合成；不会自动带入其他事件。" : timelineHasUnrenderedChanges ? `时间轴已修改；现有 ${generatedVersions.length} 个成片版本仍基于修改前的方案，生成新版本后才会得到当前 ${allocated.toFixed(1)} 秒内容。` : `当前时间轴展示 ${timelineSegmentCount} 个事件镜头；系统已选择 ${visibleRecommended.length} 个事件用于成片。可点击时间轴预览，满意后直接生成。`}</p>
-        ${timelineHasUnrenderedChanges ? `<div class="timeline-render-pending"><span><strong>当前修改尚未生成</strong><small>已有版本不会被覆盖，将新增一个当前时间轴版本</small></span><button type="button" data-render-current-timeline>生成当前时间轴版本</button></div>` : ""}<div class="review-selection-summary" data-selection-summary>正在计算选择结果…</div>
+        <div class="duration-budget${budgetClass}"><span><b>${pendingSelection ? "已选片段" : timelineEditedSinceOutput ? "当前时间轴" : "推荐成片"} ${allocated.toFixed(1)} 秒</b>${target ? ` / 单条目标 ${target.toFixed(1)} 秒` : " · AI 推荐"}</span><i><b style="width:${target ? Math.min(100, allocated / target * 100) : 100}%"></b></i></div>
+        <p>${pendingSelection ? "这些是你刚从时间轴选中的片段。可以逐个预览并调整顺序，确认无误后直接合成；不会自动带入其他事件。" : timelineHasUnrenderedChanges ? (timelineEditedSinceOutput ? `时间轴已修改；现有 ${generatedVersions.length} 个成片版本仍基于修改前的方案，生成新版本后才会得到当前 ${allocated.toFixed(1)} 秒内容。` : `当前 ${generatedVersions.length} 个成片版本都没有包含上方 ${allocated.toFixed(1)} 秒推荐时间轴；可补充生成对应版本。`) : `当前时间轴展示 ${timelineSegmentCount} 个事件镜头；系统已选择 ${visibleRecommended.length} 个事件用于成片。可点击时间轴预览，满意后直接生成。`}</p>
+        ${timelineHasUnrenderedChanges ? `<div class="timeline-render-pending"><span><strong>${timelineEditedSinceOutput ? "当前修改尚未生成" : "推荐时间轴尚未生成"}</strong><small>已有版本不会被覆盖，将新增一个完整对应当前时间轴的版本</small></span><button type="button" data-render-current-timeline>${timelineEditedSinceOutput ? "生成当前时间轴版本" : "生成推荐时间轴版本"}</button></div>` : ""}<div class="review-selection-summary" data-selection-summary>正在计算选择结果…</div>
         <div class="event-group-list">${eventGroupsForReview.map((group, groupIndex) => `<article class="event-group-row${recommended.has(group.id) ? " recommended" : ""}" data-event-group="${escapeHtml(group.id)}">
           <header><input class="event-group-check" type="checkbox" value="${escapeHtml(group.id)}" ${recommended.has(group.id) ? "checked" : ""}><span><strong>${escapeHtml(group.title)}</strong><small>${group.segments.length} 个镜头 · ${Number(group.actualDuration).toFixed(1)} 秒</small></span><b>${Math.round(group.score)}</b><button type="button" class="add-selection-event" ${job.manualSelection ? "" : "disabled"}>加选区</button><button type="button" class="rename-event">命名</button><button type="button" class="preview-event">组合预览</button></header>
           <p>${escapeHtml(group.summary)}</p>
@@ -3908,19 +3970,24 @@ function renderConversation(job) {
     });
     const hasUnrenderedTimeline = Boolean(eventTimelineSummary?.timelineHasUnrenderedChanges);
     const duplicatePlansSkipped = Math.max(0, Number(job.autoComposition?.duplicatePlansSkipped) || 0);
-    const dedupeDescription = duplicatePlansSkipped
-      ? `AI 原计划生成 ${generatedVersions.length + duplicatePlansSkipped} 个版本，其中 ${duplicatePlansSkipped} 个与已有成片重复，已自动合并；当前保留 ${generatedVersions.length} 个不同版本。`
+    const duplicatePlansReplaced = Math.max(0, Number(job.autoComposition?.duplicatePlansReplaced) || 0);
+    const dedupeDescription = duplicatePlansReplaced
+      ? `检测到 ${duplicatePlansReplaced} 个方案与已有成片重复，已自动改用其他高分事件；当前保留 ${generatedVersions.length} 个内容不同的版本。`
+      : duplicatePlansSkipped
+        ? `AI 原计划生成 ${generatedVersions.length + duplicatePlansSkipped} 个版本，其中 ${duplicatePlansSkipped} 个与已有成片重复，已自动合并；当前保留 ${generatedVersions.length} 个不同版本。`
       : "";
     const resultTitle = hasUnrenderedTimeline
       ? `已有成片 · ${generatedVersions.length} 个版本`
       : `成片已生成 · ${generatedVersions.length} 个不同版本`;
     const resultDescription = hasUnrenderedTimeline
-      ? `这些版本基于修改前的时间轴，不包含当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒调整；请先生成当前时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""}`
+      ? (eventTimelineSummary?.timelineEditedSinceOutput
+        ? `这些版本基于修改前的时间轴，不包含当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒调整；请先生成当前时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""}`
+        : `这些版本均不对应上方 ${eventTimelineSummary.allocated.toFixed(1)} 秒推荐时间轴；请先生成推荐时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""}`)
       : `${dedupeDescription || "AI 已根据画面、声音、对白和情绪线索生成多种剪辑版本。"} 点击版本即可预览比较。`;
     html += `<section class="auto-compose-result-card${hasUnrenderedTimeline ? " timeline-stale" : ""}"><strong>${resultTitle}</strong><p>${resultDescription}</p><div>${versionButtons.join("")}</div></section>`;
   }
   if (["cancelled", "failed"].includes(job.status)) {
-    html += `<section class="retry-analysis-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.34" data-beam-duration="3.1" data-beam-radius="10"><strong>${job.status === "cancelled" ? "任务已取消" : "任务分析失败"}</strong><p>可以沿用当前已确认的剪辑要求重新分析，不需要重新上传视频。</p><button type="button" class="reanalyze-job">↻ 重新分析</button></section>`;
+    html += `<section class="retry-analysis-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.52" data-beam-duration="2.5" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="14" data-beam-radius="10"><strong>${job.status === "cancelled" ? "任务已取消" : "任务分析失败"}</strong><p>可以沿用当前已确认的剪辑要求重新分析，不需要重新上传视频。</p><button type="button" class="reanalyze-job">↻ 重新分析</button></section>`;
   }
   if (analysisConsoleVisible(job)) html += inlineAnalysisProgressMarkup(job);
   // The inline progress card already communicates the current stage while a
@@ -3995,7 +4062,9 @@ function renderConversation(job) {
       if (paragraph && eventTimelineSummary) paragraph.textContent = eventTimelineSummary.pendingSelection
         ? "已记录你从时间轴选中的片段。可以逐个预览并调整顺序，确认无误后直接合成。"
         : eventTimelineSummary.timelineHasUnrenderedChanges
-          ? `时间轴已修改；现有 ${eventTimelineSummary.generatedVersionCount} 个成片版本仍基于修改前方案。生成新版本后才会得到当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒内容。`
+          ? (eventTimelineSummary.timelineEditedSinceOutput
+            ? `时间轴已修改；现有 ${eventTimelineSummary.generatedVersionCount} 个成片版本仍基于修改前方案。生成新版本后才会得到当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒内容。`
+            : `当前 ${eventTimelineSummary.generatedVersionCount} 个成片版本都没有包含上方 ${eventTimelineSummary.allocated.toFixed(1)} 秒推荐时间轴；可补充生成对应版本。`)
           : `当前时间轴展示 ${eventTimelineSummary.timelineSegmentCount} 个事件镜头；系统已选择 ${eventTimelineSummary.visibleRecommendedCount} 个事件用于成片。可点击时间轴预览，满意后直接生成。`;
     }
   }
@@ -5664,6 +5733,7 @@ function renderJob(job) {
     const decision = job.status === "awaiting_model_decision";
     const progressVisible = analysisConsoleVisible(job);
     const cancellable = isActiveJobStatus(job.status) || ["brief_confirmation", "awaiting_confirmation"].includes(String(job.status || ""));
+    updateDirectorState(job);
     updateDirectorThinkingOrb(job);
     updateDirectorFlow(job);
     if (live && directorStage === "conversation") setDirectorStage("analysis");
@@ -5768,16 +5838,7 @@ function renderJob(job) {
   const running = isPipelineRunningStatus(job.status);
   const briefing = job.status === "briefing";
   const awaitingDecision = job.status === "awaiting_model_decision";
-  setDirectorState(
-    briefing ? "正在理解需求"
-      : running ? (job.stage === "rendering" ? "正在裁剪并检查输出" : "正在分析")
-      : awaitingDecision ? "需要处理"
-      : job.status === "brief_confirmation" ? "等待你确认需求"
-      : job.status === "awaiting_confirmation" ? "等待你审核事件"
-        : job.status === "completed" ? "已完成"
-          : job.status === "failed" ? "任务失败" : "已停止",
-    running,
-  );
+  updateDirectorState(job);
   updateDirectorThinkingOrb(job);
   // renderConversation replaces its message list, so move the console after
   // the conversation has been rendered and keep it in the same visual flow.
@@ -6224,9 +6285,16 @@ function bindBriefEditor(job, root) {
 async function cancelCurrentJob() {
   if (!currentJob || !(isActiveJobStatus(currentJob.status) || ["brief_confirmation", "awaiting_confirmation"].includes(currentJob.status))) return;
   const actionToken = captureJobAction();
-  const { job } = await api(`/api/jobs/${actionToken.jobId}/cancel`, { method: "POST" });
-  if (!commitJobAction(job, actionToken)) return;
-  if (jobNeedsPolling(job)) pollJob();
+  const buttons = [...document.querySelectorAll("[data-inline-cancel], #cancelButton")];
+  buttons.forEach((button) => { button.disabled = true; button.textContent = "正在停止…"; });
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/cancel`, { method: "POST" });
+    if (!commitJobAction(job, actionToken)) return;
+    if (jobNeedsPolling(job)) pollJob();
+  } catch (error) {
+    buttons.forEach((button) => { button.disabled = false; button.textContent = "停止分析"; });
+    showToast(`停止失败：${error.message || error}`, "error");
+  }
 }
 
 function historyJobStatusText(job) {

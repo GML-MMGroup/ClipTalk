@@ -122,6 +122,7 @@ def extract_uniform_frames(
     progress_callback: Callable[[list[SampledFrame]], None] | None = None,
     progress_batch_size: int = 8,
     progress_first_batch_size: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[SampledFrame]:
     output_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = output_directory / ".uniform-frames.json"
@@ -155,6 +156,7 @@ def extract_uniform_frames(
             progress_callback=progress_callback,
             progress_batch_size=progress_batch_size,
             progress_first_batch_size=progress_first_batch_size,
+            cancelled=cancelled,
         )
         temporary_manifest = manifest_path.with_suffix(".tmp")
         temporary_manifest.write_text(json.dumps({
@@ -177,6 +179,7 @@ def _extract_uniform_frames_uncached(
     progress_callback: Callable[[list[SampledFrame]], None] | None,
     progress_batch_size: int,
     progress_first_batch_size: int | None,
+    cancelled: Callable[[], bool] | None,
 ) -> list[SampledFrame]:
     output_directory.mkdir(parents=True, exist_ok=True)
     interval = max(2.0, duration / max(12, maximum_frames))
@@ -209,6 +212,14 @@ def _extract_uniform_frames_uncached(
 
     try:
         while process.poll() is None:
+            if cancelled and cancelled():
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+                raise MediaError("任务已取消")
             if time.monotonic() - started_at > timeout:
                 process.kill()
                 process.wait(timeout=10)
@@ -256,6 +267,29 @@ def extract_frames_at_times(
 ) -> list[SampledFrame]:
     output_directory.mkdir(parents=True, exist_ok=True)
     requested = [max(0.0, float(value)) for value in times]
+    manifest_path = output_directory / ".detail-frames.json"
+    requested_signature = [round(value, 3) for value in requested]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+    except (OSError, ValueError, TypeError):
+        manifest = {}
+    if manifest.get("schemaVersion") == 1 and manifest.get("times") == requested_signature:
+        cached = [
+            SampledFrame(path=output_directory / str(item.get("filename") or ""), time=float(item.get("time") or 0))
+            for item in manifest.get("items") or [] if isinstance(item, dict)
+        ]
+        if len(cached) == len(requested) and all(
+            frame.path.is_file() and frame.path.stat().st_size > 0 for frame in cached
+        ):
+            if progress_callback is not None:
+                try:
+                    progress_callback(len(cached), len(cached))
+                except Exception:
+                    pass
+            return cached
+    manifest_path.unlink(missing_ok=True)
+    for stale in output_directory.glob("detail-*.jpg"):
+        stale.unlink(missing_ok=True)
     frames: list[SampledFrame] = []
     # Seeking each timestamp in its own ffmpeg process made a single VLM
     # refinement spawn dozens of processes (and was especially costly on
@@ -287,6 +321,14 @@ def extract_frames_at_times(
                 progress_callback(min(len(requested), batch_start + len(batch)), len(requested))
             except Exception:
                 pass
+    if len(frames) == len(requested):
+        temporary_manifest = manifest_path.with_suffix(".tmp")
+        temporary_manifest.write_text(json.dumps({
+            "schemaVersion": 1,
+            "times": requested_signature,
+            "items": [{"filename": frame.path.name, "time": round(frame.time, 3)} for frame in frames],
+        }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temporary_manifest.replace(manifest_path)
     return frames
 
 
@@ -316,6 +358,7 @@ def extract_audio_waveform(
     sample_rate: int = 8000,
     duration: float | None = None,
     progress_callback: Callable[[float, float, float], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, list[float] | int]:
     """Decode mono PCM and retain signed min/max envelopes for timeline zooming."""
     bins = max(200, min(60000, int(bins)))
@@ -327,6 +370,7 @@ def extract_audio_waveform(
     process: subprocess.Popen[bytes] | None = None
     progress_lines: list[str] = []
     timed_out = threading.Event()
+    cancelled_process = threading.Event()
 
     def read_progress() -> None:
         if process is None or process.stderr is None:
@@ -349,6 +393,17 @@ def extract_audio_waveform(
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         progress_reader = threading.Thread(target=read_progress, name="waveform-progress", daemon=True)
         progress_reader.start()
+        def watch_cancellation() -> None:
+            while process is not None and process.poll() is None:
+                if cancelled and cancelled():
+                    cancelled_process.set()
+                    process.terminate()
+                    return
+                time.sleep(.1)
+        cancellation_watcher = threading.Thread(
+            target=watch_cancellation, name="waveform-cancellation", daemon=True,
+        )
+        cancellation_watcher.start()
         watchdog = threading.Timer(600, lambda: (timed_out.set(), process.kill()))
         watchdog.daemon = True
         watchdog.start()
@@ -356,6 +411,7 @@ def extract_audio_waveform(
         return_code = process.wait()
         watchdog.cancel()
         progress_reader.join(timeout=2)
+        cancellation_watcher.join(timeout=1)
     except OSError as error:
         raise MediaError(f"无法生成音频波形：{error}") from error
     finally:
@@ -363,6 +419,8 @@ def extract_audio_waveform(
             process.stdout.close()
     if timed_out.is_set():
         raise MediaError("音频波形生成超时")
+    if cancelled_process.is_set():
+        raise MediaError("任务已取消")
     if return_code != 0:
         detail = "\n".join(progress_lines)[-2000:]
         raise MediaError(detail or "音频波形生成失败")
@@ -399,6 +457,50 @@ def extract_audio_waveform(
         "minimums": minimums,
         "maximums": maximums,
     }
+
+
+def silence_intervals_from_waveform(
+    waveform: dict[str, Any], *, duration: float, minimum_duration: float = .3,
+    rms_threshold: float = .008,
+) -> list[dict[str, float]]:
+    """Derive conservative silence boundaries from an existing RMS envelope.
+
+    The analysis pipeline already decodes the complete audio stream to create
+    the timeline waveform. Reusing that measured envelope avoids a second
+    full-media FFmpeg pass. A deliberately low threshold favours false
+    negatives over cutting quiet speech as silence.
+    """
+    rms: list[float] = []
+    for value in waveform.get("rms") or []:
+        try:
+            number = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            rms.append(number)
+    duration = max(0.0, float(duration or 0))
+    if not rms or duration <= 0:
+        return []
+    seconds_per_bin = duration / len(rms)
+    minimum_bins = max(1, math.ceil(max(.12, minimum_duration) / seconds_per_bin))
+    intervals: list[dict[str, float]] = []
+    run_start: int | None = None
+    for index, value in enumerate([*rms, float("inf")]):
+        if value <= rms_threshold:
+            if run_start is None:
+                run_start = index
+            continue
+        if run_start is None:
+            continue
+        if index - run_start >= minimum_bins:
+            start = run_start * seconds_per_bin
+            end = min(duration, index * seconds_per_bin)
+            intervals.append({
+                "start": round(start, 3), "end": round(end, 3),
+                "duration": round(end - start, 3), "source": "waveform_rms",
+            })
+        run_start = None
+    return intervals
 
 
 def create_timeline_thumbnail_sprite(
@@ -563,6 +665,53 @@ def detect_scene_changes(
     return deduplicated
 
 
+def detect_scene_changes_in_ranges(
+    source: Path,
+    ranges: list[tuple[float, float]],
+    *,
+    ffmpeg: str,
+    threshold: float = 0.34,
+    maximum: int = 240,
+) -> list[float]:
+    """Detect physical cuts only inside VLM-verified candidate windows."""
+    normalized = sorted(
+        (max(0.0, float(start)), max(0.0, float(end)))
+        for start, end in ranges if float(end) - float(start) >= .5
+    )
+    merged: list[list[float]] = []
+    for start, end in normalized:
+        if merged and start <= merged[-1][1] + .25:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    detected: list[float] = []
+    for range_start, range_end in merged:
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "info", "-ss", f"{range_start:.3f}",
+            "-t", f"{range_end - range_start:.3f}", "-i", str(source),
+            "-vf", f"select='gt(scene,{max(0.1, min(0.9, threshold)):.3f})',showinfo",
+            "-an", "-f", "null", "-",
+        ]
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=180, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for raw in re.findall(r"pts_time:([0-9]+(?:\.[0-9]+)?)", result.stderr):
+            relative = float(raw)
+            absolute = range_start + relative if relative <= range_end - range_start + .5 else relative
+            if range_start + .2 <= absolute <= range_end - .2:
+                detected.append(round(absolute, 3))
+        if len(detected) >= maximum:
+            break
+    result: list[float] = []
+    for value in sorted(set(detected)):
+        if not result or value - result[-1] >= .35:
+            result.append(value)
+        if len(result) >= maximum:
+            break
+    return result
+
+
 def detect_silence_intervals(source: Path, *, ffmpeg: str, minimum_duration: float = 0.3) -> list[dict[str, float]]:
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "info", "-i", str(source), "-vn",
@@ -715,11 +864,14 @@ def render_composition(
         if has_audio:
             audio_source = f"[{index}:a]"
             fade = min(.08, duration / 5)
-            filters.append(
-                f"{audio_source}asetpts=PTS-STARTPTS,"
-                f"aresample=async=1:first_pts=0,afade=t=in:st=0:d={fade:.3f},"
-                f"afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}[a{index}]"
-            )
+            contiguous_before = index > 0 and abs(float(valid[index - 1].get("end", 0)) - start) <= .03
+            contiguous_after = index + 1 < count and abs(end - float(valid[index + 1].get("start", 0))) <= .03
+            audio_filters = ["asetpts=PTS-STARTPTS", "aresample=async=1:first_pts=0"]
+            if not contiguous_before:
+                audio_filters.append(f"afade=t=in:st=0:d={fade:.3f}")
+            if not contiguous_after:
+                audio_filters.append(f"afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}")
+            filters.append(f"{audio_source}{','.join(audio_filters)}[a{index}]")
     video_current = "v0"
     audio_current = "a0"
     composed_duration = durations[0]

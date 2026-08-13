@@ -6,21 +6,21 @@
     <meta name="theme-color" content="#090f14" />
     <meta name="description" content="使用视觉大模型与富语音分析发现、审核并合成视频高光。" />
     <title>ClipTalk</title>
-    <link rel="icon" type="image/png" href="/static/assets/cliptalk-icon.png" />
+    <link rel="icon" type="image/png" href="/static/assets/cliptalk-icon.png?v=20260812-transparent-1" />
     <link rel="preload" href="/static/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/static/generative-loaders.css?v=20260811-loader-runtime-2" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-brand-lockup-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260813-cancel-flow-1" />
   </head>
   <body>
     <div class="ambient-grid" aria-hidden="true"></div>
     <header class="topbar">
-      <div class="brand-cluster"><a class="brand" href="/" aria-label="ClipTalk 首页">
-          <span class="brand-lockup-frame" aria-hidden="true">
-            <svg viewBox="100 230 1520 454" role="presentation" focusable="false">
-              <image href="/static/assets/cliptalk-lockup-source.png" width="1672" height="941" />
-            </svg>
-          </span>
-        </a><button id="homeButton" type="button" class="home-button" title="返回全部任务" aria-label="返回全部任务"><span aria-hidden="true">‹</span> 全部任务</button><i class="brand-circuit" aria-hidden="true"></i></div>
+      <div class="brand-cluster"><button id="homeButton" type="button" class="home-button" title="返回全部任务" aria-label="返回全部任务"><span aria-hidden="true">‹</span> 全部任务</button><i class="brand-circuit" aria-hidden="true"></i></div>
+      <a class="brand" href="/" aria-label="ClipTalk 首页">
+        <span class="brand-lockup-frame" aria-hidden="true">
+          <img class="brand-lockup-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-brand-unified-1" alt="" />
+          <img class="brand-wordmark-image" src="/static/assets/cliptalk-wordmark-dark.png?v=20260812-wordmark-exact-1" alt="" />
+        </span>
+      </a>
       <div class="top-actions">
         <button id="engineState" class="engine" type="button" title="查看模型状态"><i></i><span>正在检查视觉模型</span><b>⌄</b></button>
         <button id="settingsButton" class="top-button settings-button" type="button"><span>⚙</span> 设置</button>
@@ -39,7 +39,7 @@
       </section>
       <aside class="chat-panel glass-panel">
         <header class="panel-header">
-          <div class="director"><span class="director-orb-slot" id="directorThinkingOrb" data-thinking-orb data-orb-state="shaping" data-orb-size="30" data-orb-theme="light" data-orb-label="等待素材"></span><div><strong>AI 高光导演</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
+          <div class="director"><img class="director-brand-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><strong>AI 高光导演</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
           <ol id="directorStageNav" class="director-stage-flow" aria-label="高光剪辑流程">
             <li data-director-flow="brief"><span>1</span><div><strong>准备</strong><small>确认要求并准备媒体</small></div></li>
             <li data-director-flow="analysis"><span>2</span><div><strong>AI 分析</strong><small>发现并整理高光事件</small></div></li>
@@ -59,7 +59,7 @@
         </section>
 
         <form id="chatForm" class="chat-composer">
-          <div class="chat-input-shell composer-homepage-beam" data-border-beam data-beam-size="md" data-beam-color="ocean" data-beam-theme="dark" data-beam-strength="0.38" data-beam-duration="4.8" data-beam-brightness="1.08" data-beam-saturation="0.88" data-beam-hue-range="18" data-beam-radius="12">
+          <div class="chat-input-shell composer-homepage-beam" data-border-beam data-beam-size="md" data-beam-color="ocean" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="3.8" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="22" data-beam-radius="12">
             <textarea id="chatInput" maxlength="500" rows="2" disabled placeholder="请输入指令或补充需求……"></textarea>
             <button id="sendButton" type="submit" disabled title="发送" aria-label="发送"><span data-ui-icon="send" aria-hidden="true"></span></button>
           </div>
@@ -308,13 +308,13 @@
       </details>
     </div>
     <div id="actionConfirm" class="action-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="actionConfirmTitle">
-      <div class="action-confirm-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.36" data-beam-duration="2.8" data-beam-radius="15"><header><div><small>确认操作</small><strong id="actionConfirmTitle">请确认</strong></div><button id="actionConfirmClose" type="button" aria-label="关闭">×</button></header><p id="actionConfirmSummary"></p><ul id="actionConfirmDetails"></ul><div id="actionConfirmOrderList" class="action-confirm-order-list hidden"></div><label id="actionConfirmOrderWrap" class="action-confirm-order hidden"><span>合成顺序</span><select id="actionConfirmOrder"><option value="selection">按选择顺序 · 保持你的编排</option></select><small id="actionConfirmOrderHint"></small></label><div id="actionConfirmWarning" class="action-confirm-warning"></div><footer><button id="actionConfirmCancel" type="button">返回修改</button><button id="actionConfirmOk" class="primary" type="button">确认执行</button></footer></div>
+      <div class="action-confirm-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="2.2" data-beam-brightness="1.2" data-beam-saturation="1" data-beam-hue-range="15" data-beam-radius="15"><header><div><small>确认操作</small><strong id="actionConfirmTitle">请确认</strong></div><button id="actionConfirmClose" type="button" aria-label="关闭">×</button></header><p id="actionConfirmSummary"></p><ul id="actionConfirmDetails"></ul><div id="actionConfirmOrderList" class="action-confirm-order-list hidden"></div><label id="actionConfirmOrderWrap" class="action-confirm-order hidden"><span>合成顺序</span><select id="actionConfirmOrder"><option value="selection">按选择顺序 · 保持你的编排</option></select><small id="actionConfirmOrderHint"></small></label><div id="actionConfirmWarning" class="action-confirm-warning"></div><footer><button id="actionConfirmCancel" type="button">返回修改</button><button id="actionConfirmOk" class="primary" type="button">确认执行</button></footer></div>
     </div>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/thinking-orbs.js?v=20260806-subtitle-label-69" defer></script>
     <script src="/static/generative-loaders.js?v=20260811-loader-runtime-2" defer></script>
     <script src="/static/border-beam.js?v=20260811-border-beam-2" defer></script>
     <script src="/static/ui-icons.js?v=20260811-send-icon-1" defer></script>
-    <script src="/static/app.js?v=20260812-trustworthy-progress-1" defer></script>
+    <script src="/static/app.js?v=20260813-cancel-flow-1" defer></script>
   </body>
 </html>

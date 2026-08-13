@@ -5,6 +5,8 @@ import os
 import json
 import tempfile
 import unittest
+import httpx
+from concurrent.futures import Future
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +19,11 @@ from app.main import (
     analysis_cache_reuse_allowed,
     apply_timeline_history_state,
     automatic_composition_signature,
+    automatic_composition_similarity,
+    distinct_event_replacement_plans,
     _normalise_edit_plans,
     _edit_plan_candidates,
+    _semantic_safe_selections,
     parse_candidate_adjustment,
     parse_absolute_time_range,
     parse_manual_selection_adjustment,
@@ -34,10 +39,12 @@ from app.media import (
     create_preview_proxy,
     create_timeline_thumbnail_sprite,
     extract_audio_waveform,
+    extract_frames_at_times,
     extract_uniform_frames,
     probe_video,
     render_clip,
     render_composition,
+    silence_intervals_from_waveform,
     validate_rendered_clip,
 )
 from app.pipeline import (
@@ -52,6 +59,7 @@ from app.pipeline import (
     recommended_candidate_indices,
     refinement_window_seconds,
     refinement_candidate_limit,
+    speech_signal_candidates,
     select_non_overlapping,
     touches_refinement_boundary,
     clean_model_evidence,
@@ -70,7 +78,9 @@ from app.prompts import (
     llm_edit_plan_prompt,
 )
 from app.store import JobStore
-from app.event_groups import allocate_event_group_budget, build_event_groups, build_final_reel, composition_duration
+from app.event_groups import allocate_event_group_budget, build_event_groups, build_final_reel, composition_duration, event_groups_total, split_event_groups_at_scene_cuts
+from app.edit_boundaries import annotate_candidate_boundaries, semantic_safe_range
+from app.edl_optimizer import optimize_edl
 from app.speech import (
     _sensevoice_model_options,
     normalize_sensevoice_result,
@@ -229,6 +239,23 @@ class ChatTimeRangeTests(unittest.TestCase):
             parse_absolute_time_range("从 20 秒到 10 秒合成")
 
 
+class WaveformSilenceTests(unittest.TestCase):
+    def test_derives_conservative_silence_without_second_media_decode(self) -> None:
+        waveform = {"rms": [.2, .1, .004, .003, .002, .1, .2, .001, .2, .2]}
+        intervals = silence_intervals_from_waveform(
+            waveform, duration=5.0, minimum_duration=1.0,
+        )
+        self.assertEqual(intervals, [{
+            "start": 1.0, "end": 2.5, "duration": 1.5, "source": "waveform_rms",
+        }])
+
+    def test_does_not_treat_short_quiet_dip_as_edit_boundary(self) -> None:
+        waveform = {"rms": [.2, .001, .2, .2]}
+        self.assertEqual(silence_intervals_from_waveform(
+            waveform, duration=2.0, minimum_duration=1.0,
+        ), [])
+
+
 class EditPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.job = {"eventGroups": [{
@@ -244,6 +271,7 @@ class EditPlanTests(unittest.TestCase):
     def test_edit_plan_candidates_include_available_pool(self) -> None:
         rows = _edit_plan_candidates(self.job, ["event_1"], {"event_1": ["segment_1"]}, "all_pool")
         self.assertEqual({row["id"] for row in rows}, {"segment_1", "segment_2"})
+        self.assertEqual({row["candidateId"] for row in rows}, {"segment_1", "segment_2"})
 
     def test_normalise_edit_plan_clamps_subrange_and_rejects_overlap(self) -> None:
         rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
@@ -261,10 +289,134 @@ class EditPlanTests(unittest.TestCase):
         self.assertIn("source_start/source_end", prompt)
         self.assertTrue(EDIT_PLAN_PROMPT_VERSION)
 
+    def test_edit_plan_enforces_minimum_keep_seconds(self) -> None:
+        self.job["eventGroups"][0]["segments"][0]["minimumKeepSeconds"] = 8.0
+        rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
+        plans = _normalise_edit_plans({"plans": [{"label": "测试", "sequence": [
+            {"candidate_id": "segment_1", "source_start": 15, "source_end": 17, "role": "climax"},
+        ]}]}, rows, scope="selected_only", selected_group_ids=["event_1"], target=None)
+        self.assertGreaterEqual(plans[0]["sequence"][0]["duration"], 8.0)
+
+    def test_edit_plan_expands_a_cut_inside_spoken_expression(self) -> None:
+        self.job["eventGroups"][0]["segments"][0].update({"hasSpeech": True, "minimumKeepSeconds": 15.0})
+        rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
+        speech = [{"start": 12.0, "end": 27.0, "text": "这是一句必须完整保留的话。"}]
+        plans = _normalise_edit_plans({"plans": [{"label": "测试", "sequence": [
+            {"candidate_id": "segment_1", "source_start": 15, "source_end": 20, "role": "climax"},
+        ]}]}, rows, scope="selected_only", selected_group_ids=["event_1"], target=None, speech_segments=speech)
+        segment = plans[0]["sequence"][0]
+        self.assertEqual((segment["start"], segment["end"]), (12.0, 27.0))
+
+    def test_final_edl_removes_whole_shot_instead_of_cutting_speech(self) -> None:
+        segments = [
+            {"id": "a", "candidateId": "a", "groupId": "one", "start": 0, "end": 20, "score": 95, "essential": True},
+            {"id": "b", "candidateId": "b", "groupId": "two", "start": 30, "end": 50, "score": 80},
+        ]
+        transcript = [
+            {"start": 0, "end": 20, "text": "第一段完整对白"},
+            {"start": 30, "end": 50, "text": "第二段完整对白"},
+        ]
+        optimized = optimize_edl(
+            segments, speech_segments=transcript, target_seconds=30,
+            order_mode="source", allow_fill=False, video_duration=60,
+        )
+        self.assertEqual(optimized["shotCount"], 1)
+        self.assertEqual((optimized["segments"][0]["start"], optimized["segments"][0]["end"]), (0.0, 20.0))
+        self.assertEqual(len(optimized["removedSegments"]), 1)
+
+    def test_final_edl_fills_short_automatic_reel_from_a_new_event(self) -> None:
+        selected = [{
+            "id": "segment_1", "candidateId": "candidate_a", "groupId": "event_a",
+            "start": 0, "end": 8, "score": 94,
+        }]
+        pool = [selected[0], {
+            "id": "segment_2", "candidateId": "candidate_b", "groupId": "event_b",
+            "start": 20, "end": 32, "score": 90,
+        }]
+        optimized = optimize_edl(
+            selected, candidate_pool=pool, target_seconds=20,
+            order_mode="source", allow_fill=True, video_duration=40,
+        )
+        self.assertEqual(optimized["shotCount"], 2)
+        self.assertEqual(optimized["eventCount"], 2)
+        self.assertEqual(optimized["actualDuration"], 20.0)
+        self.assertTrue(optimized["qualityReport"]["passed"])
+
+    def test_final_edl_reports_when_only_one_event_can_fill_target(self) -> None:
+        selected = [{
+            "id": "segment_1", "groupId": "event_a", "start": 0, "end": 8, "score": 94,
+        }]
+        optimized = optimize_edl(
+            selected, candidate_pool=selected, target_seconds=30,
+            order_mode="source", allow_fill=True, video_duration=40,
+        )
+        self.assertEqual(optimized["durationStatus"], "under_target")
+        self.assertTrue(optimized["qualityReport"]["warnings"])
+
     def test_automatic_composition_signature_matches_plan_and_rendered_segments(self) -> None:
         plan = [{"candidateId": "segment_1", "start": 10.004, "end": 20.004}]
         rendered = [{"id": "segment_1", "start": 10.0, "end": 20.0}]
         self.assertEqual(automatic_composition_signature(plan), automatic_composition_signature(rendered))
+
+    def test_automatic_composition_similarity_rejects_cosmetic_boundary_changes(self) -> None:
+        left = automatic_composition_signature([
+            {"id": "a", "start": 10, "end": 20}, {"id": "b", "start": 30, "end": 40},
+        ])
+        right = automatic_composition_signature([
+            {"id": "x", "start": 10.5, "end": 20}, {"id": "y", "start": 30, "end": 39.5},
+        ])
+        distinct = automatic_composition_signature([
+            {"id": "z", "start": 50, "end": 60},
+        ])
+        self.assertGreaterEqual(automatic_composition_similarity(left, right), .85)
+        self.assertEqual(automatic_composition_similarity(left, distinct), 0.0)
+
+    def test_duplicate_auto_plans_are_replaced_with_other_events(self) -> None:
+        def group(group_id: str, start: float, end: float, score: float) -> dict:
+            segment = {
+                "id": f"segment_{group_id}", "candidateId": f"candidate_{group_id}",
+                "start": start, "end": end, "duration": end - start,
+                "score": score, "role": "精彩镜头",
+            }
+            return {
+                "id": group_id, "title": f"事件 {group_id}",
+                "segments": [segment], "availableSegments": [segment],
+            }
+
+        job = {
+            "recommendedGroupIds": ["event_a"],
+            "eventGroups": [
+                group("event_a", 0, 30, 96),
+                group("event_b", 60, 89, 94),
+                group("event_c", 120, 151, 92),
+            ],
+        }
+        existing = [automatic_composition_signature([{"id": "segment_event_a", "start": 0, "end": 30}])]
+        plans = distinct_event_replacement_plans(job, existing, 2, 30)
+
+        self.assertEqual(len(plans), 2)
+        self.assertEqual({plan["sequence"][0]["groupId"] for plan in plans}, {"event_b", "event_c"})
+        self.assertTrue(all(plan["autoMeta"]["sourceLabel"] == "事件替选" for plan in plans))
+        signatures = [automatic_composition_signature(plan["sequence"]) for plan in plans]
+        self.assertEqual(automatic_composition_similarity(existing[0], signatures[0]), 0.0)
+        self.assertEqual(automatic_composition_similarity(signatures[0], signatures[1]), 0.0)
+
+    def test_render_validation_preserves_reviewed_edl_over_target(self) -> None:
+        selections = [{
+            "id": "reviewed_reel",
+            "segments": [
+                {"id": "shot_a", "start": 0, "end": 12, "duration": 12, "editOrder": 0},
+                {"id": "shot_b", "start": 240, "end": 270.6, "duration": 30.6, "editOrder": 1},
+            ],
+        }]
+        validated, _ = _semantic_safe_selections(
+            {"videoInfo": {"duration": 700}}, selections,
+            order_mode="selection", target_seconds=None, allow_fill=False,
+        )
+
+        segments = validated[0]["segments"]
+        self.assertEqual([item["id"] for item in segments], ["shot_a", "shot_b"])
+        self.assertAlmostEqual(validated[0]["actualDuration"], 42.6, places=2)
 
 
 class PublicJobPayloadTests(unittest.TestCase):
@@ -507,7 +659,7 @@ class PromptContractTests(unittest.TestCase):
             content_profile=profile, theme="人物反应", requested_count=1,
             total_target_seconds=30, transcript_available=False,
         )
-        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v8-peak-budget"))
+        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v9-semantic-boundaries"))
         self.assertIn("不得虚构", COMMON_SYSTEM_PROMPT)
         self.assertIn('"primary_type"', classification)
         self.assertIn('"center_seconds"', discovery)
@@ -583,6 +735,19 @@ class SenseVoiceParsingTests(unittest.TestCase):
         self.assertEqual([item["text"] for item in result["segments"]], ["第一位发言", "第二位 回应"])
         self.assertEqual([item["speaker"] for item in result["segments"]], ["Speaker 1", "Speaker 2"])
 
+    def test_splits_strong_punctuation_with_token_timestamps(self) -> None:
+        result = normalize_sensevoice_result([{
+            "text": "你好。继续！",
+            "sentence_info": [{
+                "start": 1000, "end": 4000, "text": "你好。继续！",
+                "timestamp": [[0, 400], [400, 800], [800, 900], [1000, 1500], [1500, 2100], [2100, 2200]],
+            }],
+        }])
+        self.assertEqual([item["text"] for item in result["segments"]], ["你好。", "继续！"])
+        self.assertEqual((result["segments"][0]["start"], result["segments"][0]["end"]), (1.0, 1.9))
+        self.assertEqual((result["segments"][1]["start"], result["segments"][1]["end"]), (2.0, 3.2))
+        self.assertTrue(all(item["timingSource"] == "sensevoice_token_timestamp" for item in result["segments"]))
+
     def test_repairs_file_length_sensevoice_segment_instead_of_failing(self) -> None:
         transcript = " ".join(f"word{index}" for index in range(160))
         result = normalize_sensevoice_result([{
@@ -636,6 +801,96 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.load_all()[0]["id"], "job_test")
             store.delete("job_test")
             self.assertEqual(store.load_all(), [])
+
+
+class JobCancellationTests(unittest.TestCase):
+    @staticmethod
+    def _job(job_id: str, status: str) -> dict:
+        return {
+            "id": job_id, "status": status, "stage": status, "progress": 0.0,
+            "detail": status, "filename": "source.mp4", "messages": [],
+            "sourcePath": f"/tmp/{job_id}-source.mp4",
+            "workDirectory": f"/tmp/{job_id}-work",
+            "outputDirectory": f"/tmp/{job_id}-outputs",
+            "outputs": [], "outputVersions": [], "eventGroups": [], "candidates": [],
+            "request": {}, "createdAt": "2026-01-01T00:00:00+00:00",
+            "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+
+    def tearDown(self) -> None:
+        for job_id in ("job_cancel_queued", "job_cancel_running", "job_cancel_orphan", "job_cancel_brief"):
+            main_module.jobs.pop(job_id, None)
+            main_module.cancel_events.pop(job_id, None)
+            main_module.analysis_futures.pop(job_id, None)
+            main_module.active_ark_clients.pop(job_id, None)
+
+    def test_queued_future_is_removed_and_becomes_cancelled_immediately(self) -> None:
+        job_id = "job_cancel_queued"
+        future: Future = Future()
+        event = main_module.threading.Event()
+        main_module.jobs[job_id] = self._job(job_id, "queued")
+        main_module.cancel_events[job_id] = event
+        main_module.analysis_futures[job_id] = future
+        with patch.object(main_module, "save_job"):
+            result = main_module.cancel_job(job_id)["job"]
+        self.assertTrue(future.cancelled())
+        self.assertTrue(event.is_set())
+        self.assertEqual(result["status"], "cancelled")
+        self.assertNotIn(job_id, main_module.analysis_futures)
+        self.assertNotIn(job_id, main_module.cancel_events)
+
+    def test_running_future_signals_worker_and_closes_model_client(self) -> None:
+        job_id = "job_cancel_running"
+        future: Future = Future()
+        self.assertTrue(future.set_running_or_notify_cancel())
+        event = main_module.threading.Event()
+        client = MagicMock()
+        main_module.jobs[job_id] = self._job(job_id, "running")
+        main_module.cancel_events[job_id] = event
+        main_module.analysis_futures[job_id] = future
+        main_module.active_ark_clients[job_id] = client
+        with patch.object(main_module, "save_job"):
+            result = main_module.cancel_job(job_id)["job"]
+        self.assertTrue(event.is_set())
+        client.cancel.assert_called_once_with()
+        self.assertEqual(result["status"], "cancelling")
+
+    def test_orphaned_cancelling_record_is_finalized(self) -> None:
+        job_id = "job_cancel_orphan"
+        main_module.jobs[job_id] = self._job(job_id, "cancelling")
+        with patch.object(main_module, "save_job"):
+            result = main_module.cancel_job(job_id)["job"]
+        self.assertEqual(result["status"], "cancelled")
+
+    def test_cancelled_brief_cannot_overwrite_terminal_state(self) -> None:
+        job_id = "job_cancel_brief"
+        event = main_module.threading.Event()
+        event.set()
+        main_module.jobs[job_id] = self._job(job_id, "briefing")
+        main_module.cancel_events[job_id] = event
+        with patch.object(main_module, "save_job"):
+            main_module.run_brief_generation(job_id)
+        self.assertEqual(main_module.jobs[job_id]["status"], "cancelled")
+        self.assertNotEqual(main_module.jobs[job_id]["stage"], "brief_confirmation")
+        self.assertNotIn(job_id, main_module.cancel_events)
+
+
+class ModelClientCancellationTests(unittest.TestCase):
+    def test_cancelled_vision_request_does_not_retry(self) -> None:
+        client = OpenAICompatibleVisionClient(
+            api_key="secret", model="vision-model", base_url="https://vision.example/v1",
+        )
+        transport = MagicMock()
+        context = MagicMock()
+        context.__enter__.return_value = transport
+        transport.post.side_effect = lambda *_args, **_kwargs: (
+            client.cancel(), (_ for _ in ()).throw(httpx.ReadError("closed by cancellation"))
+        )[1]
+        with patch("app.ark_client.httpx.Client", return_value=context) as factory:
+            with self.assertRaisesRegex(ArkRequestError, "已取消"):
+                client.complete_json("analyze")
+        self.assertEqual(factory.call_count, 1)
+        transport.close.assert_called_once_with()
 
 
 class EventGroupEditingTests(unittest.TestCase):
@@ -1001,6 +1256,15 @@ class SourceProxySchedulingTests(unittest.TestCase):
 
 
 class CandidateSelectionTests(unittest.TestCase):
+    def test_audio_and_dialogue_signals_create_candidates_for_visual_verification(self) -> None:
+        candidates = speech_signal_candidates([
+            {"start": 10, "end": 16, "text": "这是本次发布最重要的产品结论。", "emotion": "happy", "audioEvents": ["applause"]},
+            {"start": 20, "end": 21, "text": "嗯", "emotion": "neutral", "audioEvents": []},
+        ], video_duration=60)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual((candidates[0].start, candidates[0].end), (10.0, 16.0))
+        self.assertEqual(candidates[0].audio_evidence["source"], "sensevoice")
+
     def test_undo_snapshot_restores_candidate_collection(self) -> None:
         job = {"candidates": [{"index": 0, "title": "新标题"}], "recommendedIndices": [0]}
         edit = {
@@ -1110,6 +1374,28 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(len(groups[0]["segments"]), 3)
         self.assertAlmostEqual(groups[0]["actualDuration"], 22.82, places=2)
 
+    def test_scene_cuts_expose_multiple_shots_inside_one_event(self) -> None:
+        candidates = [{"index": 0, "start": 10, "end": 20, "score": 92, "title": "连续事件", "reason": ""}]
+        groups = build_event_groups(candidates, {"event_groups": [{
+            "title": "连续事件", "score": 92,
+            "moments": [{"candidate_index": 0, "essential": True}],
+        }]})
+        split = split_event_groups_at_scene_cuts(groups, [13, 17])
+        self.assertEqual(len(split[0]["segments"]), 3)
+        self.assertEqual([(item["start"], item["end"]) for item in split[0]["segments"]], [(10.0, 13.0), (13.0, 17.0), (17.0, 20.0)])
+
+    def test_scene_cuts_keep_spoken_semantic_unit_but_expose_visual_shots(self) -> None:
+        candidates = [{
+            "index": 0, "start": 10, "end": 20, "score": 92, "title": "完整对白", "reason": "",
+            "hasSpeech": True, "minimumKeepSeconds": 10,
+        }]
+        groups = build_event_groups(candidates, {"event_groups": []})
+        split = split_event_groups_at_scene_cuts(groups, [13, 17])
+        segment = split[0]["segments"][0]
+        self.assertEqual(len(split[0]["segments"]), 1)
+        self.assertEqual(segment["physicalShotCount"], 3)
+        self.assertEqual(len(segment["visualShots"]), 3)
+
     def test_allocates_one_total_budget_across_event_groups(self) -> None:
         candidates = [
             {"index": index, "start": index * 20, "end": index * 20 + 10, "score": 95 - index, "title": f"镜头{index}", "reason": ""}
@@ -1122,6 +1408,66 @@ class CandidateSelectionTests(unittest.TestCase):
         allocated, ids = allocate_event_group_budget(groups, total_target_seconds=30, requested_count=2)
         self.assertEqual(len(ids), 2)
         self.assertLessEqual(sum(group["actualDuration"] for group in allocated if group["id"] in ids), 33.01)
+
+    def test_prefers_three_complete_events_when_they_fit_dynamic_limit(self) -> None:
+        candidates = [
+            {"index": index, "start": index * 20, "end": index * 20 + 10, "score": 95 - index,
+             "title": f"事件{index}", "reason": "", "hasSpeech": True, "minimumKeepSeconds": 10}
+            for index in range(4)
+        ]
+        groups = build_event_groups(candidates, {"event_groups": []})
+        allocated, ids = allocate_event_group_budget(groups, total_target_seconds=30, requested_count=None)
+        self.assertEqual(len(ids), 3)
+        self.assertAlmostEqual(event_groups_total(allocated, ids), 30.0)
+
+    def test_reduces_event_count_instead_of_cutting_dialogue(self) -> None:
+        candidates = [
+            {"index": index, "start": index * 30, "end": index * 30 + 15, "score": 95 - index,
+             "title": f"对白事件{index}", "reason": "", "hasSpeech": True, "minimumKeepSeconds": 15}
+            for index in range(3)
+        ]
+        groups = build_event_groups(candidates, {"event_groups": []})
+        allocated, ids = allocate_event_group_budget(groups, total_target_seconds=30, requested_count=None)
+        self.assertEqual(len(ids), 2)
+        self.assertAlmostEqual(event_groups_total(allocated, ids), 30.0)
+        selected = [group for group in allocated if group["id"] in ids]
+        self.assertTrue(all(group["segments"][0]["duration"] == 15 for group in selected))
+        self.assertTrue(selected[0]["eventReductionReason"])
+
+    def test_semantic_boundary_uses_silence_inside_long_speech_segment(self) -> None:
+        safe = semantic_safe_range(
+            10, 20,
+            speech_segments=[{"start": 5, "end": 25, "text": "较长的一段对白"}],
+            silences=[{"start": 8.5, "end": 9.0}, {"start": 21.5, "end": 22.0}],
+        )
+        self.assertEqual((safe["start"], safe["end"]), (9.0, 21.5))
+        self.assertEqual(safe["speechBoundaryStatus"], "adjusted")
+
+    def test_broad_spoken_candidate_uses_sentence_level_minimum_keep(self) -> None:
+        annotated = annotate_candidate_boundaries(
+            [{
+                "id": "candidate_1", "start": 0, "end": 30,
+                "peakStart": 11, "peakEnd": 13, "minimumKeepSeconds": 5,
+            }],
+            speech_segments=[
+                {"id": "s1", "start": 1, "end": 8, "text": "第一句完整表达。"},
+                {"id": "s2", "start": 10, "end": 16, "text": "第二句是核心表达。"},
+                {"id": "s3", "start": 20, "end": 28, "text": "第三句完整表达。"},
+            ],
+            duration=40,
+        )[0]
+        self.assertTrue(annotated["hasSpeech"])
+        self.assertEqual(annotated["speechUnitCount"], 3)
+        self.assertEqual(annotated["minimumKeepSeconds"], 6.0)
+
+        groups = build_event_groups([annotated], {"event_groups": []})
+        allocated, ids = allocate_event_group_budget(
+            groups, total_target_seconds=10, requested_count=1,
+        )
+        selected = next(group for group in allocated if group["id"] in ids)
+        segment = selected["segments"][0]
+        self.assertTrue(segment["trimmedToCompleteSpeechUnits"])
+        self.assertEqual((segment["start"], segment["end"]), (10.0, 16.0))
 
     def test_long_essential_segment_is_trimmed_around_peak_to_total_budget(self) -> None:
         candidates = [{
@@ -1407,6 +1753,17 @@ class MediaIntegrationTests(unittest.TestCase):
                 ffmpeg="/definitely/missing/ffmpeg", maximum_frames=12,
             )
             self.assertEqual(len(cached_frames), len(sprite_metadata["items"]))
+            detail_directory = root / "detail-frames"
+            detail_frames = extract_frames_at_times(
+                source, detail_directory, [0.25, 1.0, 2.0], ffmpeg="/usr/bin/ffmpeg",
+            )
+            reused_detail_frames = extract_frames_at_times(
+                source, detail_directory, [0.25, 1.0, 2.0], ffmpeg="/definitely/missing/ffmpeg",
+            )
+            self.assertEqual(
+                [(item.path.name, item.time) for item in reused_detail_frames],
+                [(item.path.name, item.time) for item in detail_frames],
+            )
             proxy = root / "proxy.mp4"
             create_preview_proxy(source, proxy, has_audio=True, ffmpeg="/usr/bin/ffmpeg")
             proxy_info = probe_video(proxy, "/usr/bin/ffprobe")

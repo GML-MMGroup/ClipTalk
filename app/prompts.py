@@ -4,8 +4,8 @@ import json
 from typing import Any
 
 
-PROMPT_VERSION = "highlight-director-v8-peak-budget-20260810"
-EDIT_PLAN_PROMPT_VERSION = "edit-plan-v3-duration-budget-20260810"
+PROMPT_VERSION = "highlight-director-v9-semantic-boundaries-20260812"
+EDIT_PLAN_PROMPT_VERSION = "edit-plan-v4-semantic-boundaries-20260812"
 BRIEF_PROMPT_VERSION = "brief-v1-20260806"
 
 COMMON_SYSTEM_PROMPT = """你是专业视频高光导演和纪录片剪辑师。
@@ -198,6 +198,8 @@ def llm_edit_plan_prompt(
 8. 转场默认 cut；禁止漏光、双色调、闪白和强特效。
 9. narrative 只描述叙事和剪辑意图，不要在文字中自行填写预计秒数；实际时长由系统根据 source_start/source_end 计算并显示。
 10. 如果目标时长无法自然达到，保留完整表达并在 warnings 说明“素材不足”，不要用重复镜头或无价值拖尾凑时长。
+11. 候选池充足时优先覆盖 3 个不同事件；但完整保留 3 个事件会超过“目标时长 + max(5秒, 目标时长的15%)”时，应减少为 2 个或 1 个事件，不得为了事件数量截断对白。
+12. minimumKeepSeconds 是硬下限；有对白的 candidate 必须在完整语句、停顿或说话人轮次边界切入切出。
 
 仅返回以下 JSON：
 {{

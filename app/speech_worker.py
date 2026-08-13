@@ -63,6 +63,12 @@ def main() -> int:
             has_intermediate_progress = False
             def report_progress(*args: Any) -> None:
                 nonlocal has_intermediate_progress
+                # FunASR invokes this callback between inference batches. Turn
+                # the filesystem cancellation marker into an exception here
+                # instead of waiting for model.generate() to finish the whole
+                # recording before noticing it.
+                if cancel_path.is_file():
+                    raise RuntimeError("任务已取消")
                 numeric = [item for item in args if isinstance(item, (int, float))]
                 processed = numeric[0] if numeric else None
                 total = numeric[1] if len(numeric) > 1 else None

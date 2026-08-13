@@ -35,7 +35,7 @@ EVENTS = {
     "breath": "breath", "music": "bgm",
 }
 TAG_PATTERN = re.compile(r"<\|([^|>]+)\|>")
-SPEECH_SCHEMA_VERSION = 4
+SPEECH_SCHEMA_VERSION = 6
 MAX_SPEECH_SEGMENT_SECONDS = 90.0
 REPAIRED_SPEECH_SEGMENT_SECONDS = 60.0
 
@@ -376,6 +376,68 @@ def _milliseconds(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _timestamp_aligned_words(
+    text: str, timestamp: Any, *, sentence_start: float, sentence_end: float,
+) -> list[dict[str, Any]]:
+    """Convert FunASR token timestamps into conservative source-time words."""
+    if not isinstance(timestamp, list):
+        return []
+    pairs = [pair for pair in timestamp if isinstance(pair, (list, tuple)) and len(pair) >= 2]
+    tokens = list(re.finditer(r"[\u3400-\u9fff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*|[^\s]", text))
+    if not pairs or len(pairs) != len(tokens):
+        return []
+    raw_max = max(float(pair[1]) for pair in pairs)
+    relative = sentence_start > .01 and raw_max <= (sentence_end - sentence_start + 2.0) * 1000
+    offset = sentence_start if relative else 0.0
+    words: list[dict[str, Any]] = []
+    for token, pair in zip(tokens, pairs):
+        start = offset + _milliseconds(pair[0])
+        end = offset + _milliseconds(pair[1])
+        start = max(sentence_start, min(sentence_end, start))
+        end = max(start, min(sentence_end, end))
+        words.append({
+            "word": token.group(0), "start": round(start, 3), "end": round(end, 3),
+            "charStart": token.start(), "charEnd": token.end(),
+        })
+    return words
+
+
+def _split_aligned_sentence(segment: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split only on strongly punctuated, timestamp-aligned sentence ends."""
+    words = list(segment.get("words") or [])
+    text = str(segment.get("text") or "")
+    if len(words) < 2:
+        return [segment]
+    boundaries = [index for index, word in enumerate(words) if str(word.get("word") or "") in "。！？!?；;"]
+    if not boundaries or boundaries[-1] != len(words) - 1:
+        boundaries.append(len(words) - 1)
+    result: list[dict[str, Any]] = []
+    first = 0
+    for boundary in boundaries:
+        selected = words[first:boundary + 1]
+        if not selected:
+            continue
+        start = float(selected[0]["start"])
+        end = float(selected[-1]["end"])
+        char_start = int(selected[0].get("charStart") or 0)
+        char_end = int(selected[-1].get("charEnd") or len(text))
+        clause_text = text[char_start:char_end].strip()
+        if end - start < .18 or not clause_text:
+            if result:
+                result[-1]["end"] = max(float(result[-1]["end"]), end)
+                result[-1]["text"] = (str(result[-1]["text"]) + clause_text).strip()
+                result[-1]["words"].extend(selected)
+            first = boundary + 1
+            continue
+        result.append({
+            **segment, "start": round(start, 3), "end": round(end, 3),
+            "text": clause_text, "words": selected,
+            "timingSource": "sensevoice_token_timestamp",
+        })
+        first = boundary + 1
+    return result or [segment]
+
+
 def _balanced_text_chunks(value: Any, count: int) -> list[str]:
     """Split transcript text in order without cutting Latin words when possible."""
     text = str(value or "").strip()
@@ -495,13 +557,18 @@ def normalize_sensevoice_result(result: Any) -> dict[str, Any]:
             emotions = rich["emotions"] or overall["emotions"]
             events = list(dict.fromkeys((rich["audioEvents"] or overall["audioEvents"])))
             words = sentence.get("words") if isinstance(sentence.get("words"), list) else []
-            segments.append({
+            if not words:
+                words = _timestamp_aligned_words(
+                    text, sentence.get("timestamp"), sentence_start=start, sentence_end=max(start, end),
+                )
+            normalized_segment = {
                 "start": start, "end": max(start, end), "text": text,
                 "words": words, "speaker": speaker,
                 "emotion": emotions[0] if emotions else "neutral",
                 "audioEvents": events,
                 "language": rich["language"] or overall["language"] or detected_language,
-            })
+            }
+            segments.extend(_split_aligned_sentence(normalized_segment))
     segments, repair_stats = repair_long_speech_segments(segments)
     return {
         "language": detected_language,
@@ -553,7 +620,7 @@ def _analyze_sensevoice(
     try:
         result = model.generate(
             input=str(source), cache={}, language="auto", use_itn=True,
-            batch_size_s=60, merge_vad=not diarization, merge_length_s=15,
+            batch_size_s=60, merge_vad=False,
             sentence_timestamp=True, progress_callback=progress_callback,
         )
     except Exception as error:

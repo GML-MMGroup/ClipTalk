@@ -11,7 +11,7 @@ import shutil
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,8 @@ from .event_groups import (
     legacy_candidates_to_event_groups,
     recalculate_event_group,
 )
+from .edit_boundaries import load_transcript_segments, semantic_safe_range
+from .edl_optimizer import optimize_edl
 from .pipeline import (
     ANALYSIS_CACHE_VERSION,
     HighlightPipeline,
@@ -58,6 +60,7 @@ from .media import (
     detect_scene_changes,
     detect_silence_intervals,
     extract_audio_waveform,
+    silence_intervals_from_waveform,
     extract_first_frame,
     probe_video,
     render_clip,
@@ -130,6 +133,11 @@ timeline_assets_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=
 jobs_lock = threading.RLock()
 jobs: dict[str, dict[str, Any]] = {}
 cancel_events: dict[str, threading.Event] = {}
+# Keep the Future for every analysis/brief task.  Without this registry a job
+# that was still waiting in ThreadPoolExecutor could only be marked
+# ``cancelling``; it remained in the queue until an earlier multi-minute job
+# released the sole worker.
+analysis_futures: dict[str, Future[Any]] = {}
 # Active clients can be visual or text-planning adapters; every adapter
 # exposes cancel(), which is all the cancellation endpoint needs.
 active_ark_clients: dict[str, Any] = {}
@@ -750,6 +758,140 @@ def automatic_composition_signature(segments: list[dict[str, Any]] | None) -> tu
             continue
         signature.append((source_id, start, end))
     return tuple(signature)
+
+
+def automatic_composition_similarity(
+    left: tuple[tuple[str, float, float], ...], right: tuple[tuple[str, float, float], ...],
+) -> float:
+    """Measure shared source-time coverage, not merely exact JSON equality."""
+    if not left or not right:
+        return 0.0
+    left_ranges = [(start, end) for _, start, end in left if end > start]
+    right_ranges = [(start, end) for _, start, end in right if end > start]
+    left_total = sum(end - start for start, end in left_ranges)
+    right_total = sum(end - start for start, end in right_ranges)
+    if left_total <= 0 or right_total <= 0:
+        return 0.0
+    intersection = 0.0
+    for left_start, left_end in left_ranges:
+        covered: list[tuple[float, float]] = []
+        for right_start, right_end in right_ranges:
+            start, end = max(left_start, right_start), min(left_end, right_end)
+            if end > start:
+                covered.append((start, end))
+        if covered:
+            covered.sort()
+            merged = [list(covered[0])]
+            for start, end in covered[1:]:
+                if start <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], end)
+                else:
+                    merged.append([start, end])
+            intersection += sum(end - start for start, end in merged)
+    return round(intersection / min(left_total, right_total), 4)
+
+
+def distinct_event_replacement_plans(
+    job: dict[str, Any],
+    seen_signatures: list[tuple[tuple[str, float, float], ...]],
+    count: int,
+    target_seconds: float | None,
+) -> list[dict[str, Any]]:
+    """Replace duplicate automatic plans with real cuts from other events.
+
+    The editorial model can legitimately return the currently recommended
+    event for every requested direction when that one event already fills the
+    duration budget.  If other analyzed events exist, dropping those duplicate
+    plans makes the product look as though no alternative footage was found.
+    Build deterministic one-event alternatives from the existing evidence
+    pool instead; this adds no model request and never invents source ranges.
+    """
+    requested = max(0, int(count or 0))
+    if not requested:
+        return []
+    selected_groups = {str(value) for value in job.get("recommendedGroupIds", [])}
+    candidates = _edit_plan_candidates(job, list(selected_groups), None, "all_pool")
+    if not candidates:
+        return []
+
+    target = float(target_seconds) if target_seconds not in (None, "", "auto") else None
+
+    def rank(candidate: dict[str, Any]) -> tuple[Any, ...]:
+        duration = max(0.0, float(candidate.get("end") or 0) - float(candidate.get("start") or 0))
+        # Prefer an entirely different event first, then the closest natural
+        # duration and the strongest analyzed candidate.
+        return (
+            str(candidate.get("groupId")) in selected_groups,
+            abs(duration - target) if target else 0.0,
+            -float(candidate.get("score") or 0),
+            float(candidate.get("start") or 0),
+        )
+
+    ranked = sorted(candidates, key=rank)
+    replacements: list[dict[str, Any]] = []
+    replacement_groups: set[str] = set()
+    live_signatures = list(seen_signatures)
+    for candidate in ranked:
+        group_id = str(candidate.get("groupId") or "")
+        if not group_id or group_id in replacement_groups:
+            continue
+        start = round(float(candidate.get("start") or 0), 3)
+        end = round(float(candidate.get("end") or 0), 3)
+        if end - start < .35:
+            continue
+        signature = automatic_composition_signature([{
+            "candidateId": candidate.get("id"), "start": start, "end": end,
+        }])
+        if not signature or any(
+            signature == previous or automatic_composition_similarity(signature, previous) >= .85
+            for previous in live_signatures
+        ):
+            continue
+        title = str(candidate.get("groupTitle") or "替代高光事件")[:60]
+        role = str(candidate.get("role") or "精彩镜头")
+        duration = round(end - start, 3)
+        auto_meta = {
+            "strategyKey": "event_alternative",
+            "displayName": title,
+            "sourceLabel": "事件替选",
+            "strategyDescription": "换用另一组高分事件",
+        }
+        replacements.append({
+            "id": f"plan_{uuid.uuid4().hex[:12]}",
+            "label": title,
+            "narrative": f"原剪辑方案与已有成片重复，改用“{title}”形成独立高光版本。",
+            "structure": ["highlight"],
+            "sequence": [{
+                "id": f"plan_{uuid.uuid4().hex[:10]}",
+                "candidateId": candidate.get("id"),
+                "groupId": group_id,
+                "chapterId": group_id,
+                "chapterTitle": title,
+                "chapterOrder": 0,
+                "editOrder": 0,
+                "start": start,
+                "end": end,
+                "duration": duration,
+                "role": role,
+                "reason": "从完整候选池换用另一个高分事件，确保版本内容真实不同。",
+                "essential": True,
+                "transitionIn": {"type": "cut", "duration": 0.0},
+            }],
+            "chapters": [{"id": f"chapter_{uuid.uuid4().hex[:8]}", "role": "highlight", "title": title, "segmentCount": 1, "duration": duration}],
+            "addedByAi": [str(candidate.get("id") or "")],
+            "estimatedDuration": duration,
+            "targetSeconds": target,
+            "durationStatus": "on_target" if not target or abs(duration - target) <= max(5.0, target * .15) else ("under_target" if duration < target else "over_target"),
+            "durationGap": round(target - duration, 3) if target else 0.0,
+            "warnings": ["原方案与已有成片重复，已自动换用其他高分事件"],
+            "planner": "local-distinct-event-fallback",
+            "autoMeta": auto_meta,
+        })
+        replacement_groups.add(group_id)
+        live_signatures.append(signature)
+        if len(replacements) >= requested:
+            break
+    return replacements
 
 
 def output_preview_path(job: dict[str, Any], filename: str) -> Path:
@@ -1721,6 +1863,46 @@ def append_message(job_id: str, role: str, text: str, *, kind: str = "message") 
         save_job(job)
 
 
+def finalize_job_cancellation(job_id: str, *, message: str = "任务已取消") -> None:
+    """Persist a terminal cancellation exactly once.
+
+    Workers and the HTTP cancellation endpoint may observe the same signal at
+    nearly the same time.  This helper keeps the final state idempotent and
+    avoids filling the conversation with duplicate cancellation notices.
+    """
+    should_append = False
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        should_append = job.get("status") != "cancelled"
+        job.update({
+            "status": "cancelled", "stage": "cancelled",
+            "detail": message, "currentAction": message,
+            "etaSeconds": None, "etaMode": "stopped",
+            "progressMode": "stopped", "pendingDecision": None,
+            "updatedAt": now_iso(),
+        })
+        save_job(job)
+    if should_append:
+        append_message(job_id, "assistant", message, kind="notice")
+
+
+def submit_analysis_task(job_id: str, target: Any, *args: Any) -> Future[Any]:
+    """Submit one cancellable analysis task and retain its queue handle."""
+    future = executor.submit(target, *args)
+    with jobs_lock:
+        analysis_futures[job_id] = future
+
+    def forget(completed: Future[Any]) -> None:
+        with jobs_lock:
+            if analysis_futures.get(job_id) is completed:
+                analysis_futures.pop(job_id, None)
+
+    future.add_done_callback(forget)
+    return future
+
+
 def new_job_record(
     *,
     job_id: str,
@@ -1845,6 +2027,19 @@ def _confirmed_brief_from_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_brief_generation(job_id: str) -> None:
+    client: Any = None
+    with jobs_lock:
+        cancel_event = cancel_events.get(job_id)
+
+    def finish_cancelled_brief() -> None:
+        finalize_job_cancellation(job_id)
+        with jobs_lock:
+            if cancel_events.get(job_id) is cancel_event:
+                cancel_events.pop(job_id, None)
+
+    if cancel_event is None or cancel_event.is_set():
+        finish_cancelled_brief()
+        return
     try:
         with jobs_lock:
             job = jobs[job_id]
@@ -1864,21 +2059,35 @@ def run_brief_generation(job_id: str) -> None:
             edit_mode=str(request.get("editMode") or "ai_plan"),
             structure=str(request.get("structure") or "auto"),
         )
+        if cancel_event.is_set():
+            raise RuntimeError("任务已取消")
         client = create_llm_client_for_job(job)
         with jobs_lock:
             active_ark_clients[job_id] = client
         brief = client.complete_json(prompt, maximum_tokens=1800, system_prompt=COMMON_SYSTEM_PROMPT)
+        if cancel_event.is_set():
+            raise RuntimeError("任务已取消")
         brief.pop("_usage", None)
         source = "llm"
     except Exception as error:
+        if cancel_event.is_set():
+            finish_cancelled_brief()
+            return
         brief = _fallback_brief(jobs[job_id])
         source = "fallback"
         append_message(job_id, "assistant", f"需求理解暂不可用，已按原始要求生成简报：{str(error)[:180]}", kind="warning")
     finally:
         with jobs_lock:
-            active_ark_clients.pop(job_id, None)
+            if active_ark_clients.get(job_id) is client:
+                active_ark_clients.pop(job_id, None)
+    if cancel_event.is_set():
+        finish_cancelled_brief()
+        return
     with jobs_lock:
         job = jobs[job_id]
+        if cancel_event.is_set() or job.get("status") in {"cancelled", "cancelling"}:
+            finish_cancelled_brief()
+            return
         job.update({"status": "brief_confirmation", "stage": "brief_confirmation", "progress": .12, "detail": "需求简报已生成，等待确认", "brief": brief, "briefStatus": "pending", "briefSource": source, "briefVersion": BRIEF_PROMPT_VERSION, "updatedAt": now_iso()})
         save_job(job)
     append_message(job_id, "assistant", "我已整理出一份剪辑需求简报，请确认后再开始视觉分析。", kind="brief")
@@ -1889,14 +2098,17 @@ def enqueue_job(job: dict[str, Any]) -> None:
         jobs[job["id"]] = job
         cancel_events[job["id"]] = threading.Event()
         save_job(job)
-    executor.submit(run_brief_generation if job.get("briefStatus") == "pending" else run_job, job["id"])
+    submit_analysis_task(job["id"], run_brief_generation if job.get("briefStatus") == "pending" else run_job, job["id"])
 
 
 def run_job(job_id: str, resume_action: str | None = None) -> None:
     with jobs_lock:
         job = jobs[job_id]
         cancel_event = cancel_events[job_id]
+    client: Any = None
     try:
+        if cancel_event.is_set():
+            raise RuntimeError("任务已取消")
         vision_config = vision_store.resolve(snapshot=job.get("visionConfig") if isinstance(job.get("visionConfig"), dict) else None)
         missing_vision = [label for label, value in (
             ("API Key", vision_config.get("apiKey")),
@@ -1936,6 +2148,8 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
         )
 
         def progress(value: float, stage: str, detail: str) -> None:
+            if cancel_event.is_set():
+                return
             with jobs_lock:
                 current_job = jobs.get(job_id, {})
                 previous_overall = float(current_job.get("progress") or 0.0)
@@ -1985,6 +2199,16 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
         if manifest is not None:
             progress(0.96, "cache_hit", "检测到相同视频和分析要求，正在复用已验证候选")
         else:
+            scene_cuts: list[float] = []
+            if source_hash:
+                timeline_metadata_path, _ = timeline_cache_paths(source_hash)
+                if timeline_metadata_path.is_file():
+                    try:
+                        timeline_metadata = json.loads(timeline_metadata_path.read_text(encoding="utf-8"))
+                        if timeline_metadata.get("sceneCutsReady") is True:
+                            scene_cuts = [float(value) for value in timeline_metadata.get("sceneCuts") or []]
+                    except (OSError, ValueError, TypeError):
+                        scene_cuts = []
             manifest = pipeline.run(
                 source=Path(job["sourcePath"]),
                 work_directory=Path(job["workDirectory"]),
@@ -2011,9 +2235,12 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
                 total_target_seconds=total_target_seconds,
                 requested_count=requested_count,
                 resume_action=resume_action,
+                scene_cuts=scene_cuts,
             )
             if cache_key:
                 save_analysis_cache(cache_key, manifest)
+        if cancel_event.is_set():
+            raise RuntimeError("任务已取消")
         if manifest.get("eventGroups"):
             update_job(
                 job_id,
@@ -2035,6 +2262,8 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
                 allocatedTotalSeconds=manifest.get("allocatedTotalSeconds"),
                 totalTargetSeconds=manifest.get("totalTargetSeconds"),
                 durationTolerance=manifest.get("durationTolerance", .1),
+                durationUpperLimit=manifest.get("durationUpperLimit"),
+                eventReductionReason=manifest.get("eventReductionReason", ""),
                 durationStatus=manifest.get("durationStatus"),
                 durationGap=manifest.get("durationGap", 0.0),
                 videoInfo=manifest["video"],
@@ -2059,10 +2288,14 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
             if manifest.get("totalTargetSeconds"):
                 duration_text += f"（目标 {float(manifest['totalTargetSeconds']):.1f} 秒）"
             degraded_text = " 事件归组使用了本地降级规则，建议重点审核镜头组合。" if manifest.get("directorDegraded") else ""
+            reduction_text = (
+                f" {str(manifest.get('eventReductionReason')).rstrip('。')}；系统优先保留完整表达，不会为凑事件数截断对白。"
+                if manifest.get("eventReductionReason") else ""
+            )
             append_message(
                 job_id,
                 "assistant",
-                f"{'已复用相同视频的分析结果：' if cache_hit else '事件整理完成：'}视觉模型保留 {manifest['candidateCount']} 个候选镜头，归并为 {manifest['eventGroupCount']} 个高光事件；当前推荐 {manifest['recommendedCount']} 个事件{duration_text}。可以把已选事件合成 1 条视频，也可以分别导出。{degraded_text}",
+                f"{'已复用相同视频的分析结果：' if cache_hit else '事件整理完成：'}视觉模型保留 {manifest['candidateCount']} 个候选镜头，归并为 {manifest['eventGroupCount']} 个高光事件；当前推荐 {manifest['recommendedCount']} 个事件{duration_text}。{reduction_text}可以把已选事件合成 1 条视频，也可以分别导出。{degraded_text}",
                 kind="recommendation",
             )
             for group_id in manifest.get("recommendedGroupIds", [])[:3]:
@@ -2091,6 +2324,9 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
             kind="result",
         )
     except ModelDecisionRequired as error:
+        if cancel_event.is_set():
+            finalize_job_cancellation(job_id)
+            return
         stage_name = {
             "content_classification": "内容类型识别",
             "speech_analysis": "SenseVoice 富语音分析",
@@ -2139,27 +2375,25 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
         )
     except Exception as error:
         cancelled = cancel_event.is_set()
-        update_job(
-            job_id,
-            status="cancelled" if cancelled else "failed",
-            stage="cancelled" if cancelled else "failed",
-            detail="任务已取消" if cancelled else "视觉高光分析失败",
-            currentAction="任务已取消" if cancelled else "视觉高光分析失败",
-            etaSeconds=None,
-            etaMode="stopped",
-            progressMode="stopped",
-            error=str(error)[:2000],
-        )
-        append_message(
-            job_id,
-            "assistant",
-            "任务已取消" if cancelled else f"这次高光分析没有完成：{str(error)[:500]}",
-            kind="error" if not cancelled else "notice",
-        )
+        if cancelled:
+            finalize_job_cancellation(job_id)
+        else:
+            update_job(
+                job_id,
+                status="failed", stage="failed",
+                detail="视觉高光分析失败", currentAction="视觉高光分析失败",
+                etaSeconds=None, etaMode="stopped", progressMode="stopped",
+                error=str(error)[:2000],
+            )
+            append_message(
+                job_id, "assistant", f"这次高光分析没有完成：{str(error)[:500]}", kind="error",
+            )
     finally:
         with jobs_lock:
-            cancel_events.pop(job_id, None)
-            active_ark_clients.pop(job_id, None)
+            if cancel_events.get(job_id) is cancel_event:
+                cancel_events.pop(job_id, None)
+            if active_ark_clients.get(job_id) is client:
+                active_ark_clients.pop(job_id, None)
 
 
 def run_automatic_composition(job_id: str) -> None:
@@ -2277,21 +2511,35 @@ def run_automatic_composition(job_id: str) -> None:
             distinct_plans: list[dict[str, Any]] = []
             vlm_output = next((item for item in (job.get("outputs") or []) if item.get("segments")), None)
             vlm_signature = automatic_composition_signature(vlm_output.get("segments") if vlm_output else None)
-            seen_signatures: set[tuple[Any, ...]] = {vlm_signature} if vlm_signature else set()
+            seen_signatures: list[tuple[tuple[str, float, float], ...]] = [vlm_signature] if vlm_signature else []
             duplicate_plan_count = 0
             for candidate_plan in plans:
                 signature = automatic_composition_signature(candidate_plan.get("sequence"))
-                if not signature or signature in seen_signatures:
+                if not signature or any(
+                    signature == previous or automatic_composition_similarity(signature, previous) >= .85
+                    for previous in seen_signatures
+                ):
                     duplicate_plan_count += 1
                     continue
-                seen_signatures.add(signature)
+                seen_signatures.append(signature)
                 distinct_plans.append(candidate_plan)
                 if len(distinct_plans) >= llm_version_count:
                     break
-            plans = distinct_plans
+            replacement_plans = distinct_event_replacement_plans(
+                job,
+                seen_signatures,
+                llm_version_count - len(distinct_plans),
+                float(target) if target not in (None, "", "auto") else None,
+            )
+            plans = [*distinct_plans, *replacement_plans]
+            duplicate_plans_replaced = len(replacement_plans)
+            duplicate_plans_skipped = max(0, duplicate_plan_count - duplicate_plans_replaced)
             actual_total_versions = 1 + len(plans)
             job["autoComposition"].update({
-                "phase": "llm_render", "duplicatePlansSkipped": duplicate_plan_count,
+                "phase": "llm_render",
+                "duplicatePlansDetected": duplicate_plan_count,
+                "duplicatePlansReplaced": duplicate_plans_replaced,
+                "duplicatePlansSkipped": duplicate_plans_skipped,
                 "totalVersions": actual_total_versions,
                 "completedVersions": 1,
                 "currentVersion": 2 if plans else None,
@@ -2331,14 +2579,14 @@ def run_automatic_composition(job_id: str) -> None:
                 job["lastProgressAt"] = now_iso()
                 save_job(job)
             plan_label = str(plan.get("label") or f"叙事方案 {index + 1}")
-            plan_meta = auto_composition_meta("llm", plan_label)
+            plan_meta = dict(plan.get("autoMeta") or auto_composition_meta("llm", plan_label))
             run_confirmed_render(job_id, [], "single_reel", "complete", plan_meta["sourceLabel"], index == len(plans) - 1, list(plan.get("sequence") or []), plan_meta["displayName"], list(plan.get("chapters") or []), subtitle_mode, "selection", subtitle_style, auto_meta=plan_meta, background_auto=True)
             with jobs_lock:
                 job = jobs.get(job_id)
                 if not job:
                     return
                 completed_meta = [vlm_meta] + [
-                    auto_composition_meta("llm", str(item.get("label") or f"叙事方案 {plan_index + 1}"))
+                    dict(item.get("autoMeta") or auto_composition_meta("llm", str(item.get("label") or f"叙事方案 {plan_index + 1}")))
                     for plan_index, item in enumerate(plans[:index + 1])
                 ]
                 completed_count = len(completed_meta)
@@ -2356,7 +2604,7 @@ def run_automatic_composition(job_id: str) -> None:
         with jobs_lock:
             job = jobs.get(job_id)
             if job:
-                version_meta = [vlm_meta] + [auto_composition_meta("llm", str(plan.get("label") or f"叙事方案 {index + 1}")) for index, plan in enumerate(plans)]
+                version_meta = [vlm_meta] + [dict(plan.get("autoMeta") or auto_composition_meta("llm", str(plan.get("label") or f"叙事方案 {index + 1}"))) for index, plan in enumerate(plans)]
                 job["autoComposition"].update({"status": "completed", "phase": "done", "versions": version_meta, "planIds": [plan.get("id") for plan in plans]})
                 job["autoComposition"]["progress"] = 1.0
                 job["autoComposition"]["completedVersions"] = len(version_meta)
@@ -2364,8 +2612,11 @@ def run_automatic_composition(job_id: str) -> None:
                 job["autoComposition"]["currentVersion"] = None
                 job["autoComposition"]["currentVersionProgress"] = 1.0
                 job["autoComposition"]["detail"] = (
-                    f"自动成片已完成，{duplicate_plan_count} 个重复方案已合并"
-                    if duplicate_plan_count else "自动成片版本已全部生成"
+                    f"自动成片已完成，{duplicate_plans_replaced} 个重复方案已改用其他事件"
+                    if duplicate_plans_replaced else (
+                        f"自动成片已完成，{duplicate_plans_skipped} 个重复方案已合并"
+                        if duplicate_plans_skipped else "自动成片版本已全部生成"
+                    )
                 )
                 job["stageProgress"] = 1.0
                 job["stageCompleted"] = len(version_meta)
@@ -2377,11 +2628,20 @@ def run_automatic_composition(job_id: str) -> None:
                 job["etaSeconds"] = None
                 job["etaMode"] = "completed"
                 job["detail"] = (
-                    f"已保留 {len(version_meta)} 个不同的自动高光版本，{duplicate_plan_count} 个重复方案已合并"
-                    if duplicate_plan_count else f"已生成 {len(version_meta)} 个自动高光版本，可直接预览比较"
+                    f"已生成 {len(version_meta)} 个不同的自动高光版本，{duplicate_plans_replaced} 个重复方案已改用其他事件"
+                    if duplicate_plans_replaced else (
+                        f"已保留 {len(version_meta)} 个不同的自动高光版本，{duplicate_plans_skipped} 个重复方案已合并"
+                        if duplicate_plans_skipped else f"已生成 {len(version_meta)} 个自动高光版本，可直接预览比较"
+                    )
                 )
                 save_job(job)
-        duplicate_text = f"另有 {duplicate_plan_count} 个与已有成片重复的方案已自动合并。" if duplicate_plan_count else ""
+        duplicate_text = (
+            f"检测到 {duplicate_plans_replaced} 个重复方案，已自动改用其他高分事件。"
+            if duplicate_plans_replaced else (
+                f"另有 {duplicate_plans_skipped} 个与已有成片重复的方案已自动合并。"
+                if duplicate_plans_skipped else ""
+            )
+        )
         append_message(job_id, "assistant", f"自动成片已完成：已生成 {len(version_meta)} 个不同版本（{vlm_meta['displayName']} 1 个、剪辑规划版本 {len(plans)} 个）。{duplicate_text}源视频保持不变，可直接预览比较。", kind="auto-compose")
     except Exception as error:
         error_text = str(error)[:800]
@@ -2511,6 +2771,8 @@ def _edit_plan_candidates(job: dict[str, Any], group_ids: list[str], segment_ids
             seen.add(segment_id)
             rows.append({
                 "id": segment_id,
+                "candidateId": str(segment.get("candidateId") or segment_id),
+                "semanticUnitId": str(segment.get("semanticUnitId") or segment.get("candidateId") or segment_id),
                 "groupId": group_id,
                 "groupTitle": str(group.get("title") or "精彩事件"),
                 "selected": group_id in selected_groups and (not requested.get(group_id) or segment_id in requested[group_id]),
@@ -2526,8 +2788,78 @@ def _edit_plan_candidates(job: dict[str, Any], group_ids: list[str], segment_ids
                 "peakEnd": round(float(segment.get("peakEnd", segment.get("end") or 0)), 3),
                 "minimumKeepSeconds": round(float(segment.get("minimumKeepSeconds") or min(float(segment.get("duration") or 2), 2)), 3),
                 "boundaryConfidence": round(float(segment.get("boundaryConfidence") or .5), 3),
+                "safeStart": round(float(segment.get("safeStart", segment.get("start") or 0)), 3),
+                "safeEnd": round(float(segment.get("safeEnd", segment.get("end") or 0)), 3),
+                "boundarySource": str(segment.get("boundarySource") or "visual"),
+                "speechBoundaryStatus": str(segment.get("speechBoundaryStatus") or "no_speech"),
+                "hasSpeech": bool(segment.get("hasSpeech")),
+                "speechUnits": copy.deepcopy(segment.get("speechUnits") or []),
             })
     return rows[:120]
+
+
+def _job_transcript_segments(job: dict[str, Any]) -> list[dict[str, Any]]:
+    speech = job.get("speechAnalysis") or {}
+    segments = speech.get("segments") if isinstance(speech, dict) else None
+    if isinstance(segments, list):
+        return load_transcript_segments(segments)
+    work_directory = str(job.get("workDirectory") or "").strip()
+    path = Path(work_directory) / "transcript.json" if work_directory else None
+    if not path or not path.is_file():
+        return []
+    try:
+        return load_transcript_segments(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _job_silence_intervals(job: dict[str, Any]) -> list[dict[str, Any]]:
+    work_directory = str(job.get("workDirectory") or "").strip()
+    path = Path(work_directory) / "timeline-waveform.json" if work_directory else None
+    if not path or not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    return list(payload.get("silences") or []) if isinstance(payload, dict) else []
+
+
+def _semantic_safe_selections(
+    job: dict[str, Any], selections: list[dict[str, Any]], *, order_mode: str = "selection",
+    target_seconds: float | None = None, allow_fill: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    speech_segments = _job_transcript_segments(job)
+    silences = _job_silence_intervals(job)
+    video_duration = float((job.get("videoInfo") or {}).get("duration") or 0) or None
+    result = copy.deepcopy(selections)
+    candidate_pool = _edit_plan_candidates(job, [], None, "all_pool") if allow_fill else []
+    adjustments: list[dict[str, Any]] = []
+    for selection in result:
+        optimized = optimize_edl(
+            list(selection.get("segments") or []),
+            candidate_pool=candidate_pool,
+            speech_segments=speech_segments, silences=silences,
+            target_seconds=target_seconds,
+            order_mode=order_mode,
+            allow_fill=allow_fill, video_duration=video_duration,
+        )
+        selection["segments"] = optimized["segments"]
+        selection["actualDuration"] = optimized["actualDuration"]
+        selection["edlOptimization"] = {key: value for key, value in optimized.items() if key != "segments"}
+        adjustments.extend(optimized["boundaryAdjustments"])
+    return result, adjustments
+
+
+def _safe_plan_range(
+    candidate: dict[str, Any], start: float, end: float,
+    speech_segments: list[dict[str, Any]], silences: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return semantic_safe_range(
+        start, end, speech_segments=speech_segments, silences=silences,
+        lower_bound=float(candidate.get("start") or 0),
+        upper_bound=float(candidate.get("end") or 0),
+    )
 
 
 def _plan_range_for_duration(candidate: dict[str, Any], duration: float, *, within: tuple[float, float] | None = None) -> tuple[float, float]:
@@ -2550,6 +2882,8 @@ def _fit_edit_sequence_to_target(
     sequence: list[dict[str, Any]],
     candidate_map: dict[str, dict[str, Any]],
     target: float | None,
+    speech_segments: list[dict[str, Any]] | None = None,
+    silences: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Deterministically repair an LLM plan to the requested duration.
 
@@ -2586,7 +2920,12 @@ def _fit_edit_sequence_to_target(
             if desired >= current - .05:
                 continue
             start, end = _plan_range_for_duration(candidate, desired, within=(float(item["start"]), float(item["end"])))
-            item.update({"start": start, "end": end, "duration": round(end - start, 3), "durationAdjusted": True})
+            safe = _safe_plan_range(candidate, start, end, speech_segments or [], silences or [])
+            item.update({
+                "start": safe["start"], "end": safe["end"],
+                "duration": round(safe["end"] - safe["start"], 3),
+                "durationAdjusted": True, "boundaryAdjustment": safe,
+            })
         if total() < target - tolerance:
             notes.append("为满足目标时长，已在精彩核心范围内压缩过长镜头")
 
@@ -2605,6 +2944,10 @@ def _fit_edit_sequence_to_target(
                 break
             keep = min(end - start, need)
             fitted_start, fitted_end = _plan_range_for_duration(candidate, keep)
+            safe = _safe_plan_range(candidate, fitted_start, fitted_end, speech_segments or [], silences or [])
+            fitted_start, fitted_end = safe["start"], safe["end"]
+            if total() + fitted_end - fitted_start > target + max(5.0, target * .15) and result:
+                continue
             result.append({
                 "id": f"plan_{uuid.uuid4().hex[:10]}", "candidateId": candidate_id,
                 "groupId": candidate["groupId"], "chapterId": candidate["groupId"],
@@ -2613,6 +2956,7 @@ def _fit_edit_sequence_to_target(
                 "role": str(candidate.get("role") or "development"),
                 "reason": "目标时长校正：从完整候选池补充高分且不重复的精彩核心。",
                 "essential": False, "addedByDurationOptimizer": True,
+                "boundaryAdjustment": safe,
                 "transitionIn": {"type": "cut", "duration": 0.0},
             })
             occupied.append((fitted_start, fitted_end))
@@ -2622,6 +2966,30 @@ def _fit_edit_sequence_to_target(
         result.sort(key=lambda item: (float(item.get("start") or 0), int(item.get("editOrder") or 0)))
         if any(item.get("addedByDurationOptimizer") for item in result):
             notes.append("已从完整候选池补充高分且不重复的镜头，使成片接近目标时长")
+
+    upper_limit = target + max(5.0, target * .15)
+    while total() > upper_limit + .01 and len(result) > 1:
+        removable = min(
+            result,
+            key=lambda item: (
+                bool(item.get("essential")),
+                float(candidate_map.get(str(item.get("candidateId")), {}).get("score") or 0),
+                -float(item.get("duration") or 0),
+            ),
+        )
+        result.remove(removable)
+        notes.append("为保留完整表达且控制总时长，已移除一个完整的低优先级镜头")
+
+    optimized = optimize_edl(
+        result, candidate_pool=list(candidate_map.values()),
+        speech_segments=speech_segments, silences=silences,
+        target_seconds=target, order_mode="selection", allow_fill=True,
+    )
+    result = optimized["segments"]
+    if optimized["removedSegments"]:
+        notes.append("最终 EDL 已按完整镜头控制动态时长上限")
+    if optimized["overlapResolutions"]:
+        notes.append("最终 EDL 已合并重叠源区间")
 
     for index, item in enumerate(result):
         item["editOrder"] = index
@@ -2637,6 +3005,8 @@ def _normalise_edit_plans(
     scope: str,
     selected_group_ids: list[str],
     target: float | None,
+    speech_segments: list[dict[str, Any]] | None = None,
+    silences: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     candidate_map = {str(item["id"]): item for item in candidates}
     selected_groups = {str(value) for value in selected_group_ids}
@@ -2658,6 +3028,16 @@ def _normalise_edit_plans(
             end = float(step.get("source_end", step.get("sourceEnd", candidate["end"])))
             start = max(candidate["start"], min(candidate["end"], start))
             end = max(candidate["start"], min(candidate["end"], end))
+            safe = _safe_plan_range(candidate, start, end, speech_segments or [], silences or [])
+            start, end = safe["start"], safe["end"]
+            minimum_keep = max(.35, min(
+                float(candidate["end"]) - float(candidate["start"]),
+                float(candidate.get("minimumKeepSeconds") or .35),
+            ))
+            if end - start < minimum_keep - .01:
+                start, end = _plan_range_for_duration(candidate, minimum_keep)
+                safe = _safe_plan_range(candidate, start, end, speech_segments or [], silences or [])
+                start, end = safe["start"], safe["end"]
             if end - start < .35:
                 continue
             if any(max(start, left) < min(end, right) for left, right in occupied):
@@ -2677,11 +3057,15 @@ def _normalise_edit_plans(
                 "role": str(step.get("role") or "development"),
                 "reason": str(step.get("reason") or "")[:500],
                 "essential": bool(step.get("essential", False)),
+                "boundaryAdjustment": safe,
                 "transitionIn": {"type": "cut", "duration": 0.0},
             })
         if not sequence:
             continue
-        sequence, duration_notes = _fit_edit_sequence_to_target(sequence, candidate_map, target)
+        sequence, duration_notes = _fit_edit_sequence_to_target(
+            sequence, candidate_map, target,
+            speech_segments=speech_segments, silences=silences,
+        )
         duration = round(sum(float(item["duration"]) for item in sequence), 3)
         chapters: list[dict[str, Any]] = []
         for segment in sequence:
@@ -2812,7 +3196,11 @@ def run_auto_plan_generation(job_id: str, request: AutoPlanRequest, background_a
             maximum_tokens=5000,
             system_prompt=COMMON_SYSTEM_PROMPT,
         )
-        plans = _normalise_edit_plans(raw, evidence, scope=scope, selected_group_ids=selected_group_ids, target=target)
+        plans = _normalise_edit_plans(
+            raw, evidence, scope=scope, selected_group_ids=selected_group_ids, target=target,
+            speech_segments=_job_transcript_segments(job),
+            silences=_job_silence_intervals(job),
+        )
         if requested_structure == "hook_story_result":
             for plan in plans:
                 roles = {str(role).lower() for role in plan.get("structure", [])}
@@ -2940,6 +3328,17 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             if not final_reel.get("segments"):
                 raise RuntimeError("所选事件中没有可用于合成的镜头")
             selections = [final_reel]
+        # Rendering must preserve the EDL that was presented for review. Target
+        # fitting belongs to recommendation/planning, before the user sees the
+        # timeline. Re-applying the target here previously turned a displayed
+        # 42.6s two-event recommendation into an undocumented 30.6s one-event
+        # output. Semantic boundary validation still runs, but it may not add
+        # or remove selected shots at render time.
+        selections, boundary_adjustments = _semantic_safe_selections(
+            job, selections, order_mode=order_mode,
+            target_seconds=None,
+            allow_fill=False,
+        )
         composition_hash = composition_edl_hash(
             selections,
             source_hash=str(job.get("sourceHash") or ""),
@@ -3202,13 +3601,33 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
                 else ("under_target" if rendered.duration < requested_target else "over_target")
             )
             version_created_at = now_iso()
+            rendered_event_ids = {
+                str(event_id)
+                for item in segments
+                for event_id in (
+                    item.get("contributingEventIds")
+                    or item.get("contributingChapterIds")
+                    or [item.get("chapterId") or item.get("groupId") or selection.get("id")]
+                )
+                if event_id
+            }
+            rendered_event_count = len(rendered_event_ids) or 1
+            edl_quality = dict((selection.get("edlOptimization") or {}).get("qualityReport") or {})
+            media_quality = {
+                "passed": True,
+                "decoded": True,
+                "durationDelta": round(rendered.duration - expected_duration, 3),
+                "width": int(rendered.width), "height": int(rendered.height),
+                "audioPresent": bool(rendered.has_audio),
+                "audioExpected": bool(info.has_audio),
+            }
             outputs.append({
                 "filename": filename,
                 "versionId": version_id,
                 "versionNumber": version_number,
                 "versionCreatedAt": version_created_at,
                 "eventGroupId": selection.get("id"),
-                "eventGroupIds": selected_event_group_ids if output_mode == "single_reel" else [selection.get("id")],
+                "eventGroupIds": sorted(rendered_event_ids) if output_mode == "single_reel" else [selection.get("id")],
                 "candidateIndex": selection.get("index"),
                 "start": min(float(item["start"]) for item in segments),
                 "end": max(float(item["end"]) for item in segments),
@@ -3223,8 +3642,34 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
                 "evidence": list(selection.get("evidence", [])),
                 "segments": segments,
                 "segmentCount": len(segments),
+                "shotCount": len(segments),
+                "physicalShotCount": sum(max(1, int(item.get("physicalShotCount") or len(item.get("visualShots") or []) or 1)) for item in segments),
                 "chapters": list(selection.get("chapters", [])),
-                "chapterCount": len(selection.get("chapters", [])) if output_mode == "single_reel" else 1,
+                "chapterCount": rendered_event_count,
+                "eventCount": rendered_event_count,
+                "durationUpperLimit": (
+                    round(requested_target + max(5.0, requested_target * .15), 3)
+                    if requested_target else None
+                ),
+                "durationDeviationReason": (
+                    "为保留完整对白或动作而允许安全边界内的时长偏差"
+                    if requested_target and rendered.duration > requested_target + max(4.0, requested_target * .1)
+                    else (
+                        "候选池中没有足够的不重复完整镜头，未使用重复或低价值拖尾强行凑时长"
+                        if requested_target and rendered.duration < requested_target - max(4.0, requested_target * .1)
+                        else ""
+                    )
+                ),
+                "boundaryAdjustments": boundary_adjustments,
+                "deduplicationLog": list(selection.get("deduplicationLog") or []),
+                "edlOptimization": dict(selection.get("edlOptimization") or {}),
+                "qualityReport": {
+                    "score": int(edl_quality.get("score", 100)),
+                    "passed": bool(edl_quality.get("passed", True)) and media_quality["passed"],
+                    "editorial": edl_quality,
+                    "media": media_quality,
+                },
+                "eventReductionReason": str(job.get("eventReductionReason") or ""),
                 "subtitleMode": subtitle_mode,
                 "subtitleStyle": subtitle_style if subtitle_mode == "burn" else None,
             })
@@ -3249,6 +3694,10 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             "subtitleStyle": subtitle_style if subtitle_mode == "burn" else None,
             "targetSeconds": outputs[0].get("targetSeconds") if len(outputs) == 1 else None,
             "durationStatus": outputs[0].get("durationStatus") if len(outputs) == 1 else None,
+            "qualityReport": outputs[0].get("qualityReport") if len(outputs) == 1 else {
+                "passed": all(bool((item.get("qualityReport") or {}).get("passed")) for item in outputs),
+                "outputs": [item.get("qualityReport") for item in outputs],
+            },
             **(auto_meta or {}),
             "outputs": outputs,
         }
@@ -3313,11 +3762,18 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             actualTotalSeconds=round(sum(float(item["duration"]) for item in outputs), 3),
         )
         version_committed = True
+        quality_summary = ""
+        if output_mode == "single_reel" and outputs:
+            report = outputs[0].get("qualityReport") or {}
+            warnings = list((report.get("editorial") or {}).get("warnings") or [])
+            quality_summary = f" 成片质检 {int(report.get('score', 100))}/100，媒体完整性检查已通过。"
+            if warnings:
+                quality_summary += " " + "；".join(str(value) for value in warnings[:2]) + "。"
         append_message(
             job_id,
             "assistant",
             (
-                f"已保存为 V{version_number}：将 {outputs[0]['chapterCount']} 个高光事件、{outputs[0]['segmentCount']} 个镜头合成为 1 条视频。此前版本仍可播放和下载。"
+                f"已保存为 V{version_number}：将 {outputs[0]['chapterCount']} 个高光事件、{outputs[0]['segmentCount']} 个镜头合成为 1 条视频。{quality_summary}此前版本仍可播放和下载。"
                 if output_mode == "single_reel"
                 else f"已保存为 V{version_number}：分别导出 {len(outputs)} 条事件视频，共组合 {sum(int(item['segmentCount']) for item in outputs)} 个精彩镜头。此前版本仍被保留。"
             ),
@@ -3919,7 +4375,7 @@ def confirm_job_brief(job_id: str, request: BriefConfirmRequest) -> dict[str, An
         save_job(job)
         cancel_events[job_id] = threading.Event()
     append_message(job_id, "user", "确认需求简报，开始视觉分析。", kind="brief-confirmation")
-    executor.submit(run_job, job_id)
+    submit_analysis_task(job_id, run_job, job_id)
     with jobs_lock:
         return {"job": public_job(jobs[job_id])}
 
@@ -3976,10 +4432,14 @@ def get_job_waveform(job_id: str) -> dict[str, Any]:
             ))
             waveform["pointsPerSecond"] = round(len(waveform["rms"]) / info.duration, 3)
             waveform["normalizationPeak"] = max(waveform["peaks"], default=0.0)
-            try:
-                waveform["silences"] = detect_silence_intervals(source, ffmpeg=settings.ffmpeg)
-            except Exception:
-                waveform["silences"] = []
+            waveform["silences"] = silence_intervals_from_waveform(
+                waveform, duration=info.duration,
+            )
+            if not waveform["silences"] and not waveform.get("rms"):
+                try:
+                    waveform["silences"] = detect_silence_intervals(source, ffmpeg=settings.ffmpeg)
+                except Exception:
+                    waveform["silences"] = []
         temporary = cache_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(waveform, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         temporary.replace(cache_path)
@@ -5528,6 +5988,12 @@ def apply_event_total_budget(job_id: str, text: str, seconds: float) -> dict[str
         job["eventGroups"] = groups
         job["recommendedGroupIds"] = recommended_ids
         job["totalTargetSeconds"] = seconds
+        job["durationUpperLimit"] = round(seconds + max(5.0, seconds * .15), 3)
+        job["eventReductionReason"] = next((
+            str(group.get("eventReductionReason"))
+            for group in groups
+            if group.get("id") in recommended_ids and group.get("eventReductionReason")
+        ), "")
         job.setdefault("request", {})["totalTargetSeconds"] = seconds
         finish_event_group_edit(job, before)
         actual = float(job.get("allocatedTotalSeconds") or 0)
@@ -5831,7 +6297,7 @@ def resolve_analysis_decision(job_id: str, request: AnalysisDecisionRequest) -> 
             })
             cancel_events[job_id] = threading.Event()
             save_job(job)
-            executor.submit(run_job, job_id)
+            submit_analysis_task(job_id, run_job, job_id)
             append_text = "已从服务中断处恢复任务。" if checkpoint else "未找到阶段检查点，已使用原素材重新启动分析。"
             # Continue below to append a durable message and return the refreshed job.
         elif job.get("status") != "awaiting_model_decision" or not job.get("pendingDecision"):
@@ -5874,7 +6340,7 @@ def resolve_analysis_decision(job_id: str, request: AnalysisDecisionRequest) -> 
                 if visual_fallback
                 else f"已选择{'重试当前阶段' if action == 'retry' else '按降级规则继续'}：{stage_label}。"
             )
-            executor.submit(run_job, job_id, action)
+            submit_analysis_task(job_id, run_job, job_id, action)
     append_message(job_id, "user", append_text, kind="decision")
     with jobs_lock:
         return {"job": public_job(jobs[job_id])}
@@ -5906,7 +6372,7 @@ def reanalyze_cancelled_job(job_id: str) -> dict[str, Any]:
         save_job(job)
     append_message(job_id, "user", "重新分析当前视频，沿用已确认的剪辑要求。", kind="retry")
     append_message(job_id, "assistant", "已重新提交分析，会复用源视频、波形和播放代理，不需要重新上传。", kind="notice")
-    executor.submit(run_job, job_id, "retry")
+    submit_analysis_task(job_id, run_job, job_id, "retry")
     with jobs_lock:
         return {"job": public_job(jobs[job_id])}
 
@@ -5944,6 +6410,8 @@ def stream_chat_with_job(job_id: str, request: ChatRequest) -> StreamingResponse
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str) -> dict[str, Any]:
+    client: Any = None
+    immediate = False
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -5951,26 +6419,41 @@ def cancel_job(job_id: str) -> dict[str, Any]:
         cancellable = ("briefing", "brief_confirmation", "queued", "running", "cancelling", "awaiting_model_decision", "awaiting_confirmation")
         if job["status"] not in cancellable:
             return {"job": public_job(job)}
+        original_status = str(job["status"])
         event = cancel_events.get(job_id)
         if event:
             event.set()
+        future = analysis_futures.get(job_id)
+        # Future.cancel() succeeds only before the worker starts. This is the
+        # important difference between a real queue cancellation and merely
+        # painting the job as "cancelling" in the UI.
+        removed_from_queue = bool(future and future.cancel())
         client = active_ark_clients.get(job_id)
-        if client:
-            client.cancel()
-        if job["status"] in ("awaiting_model_decision", "awaiting_confirmation", "brief_confirmation"):
-            update_job(
-                job_id, status="cancelled", stage="cancelled",
-                progress=float(job.get("progress") or 0), detail="已取消任务",
-                currentAction="任务已取消", etaSeconds=None,
-                etaMode="stopped", progressMode="stopped",
-            )
-        else:
+        immediate = (
+            original_status in {"awaiting_model_decision", "awaiting_confirmation", "brief_confirmation"}
+            or removed_from_queue
+            # Recover stale/orphaned states defensively. A queued/cancelling
+            # record with neither Future nor active client has no worker that
+            # could ever advance it to a terminal state.
+            or (original_status in {"queued", "briefing", "cancelling"} and future is None and client is None)
+        )
+        if not immediate:
             update_job(
                 job_id, status="cancelling", stage="cancelling", detail="正在取消任务",
                 currentAction="正在停止当前处理", etaSeconds=None,
                 etaMode="stopped", progressMode="indeterminate",
             )
-        return {"job": public_job(job)}
+    # Closing a live HTTP transport can briefly block; do it outside the jobs
+    # lock so status polling and unrelated tasks remain responsive.
+    if client:
+        client.cancel()
+    if immediate:
+        finalize_job_cancellation(job_id, message="任务已取消")
+        with jobs_lock:
+            cancel_events.pop(job_id, None)
+            analysis_futures.pop(job_id, None)
+    with jobs_lock:
+        return {"job": public_job(jobs[job_id])}
 
 
 @app.delete("/api/jobs/{job_id}")
