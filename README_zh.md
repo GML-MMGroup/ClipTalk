@@ -49,7 +49,7 @@ ClipTalk 正在持续迭代，希望打造一个更强大的对话式视频剪�
 > 只需要一句自然语言指令，ClipTalk 即可完成真实的视频剪辑任务。
 >
 > <!-- 在这里添加 GIF 对比：原始素材 → 用户指令 → 剪辑结果 -->
-
+<div align="center">
 <table>
   <tr>
     <td align="center"><b>📰 新闻与资讯高光</b><br/><img src="./assets/cases/news-broadcast.gif" width="240"/></td>
@@ -62,7 +62,7 @@ ClipTalk 正在持续迭代，希望打造一个更强大的对话式视频剪�
     <td align="center"><b>⚽ 体育赛事高光</b><br/><img src="./assets/cases/sports.gif" width="240"/></td>
   </tr>
 </table>
-
+</div>
 ---
 
 ## 💡 什么是 ClipTalk？
