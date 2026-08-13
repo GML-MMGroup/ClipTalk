@@ -1,20 +1,21 @@
 <div align="center">
 
-<!-- 👇 在这里替换成你的封面 Banner 图（就用我们之前设计的那张海报） -->
-<img src="./assets/banner_zh.png" alt="ClipTalk Banner" width="100%" />
+<!-- 👇 在这里替换你的封面 Banner -->
+
+<img src="./assets/banner.png" alt="ClipTalk Banner" width="100%" />
 
 # ClipTalk ✂️
 
-### 通过对话完成视频剪辑的 AI Agent
+### 一个通过对话完成视频剪辑的 AI Agent
 
-**说句话，片子就剪好了。**
+**只需要说出来，视频就剪好了。**
 
 [![License](https://img.shields.io/badge/license-GPL%20v3-blue)](./LICENSE)
 [![Stars](https://img.shields.io/github/stars/GML-MMGroup/ClipTalk?style=social)](https://github.com/GML-MMGroup/ClipTalk)
 [![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/GML-MMGroup/ClipTalk/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865f2)](https://discord.gg/yourlink)
 
-[English](./README.md) · **简体中文** · [在线体验](#) · [使用文档](#)
+[English](./README.md) · **简体中文** · [在线体验](#) · [文档](#)
 
 </div>
 
@@ -22,27 +23,41 @@
 
 ## 📰 最新动态
 
-- **[2026-XX-XX]** 🎉 ClipTalk 正式开源！
-- **[2026-XX-XX]** 🚀 发布声纹识别功能 —— 在数小时的素材中按人名精准定位任意说话人。
-- **[2026-XX-XX]** ✨ 新增直播高光一键生成能力。
+* **[2026-08-12]** 🚀 优化时间轴显示，并新增 **竖屏创作模式** 切换支持。
+* **[2026-07-20]** ✨ 新增 **高光剪辑 Agent**，支持自动提取视频高光片段。
+* **[2026-07-10]** 🎉 ClipTalk 正式 **开源**！
 
 <!-- 后续更新持续追加到这里 -->
 
 ---
 
-## 🌟 案例展示 —— 一句话，一次剪辑
+## 🗺️ Roadmap
 
-> 以下均为 ClipTalk 通过单条指令完成的真实剪辑任务。
-> <!-- 在这里放不同场景的剪辑案例，建议用 GIF 对比：原始素材 → 指令 → 成片 -->
+ClipTalk 正在持续迭代，希望打造一个更强大的对话式视频剪辑体验。
+
+* [x] 💬 **对话式剪辑基础设施**
+* [x] ⚡ **高光剪辑 Agent**
+* [ ] 👤 **人脸匹配剪辑** — 找到视频中的目标人物，并提取其出现在画面中的所有片段。
+* [ ] 🔊 **声纹识别剪辑** — 通过声纹识别目标说话人，并提取该人物讲话的片段。
+* [ ] 🧭 **话题分割剪辑** — 理解视频内容，并围绕指定话题自动提取相关片段。
+* [ ] 🎞️ **可二次编辑时间轴** — 对 AI 自动生成的剪辑结果继续在时间轴中进行精细调整和二次编辑。
+
+---
+
+## 🌟 效果展示 — 一句话，完成一次剪辑
+
+> 只需要一句自然语言指令，ClipTalk 即可完成真实的视频剪辑任务。
+>
+> <!-- 在这里添加 GIF 对比：原始素材 → 用户指令 → 剪辑结果 -->
 
 <table>
   <tr>
-    <td align="center"><b>📰 新闻播报高光</b><br/><img src="./assets/cases/news-broadcast.gif" width="240"/></td>
-    <td align="center"><b>🧵 手工教程剪辑</b><br/><img src="./assets/cases/diy-craft.gif" width="240"/></td>
-    <td align="center"><b>📦 产品讲解</b><br/><img src="./assets/cases/product.gif" width="240"/></td>
+    <td align="center"><b>📰 新闻与资讯高光</b><br/><img src="./assets/cases/news-broadcast.gif" width="240"/></td>
+    <td align="center"><b>🧵 DIY 与手工教程</b><br/><img src="./assets/cases/diy-craft.gif" width="240"/></td>
+    <td align="center"><b>📦 产品介绍</b><br/><img src="./assets/cases/product.gif" width="240"/></td>
   </tr>
   <tr>
-    <td align="center"><b>🏢 会议录像</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
+    <td align="center"><b>🏢 生活 Vlog</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
     <td align="center"><b>🎵 音乐表演高光</b><br/><img src="./assets/cases/music.gif" width="240"/></td>
     <td align="center"><b>⚽ 体育赛事高光</b><br/><img src="./assets/cases/sports.gif" width="240"/></td>
   </tr>
@@ -50,110 +65,103 @@
 
 ---
 
-## 💡 ClipTalk 是什么？
+## 💡 什么是 ClipTalk？
 
-ClipTalk 是一个**视频剪辑 AI Agent**。你不需要在时间轴上拖拽素材，
-也不需要在几小时的录像里反复拉进度条 —— 只需用自然语言描述需求，
-Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划剪辑方案 →
-执行剪切 → 输出成片。**
+ClipTalk 是一个 **AI 视频剪辑 Agent**。
+
+你不需要在时间轴上反复拖拽素材，也不需要在几个小时的视频中来回寻找片段。你只需要用自然语言描述自己想要什么，Agent 就可以自动完成整个剪辑流程：
+
+**理解视频内容 → 定位目标内容 → 规划剪辑方案 → 执行剪辑 → 输出最终片段。**
 
 <div align="center">
-  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk 对话式视频剪辑流程演示" width="90%" />
+  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk conversational highlight editing workflow" width="900" />
   <br />
-  <sub><b>“从最精彩的片段生成一条高光。”</b> —— ClipTalk 分析素材、展示事件时间轴，并交付多个 AI 剪辑版本。</sub>
+  <sub><b>“把最精彩的部分剪成一个高光视频。”</b> — ClipTalk 会自动分析视频内容、展示事件时间轴，并生成多个 AI 剪辑版本。</sub>
 </div>
 
 <br />
 
-> 上传一段长视频，用一句话描述想要的内容，ClipTalk 会理解素材、规划
-> 剪辑、调用相应工具，并直接交付剪好的成片。
-
-它不是简单的字幕关键词检索。ClipTalk 能真正**理解画面里是谁、
-谁在说话、在聊什么** —— 综合运用语音识别、声纹识别、人脸检测和
-话题分割 —— 所以哪怕是多人出镜的 1 小时录像，*"把王总的画面剪
-出来"* 这样的指令也能直接生效。
+> 上传一个 1 小时的视频，告诉 ClipTalk 你想要哪些内容，让它自动理解素材、规划剪辑并输出最终视频。
 
 ---
 
 ## ✨ 核心特性
 
-### 1. 💬 对话式剪辑
-描述任务，直接拿结果。不需要任何时间轴操作技能 —— *"把他说话的
-画面合并"* 一句话就是一次完整的剪辑流程。还可以持续追加指令：
-*"再剪短一点"*、*"从讲价格的部分开始"*。
+### 💬 对话式剪辑
 
-### 2. 🧠 素材内容理解
-剪辑开始前，ClipTalk 会先对视频建立结构化理解：
-- **语音转写** —— 带时间戳的完整字幕
-- **声纹识别** —— 不只是"有人在说话"，而是"*谁*在说话"
-- **人脸检测与追踪** —— 定位每个人的全部出镜片段
-- **话题分割** —— 找到"新品讲解"从哪一秒开始、到哪一秒结束
+只需要描述你想要什么，就可以完成视频剪辑。
 
-### 3. 🎯 指定人物剪辑
-说出一个名字，就能拿到 TA 的全部片段。*"把王总的画面剪出来"* 会
-结合人脸与声纹双重识别，从整段素材中提取目标人物所有出镜和发言
-的片段。
+从：
 
-### 4. 🗣️ 说话片段合并
-自动检测并合并指定说话人的全部发言片段，去除静音、口水词和其他
-人的发言 —— 把散落在各处的片段拼成一条连贯的成片。
+*“把最精彩的部分剪成一个高光视频”*
 
-### 5. ⚡ 一句话生成高光
-*"剪一个 60 秒高光切片"* —— Agent 会对素材的情绪能量、金句和
-观众反应打分，自动拼出一条节奏紧凑、带字幕、可直接发布的高光
-视频。
+到：
 
-### 6. 🤖 Agent 驱动的多步剪辑
-每条指令背后，Agent 会**自动规划并执行一条工具流水线** —— 读取
-字幕、识别声纹、定位片段、执行剪辑 —— 并把工作日志实时逐步展示
-给你，全程透明，没有黑箱。
+*“把介绍 XX 产品的部分剪出来”*
 
-### 7. 🎞️ 可编辑的时间轴输出
-结果不会消失在黑箱里。每次剪辑都会落到一条**多轨时间轴**上
-（视频 / 音频 / 字幕），你可以检查每一处剪切点、微调边界、重新
-渲染 —— AI 干重活，最终决定权在你手里。
+ClipTalk 可以直接把自然语言指令转换成具体的剪辑操作。
 
-### 8. 🔄 持续迭代优化
-对结果不满意？继续说就行。每条指令都基于上一步的结果 —— *"删掉
-第二段"*、*"加上字幕"*、*"导出竖屏版"* —— 不需要从头再来。
+你还可以通过多轮对话继续调整结果，例如：
 
-### 9. 📚 为长素材而生
-专治难啃的素材：1 小时直播、多人圆桌、全天活动录像。素材越长
-越乱，ClipTalk 帮你省下的时间就越多。
+*“再短一点”*
 
-### 10. 🔌 模块化工具系统
-语音转写、声纹识别、人脸检测、渲染合成都是统一 Agent 接口下的
-可插拔工具 —— 可以替换成你偏好的模型，也可以自行扩展工具箱。
+或者：
 
----
+*“从讲价格的地方开始。”*
 
-## 🛠️ Agent 的工具箱
+### 🎯 四大核心剪辑能力
 
-| 工具 | 能力 |
-|------|------|
-| 📝 **语音转写** | 语音转文字，精确到词级时间戳 |
-| 🔊 **声纹识别** | 通过声纹识别并追踪每一位说话人 |
-| 👤 **人脸追踪** | 检测并追踪每个人的全部出镜片段 |
-| 🧭 **话题分割** | 将素材切分为语义段落与话题 |
-| ⭐ **高光打分** | 按情绪能量、金句、观众反应为片段打分排序 |
-| ✂️ **剪辑执行** | 帧级精度的剪切与合并 |
-| 🎞️ **合成渲染** | 将片段、字幕、音频合成为最终成片 |
+* **⚡ 高光切片提取** — 自动理解长视频内容，识别其中最有价值的时刻，并生成精炼的高光片段。
+
+* **👤 人脸匹配剪辑** — 找到视频中的目标人物，并自动提取其出现在画面中的片段。
+
+* **🧭 话题分割剪辑** — 根据指定话题定位并提取相关内容，例如 *“把讲解 XX 产品的片段剪出来。”*
+
+* **🔊 声纹识别剪辑** — 通过声纹识别指定说话人，并自动提取该人物讲话的所有片段。
 
 ---
 
 ## 🏗️ 工作原理
 
-```
-💬 "把王总的画面剪出来"
+ClipTalk 会把自然语言剪辑指令转换成完整的视频剪辑流程。
+
+### 👤 人脸匹配剪辑
+
+```text
+💬 “把所有王总出现的画面剪出来”
         ↓
-🤖 Agent 规划剪辑方案
+🤖 Agent 理解目标人物
         ↓
-📝 读取字幕 → 🔊 识别声纹 → 👤 人脸追踪 → 🧭 定位片段
+👤 人脸匹配 → 定位所有目标人物出现的画面
         ↓
-✂️ 执行剪辑 → 🎞️ 合成渲染 → ✅ 完成
+✂️ 剪辑片段 → 🎞️ 合成 → ✅ 完成
 ```
 
-一句指令进，成片出 —— 每一步都在 Agent 工作日志中清晰可见。
+### ⚡ 高光剪辑
+
+```text
+💬 “把最精彩的部分剪成一个高光视频”
+        ↓
+🤖 Agent 分析视频内容
+        ↓
+🎬 理解事件 → 识别高光时刻 → 选择关键片段
+        ↓
+✂️ 剪辑并排序 → 🎞️ 合成 → ✅ 完成
+```
+
+### 🧭 话题分割剪辑
+
+```text
+💬 “把讲解 XX 产品的片段剪出来”
+        ↓
+🤖 Agent 理解目标话题
+        ↓
+📝 分析对话 → 🧭 话题分割 → 定位相关内容
+        ↓
+✂️ 剪辑片段 → 🎞️ 合成 → ✅ 完成
+```
+
+**一句指令输入，最终视频输出。**
 
 ---
 
@@ -161,26 +169,22 @@ Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划�
 
 ### ✅ 环境要求
 
-- 下方本机安装流程以 **Linux x86_64** 为主要测试环境；Windows 建议使用
-  **WSL2**，其他平台建议优先使用 Docker
-- **Python 3.10 或 3.11**（仓库固定使用的 PyTorch 2.2 运行时不面向更新的
-  Python 版本）
-- 已安装 Python `venv` 模块，系统能够直接调用 **FFmpeg** 和 **ffprobe**
-- 一个支持图像输入、兼容 OpenAI Chat Completions 接口的视觉语言模型服务
-  （已支持火山方舟）；打开界面不需要 API Key，但首次分析前必须配置
-- 默认 SenseVoice 与 VAD 模型建议至少预留 **2 GiB 可用磁盘空间**；启用
-  说话人分段后还需要额外空间
+* 以下原生安装方式已在 **Linux x86_64** 环境下测试。在 Windows 上建议使用 **WSL2**；其他平台建议优先使用 Docker。
+* **Python 3.10 或 3.11**（当前固定的 PyTorch 2.2 运行环境不支持更新版本的 Python）
+* Python 的 `venv` 模块，以及已经加入 `PATH` 的 **FFmpeg** 和 **ffprobe**
+* 在执行第一次视频分析之前，需要配置一个支持图像输入、兼容 OpenAI Chat Completions API 的视觉语言模型服务（支持火山引擎 Ark）。仅打开 Web UI 不需要 API Key。
+* 默认 SenseVoice 和 VAD 模型大约需要 **2 GiB 可用磁盘空间**；启用说话人识别后需要更多空间。
 
-安装前先确认本机环境：
+安装前可以先检查本地运行环境：
 
 ```bash
-python3 --version       # 必须为 3.10.x 或 3.11.x
-python3 -m venv --help  # 确认已安装 venv 模块
+python3 --version       # 应输出 3.10.x 或 3.11.x
+python3 -m venv --help  # 确认已经安装 venv 模块
 ffmpeg -version
 ffprobe -version
 ```
 
-### 💻 本机运行
+### 💻 本地运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -190,64 +194,79 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 
-# CPU 版本（首次部署推荐）
+# CPU（推荐首次安装使用）
 python -m pip install -r requirements-audiovisual.txt
 
-# 前台启动 Web 服务
+# 前台启动 Web 应用
 bash start.sh
 ```
 
-终端显示 Uvicorn 已启动后，直接打开终端输出的完整地址。本机运行时地址
-格式为 `http://127.0.0.1:<HIGHLIGHT_PORT>`；默认端口是 `5180`，但终端显示
-的始终是当前配置实际使用的端口。
+当终端显示 Uvicorn 已成功运行后，打开终端中输出的具体 URL。
+
+本地安装情况下，其格式通常为：
+
+```text
+http://127.0.0.1:<HIGHLIGHT_PORT>
+```
+
+默认端口为 `5180`，但请始终以当前终端输出的实际配置为准。
 
 #### 配置模型
 
-点击右上角的**设置**，依次配置：
+点击页面右上角的 **Settings**，完成以下配置：
 
-1. **视觉模型**：服务商、API Key、Base URL，以及支持图像理解的模型。
-2. **剪辑规划模型**：可以复用视觉模型，也可以单独配置文本 LLM，用于
-   镜头筛选、顺序规划和多版本成片。
+1. **Vision model** — 配置模型提供商、API Key、Base URL，以及支持图像理解的模型。
+2. **Editing planner** — 可以直接复用视觉模型，也可以单独配置一个文本 LLM，用于镜头选择、排序以及多版本剪辑规划。
 
-保存前先在设置面板中点击**验证连接并读取列表**。密钥保存在本机 `data/`
-目录中，公开设置接口不会返回完整密钥。
+保存之前，建议在设置面板中点击 **Verify connection and load list** 验证连接。
 
-#### 创建第一个剪辑任务
+认证信息会保存在本地 `data/` 目录中，并且不会通过公共 Settings API 返回。
 
-上传一个视频、描述需要的高光并确认要求，即可创建第一个任务。语音模型
-未就绪时界面仍可打开；可选语音分析准备失败，也不会阻止纯视觉分析。
+#### 创建你的第一个剪辑任务
+
+上传一个视频，描述你想生成的高光内容，然后确认任务，即可创建第一次剪辑。
+
+即使语音模型还没有准备完成，Web UI 也可以正常打开；如果可选的语音组件加载失败，视觉分析功能仍然可以继续使用。
 
 ---
 
 ## ⚙️ 部署与配置
 
-### ⚡ 本机安装使用 NVIDIA GPU
+### ⚡ 本地安装使用 NVIDIA GPU
 
-如果机器配有 NVIDIA GPU 且驱动支持 CUDA 12.1，请将 CPU 依赖命令替换为：
+如果机器拥有 NVIDIA GPU，并且显卡驱动支持 CUDA 12.1，可以将 CPU 依赖安装命令替换为：
 
 ```bash
 python -m pip install -r requirements-audiovisual-cu121.txt
 ```
 
-请在全新的虚拟环境中二选一安装 CPU 或 CUDA 依赖，不要重复安装。仓库提供
-的 Docker 镜像默认是 CPU 版本；GPU 容器需要另行构建 CUDA 镜像并配置
-NVIDIA Container Toolkit。
+请在一个全新的虚拟环境中，只安装 CPU 或 CUDA 版本中的一种依赖文件。
+
+目前提供的 Docker 镜像为 CPU-only。GPU Docker 容器需要另外构建支持 CUDA 的镜像，并配置 NVIDIA Container Toolkit。
 
 ### 🎙️ 语音模型与首次启动
 
-服务会在后台启动 SenseVoice 工作进程，Web 界面不会等待它完成。缺少的
-SenseVoice 和 VAD 模型会从 ModelScope 自动下载到 `./data/models`，因此
-第一次使用语音辅助分析可能需要更长时间。也可以在启动前下载并验证模型：
+服务器会在后台启动一个 SenseVoice Worker，Web 页面不会等待它初始化完成。
+
+缺失的 SenseVoice / VAD 模型会自动从 ModelScope 下载到：
+
+```text
+./data/models
+```
+
+因此，第一次执行带语音分析的视频任务可能会花费更长时间。
+
+如果希望在启动应用前提前下载并验证模型，可以执行：
 
 ```bash
-# 使用 HIGHLIGHT_SENSEVOICE_DEVICE 指定的设备（默认 auto）
+# 使用 HIGHLIGHT_SENSEVOICE_DEVICE 指定的设备（默认：auto）
 python tools/prepare_speech_models.py
 
-# 同时准备说话人任务需要的 CAM++ 模型
+# 同时准备 CAM++，用于说话人相关任务
 python tools/prepare_speech_models.py --with-speakers
 ```
 
-### 🐳 Docker 运行
+### 🐳 使用 Docker 运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -256,15 +275,41 @@ cp .env.example .env
 docker compose up --build
 ```
 
-等待容器进入健康状态，然后在 Docker 所在电脑上打开
-`http://127.0.0.1:<CLIPTALK_PORT>`，在**设置**中配置视觉模型与剪辑规划
-模型。`CLIPTALK_PORT` 读取自 `.env`，默认值为 `5180`。Docker 会把上传
-素材、模型缓存、任务记录和成片输出保存在由 Docker 管理的
-`cliptalk-data` 数据卷中。`docker compose down` 会保留数据；执行
-`docker compose down -v` 会永久删除该数据卷。
+等待容器进入健康状态后，在 Docker 主机上打开：
 
-旧版本使用 `./data` 目录挂载。升级不会删除该目录，但其中的历史任务不会
-自动导入新的命名卷；迁移前请先备份。
+```text
+http://127.0.0.1:<CLIPTALK_PORT>
+```
+
+然后在 **Settings** 页面中配置视觉模型和剪辑规划模型。
+
+`CLIPTALK_PORT` 从 `.env` 文件中读取，默认值为：
+
+```text
+5180
+```
+
+Docker 会将上传的视频、模型缓存、任务记录以及渲染结果保存在 Docker 管理的 `cliptalk-data` Volume 中。
+
+执行：
+
+```bash
+docker compose down
+```
+
+不会删除该 Volume。
+
+而：
+
+```bash
+docker compose down -v
+```
+
+会永久删除该 Volume 中的数据。
+
+旧版本使用 `./data` 目录进行 bind mount。
+
+升级版本不会删除这个目录，但其中的数据不会自动迁移到新的 named volume，因此迁移已有任务之前请先做好备份。
 
 常用检查命令：
 
@@ -273,90 +318,150 @@ docker compose ps
 docker compose logs --tail=200 cliptalk
 ```
 
-Apple Silicon 或其他非 amd64 主机可能需要通过
-`DOCKER_DEFAULT_PLATFORM=linux/amd64` 使用 Linux/amd64 模拟运行固定版本的
-PyTorch 镜像，速度会低于原生 Linux x86_64 环境。
+在 Apple Silicon 或其他非 amd64 主机上，由于固定版本 PyTorch 镜像的限制，可能需要启用 Linux/amd64 模拟：
+
+```text
+DOCKER_DEFAULT_PLATFORM=linux/amd64
+```
+
+这种方式的运行速度会比原生 Linux x86_64 环境更慢。
 
 ### 🌐 应该打开哪个地址？
 
-| ClipTalk 运行位置 | 应打开的地址 |
-| --- | --- |
-| 本机运行，与浏览器在同一台电脑 | Uvicorn 输出的地址：`http://127.0.0.1:<HIGHLIGHT_PORT>` |
-| Docker，与浏览器在同一台电脑 | `http://127.0.0.1:<CLIPTALK_PORT>` |
-| 本机运行在远程服务器 | `http://<服务器 IP>:<HIGHLIGHT_PORT>` |
-| Docker 运行在远程服务器 | `http://<服务器 IP>:<CLIPTALK_PORT>` |
+| ClipTalk 运行位置     | 打开的地址                                               |
+| ----------------- | --------------------------------------------------- |
+| 本地运行，同一台电脑访问      | Uvicorn 输出的 URL：`http://127.0.0.1:<HIGHLIGHT_PORT>` |
+| Docker 运行，同一台电脑访问 | `http://127.0.0.1:<CLIPTALK_PORT>`                  |
+| 远程服务器本地运行         | `http://<server-ip>:<HIGHLIGHT_PORT>`               |
+| 远程服务器 Docker 运行   | `http://<server-ip>:<CLIPTALK_PORT>`                |
 
-Docker 默认只绑定 `127.0.0.1`。如需远程访问 Docker，请编辑 `.env`，同时
-配置监听地址和访问令牌：
+Docker 默认绑定：
+
+```text
+127.0.0.1
+```
+
+如果需要远程访问 Docker 部署，请修改 `.env`，配置监听地址和访问 Token：
 
 ```bash
 CLIPTALK_BIND_ADDRESS=0.0.0.0
-HIGHLIGHT_ACCESS_TOKEN=请替换为足够长的随机令牌
+HIGHLIGHT_ACCESS_TOKEN=replace-with-a-long-random-token
 ```
 
-非 Docker 的远程部署则需要在运行 `bash start.sh` 前设置
-`HIGHLIGHT_HOST=0.0.0.0` 和相同的访问令牌。随后在服务器防火墙或云安全组
-中放行实际配置的 `HIGHLIGHT_PORT`，并访问
-`http://<服务器 IP>:<HIGHLIGHT_PORT>/?token=<你的令牌>`。不要在其他设备上访问
-`127.0.0.1`，因为它始终指向当前设备自身。若服务需要暴露到公网，建议
-使用带身份验证的 HTTPS 反向代理，不要直接公开开发服务器。
+如果使用非 Docker 方式在远程服务器部署，请在执行：
 
-如果 Docker 的默认端口已被占用，可在 `.env` 中将 `CLIPTALK_PORT` 改为
-任意空闲端口，然后使用该端口访问。
+```bash
+bash start.sh
+```
 
-### 🔧 可选环境变量
+之前配置：
 
-推荐直接通过界面配置视觉模型与规划模型。无界面部署时，可以复制仓库
-提供的配置模板，再按需修改；`start.sh` 会直接读取该文件，Docker Compose
-也会把它传入容器：
+```bash
+HIGHLIGHT_HOST=0.0.0.0
+```
+
+并设置相同的访问 Token。
+
+随后，在服务器防火墙或安全组中放行 `HIGHLIGHT_PORT` 对应端口，然后访问：
+
+```text
+http://<server-ip>:<HIGHLIGHT_PORT>/?token=<your-token>
+```
+
+不要在其他设备上使用 `127.0.0.1` 访问服务器，因为它始终指向当前设备自身。
+
+如果需要将 ClipTalk 部署到公网，请使用带身份验证的 HTTPS 反向代理，而不是直接暴露开发服务器。
+
+如果 Docker 默认端口已经被占用，可以在 `.env` 中将 `CLIPTALK_PORT` 修改为其他空闲端口，然后使用对应地址访问。
+
+### 🔧 可选环境变量配置
+
+推荐直接通过 Web UI 配置视觉模型和剪辑规划模型。
+
+如果需要无界面部署，可以复制项目提供的环境变量模板，并只修改需要的字段：
 
 ```bash
 cp .env.example .env
 ```
 
-常用配置包括 `HIGHLIGHT_HOST`、`HIGHLIGHT_PORT`、
-`HIGHLIGHT_DATA_ROOT`、`VISION_*`、`LLM_*` 以及 SenseVoice 的设备和
-模型选项。不要提交 `.env` 或任何 API Key。
+`start.sh` 会直接读取该文件，Docker Compose 也会将其中的配置传入容器。
 
-使用与启动时相同的端口查看本机服务状态：
+常见配置项包括：
+
+```text
+HIGHLIGHT_HOST
+HIGHLIGHT_PORT
+HIGHLIGHT_DATA_ROOT
+VISION_*
+LLM_*
+```
+
+以及 SenseVoice 对应的设备和模型配置。
+
+请勿将 `.env` 或 API Key 提交到 Git 仓库。
+
+可以使用与服务启动时相同的端口检查服务状态：
 
 ```bash
-SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # Docker 请改用 CLIPTALK_PORT
+SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # Docker 环境请使用 CLIPTALK_PORT
 curl -s "http://127.0.0.1:${SERVICE_PORT}/api/health" | python -m json.tool
 ```
 
-`ok: true` 只表示 HTTP 服务存活。开始分析前，还应确认
-`mediaToolsReady: true` 和 `analysisReady: true`。语音属于辅助信号：模型
-下载期间 `speechReady` 可以为 false，不会阻止纯视觉分析。
+返回：
 
-如果无法连接，请确认启动进程仍在运行、查看终端错误信息，并检查启动时
-使用的主机与端口是否和浏览器地址一致。如果 FFmpeg 已加入 `PATH` 但仍未
-识别，可在 `.env` 中将 `FFMPEG_BIN` 和 `FFPROBE_BIN` 设置为绝对路径。
+```text
+ok: true
+```
 
-正常使用无需安装 Node.js：浏览器所需文件已经包含在 `static/` 中。只有
-重新构建 `package.json` 中定义的前端动效或图标包时才需要 Node.js。
+说明 HTTP 服务已经正常运行。
+
+开始执行视频分析之前，通常还应该看到：
+
+```text
+mediaToolsReady: true
+analysisReady: true
+```
+
+语音能力属于辅助模块，因此模型下载过程中：
+
+```text
+speechReady
+```
+
+即使仍然为 `false`，也不会影响只依赖视觉能力的分析任务。
+
+如果命令无法连接服务，请检查：
+
+* 启动进程是否仍在运行；
+* 终端中是否存在错误信息；
+* 当前使用的 Host 和 Port 是否与启动时一致。
+
+如果 FFmpeg 和 ffprobe 已经位于 `PATH` 中，但系统仍然无法找到媒体工具，可以在 `.env` 中手动设置：
+
+```text
+FFMPEG_BIN
+FFPROBE_BIN
+```
+
+为它们对应的绝对路径。
+
+正常使用 ClipTalk **不需要 Node.js 构建步骤**，浏览器所需资源已经包含在：
+
+```text
+static/
+```
+
+目录中。
+
+只有重新构建 `package.json` 中定义的可选前端动画或图标资源时，才需要 Node.js。
 
 ---
 
 ## 🤝 参与贡献
 
-欢迎任何形式的贡献！请先阅读[贡献指南](#)。
-
-## 📄 开源协议
-
-本项目基于 **[GNU General Public License v3.0](./LICENSE)** 开源。
-
-你可以自由地运行、研究、分享和修改本软件。任何分发的衍生作品也必须
-以 GPL v3 协议发布，以保证软件对所有用户保持自由。完整条款请见
-[LICENSE](./LICENSE) 文件。
-
-## 💬 社区交流
-
-- [Discord](#) · [Twitter/X](#) · [微信群](#)
-
 <div align="center">
 
-**⭐ 如果 ClipTalk 对你有帮助，欢迎点一个 Star！**
+⭐ 如果 ClipTalk 对你有帮助，欢迎给项目点一个 Star！
 
 Made with ❤️ by the ClipTalk Team
 
