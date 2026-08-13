@@ -59,7 +59,7 @@ ClipTalk is actively evolving toward a more powerful conversational video editin
   </tr>
   <tr>
     <td align="center"><b>🏢 Lifestyle Vlogs</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
-    <td align="center"><b>🎵 Music Performance Highlights</b><br/><img src="./assets/cases/music.gif" width="240"/></td>
+    <td align="center"><b>🔥 Live PK Reaction Highlights</b><br/><img src="./assets/cases/music.gif" alt="AI-edited live PK reaction highlights" width="240"/></td>
     <td align="center"><b>⚽ Sports Highlights</b><br/><img src="./assets/cases/sports.gif" width="240"/></td>
   </tr>
 </table>

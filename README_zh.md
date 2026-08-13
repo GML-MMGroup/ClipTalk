@@ -58,7 +58,7 @@ ClipTalk 正在持续迭代，希望打造一个更强大的对话式视频剪�
   </tr>
   <tr>
     <td align="center"><b>🏢 生活 Vlog</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
-    <td align="center"><b>🎵 音乐表演高光</b><br/><img src="./assets/cases/music.gif" width="240"/></td>
+    <td align="center"><b>🔥 直播 PK 情绪高光</b><br/><img src="./assets/cases/music.gif" alt="AI 剪辑的直播 PK 情绪高光" width="240"/></td>
     <td align="center"><b>⚽ 体育赛事高光</b><br/><img src="./assets/cases/sports.gif" width="240"/></td>
   </tr>
 </table>
