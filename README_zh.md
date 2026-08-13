@@ -54,7 +54,7 @@
 <table>
   <tr>
     <td align="center"><b>📺 直播高光</b><br/><img src="./assets/cases/livestream.gif" width="240"/></td>
-    <td align="center"><b>🎤 访谈剪辑</b><br/><img src="./assets/cases/interview.gif" width="240"/></td>
+    <td align="center"><b>🧵 手工教程剪辑</b><br/><img src="./assets/cases/diy-craft.gif" width="240"/></td>
     <td align="center"><b>📦 产品讲解</b><br/><img src="./assets/cases/product.gif" width="240"/></td>
   </tr>
   <tr>
