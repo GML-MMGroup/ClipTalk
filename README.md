@@ -152,13 +152,7 @@ ClipTalk turns natural-language editing requests into complete video-editing wor
 
 ## 🚀 Quick Start
 
-### 1. Prepare
-
-* Linux x86_64, or Windows through WSL2
-* Python 3.10/3.11 with `venv`
-* FFmpeg and ffprobe available on `PATH`
-
-### 2. Install and run
+Requires Linux x86_64 (or WSL2), Python 3.10/3.11, FFmpeg, and ffprobe.
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -171,24 +165,13 @@ python -m pip install -r requirements-audiovisual.txt
 bash start.sh
 ```
 
-Open the URL printed by Uvicorn in the terminal.
+### Models
 
-### 3. Configure the models
+* **VLM · Required** — understands frames, finds events, and refines shot boundaries.
+* **LLM · Optional** — plans shot selection, ordering, and alternative edits; it can reuse the VLM.
+* **SenseVoice · Optional/local** — adds timestamped speech, emotion, and sound evidence; visual-only analysis remains available.
 
-You only need one image-capable VLM API to start. The other components are optional or run locally:
-
-| Component | Required? | What it does |
-|---|---|---|
-| 👁️ **VLM** | **Yes, for video analysis** | Reads frames, finds highlight events, refines shot boundaries, and groups shots into events |
-| 🧠 **LLM planner** | Optional | Selects and orders verified shots and plans alternative edits; it can reuse the VLM configuration |
-| 🎧 **SenseVoice** | Optional, local | Adds timestamped speech, emotion, and sound-event evidence; visual-only analysis still works if it is unavailable |
-| ✂️ **FFmpeg** | **Yes, not an AI model** | Extracts frames and performs deterministic cutting, composition, preview generation, and output checks |
-
-Open **Settings** in the top-right corner, configure and verify the **Vision model**, then let the **Editing planner** reuse it or provide a separate text LLM. Save the settings; no restart is required.
-
-### 4. Create your first edit
-
-Upload a video, describe the highlight you want, and start the analysis. SenseVoice can download its local files on first use, so the first speech-assisted task may take longer.
+Open the URL printed in the terminal. In **Settings**, configure the VLM and optionally a separate LLM, then upload a video and describe the edit you want.
 
 ---
 
