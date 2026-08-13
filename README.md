@@ -180,12 +180,105 @@ agent's working log.
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- **Python 3.10 or 3.11** (the pinned PyTorch 2.2 runtime does not target
+  newer Python releases)
+- **FFmpeg** and **ffprobe** available on `PATH`
+- A vision-language model endpoint that accepts image input through an
+  OpenAI-compatible Chat Completions API (Volcengine Ark is supported)
+- About **2 GiB of free disk space** for the default SenseVoice and VAD
+  models; more is required when speaker diarization is enabled
+
+### Option A — Run locally
+
 ```bash
-git clone https://github.com/yourorg/ClipTalk.git
+git clone https://github.com/GML-MMGroup/ClipTalk.git
 cd ClipTalk
-# 安装与启动步骤，待补充
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+# CPU (recommended for the first setup)
+python -m pip install -r requirements-audiovisual.txt
+
+# Start the web app in the foreground
+bash start.sh
 ```
-See the Documentation for configuration and API keys.
+
+Open **http://127.0.0.1:5180**. In the top-right corner, choose
+**Settings** and configure:
+
+1. **Vision model** — provider, API key, base URL, and a model capable of
+   understanding images.
+2. **Editing planner** — reuse the vision model, or configure a separate
+   text LLM for shot selection, ordering, and multi-version planning.
+
+Use **Verify connection and load list** in the settings panel before saving. The
+credentials are stored locally under `data/` and are not returned by the
+public settings API.
+
+> **Using an NVIDIA GPU?** If the host driver supports CUDA 12.1, replace
+> the CPU dependency command above with:
+>
+> ```bash
+> python -m pip install -r requirements-audiovisual-cu121.txt
+> ```
+>
+> Install only one of the CPU/CUDA requirement files in a fresh virtual
+> environment.
+
+### Speech models and first run
+
+The server starts a SenseVoice worker in the background. Missing
+SenseVoice/VAD components are downloaded from ModelScope into
+`./data/models` on first use, so the first launch can take longer. To
+download and validate them before starting the app, run:
+
+```bash
+# Uses the device selected by HIGHLIGHT_SENSEVOICE_DEVICE (default: auto)
+python tools/prepare_speech_models.py
+
+# Also prepare CAM++ for speaker-aware tasks
+python tools/prepare_speech_models.py --with-speakers
+```
+
+### Option B — Run with Docker
+
+```bash
+git clone https://github.com/GML-MMGroup/ClipTalk.git
+cd ClipTalk
+docker compose up --build
+```
+
+Then open **http://127.0.0.1:5180** and configure the vision/planning
+models from **Settings**. Docker stores uploaded media, model caches, task
+records, and rendered outputs in the repository's `data/` directory.
+
+### Optional environment configuration
+
+The UI is the recommended place to configure the vision and planning
+models. For headless deployments, copy the supplied template and edit only
+the values you need:
+
+```bash
+cp .env.example .env
+```
+
+Common options include `HIGHLIGHT_HOST`, `HIGHLIGHT_PORT`,
+`HIGHLIGHT_DATA_ROOT`, `VISION_*`, `LLM_*`, and the SenseVoice device/model
+settings. Do not commit `.env` or API keys.
+
+Check that the service is ready with:
+
+```bash
+curl http://127.0.0.1:5180/api/health
+```
+
+No Node.js build is required for normal use—the browser assets are already
+included in `static/`. Node.js is needed only when rebuilding the optional
+frontend animation/icon bundles defined in `package.json`.
 
 🤝 Contributing
 We welcome contributions of all kinds! Please see our Contributing Guide to get started.

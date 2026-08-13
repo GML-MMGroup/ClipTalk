@@ -164,13 +164,98 @@ Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划�
 
 ## 🚀 快速开始
 
+### 环境要求
+
+- **Python 3.10 或 3.11**（仓库固定使用的 PyTorch 2.2 运行时不面向更新的
+  Python 版本）
+- 系统能够直接调用 **FFmpeg** 和 **ffprobe**
+- 一个支持图像输入、兼容 OpenAI Chat Completions 接口的视觉语言模型服务
+  （已支持火山方舟）
+- 默认 SenseVoice 与 VAD 模型建议至少预留 **2 GiB 可用磁盘空间**；启用
+  说话人分段后还需要额外空间
+
+### 方式一：本机运行
+
 ```bash
-git clone https://github.com/yourorg/ClipTalk.git
+git clone https://github.com/GML-MMGroup/ClipTalk.git
 cd ClipTalk
-# 安装与启动步骤，待补充
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+# CPU 版本（首次部署推荐）
+python -m pip install -r requirements-audiovisual.txt
+
+# 前台启动 Web 服务
+bash start.sh
 ```
 
-配置项与 API Key 设置请参阅[使用文档](#)。
+打开 **http://127.0.0.1:5180**，点击右上角的**设置**，依次配置：
+
+1. **视觉模型**：服务商、API Key、Base URL，以及支持图像理解的模型。
+2. **剪辑规划模型**：可以复用视觉模型，也可以单独配置文本 LLM，用于
+   镜头筛选、顺序规划和多版本成片。
+
+保存前先在设置面板中点击**验证连接并读取列表**。密钥保存在本机 `data/`
+目录中，公开设置接口不会返回完整密钥。
+
+> **使用 NVIDIA GPU？** 如果宿主机驱动支持 CUDA 12.1，请将上面的 CPU
+> 依赖安装命令替换为：
+>
+> ```bash
+> python -m pip install -r requirements-audiovisual-cu121.txt
+> ```
+>
+> CPU 与 CUDA 依赖请在全新的虚拟环境中二选一，不要重复安装。
+
+### 语音模型与首次启动
+
+服务会在后台启动 SenseVoice 工作进程。首次使用时，缺少的 SenseVoice
+和 VAD 模型会从 ModelScope 自动下载到 `./data/models`，因此第一次启动
+可能需要更长时间。也可以提前下载并验证模型：
+
+```bash
+# 使用 HIGHLIGHT_SENSEVOICE_DEVICE 指定的设备（默认 auto）
+python tools/prepare_speech_models.py
+
+# 同时准备说话人任务需要的 CAM++ 模型
+python tools/prepare_speech_models.py --with-speakers
+```
+
+### 方式二：Docker 运行
+
+```bash
+git clone https://github.com/GML-MMGroup/ClipTalk.git
+cd ClipTalk
+docker compose up --build
+```
+
+然后打开 **http://127.0.0.1:5180**，在**设置**中配置视觉模型与剪辑规划
+模型。Docker 会把上传素材、模型缓存、任务记录和成片输出保存在仓库的
+`data/` 目录中。
+
+### 可选环境变量
+
+推荐直接通过界面配置视觉模型与规划模型。无界面部署时，可以复制仓库
+提供的配置模板，再按需修改：
+
+```bash
+cp .env.example .env
+```
+
+常用配置包括 `HIGHLIGHT_HOST`、`HIGHLIGHT_PORT`、
+`HIGHLIGHT_DATA_ROOT`、`VISION_*`、`LLM_*` 以及 SenseVoice 的设备和
+模型选项。不要提交 `.env` 或任何 API Key。
+
+可以通过以下命令检查服务状态：
+
+```bash
+curl http://127.0.0.1:5180/api/health
+```
+
+正常使用无需安装 Node.js：浏览器所需文件已经包含在 `static/` 中。只有
+重新构建 `package.json` 中定义的前端动效或图标包时才需要 Node.js。
 
 ---
 
