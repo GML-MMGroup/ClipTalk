@@ -60,7 +60,7 @@
   <tr>
     <td align="center"><b>🏢 会议录像</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
     <td align="center"><b>🎓 课程录播</b><br/><img src="./assets/cases/lecture.gif" width="240"/></td>
-    <td align="center"><b>➕ 持续更新中</b><br/><img src="./assets/cases/more.gif" width="240"/></td>
+    <td align="center"><b>⚽ 体育赛事高光</b><br/><img src="./assets/cases/sports.gif" width="240"/></td>
   </tr>
 </table>
 
