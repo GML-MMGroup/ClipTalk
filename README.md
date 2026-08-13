@@ -66,7 +66,7 @@
     <td align="center"><b>📦 Product Demos</b><br/><img src="./assets/cases/product.gif" width="240"/></td>
   </tr>
   <tr>
-    <td align="center"><b>🏢 Meeting Recordings</b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
+    <td align="center"><b>🏢 Lifestyle Vlogs </b><br/><img src="./assets/cases/meeting.gif" width="240"/></td>
     <td align="center"><b>🎓 Course Lectures</b><br/><img src="./assets/cases/lecture.gif" width="240"/></td>
     <td align="center"><b>➕ More coming</b><br/><img src="./assets/cases/more.gif" width="240"/></td>
   </tr>
