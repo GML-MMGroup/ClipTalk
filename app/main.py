@@ -4021,9 +4021,23 @@ def health() -> dict[str, Any]:
     provider_label = vision_provider_label(str(active_vision["provider"]))
     active_llm = resolve_llm_configuration({"llmConfig": llm_store.snapshot(), "visionConfig": vision_store.snapshot()})
     llm_configured = bool(active_llm["apiKey"] and active_llm["model"] and active_llm["baseUrl"])
+    ffmpeg_ready = Path(settings.ffmpeg).is_file()
+    ffprobe_ready = Path(settings.ffprobe).is_file()
+    media_tools_ready = ffmpeg_ready and ffprobe_ready
+    if settings.speech_engine == "sensevoice":
+        speech_ready = speech_state.get("status") == "ready"
+    elif settings.speech_engine == "whisper":
+        speech_ready = bool(settings.whisper_model)
+    else:
+        speech_ready = False
     return {
         "ok": True,
         "service": "vlm-highlight-cutter",
+        # `ok` is HTTP liveness for compatibility. These explicit readiness
+        # fields tell operators whether a video-analysis task can start.
+        "mediaToolsReady": media_tools_ready,
+        "analysisReady": media_tools_ready and vision_configured and llm_configured,
+        "speechReady": speech_ready,
         "visionConfigured": vision_configured,
         "visionProvider": active_vision["provider"],
         "visionProviderLabel": provider_label,
@@ -4049,8 +4063,8 @@ def health() -> dict[str, Any]:
         "speechDevice": speech_state.get("device"),
         "speechDiarization": settings.sensevoice_diarization,
         "speechModelError": speech_state.get("error"),
-        "ffmpeg": Path(settings.ffmpeg).is_file(),
-        "ffprobe": Path(settings.ffprobe).is_file(),
+        "ffmpeg": ffmpeg_ready,
+        "ffprobe": ffprobe_ready,
         "dataRoot": str(settings.data_root),
         "keptLibrary": True,
         "portraitProxyMaxDimension": 1280,

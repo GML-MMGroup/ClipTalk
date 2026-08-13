@@ -166,15 +166,26 @@ Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划�
 
 ### 环境要求
 
+- 下方本机安装流程以 **Linux x86_64** 为主要测试环境；Windows 建议使用
+  **WSL2**，其他平台建议优先使用 Docker
 - **Python 3.10 或 3.11**（仓库固定使用的 PyTorch 2.2 运行时不面向更新的
   Python 版本）
-- 系统能够直接调用 **FFmpeg** 和 **ffprobe**
+- 已安装 Python `venv` 模块，系统能够直接调用 **FFmpeg** 和 **ffprobe**
 - 一个支持图像输入、兼容 OpenAI Chat Completions 接口的视觉语言模型服务
-  （已支持火山方舟）
+  （已支持火山方舟）；打开界面不需要 API Key，但首次分析前必须配置
 - 默认 SenseVoice 与 VAD 模型建议至少预留 **2 GiB 可用磁盘空间**；启用
   说话人分段后还需要额外空间
 
-### 方式一：本机运行
+安装前先确认本机环境：
+
+```bash
+python3 --version       # 必须为 3.10.x 或 3.11.x
+python3 -m venv --help  # 确认已安装 venv 模块
+ffmpeg -version
+ffprobe -version
+```
+
+### 本机运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -204,20 +215,30 @@ bash start.sh
 保存前先在设置面板中点击**验证连接并读取列表**。密钥保存在本机 `data/`
 目录中，公开设置接口不会返回完整密钥。
 
-> **使用 NVIDIA GPU？** 如果宿主机驱动支持 CUDA 12.1，请将上面的 CPU
-> 依赖安装命令替换为：
->
-> ```bash
-> python -m pip install -r requirements-audiovisual-cu121.txt
-> ```
->
-> CPU 与 CUDA 依赖请在全新的虚拟环境中二选一，不要重复安装。
+上传一个视频、描述需要的高光并确认要求，即可创建第一个任务。语音模型
+未就绪时界面仍可打开；可选语音分析准备失败，也不会阻止纯视觉分析。
+
+---
+
+## 部署与配置
+
+### 本机安装使用 NVIDIA GPU
+
+如果机器配有 NVIDIA GPU 且驱动支持 CUDA 12.1，请将 CPU 依赖命令替换为：
+
+```bash
+python -m pip install -r requirements-audiovisual-cu121.txt
+```
+
+请在全新的虚拟环境中二选一安装 CPU 或 CUDA 依赖，不要重复安装。仓库提供
+的 Docker 镜像默认是 CPU 版本；GPU 容器需要另行构建 CUDA 镜像并配置
+NVIDIA Container Toolkit。
 
 ### 语音模型与首次启动
 
-服务会在后台启动 SenseVoice 工作进程。首次使用时，缺少的 SenseVoice
-和 VAD 模型会从 ModelScope 自动下载到 `./data/models`，因此第一次启动
-可能需要更长时间。也可以提前下载并验证模型：
+服务会在后台启动 SenseVoice 工作进程，Web 界面不会等待它完成。缺少的
+SenseVoice 和 VAD 模型会从 ModelScope 自动下载到 `./data/models`，因此
+第一次使用语音辅助分析可能需要更长时间。也可以在启动前下载并验证模型：
 
 ```bash
 # 使用 HIGHLIGHT_SENSEVOICE_DEVICE 指定的设备（默认 auto）
@@ -227,18 +248,34 @@ python tools/prepare_speech_models.py
 python tools/prepare_speech_models.py --with-speakers
 ```
 
-### 方式二：Docker 运行
+### Docker 运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
 cd ClipTalk
+cp .env.example .env
 docker compose up --build
 ```
 
-等待 `docker compose` 显示服务已启动，然后在 Docker 所在电脑上打开
+等待容器进入健康状态，然后在 Docker 所在电脑上打开
 **<http://127.0.0.1:5180>**，在**设置**中配置视觉模型与剪辑规划模型。
-Docker 会把上传素材、模型缓存、任务记录和成片输出保存在仓库的 `data/`
-目录中。
+Docker 会把上传素材、模型缓存、任务记录和成片输出保存在由 Docker 管理的
+`cliptalk-data` 数据卷中。`docker compose down` 会保留数据；执行
+`docker compose down -v` 会永久删除该数据卷。
+
+旧版本使用 `./data` 目录挂载。升级不会删除该目录，但其中的历史任务不会
+自动导入新的命名卷；迁移前请先备份。
+
+常用检查命令：
+
+```bash
+docker compose ps
+docker compose logs --tail=200 cliptalk
+```
+
+Apple Silicon 或其他非 amd64 主机可能需要通过
+`DOCKER_DEFAULT_PLATFORM=linux/amd64` 使用 Linux/amd64 模拟运行固定版本的
+PyTorch 镜像，速度会低于原生 Linux x86_64 环境。
 
 ### 应该打开哪个地址？
 
@@ -247,27 +284,31 @@ Docker 会把上传素材、模型缓存、任务记录和成片输出保存在�
 | 与浏览器在同一台电脑 | `http://127.0.0.1:5180` |
 | 远程服务器或虚拟机 | `http://<服务器 IP>:5180` |
 | 本机运行并自定义了 `HIGHLIGHT_PORT` | 将 `5180` 替换为实际端口 |
-| Docker 使用自定义 `主机端口:5180` 映射 | 浏览器使用该主机端口 |
+| Docker 自定义了 `CLIPTALK_PORT` | 将 `5180` 替换为实际端口 |
 
-非 Docker 的远程部署需要监听所有网络接口：
+Docker 默认只绑定 `127.0.0.1`。如需远程访问 Docker，请编辑 `.env`，同时
+配置监听地址和访问令牌：
 
 ```bash
-HIGHLIGHT_HOST=0.0.0.0 HIGHLIGHT_PORT=5180 bash start.sh
+CLIPTALK_BIND_ADDRESS=0.0.0.0
+HIGHLIGHT_ACCESS_TOKEN=请替换为足够长的随机令牌
 ```
 
-随后在服务器防火墙或云安全组中放行 TCP 端口 `5180`，并访问
-`http://<服务器 IP>:5180`。不要在其他设备上访问 `127.0.0.1`，因为它始终
-指向当前设备自身。若服务需要暴露到公网，建议使用带身份验证的 HTTPS
-反向代理，不要直接公开开发服务器。
+非 Docker 的远程部署则需要在运行 `bash start.sh` 前设置
+`HIGHLIGHT_HOST=0.0.0.0` 和相同的访问令牌。随后在服务器防火墙或云安全组
+中放行 TCP 端口 `5180`，并访问
+`http://<服务器 IP>:5180/?token=<你的令牌>`。不要在其他设备上访问
+`127.0.0.1`，因为它始终指向当前设备自身。若服务需要暴露到公网，建议
+使用带身份验证的 HTTPS 反向代理，不要直接公开开发服务器。
 
-如果 Docker 宿主机的 `5180` 已被占用，可以修改 Compose 端口映射左侧的
-主机端口（例如改为 `8080:5180`），然后打开 `http://127.0.0.1:8080`；容器
-端口应继续与服务配置保持一致。
+如果 Docker 宿主机的 `5180` 已被占用，可在 `.env` 中设置
+`CLIPTALK_PORT=8080`，然后打开 `http://127.0.0.1:8080`。
 
 ### 可选环境变量
 
 推荐直接通过界面配置视觉模型与规划模型。无界面部署时，可以复制仓库
-提供的配置模板，再按需修改：
+提供的配置模板，再按需修改；`start.sh` 会直接读取该文件，Docker Compose
+也会把它传入容器：
 
 ```bash
 cp .env.example .env
@@ -277,14 +318,19 @@ cp .env.example .env
 `HIGHLIGHT_DATA_ROOT`、`VISION_*`、`LLM_*` 以及 SenseVoice 的设备和
 模型选项。不要提交 `.env` 或任何 API Key。
 
-可以通过以下命令检查默认本机服务是否就绪：
+可以通过以下命令查看默认本机服务状态：
 
 ```bash
-curl http://127.0.0.1:5180/api/health
+curl -s http://127.0.0.1:5180/api/health | python -m json.tool
 ```
 
+`ok: true` 只表示 HTTP 服务存活。开始分析前，还应确认
+`mediaToolsReady: true` 和 `analysisReady: true`。语音属于辅助信号：模型
+下载期间 `speechReady` 可以为 false，不会阻止纯视觉分析。
+
 如果无法连接，请确认启动进程仍在运行、查看终端错误信息，并检查启动时
-使用的主机与端口是否和浏览器地址一致。
+使用的主机与端口是否和浏览器地址一致。如果 FFmpeg 已加入 `PATH` 但仍未
+识别，可在 `.env` 中将 `FFMPEG_BIN` 和 `FFPROBE_BIN` 设置为绝对路径。
 
 正常使用无需安装 Node.js：浏览器所需文件已经包含在 `static/` 中。只有
 重新构建 `package.json` 中定义的前端动效或图标包时才需要 Node.js。

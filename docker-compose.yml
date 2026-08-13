@@ -3,12 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - ${CLIPTALK_ENV_FILE:-.env.example}
     ports:
-      - "5180:5180"
+      - "${CLIPTALK_BIND_ADDRESS:-127.0.0.1}:${CLIPTALK_PORT:-5180}:5180"
     environment:
       HIGHLIGHT_HOST: 0.0.0.0
       HIGHLIGHT_PORT: 5180
       HIGHLIGHT_DATA_ROOT: /app/data
     volumes:
-      - ./data:/app/data
+      - cliptalk-data:/app/data
     restart: unless-stopped
+
+volumes:
+  cliptalk-data:

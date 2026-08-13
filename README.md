@@ -182,15 +182,27 @@ agent's working log.
 
 ### Prerequisites
 
+- The native setup below is tested on **Linux x86_64**. On Windows, use
+  **WSL2**; on other platforms, Docker is the recommended starting point.
 - **Python 3.10 or 3.11** (the pinned PyTorch 2.2 runtime does not target
   newer Python releases)
-- **FFmpeg** and **ffprobe** available on `PATH`
+- Python's `venv` module, plus **FFmpeg** and **ffprobe** available on `PATH`
 - A vision-language model endpoint that accepts image input through an
-  OpenAI-compatible Chat Completions API (Volcengine Ark is supported)
+  OpenAI-compatible Chat Completions API (Volcengine Ark is supported) before
+  you run the first analysis; an API key is not required merely to open the UI
 - About **2 GiB of free disk space** for the default SenseVoice and VAD
   models; more is required when speaker diarization is enabled
 
-### Option A — Run locally
+Verify the local runtime before installing:
+
+```bash
+python3 --version       # must report 3.10.x or 3.11.x
+python3 -m venv --help  # confirms that the venv module is installed
+ffmpeg -version
+ffprobe -version
+```
+
+### Run locally
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -223,22 +235,33 @@ Use **Verify connection and load list** in the settings panel before saving. The
 credentials are stored locally under `data/` and are not returned by the
 public settings API.
 
-> **Using an NVIDIA GPU?** If the host driver supports CUDA 12.1, replace
-> the CPU dependency command above with:
->
-> ```bash
-> python -m pip install -r requirements-audiovisual-cu121.txt
-> ```
->
-> Install only one of the CPU/CUDA requirement files in a fresh virtual
-> environment.
+Create the first task by uploading one video, describing the highlight you
+want, and confirming the request. The UI can open before the speech model is
+ready; visual analysis remains available if optional speech preparation fails.
+
+---
+
+## Deployment and configuration
+
+### NVIDIA GPU for a local install
+
+If the machine has an NVIDIA GPU and its driver supports CUDA 12.1, replace
+the CPU dependency command with:
+
+```bash
+python -m pip install -r requirements-audiovisual-cu121.txt
+```
+
+Install only one CPU/CUDA requirement file in a fresh virtual environment.
+The supplied Docker image is CPU-only; GPU containers require a separate
+CUDA-enabled image and NVIDIA Container Toolkit configuration.
 
 ### Speech models and first run
 
-The server starts a SenseVoice worker in the background. Missing
-SenseVoice/VAD components are downloaded from ModelScope into
-`./data/models` on first use, so the first launch can take longer. To
-download and validate them before starting the app, run:
+The server starts a SenseVoice worker in the background. The web interface does
+not wait for it. Missing SenseVoice/VAD components are downloaded from
+ModelScope into `./data/models`, so the first speech-assisted analysis may take
+longer. To download and validate them before starting the app, run:
 
 ```bash
 # Uses the device selected by HIGHLIGHT_SENSEVOICE_DEVICE (default: auto)
@@ -248,19 +271,36 @@ python tools/prepare_speech_models.py
 python tools/prepare_speech_models.py --with-speakers
 ```
 
-### Option B — Run with Docker
+### Run with Docker
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
 cd ClipTalk
+cp .env.example .env
 docker compose up --build
 ```
 
-Wait until `docker compose` reports that the service has started, then open
+Wait until the container is healthy, then open
 **<http://127.0.0.1:5180>** on the Docker host and configure the
 vision/planning models from **Settings**. Docker stores uploaded media, model
-caches, task records, and rendered outputs in the repository's `data/`
-directory.
+caches, task records, and rendered outputs in the Docker-managed
+`cliptalk-data` volume. `docker compose down` preserves that volume;
+`docker compose down -v` permanently removes it.
+
+Older releases used a `./data` bind mount. Upgrading does not delete that
+directory, but it is not imported into the new named volume automatically;
+back it up before migrating existing tasks.
+
+Useful checks:
+
+```bash
+docker compose ps
+docker compose logs --tail=200 cliptalk
+```
+
+On Apple Silicon or another non-amd64 host, the pinned PyTorch image may need
+Linux/amd64 emulation (`DOCKER_DEFAULT_PLATFORM=linux/amd64`), which is slower
+than running on a native Linux x86_64 host.
 
 ### Which address should I open?
 
@@ -269,30 +309,33 @@ directory.
 | On the same computer as the browser | `http://127.0.0.1:5180` |
 | On a remote server or VM | `http://<server-ip>:5180` |
 | Local run with a custom `HIGHLIGHT_PORT` | Replace `5180` with that port |
-| Docker with a custom `HOST_PORT:5180` mapping | Use `HOST_PORT` in the browser |
+| Docker with a custom `CLIPTALK_PORT` | Replace `5180` with that port |
 
-For a non-Docker remote deployment, listen on all network interfaces:
+Docker binds to `127.0.0.1` by default. For remote Docker access, edit `.env`
+and set both a bind address and an access token:
 
 ```bash
-HIGHLIGHT_HOST=0.0.0.0 HIGHLIGHT_PORT=5180 bash start.sh
+CLIPTALK_BIND_ADDRESS=0.0.0.0
+HIGHLIGHT_ACCESS_TOKEN=replace-with-a-long-random-token
 ```
 
-Then allow TCP port `5180` in the server firewall/security group and open
-`http://<server-ip>:5180`. Do not use `127.0.0.1` from another device—it
-always points back to that device itself. For an internet-facing deployment,
-put ClipTalk behind an authenticated HTTPS reverse proxy instead of exposing
-the development server directly.
+For a non-Docker remote deployment, set `HIGHLIGHT_HOST=0.0.0.0` and the same
+access token before running `bash start.sh`. Then allow TCP port `5180` in the
+server firewall/security group and open
+`http://<server-ip>:5180/?token=<your-token>`. Do not use `127.0.0.1` from
+another device—it always points back to that device itself. For an
+internet-facing deployment, put ClipTalk behind an authenticated HTTPS reverse
+proxy instead of exposing the development server directly.
 
-If port `5180` is already in use with Docker, change the left side of the
-Compose mapping (for example, `8080:5180`) and open
-`http://127.0.0.1:8080`. Keep the container-side port aligned with the
-service configuration.
+If port `5180` is already in use with Docker, set `CLIPTALK_PORT=8080` in
+`.env` and open `http://127.0.0.1:8080`.
 
 ### Optional environment configuration
 
-The UI is the recommended place to configure the vision and planning
-models. For headless deployments, copy the supplied template and edit only
-the values you need:
+The UI is the recommended place to configure the vision and planning models.
+For headless deployments, copy the supplied template and edit only the values
+you need. `start.sh` reads this file directly, and Docker Compose passes it
+into the container:
 
 ```bash
 cp .env.example .env
@@ -302,21 +345,27 @@ Common options include `HIGHLIGHT_HOST`, `HIGHLIGHT_PORT`,
 `HIGHLIGHT_DATA_ROOT`, `VISION_*`, `LLM_*`, and the SenseVoice device/model
 settings. Do not commit `.env` or API keys.
 
-Check that the default local service is ready with:
+Inspect the default local service with:
 
 ```bash
-curl http://127.0.0.1:5180/api/health
+curl -s http://127.0.0.1:5180/api/health | python -m json.tool
 ```
+
+`ok: true` means that the HTTP service is alive. Before starting an analysis,
+also expect `mediaToolsReady: true` and `analysisReady: true`. Speech is
+auxiliary: `speechReady` can remain false while models download, without
+blocking visual-only analysis.
 
 If the command cannot connect, confirm that the startup process is still
 running, inspect its error output, and verify that the host and port match the
-address you are opening.
+address you are opening. If media tools are unavailable despite being on
+`PATH`, set `FFMPEG_BIN` and `FFPROBE_BIN` to their absolute paths in `.env`.
 
 No Node.js build is required for normal use—the browser assets are already
 included in `static/`. Node.js is needed only when rebuilding the optional
 frontend animation/icon bundles defined in `package.json`.
 
-🤝 Contributing
+## 🤝 Contributing
 We welcome contributions of all kinds! Please see our Contributing Guide to get started.
 
 

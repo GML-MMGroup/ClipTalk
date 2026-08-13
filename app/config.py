@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,14 @@ def _boolean(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _executable(name: str, command: str, fallback: str) -> str:
+    """Resolve an explicit executable or discover it from PATH."""
+    configured = os.environ.get(name, "").strip()
+    if configured:
+        return shutil.which(configured) or str(Path(configured).expanduser())
+    return shutil.which(command) or fallback
 
 
 @dataclass(frozen=True)
@@ -140,8 +149,8 @@ class Settings:
             # with HIGHLIGHT_ACCESS_TOKEN plus an HTTPS reverse proxy.
             host=os.environ.get("HIGHLIGHT_HOST", "127.0.0.1"),
             port=_positive_int("HIGHLIGHT_PORT", 5180),
-            ffmpeg=os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg"),
-            ffprobe=os.environ.get("FFPROBE_BIN", "/usr/bin/ffprobe"),
+            ffmpeg=_executable("FFMPEG_BIN", "ffmpeg", "/usr/bin/ffmpeg"),
+            ffprobe=_executable("FFPROBE_BIN", "ffprobe", "/usr/bin/ffprobe"),
             maximum_upload_bytes=_positive_int("HIGHLIGHT_MAX_UPLOAD_BYTES", 8 * 1024**3),
             maximum_workers=min(4, _positive_int("HIGHLIGHT_MAX_WORKERS", 1)),
             access_token=os.environ.get("HIGHLIGHT_ACCESS_TOKEN", "").strip(),

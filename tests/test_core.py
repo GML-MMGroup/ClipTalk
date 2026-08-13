@@ -225,6 +225,31 @@ class JsonParsingTests(unittest.TestCase):
         self.assertFalse(ArkRequestError("bad request").retryable)
 
 
+class RuntimeConfigurationTests(unittest.TestCase):
+    def test_media_tools_are_discovered_from_path(self) -> None:
+        def resolve(command: str) -> str | None:
+            return {
+                "ffmpeg": "/opt/media/bin/ffmpeg",
+                "ffprobe": "/opt/media/bin/ffprobe",
+            }.get(command)
+
+        with patch.dict(os.environ, {}, clear=True), patch("app.config.shutil.which", side_effect=resolve):
+            settings = Settings.from_environment()
+
+        self.assertEqual(settings.ffmpeg, "/opt/media/bin/ffmpeg")
+        self.assertEqual(settings.ffprobe, "/opt/media/bin/ffprobe")
+
+    def test_explicit_media_tool_path_takes_precedence(self) -> None:
+        with patch.dict(os.environ, {
+            "FFMPEG_BIN": "/custom/ffmpeg",
+            "FFPROBE_BIN": "/custom/ffprobe",
+        }, clear=True), patch("app.config.shutil.which", return_value=None):
+            settings = Settings.from_environment()
+
+        self.assertEqual(settings.ffmpeg, "/custom/ffmpeg")
+        self.assertEqual(settings.ffprobe, "/custom/ffprobe")
+
+
 class ChatTimeRangeTests(unittest.TestCase):
     def test_parses_seconds_and_clock_ranges(self) -> None:
         self.assertEqual(parse_absolute_time_range("把 00:10 到 00:20 合成"), {"start": 10.0, "end": 20.0})
