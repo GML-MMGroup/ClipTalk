@@ -175,35 +175,9 @@ Open the URL printed in the terminal. In **Settings**, configure the VLM and opt
 
 ---
 
-## ⚙️ Deployment and Configuration
+## ⚙️ Deployment
 
-### ⚡ NVIDIA GPU for a local install
-
-If the machine has an NVIDIA GPU and its driver supports CUDA 12.1, replace the CPU dependency command with:
-
-```bash
-python -m pip install -r requirements-audiovisual-cu121.txt
-```
-
-Install only one CPU/CUDA requirement file in a fresh virtual environment.
-
-The supplied Docker image is CPU-only; GPU containers require a separate CUDA-enabled image and NVIDIA Container Toolkit configuration.
-
-### 🎙️ Speech Models and First Run
-
-The server starts a SenseVoice worker in the background. The web interface does not wait for it.
-
-Missing SenseVoice/VAD components are downloaded from ModelScope into `./data/models`, so the first speech-assisted analysis may take longer. To download and validate them before starting the app, run:
-
-```bash
-# Uses the device selected by HIGHLIGHT_SENSEVOICE_DEVICE (default: auto)
-python tools/prepare_speech_models.py
-
-# Also prepare CAM++ for speaker-aware tasks
-python tools/prepare_speech_models.py --with-speakers
-```
-
-### 🐳 Run with Docker
+### 🐳 Docker
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -212,89 +186,20 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Wait until the container is healthy, then open `http://127.0.0.1:<CLIPTALK_PORT>` on the Docker host and configure the vision/planning models from **Settings**.
+Open the URL printed in the terminal, then configure the vision and planning models in **Settings**.
 
-`CLIPTALK_PORT` comes from `.env` and defaults to `5180`.
+### 🔧 Optional setup
 
-Docker stores uploaded media, model caches, task records, and rendered outputs in the Docker-managed `cliptalk-data` volume.
+- **NVIDIA GPU:** install `requirements-audiovisual-cu121.txt` instead of the CPU requirements when the driver supports CUDA 12.1.
+- **SenseVoice:** optional local speech models download automatically on first use; visual-only analysis works without them.
+- **Environment variables:** see [`.env.example`](./.env.example). Never commit `.env` or API keys.
 
-`docker compose down` preserves that volume; `docker compose down -v` permanently removes it.
+<details>
+<summary><strong>Remote deployment and security</strong></summary>
 
-Older releases used a `./data` bind mount. Upgrading does not delete that directory, but it is not imported into the new named volume automatically; back it up before migrating existing tasks.
+For remote access, set `HIGHLIGHT_HOST=0.0.0.0` for a native install or `CLIPTALK_BIND_ADDRESS=0.0.0.0` for Docker. Configure a strong `HIGHLIGHT_ACCESS_TOKEN`, allow the selected port, and use an authenticated HTTPS reverse proxy for internet-facing deployments.
 
-Useful checks:
-
-```bash
-docker compose ps
-docker compose logs --tail=200 cliptalk
-```
-
-On Apple Silicon or another non-amd64 host, the pinned PyTorch image may need Linux/amd64 emulation (`DOCKER_DEFAULT_PLATFORM=linux/amd64`), which is slower than running on a native Linux x86_64 host.
-
-### 🌐 Which Address Should I Open?
-
-| Where ClipTalk runs          | Address to open                                                 |
-| ---------------------------- | --------------------------------------------------------------- |
-| Local run, same computer     | The URL printed by Uvicorn: `http://127.0.0.1:<HIGHLIGHT_PORT>` |
-| Docker, same computer        | `http://127.0.0.1:<CLIPTALK_PORT>`                              |
-| Local run on a remote server | `http://<server-ip>:<HIGHLIGHT_PORT>`                           |
-| Docker on a remote server    | `http://<server-ip>:<CLIPTALK_PORT>`                            |
-
-Docker binds to `127.0.0.1` by default. For remote Docker access, edit `.env` and set both a bind address and an access token:
-
-```bash
-CLIPTALK_BIND_ADDRESS=0.0.0.0
-HIGHLIGHT_ACCESS_TOKEN=replace-with-a-long-random-token
-```
-
-For a non-Docker remote deployment, set `HIGHLIGHT_HOST=0.0.0.0` and the same access token before running `bash start.sh`.
-
-Then allow the configured `HIGHLIGHT_PORT` in the server firewall/security group and open:
-
-```text
-http://<server-ip>:<HIGHLIGHT_PORT>/?token=<your-token>
-```
-
-Do not use `127.0.0.1` from another device — it always points back to that device itself.
-
-For an internet-facing deployment, put ClipTalk behind an authenticated HTTPS reverse proxy instead of exposing the development server directly.
-
-If the default port is already in use with Docker, set `CLIPTALK_PORT` to a free port in `.env`, then open the address using that value.
-
-### 🔧 Optional Environment Configuration
-
-The UI is the recommended place to configure the vision and planning models.
-
-For headless deployments, copy the supplied template and edit only the values you need. `start.sh` reads this file directly, and Docker Compose passes it into the container:
-
-```bash
-cp .env.example .env
-```
-
-Common options include `HIGHLIGHT_HOST`, `HIGHLIGHT_PORT`, `HIGHLIGHT_DATA_ROOT`, `VISION_*`, `LLM_*`, and the SenseVoice device/model settings.
-
-Do not commit `.env` or API keys.
-
-Inspect a local service with the same port used to start it:
-
-```bash
-SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # use CLIPTALK_PORT for Docker
-curl -s "http://127.0.0.1:${SERVICE_PORT}/api/health" | python -m json.tool
-```
-
-`ok: true` means that the HTTP service is alive.
-
-Before starting an analysis, also expect `mediaToolsReady: true` and `analysisReady: true`.
-
-Speech is auxiliary: `speechReady` can remain false while models download, without blocking visual-only analysis.
-
-If the command cannot connect, confirm that the startup process is still running, inspect its error output, and verify that the host and port match the address you are opening.
-
-If media tools are unavailable despite being on `PATH`, set `FFMPEG_BIN` and `FFPROBE_BIN` to their absolute paths in `.env`.
-
-No Node.js build is required for normal use — the browser assets are already included in `static/`.
-
-Node.js is needed only when rebuilding the optional frontend animation/icon bundles defined in `package.json`.
+</details>
 
 ---
 

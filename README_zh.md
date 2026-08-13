@@ -191,43 +191,9 @@ bash start.sh
 
 ---
 
-## ⚙️ 部署与配置
+## ⚙️ 部署
 
-### ⚡ 本地安装使用 NVIDIA GPU
-
-如果机器拥有 NVIDIA GPU，并且显卡驱动支持 CUDA 12.1，可以将 CPU 依赖安装命令替换为：
-
-```bash
-python -m pip install -r requirements-audiovisual-cu121.txt
-```
-
-请在一个全新的虚拟环境中，只安装 CPU 或 CUDA 版本中的一种依赖文件。
-
-目前提供的 Docker 镜像为 CPU-only。GPU Docker 容器需要另外构建支持 CUDA 的镜像，并配置 NVIDIA Container Toolkit。
-
-### 🎙️ 语音模型与首次启动
-
-服务器会在后台启动一个 SenseVoice Worker，Web 页面不会等待它初始化完成。
-
-缺失的 SenseVoice / VAD 模型会自动从 ModelScope 下载到：
-
-```text
-./data/models
-```
-
-因此，第一次执行带语音分析的视频任务可能会花费更长时间。
-
-如果希望在启动应用前提前下载并验证模型，可以执行：
-
-```bash
-# 使用 HIGHLIGHT_SENSEVOICE_DEVICE 指定的设备（默认：auto）
-python tools/prepare_speech_models.py
-
-# 同时准备 CAM++，用于说话人相关任务
-python tools/prepare_speech_models.py --with-speakers
-```
-
-### 🐳 使用 Docker 运行
+### 🐳 Docker
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -236,185 +202,20 @@ cp .env.example .env
 docker compose up --build
 ```
 
-等待容器进入健康状态后，在 Docker 主机上打开：
+打开终端实际输出的访问地址，然后在 **Settings** 中配置视觉模型和剪辑规划模型。
 
-```text
-http://127.0.0.1:<CLIPTALK_PORT>
-```
+### 🔧 可选配置
 
-然后在 **Settings** 页面中配置视觉模型和剪辑规划模型。
+- **NVIDIA GPU：** 显卡驱动支持 CUDA 12.1 时，使用 `requirements-audiovisual-cu121.txt` 代替 CPU 依赖。
+- **SenseVoice：** 可选的本地语音模型会在首次使用时自动下载；纯视觉分析不依赖它。
+- **环境变量：** 查看 [`.env.example`](./.env.example)。请勿提交 `.env` 或 API Key。
 
-`CLIPTALK_PORT` 从 `.env` 文件中读取，默认值为：
+<details>
+<summary><strong>远程部署与安全</strong></summary>
 
-```text
-5180
-```
+远程访问时，原生部署设置 `HIGHLIGHT_HOST=0.0.0.0`，Docker 设置 `CLIPTALK_BIND_ADDRESS=0.0.0.0`。同时配置高强度的 `HIGHLIGHT_ACCESS_TOKEN`、开放实际使用的端口；若面向公网，请使用带身份验证的 HTTPS 反向代理。
 
-Docker 会将上传的视频、模型缓存、任务记录以及渲染结果保存在 Docker 管理的 `cliptalk-data` Volume 中。
-
-执行：
-
-```bash
-docker compose down
-```
-
-不会删除该 Volume。
-
-而：
-
-```bash
-docker compose down -v
-```
-
-会永久删除该 Volume 中的数据。
-
-旧版本使用 `./data` 目录进行 bind mount。
-
-升级版本不会删除这个目录，但其中的数据不会自动迁移到新的 named volume，因此迁移已有任务之前请先做好备份。
-
-常用检查命令：
-
-```bash
-docker compose ps
-docker compose logs --tail=200 cliptalk
-```
-
-在 Apple Silicon 或其他非 amd64 主机上，由于固定版本 PyTorch 镜像的限制，可能需要启用 Linux/amd64 模拟：
-
-```text
-DOCKER_DEFAULT_PLATFORM=linux/amd64
-```
-
-这种方式的运行速度会比原生 Linux x86_64 环境更慢。
-
-### 🌐 应该打开哪个地址？
-
-| ClipTalk 运行位置     | 打开的地址                                               |
-| ----------------- | --------------------------------------------------- |
-| 本地运行，同一台电脑访问      | Uvicorn 输出的 URL：`http://127.0.0.1:<HIGHLIGHT_PORT>` |
-| Docker 运行，同一台电脑访问 | `http://127.0.0.1:<CLIPTALK_PORT>`                  |
-| 远程服务器本地运行         | `http://<server-ip>:<HIGHLIGHT_PORT>`               |
-| 远程服务器 Docker 运行   | `http://<server-ip>:<CLIPTALK_PORT>`                |
-
-Docker 默认绑定：
-
-```text
-127.0.0.1
-```
-
-如果需要远程访问 Docker 部署，请修改 `.env`，配置监听地址和访问 Token：
-
-```bash
-CLIPTALK_BIND_ADDRESS=0.0.0.0
-HIGHLIGHT_ACCESS_TOKEN=replace-with-a-long-random-token
-```
-
-如果使用非 Docker 方式在远程服务器部署，请在执行：
-
-```bash
-bash start.sh
-```
-
-之前配置：
-
-```bash
-HIGHLIGHT_HOST=0.0.0.0
-```
-
-并设置相同的访问 Token。
-
-随后，在服务器防火墙或安全组中放行 `HIGHLIGHT_PORT` 对应端口，然后访问：
-
-```text
-http://<server-ip>:<HIGHLIGHT_PORT>/?token=<your-token>
-```
-
-不要在其他设备上使用 `127.0.0.1` 访问服务器，因为它始终指向当前设备自身。
-
-如果需要将 ClipTalk 部署到公网，请使用带身份验证的 HTTPS 反向代理，而不是直接暴露开发服务器。
-
-如果 Docker 默认端口已经被占用，可以在 `.env` 中将 `CLIPTALK_PORT` 修改为其他空闲端口，然后使用对应地址访问。
-
-### 🔧 可选环境变量配置
-
-推荐直接通过 Web UI 配置视觉模型和剪辑规划模型。
-
-如果需要无界面部署，可以复制项目提供的环境变量模板，并只修改需要的字段：
-
-```bash
-cp .env.example .env
-```
-
-`start.sh` 会直接读取该文件，Docker Compose 也会将其中的配置传入容器。
-
-常见配置项包括：
-
-```text
-HIGHLIGHT_HOST
-HIGHLIGHT_PORT
-HIGHLIGHT_DATA_ROOT
-VISION_*
-LLM_*
-```
-
-以及 SenseVoice 对应的设备和模型配置。
-
-请勿将 `.env` 或 API Key 提交到 Git 仓库。
-
-可以使用与服务启动时相同的端口检查服务状态：
-
-```bash
-SERVICE_PORT="${HIGHLIGHT_PORT:-5180}"  # Docker 环境请使用 CLIPTALK_PORT
-curl -s "http://127.0.0.1:${SERVICE_PORT}/api/health" | python -m json.tool
-```
-
-返回：
-
-```text
-ok: true
-```
-
-说明 HTTP 服务已经正常运行。
-
-开始执行视频分析之前，通常还应该看到：
-
-```text
-mediaToolsReady: true
-analysisReady: true
-```
-
-语音能力属于辅助模块，因此模型下载过程中：
-
-```text
-speechReady
-```
-
-即使仍然为 `false`，也不会影响只依赖视觉能力的分析任务。
-
-如果命令无法连接服务，请检查：
-
-* 启动进程是否仍在运行；
-* 终端中是否存在错误信息；
-* 当前使用的 Host 和 Port 是否与启动时一致。
-
-如果 FFmpeg 和 ffprobe 已经位于 `PATH` 中，但系统仍然无法找到媒体工具，可以在 `.env` 中手动设置：
-
-```text
-FFMPEG_BIN
-FFPROBE_BIN
-```
-
-为它们对应的绝对路径。
-
-正常使用 ClipTalk **不需要 Node.js 构建步骤**，浏览器所需资源已经包含在：
-
-```text
-static/
-```
-
-目录中。
-
-只有重新构建 `package.json` 中定义的可选前端动画或图标资源时，才需要 Node.js。
+</details>
 
 ---
 
