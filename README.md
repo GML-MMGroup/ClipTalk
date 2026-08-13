@@ -207,8 +207,12 @@ python -m pip install -r requirements-audiovisual.txt
 bash start.sh
 ```
 
-Open **http://127.0.0.1:5180**. In the top-right corner, choose
-**Settings** and configure:
+After the terminal reports that Uvicorn is running, open
+**<http://127.0.0.1:5180>** in a browser on the same computer. This is the
+default local address, not a universal deployment URL. If you changed
+`HIGHLIGHT_PORT`, use the configured port instead.
+
+In the top-right corner, choose **Settings** and configure:
 
 1. **Vision model** — provider, API key, base URL, and a model capable of
    understanding images.
@@ -252,9 +256,37 @@ cd ClipTalk
 docker compose up --build
 ```
 
-Then open **http://127.0.0.1:5180** and configure the vision/planning
-models from **Settings**. Docker stores uploaded media, model caches, task
-records, and rendered outputs in the repository's `data/` directory.
+Wait until `docker compose` reports that the service has started, then open
+**<http://127.0.0.1:5180>** on the Docker host and configure the
+vision/planning models from **Settings**. Docker stores uploaded media, model
+caches, task records, and rendered outputs in the repository's `data/`
+directory.
+
+### Which address should I open?
+
+| Where ClipTalk runs | Address to open |
+| --- | --- |
+| On the same computer as the browser | `http://127.0.0.1:5180` |
+| On a remote server or VM | `http://<server-ip>:5180` |
+| Local run with a custom `HIGHLIGHT_PORT` | Replace `5180` with that port |
+| Docker with a custom `HOST_PORT:5180` mapping | Use `HOST_PORT` in the browser |
+
+For a non-Docker remote deployment, listen on all network interfaces:
+
+```bash
+HIGHLIGHT_HOST=0.0.0.0 HIGHLIGHT_PORT=5180 bash start.sh
+```
+
+Then allow TCP port `5180` in the server firewall/security group and open
+`http://<server-ip>:5180`. Do not use `127.0.0.1` from another device—it
+always points back to that device itself. For an internet-facing deployment,
+put ClipTalk behind an authenticated HTTPS reverse proxy instead of exposing
+the development server directly.
+
+If port `5180` is already in use with Docker, change the left side of the
+Compose mapping (for example, `8080:5180`) and open
+`http://127.0.0.1:8080`. Keep the container-side port aligned with the
+service configuration.
 
 ### Optional environment configuration
 
@@ -270,11 +302,15 @@ Common options include `HIGHLIGHT_HOST`, `HIGHLIGHT_PORT`,
 `HIGHLIGHT_DATA_ROOT`, `VISION_*`, `LLM_*`, and the SenseVoice device/model
 settings. Do not commit `.env` or API keys.
 
-Check that the service is ready with:
+Check that the default local service is ready with:
 
 ```bash
 curl http://127.0.0.1:5180/api/health
 ```
+
+If the command cannot connect, confirm that the startup process is still
+running, inspect its error output, and verify that the host and port match the
+address you are opening.
 
 No Node.js build is required for normal use—the browser assets are already
 included in `static/`. Node.js is needed only when rebuilding the optional
