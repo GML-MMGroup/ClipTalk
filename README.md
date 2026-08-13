@@ -328,8 +328,6 @@ Node.js is needed only when rebuilding the optional frontend animation/icon bund
 
 ## 🤝 Contributing
 
-We welcome contributions of all kinds! Please see our Contributing Guide to get started.
-
 <div align="center">
 
 ⭐ If you find ClipTalk useful, please give us a star!
