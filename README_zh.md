@@ -24,7 +24,7 @@
 
 <!-- 👇 在这里放核心演示 GIF：用户输入一句话 → Agent 执行 → 成片输出 -->
 <div align="center">
-  <img src="./assets/demo.gif" alt="ClipTalk Demo" width="90%" />
+  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk 演示" width="90%" />
 </div>
 
 <br/>
