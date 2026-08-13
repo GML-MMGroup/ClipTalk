@@ -180,7 +180,7 @@ agent's working log.
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### ✅ Prerequisites
 
 - The native setup below is tested on **Linux x86_64**. On Windows, use
   **WSL2**; on other platforms, Docker is the recommended starting point.
@@ -202,7 +202,7 @@ ffmpeg -version
 ffprobe -version
 ```
 
-### Run locally
+### 💻 Run locally
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -224,6 +224,8 @@ After the terminal reports that Uvicorn is running, open
 default local address, not a universal deployment URL. If you changed
 `HIGHLIGHT_PORT`, use the configured port instead.
 
+#### Configure the models
+
 In the top-right corner, choose **Settings** and configure:
 
 1. **Vision model** — provider, API key, base URL, and a model capable of
@@ -235,15 +237,17 @@ Use **Verify connection and load list** in the settings panel before saving. The
 credentials are stored locally under `data/` and are not returned by the
 public settings API.
 
+#### Create your first edit
+
 Create the first task by uploading one video, describing the highlight you
 want, and confirming the request. The UI can open before the speech model is
 ready; visual analysis remains available if optional speech preparation fails.
 
 ---
 
-## Deployment and configuration
+## ⚙️ Deployment and configuration
 
-### NVIDIA GPU for a local install
+### ⚡ NVIDIA GPU for a local install
 
 If the machine has an NVIDIA GPU and its driver supports CUDA 12.1, replace
 the CPU dependency command with:
@@ -256,7 +260,7 @@ Install only one CPU/CUDA requirement file in a fresh virtual environment.
 The supplied Docker image is CPU-only; GPU containers require a separate
 CUDA-enabled image and NVIDIA Container Toolkit configuration.
 
-### Speech models and first run
+### 🎙️ Speech models and first run
 
 The server starts a SenseVoice worker in the background. The web interface does
 not wait for it. Missing SenseVoice/VAD components are downloaded from
@@ -271,7 +275,7 @@ python tools/prepare_speech_models.py
 python tools/prepare_speech_models.py --with-speakers
 ```
 
-### Run with Docker
+### 🐳 Run with Docker
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -302,7 +306,7 @@ On Apple Silicon or another non-amd64 host, the pinned PyTorch image may need
 Linux/amd64 emulation (`DOCKER_DEFAULT_PLATFORM=linux/amd64`), which is slower
 than running on a native Linux x86_64 host.
 
-### Which address should I open?
+### 🌐 Which address should I open?
 
 | Where ClipTalk runs | Address to open |
 | --- | --- |
@@ -330,7 +334,7 @@ proxy instead of exposing the development server directly.
 If port `5180` is already in use with Docker, set `CLIPTALK_PORT=8080` in
 `.env` and open `http://127.0.0.1:8080`.
 
-### Optional environment configuration
+### 🔧 Optional environment configuration
 
 The UI is the recommended place to configure the vision and planning models.
 For headless deployments, copy the supplied template and edit only the values

@@ -164,7 +164,7 @@ Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划�
 
 ## 🚀 快速开始
 
-### 环境要求
+### ✅ 环境要求
 
 - 下方本机安装流程以 **Linux x86_64** 为主要测试环境；Windows 建议使用
   **WSL2**，其他平台建议优先使用 Docker
@@ -185,7 +185,7 @@ ffmpeg -version
 ffprobe -version
 ```
 
-### 本机运行
+### 💻 本机运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -206,6 +206,8 @@ bash start.sh
 **<http://127.0.0.1:5180>**。这是默认的本机地址，并非所有部署环境都固定
 使用该地址；如果修改了 `HIGHLIGHT_PORT`，请使用实际配置的端口。
 
+#### 配置模型
+
 点击右上角的**设置**，依次配置：
 
 1. **视觉模型**：服务商、API Key、Base URL，以及支持图像理解的模型。
@@ -215,14 +217,16 @@ bash start.sh
 保存前先在设置面板中点击**验证连接并读取列表**。密钥保存在本机 `data/`
 目录中，公开设置接口不会返回完整密钥。
 
+#### 创建第一个剪辑任务
+
 上传一个视频、描述需要的高光并确认要求，即可创建第一个任务。语音模型
 未就绪时界面仍可打开；可选语音分析准备失败，也不会阻止纯视觉分析。
 
 ---
 
-## 部署与配置
+## ⚙️ 部署与配置
 
-### 本机安装使用 NVIDIA GPU
+### ⚡ 本机安装使用 NVIDIA GPU
 
 如果机器配有 NVIDIA GPU 且驱动支持 CUDA 12.1，请将 CPU 依赖命令替换为：
 
@@ -234,7 +238,7 @@ python -m pip install -r requirements-audiovisual-cu121.txt
 的 Docker 镜像默认是 CPU 版本；GPU 容器需要另行构建 CUDA 镜像并配置
 NVIDIA Container Toolkit。
 
-### 语音模型与首次启动
+### 🎙️ 语音模型与首次启动
 
 服务会在后台启动 SenseVoice 工作进程，Web 界面不会等待它完成。缺少的
 SenseVoice 和 VAD 模型会从 ModelScope 自动下载到 `./data/models`，因此
@@ -248,7 +252,7 @@ python tools/prepare_speech_models.py
 python tools/prepare_speech_models.py --with-speakers
 ```
 
-### Docker 运行
+### 🐳 Docker 运行
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -277,7 +281,7 @@ Apple Silicon 或其他非 amd64 主机可能需要通过
 `DOCKER_DEFAULT_PLATFORM=linux/amd64` 使用 Linux/amd64 模拟运行固定版本的
 PyTorch 镜像，速度会低于原生 Linux x86_64 环境。
 
-### 应该打开哪个地址？
+### 🌐 应该打开哪个地址？
 
 | ClipTalk 运行位置 | 应打开的地址 |
 | --- | --- |
@@ -304,7 +308,7 @@ HIGHLIGHT_ACCESS_TOKEN=请替换为足够长的随机令牌
 如果 Docker 宿主机的 `5180` 已被占用，可在 `.env` 中设置
 `CLIPTALK_PORT=8080`，然后打开 `http://127.0.0.1:8080`。
 
-### 可选环境变量
+### 🔧 可选环境变量
 
 推荐直接通过界面配置视觉模型与规划模型。无界面部署时，可以复制仓库
 提供的配置模板，再按需修改；`start.sh` 会直接读取该文件，Docker Compose
