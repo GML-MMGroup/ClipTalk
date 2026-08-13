@@ -152,24 +152,13 @@ ClipTalk turns natural-language editing requests into complete video-editing wor
 
 ## 🚀 Quick Start
 
-### ✅ Prerequisites
+### 1. Prepare
 
-* The native setup below is tested on **Linux x86_64**. On Windows, use **WSL2**; on other platforms, Docker is the recommended starting point.
-* **Python 3.10 or 3.11** (the pinned PyTorch 2.2 runtime does not target newer Python releases)
-* Python's `venv` module, plus **FFmpeg** and **ffprobe** available on `PATH`
-* A vision-language model endpoint that accepts image input through an OpenAI-compatible Chat Completions API (Volcengine Ark is supported) before you run the first analysis; an API key is not required merely to open the UI
-* About **2 GiB of free disk space** for the default SenseVoice and VAD models; more is required when speaker diarization is enabled
+* Linux x86_64, or Windows through WSL2
+* Python 3.10/3.11 with `venv`
+* FFmpeg and ffprobe available on `PATH`
 
-Verify the local runtime before installing:
-
-```bash
-python3 --version       # must report 3.10.x or 3.11.x
-python3 -m venv --help  # confirms that the venv module is installed
-ffmpeg -version
-ffprobe -version
-```
-
-### 💻 Run locally
+### 2. Install and run
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -178,28 +167,28 @@ cd ClipTalk
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-
-# CPU (recommended for the first setup)
 python -m pip install -r requirements-audiovisual.txt
-
-# Start the web app in the foreground
 bash start.sh
 ```
 
-After the terminal reports that Uvicorn is running, open the exact URL shown in that terminal. For a local installation its format is `http://127.0.0.1:<HIGHLIGHT_PORT>`; the default port is `5180`, but the displayed value always follows your current configuration.
+Open the URL printed by Uvicorn in the terminal.
 
-#### Configure the models
+### 3. Configure the models
 
-In the top-right corner, choose **Settings** and configure:
+You only need one image-capable VLM API to start. The other components are optional or run locally:
 
-1. **Vision model** — provider, API key, base URL, and a model capable of understanding images.
-2. **Editing planner** — reuse the vision model, or configure a separate text LLM for shot selection, ordering, and multi-version planning.
+| Component | Required? | What it does |
+|---|---|---|
+| 👁️ **VLM** | **Yes, for video analysis** | Reads frames, finds highlight events, refines shot boundaries, and groups shots into events |
+| 🧠 **LLM planner** | Optional | Selects and orders verified shots and plans alternative edits; it can reuse the VLM configuration |
+| 🎧 **SenseVoice** | Optional, local | Adds timestamped speech, emotion, and sound-event evidence; visual-only analysis still works if it is unavailable |
+| ✂️ **FFmpeg** | **Yes, not an AI model** | Extracts frames and performs deterministic cutting, composition, preview generation, and output checks |
 
-Use **Verify connection and load list** in the settings panel before saving. The credentials are stored locally under `data/` and are not returned by the public settings API.
+Open **Settings** in the top-right corner, configure and verify the **Vision model**, then let the **Editing planner** reuse it or provide a separate text LLM. Save the settings; no restart is required.
 
-#### Create your first edit
+### 4. Create your first edit
 
-Create the first task by uploading one video, describing the highlight you want, and confirming the request. The UI can open before the speech model is ready; visual analysis remains available if optional speech preparation fails.
+Upload a video, describe the highlight you want, and start the analysis. SenseVoice can download its local files on first use, so the first speech-assisted task may take longer.
 
 ---
 

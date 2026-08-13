@@ -168,24 +168,13 @@ ClipTalk 会把自然语言剪辑指令转换成完整的视频剪辑流程。
 
 ## 🚀 快速开始
 
-### ✅ 环境要求
+### 1. 准备环境
 
-* 以下原生安装方式已在 **Linux x86_64** 环境下测试。在 Windows 上建议使用 **WSL2**；其他平台建议优先使用 Docker。
-* **Python 3.10 或 3.11**（当前固定的 PyTorch 2.2 运行环境不支持更新版本的 Python）
-* Python 的 `venv` 模块，以及已经加入 `PATH` 的 **FFmpeg** 和 **ffprobe**
-* 在执行第一次视频分析之前，需要配置一个支持图像输入、兼容 OpenAI Chat Completions API 的视觉语言模型服务（支持火山引擎 Ark）。仅打开 Web UI 不需要 API Key。
-* 默认 SenseVoice 和 VAD 模型大约需要 **2 GiB 可用磁盘空间**；启用说话人识别后需要更多空间。
+* Linux x86_64，Windows 可使用 WSL2
+* Python 3.10/3.11，并已安装 `venv`
+* 系统可以直接调用 FFmpeg 和 ffprobe
 
-安装前可以先检查本地运行环境：
-
-```bash
-python3 --version       # 应输出 3.10.x 或 3.11.x
-python3 -m venv --help  # 确认已经安装 venv 模块
-ffmpeg -version
-ffprobe -version
-```
-
-### 💻 本地运行
+### 2. 安装并启动
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -194,40 +183,28 @@ cd ClipTalk
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-
-# CPU（推荐首次安装使用）
 python -m pip install -r requirements-audiovisual.txt
-
-# 前台启动 Web 应用
 bash start.sh
 ```
 
-当终端显示 Uvicorn 已成功运行后，打开终端中输出的具体 URL。
+启动后，打开终端中 Uvicorn 输出的实际访问地址。
 
-本地安装情况下，其格式通常为：
+### 3. 配置模型
 
-```text
-http://127.0.0.1:<HIGHLIGHT_PORT>
-```
+开始使用只需要一个支持图片理解的 VLM API；其他模型为可选或在本地运行：
 
-默认端口为 `5180`，但请始终以当前终端输出的实际配置为准。
+| 组件 | 是否必需 | 负责什么 |
+|---|---|---|
+| 👁️ **VLM 视觉模型** | **分析视频必需** | 查看画面、发现高光事件、精修镜头边界并将镜头归组成事件 |
+| 🧠 **LLM 剪辑规划** | 可选 | 基于已验证镜头规划取舍、顺序和不同成片方向；可直接复用 VLM 配置 |
+| 🎧 **SenseVoice** | 可选，本地运行 | 提供带时间范围的对白、情绪和声音事件证据；不可用时仍可继续纯视觉分析 |
+| ✂️ **FFmpeg** | **必需，但不是 AI 模型** | 负责抽帧、裁剪、合成、播放代理和输出检查 |
 
-#### 配置模型
+点击右上角 **Settings**，配置并验证 **Vision model**；然后让 **Editing planner** 复用视觉配置，或填写独立文本 LLM。保存后立即生效，不需要重启。
 
-点击页面右上角的 **Settings**，完成以下配置：
+### 4. 创建第一个剪辑任务
 
-1. **Vision model** — 配置模型提供商、API Key、Base URL，以及支持图像理解的模型。
-2. **Editing planner** — 可以直接复用视觉模型，也可以单独配置一个文本 LLM，用于镜头选择、排序以及多版本剪辑规划。
-
-保存之前，建议在设置面板中点击 **Verify connection and load list** 验证连接。
-
-认证信息会保存在本地 `data/` 目录中，并且不会通过公共 Settings API 返回。
-
-#### 创建你的第一个剪辑任务
-
-上传一个视频，描述你想生成的高光内容，然后确认任务，即可创建第一次剪辑。
-
-即使语音模型还没有准备完成，Web UI 也可以正常打开；如果可选的语音组件加载失败，视觉分析功能仍然可以继续使用。
+上传视频、描述需要的高光，然后开始分析。SenseVoice 首次使用时可能需要下载本地模型，因此第一次视听分析通常更慢。
 
 ---
 
