@@ -20,22 +20,6 @@
 
 ---
 
-## 🎥 效果演示
-
-<!-- 👇 在这里放核心演示 GIF：用户输入一句话 → Agent 执行 → 成片输出 -->
-<div align="center">
-  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk 演示" width="90%" />
-</div>
-
-<br/>
-
-> 上传一段 1 小时的直播视频，然后只需输入一句话：*"把男生说话的画面
-> 合并"*、*"把王总的画面剪出来"*、*"剪出讲新品的片段"*、*"剪一个
-> 60 秒高光切片"* —— ClipTalk 会理解素材内容、规划剪辑方案、调用
-> 相应工具，直接交付剪好的成片。
-
----
-
 ## 📰 最新动态
 
 - **[2026-XX-XX]** 🎉 ClipTalk 正式开源！
@@ -72,6 +56,17 @@ ClipTalk 是一个**视频剪辑 AI Agent**。你不需要在时间轴上拖拽�
 也不需要在几小时的录像里反复拉进度条 —— 只需用自然语言描述需求，
 Agent 会完成全部流程：**理解素材 → 定位目标内容 → 规划剪辑方案 →
 执行剪切 → 输出成片。**
+
+<div align="center">
+  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk 对话式视频剪辑流程演示" width="90%" />
+  <br />
+  <sub><b>“从最精彩的片段生成一条高光。”</b> —— ClipTalk 分析素材、展示事件时间轴，并交付多个 AI 剪辑版本。</sub>
+</div>
+
+<br />
+
+> 上传一段长视频，用一句话描述想要的内容，ClipTalk 会理解素材、规划
+> 剪辑、调用相应工具，并直接交付剪好的成片。
 
 它不是简单的字幕关键词检索。ClipTalk 能真正**理解画面里是谁、
 谁在说话、在聊什么** —— 综合运用语音识别、声纹识别、人脸检测和

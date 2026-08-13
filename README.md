@@ -20,22 +20,6 @@
 
 ---
 
-## 🎥 See It In Action
-
-<!-- 👇 在这里放核心演示 GIF：用户输入一句话 → Agent 执行 → 成片输出 -->
-<div align="center">
-  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk Demo" width="90%" />
-</div>
-
-<br/>
-
-> Upload a 1-hour livestream, then just type: *"Merge all his speaking
-> clips"*, *"Cut out Mr. Wang's scenes"*, *"Clip the product intro"*, or
-> *"Make a 60s highlight"* — ClipTalk understands your footage, plans the
-> edit, calls the right tools, and delivers the finished clips.
-
----
-
 ## 📰 News
 
 - **[2026‑07‑10]** 🎉 ClipTalk is now open‑source!
@@ -50,14 +34,6 @@
 
 > Real editing tasks completed by ClipTalk with a single instruction.
 > <!-- 在这里放不同场景的剪辑案例，建议用 GIF 对比：原始素材 → 指令 → 成片 -->
-
-<div align="center">
-  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk conversational highlight editing workflow" width="900" />
-  <br />
-  <sub><b>“Make a highlight from the best moments.”</b> — ClipTalk analyzes the footage, presents the event timeline, and delivers multiple AI-edited versions.</sub>
-</div>
-
-<br />
 
 <table>
   <tr>
@@ -81,6 +57,18 @@ timeline or scrub through hours of footage — you just describe what you
 want in natural language, and the agent handles the entire process:
 **understanding the footage → locating the target content → planning the
 edit → executing cuts → delivering the final clips.**
+
+<div align="center">
+  <img src="./assets/showcase/conversational-highlight-editing-preview.gif" alt="ClipTalk conversational highlight editing workflow" width="900" />
+  <br />
+  <sub><b>“Make a highlight from the best moments.”</b> — ClipTalk analyzes the footage, presents the event timeline, and delivers multiple AI-edited versions.</sub>
+</div>
+
+<br />
+
+> Upload a 1-hour video, describe the moments you want, and let ClipTalk
+> understand the footage, plan the edit, call the right tools, and deliver the
+> finished clips.
 
 It's not a keyword search over subtitles. ClipTalk actually **understands
 who is on screen, who is speaking, and what they are talking about** —
