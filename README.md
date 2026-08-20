@@ -23,6 +23,7 @@
 
 ## 📰 News
 
+* **[2026-08-20]** ✅ Added **Face-Matched Editing** and **Topic-Based Editing**, enabling target-person retrieval and topic-driven clip extraction.
 * **[2026-08-12]** 🚀 Optimized the timeline display and added support for switching to **vertical creation mode**.
 * **[2026-07-20]** ✨ Added the **Highlight Editing Agent** for automatic highlight clip extraction.
 * **[2026-07-10]** 🎉 ClipTalk is now **open-source**!
@@ -37,9 +38,9 @@ ClipTalk is actively evolving toward a more powerful conversational video editin
 
 * [x] 💬 **Conversational Editing Infrastructure**
 * [x] ⚡ **Highlight Editing Agent**
-* [ ] 👤 **Face-Matched Editing** — Find a target person and extract the segments where they appear on screen.
+* [x] 👤 **Face-Matched Editing** — Find a target person and extract the segments where they appear on screen.
 * [ ] 🔊 **Voiceprint-Based Editing** — Identify a target speaker and extract the segments where they are speaking.
-* [ ] 🧭 **Topic-Based Editing** — Understand the content and extract segments around a specific topic.
+* [x] 🧭 **Topic-Based Editing** — Understand the content and extract segments around a specific topic.
 * [ ] 🎞️ **Editable Timeline** — Further edit and fine-tune AI-generated results directly on the timeline.
 
 
