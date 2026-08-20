@@ -13,5 +13,8 @@ services:
       HIGHLIGHT_DATA_ROOT: /app/data
       HIGHLIGHT_ACCESS_TOKEN: ${HIGHLIGHT_ACCESS_TOKEN:?请配置至少16字符的HIGHLIGHT_ACCESS_TOKEN}
     volumes:
-      - ./data:/app/data
+      - cliptalk-data:/app/data
     restart: unless-stopped
+
+volumes:
+  cliptalk-data:
