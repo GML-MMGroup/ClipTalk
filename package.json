@@ -2,7 +2,16 @@
   "name": "cliptalk-highlight-director",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
+    "doctor": "python3 tools/doctor.py",
+    "check:repository": "python3 tools/check_repository.py",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "test:intent": "python3 -m pytest -q tests/test_intent_logic.py",
+    "benchmark:quality": "python3 tools/evaluate_content_search.py benchmarks/content-search-baseline.jsonl --check",
+    "benchmark:interview-quality": "python3 tools/evaluate_content_search.py benchmarks/interview-content-search.jsonl --check --strict-interview",
     "build:readme-preview": "node tools/build-readme-preview.mjs",
     "preview:readme": "npm run build:readme-preview && python3 -m http.server 5191 --bind 0.0.0.0",
     "build:orbs": "vite build --config vite.orbs.config.js",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import re
 import threading
 from pathlib import Path
@@ -32,6 +33,15 @@ class VisionModelClient(Protocol):
         self,
         prompt: str,
         image_path: Path,
+        *,
+        maximum_tokens: int = 2200,
+        system_prompt: str = "",
+    ) -> dict[str, Any]: ...
+
+    def analyze_video(
+        self,
+        prompt: str,
+        video_path: Path,
         *,
         maximum_tokens: int = 2200,
         system_prompt: str = "",
@@ -123,6 +133,28 @@ class OpenAICompatibleVisionClient:
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
             },
+        ]
+        return self._complete(content, maximum_tokens=maximum_tokens, system_prompt=system_prompt)
+
+    def analyze_video(
+        self,
+        prompt: str,
+        video_path: Path,
+        *,
+        maximum_tokens: int = 2200,
+        system_prompt: str = "",
+    ) -> dict[str, Any]:
+        """Send the rendered review proxy as real dynamic video evidence.
+
+        OpenAI-compatible multimodal gateways that do not implement
+        ``video_url`` return a normal request error; callers then fall back to
+        the labelled contact sheet without losing the review job.
+        """
+        encoded = base64.b64encode(video_path.read_bytes()).decode("ascii")
+        mime = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{encoded}"}},
         ]
         return self._complete(content, maximum_tokens=maximum_tokens, system_prompt=system_prompt)
 

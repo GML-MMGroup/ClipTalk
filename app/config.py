@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+from .security import validate_deployment_access
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,14 +55,6 @@ def _boolean(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
-def _executable(name: str, command: str, fallback: str) -> str:
-    """Resolve an explicit executable or discover it from PATH."""
-    configured = os.environ.get(name, "").strip()
-    if configured:
-        return shutil.which(configured) or str(Path(configured).expanduser())
-    return shutil.which(command) or fallback
-
-
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -95,6 +88,7 @@ class Settings:
     maximum_upload_bytes: int
     maximum_workers: int
     access_token: str
+    allow_private_model_endpoints: bool
     maximum_storage_bytes: int
     retention_days: int
     whisper_model: str
@@ -107,6 +101,25 @@ class Settings:
     sensevoice_spk_model: str
     sensevoice_diarization: bool
     speech_model_cache: Path
+    recognition_enabled: bool
+    recognition_profile: str
+    recognition_model_cache: Path
+    recognition_worker_python: str
+    recognition_text_model: str
+    recognition_siglip_model: str
+    recognition_clap_model: str
+    recognition_grounding_model: str
+    recognition_yunet_model: Path
+    recognition_sface_model: Path
+    recognition_ocr_enabled: bool
+    content_search_dialogue_v2: bool
+    active_speaker_mode: str
+    talknet_worker_python: str
+    talknet_worker_script: str
+    talknet_repository: str
+    talknet_checkpoint: str
+    talknet_device: str
+    talknet_timeout_seconds: float
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -149,11 +162,12 @@ class Settings:
             # with HIGHLIGHT_ACCESS_TOKEN plus an HTTPS reverse proxy.
             host=os.environ.get("HIGHLIGHT_HOST", "127.0.0.1"),
             port=_positive_int("HIGHLIGHT_PORT", 5180),
-            ffmpeg=_executable("FFMPEG_BIN", "ffmpeg", "/usr/bin/ffmpeg"),
-            ffprobe=_executable("FFPROBE_BIN", "ffprobe", "/usr/bin/ffprobe"),
+            ffmpeg=os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg"),
+            ffprobe=os.environ.get("FFPROBE_BIN", "/usr/bin/ffprobe"),
             maximum_upload_bytes=_positive_int("HIGHLIGHT_MAX_UPLOAD_BYTES", 8 * 1024**3),
             maximum_workers=min(4, _positive_int("HIGHLIGHT_MAX_WORKERS", 1)),
             access_token=os.environ.get("HIGHLIGHT_ACCESS_TOKEN", "").strip(),
+            allow_private_model_endpoints=_boolean("HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS", False),
             maximum_storage_bytes=_positive_int("HIGHLIGHT_MAX_STORAGE_BYTES", 50 * 1024**3),
             retention_days=_nonnegative_int("HIGHLIGHT_RETENTION_DAYS", 0),
             whisper_model=os.environ.get("HIGHLIGHT_WHISPER_MODEL", "").strip(),
@@ -172,12 +186,35 @@ class Settings:
             # speaker-based editing, unless explicitly configured otherwise.
             sensevoice_diarization=_boolean("HIGHLIGHT_SENSEVOICE_DIARIZATION", False),
             speech_model_cache=Path(os.environ.get("HIGHLIGHT_SPEECH_MODEL_CACHE", data_root / "models")).resolve(),
+            recognition_enabled=_boolean("HIGHLIGHT_RECOGNITION_V4", True),
+            recognition_profile=(os.environ.get("HIGHLIGHT_RECOGNITION_PROFILE", "auto").strip().lower() or "auto"),
+            recognition_model_cache=Path(os.environ.get("HIGHLIGHT_RECOGNITION_MODEL_CACHE", data_root / "models" / "recognition")).resolve(),
+            recognition_worker_python=os.environ.get("HIGHLIGHT_RECOGNITION_PYTHON", "").strip(),
+            recognition_text_model=os.environ.get("HIGHLIGHT_TEXT_EMBEDDING_MODEL", "intfloat/multilingual-e5-base").strip(),
+            recognition_siglip_model=os.environ.get("HIGHLIGHT_SIGLIP_MODEL", "google/siglip2-base-patch16-224").strip(),
+            recognition_clap_model=os.environ.get("HIGHLIGHT_CLAP_MODEL", "laion/clap-htsat-fused").strip(),
+            recognition_grounding_model=os.environ.get("HIGHLIGHT_GROUNDING_MODEL", "IDEA-Research/grounding-dino-tiny").strip(),
+            recognition_yunet_model=Path(os.environ.get("HIGHLIGHT_YUNET_MODEL", data_root / "models" / "recognition" / "face_detection_yunet_2023mar.onnx")).resolve(),
+            recognition_sface_model=Path(os.environ.get("HIGHLIGHT_SFACE_MODEL", data_root / "models" / "recognition" / "face_recognition_sface_2021dec.onnx")).resolve(),
+            recognition_ocr_enabled=_boolean("HIGHLIGHT_OCR_ENABLED", True),
+            content_search_dialogue_v2=_boolean("CONTENT_SEARCH_DIALOGUE_V2", True),
+            active_speaker_mode=(os.environ.get("HIGHLIGHT_ACTIVE_SPEAKER_MODE", "primary").strip().lower() or "primary"),
+            talknet_worker_python=os.environ.get("HIGHLIGHT_TALKNET_PYTHON", "").strip(),
+            talknet_worker_script=os.environ.get("HIGHLIGHT_TALKNET_WORKER", str(ROOT / "tools" / "talknet_worker.py")).strip(),
+            talknet_repository=os.environ.get("HIGHLIGHT_TALKNET_REPOSITORY", "").strip(),
+            talknet_checkpoint=os.environ.get("HIGHLIGHT_TALKNET_CHECKPOINT", "").strip(),
+            talknet_device=os.environ.get("HIGHLIGHT_TALKNET_DEVICE", "cuda:0").strip(),
+            talknet_timeout_seconds=_positive_float("HIGHLIGHT_TALKNET_TIMEOUT_SECONDS", 900.0),
         )
 
     def ensure_directories(self) -> None:
         for child in ("jobs", "uploads", "work", "outputs", "kept", "cache", "models"):
             (self.data_root / child).mkdir(parents=True, exist_ok=True)
         self.speech_model_cache.mkdir(parents=True, exist_ok=True)
+        self.recognition_model_cache.mkdir(parents=True, exist_ok=True)
+
+    def validate_deployment_security(self) -> None:
+        validate_deployment_access(self.host, self.access_token)
 
     def validate_vision(self) -> None:
         missing = [name for name, value in (

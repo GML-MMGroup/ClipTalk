@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import json
+import copy
 import tempfile
 import unittest
 import httpx
@@ -14,13 +15,35 @@ from unittest.mock import MagicMock, patch
 
 from app.ark_client import ArkRequestError, ArkVisionClient, OpenAICompatibleVisionClient, parse_json_object
 from app.config import Settings
+from app.editing_techniques import (
+    composition_effective_duration,
+    plan_editing_techniques,
+    source_duration_meets_minimum,
+    source_pieces,
+)
+from app.editing_intent import (
+    apply_user_feedback_to_brief,
+    candidate_requirement_alignment,
+    compile_editing_intent,
+    evaluate_sequence_against_intent,
+)
+from app.composition_review import (
+    calibrate_review_report,
+    apply_review_repairs,
+    composition_review_timeline,
+    normalize_review_report,
+    rendered_visual_metrics,
+    review_improved,
+)
 from app.vision_settings import LlmConfigurationStore, VisionConfigurationStore, discover_llm_models, discover_models
 from app.main import (
     analysis_cache_reuse_allowed,
     apply_timeline_history_state,
     automatic_composition_signature,
     automatic_composition_similarity,
+    build_output_editing_explanation,
     distinct_event_replacement_plans,
+    _content_selection_fidelity,
     _normalise_edit_plans,
     _edit_plan_candidates,
     _semantic_safe_selections,
@@ -36,17 +59,25 @@ from app.main import (
     structured_progress,
 )
 from app.media import (
+    MediaError,
+    SampledFrame,
     create_preview_proxy,
     create_timeline_thumbnail_sprite,
     extract_audio_waveform,
     extract_frames_at_times,
     extract_uniform_frames,
+    exclusive_render_duration,
     probe_video,
     render_clip,
     render_composition,
+    snapshot_sampled_frames,
     silence_intervals_from_waveform,
+    validate_uniform_frame_coverage,
+    validate_video_decodable_coverage,
     validate_rendered_clip,
 )
+from app.subtitle_review import output_fingerprints, save_draft
+from app.event_groups import build_final_reel
 from app.pipeline import (
     HighlightCandidate,
     HighlightPipeline,
@@ -55,11 +86,15 @@ from app.pipeline import (
     _refined_candidate,
     candidate_text_similarity,
     coarse_frame_limit,
+    coarse_priority_times,
+    merge_priority_frames,
     overlaps_ranges,
     recommended_candidate_indices,
     refinement_window_seconds,
     refinement_candidate_limit,
     speech_signal_candidates,
+    visual_change_candidates,
+    waveform_hotspot_candidates,
     select_non_overlapping,
     touches_refinement_boundary,
     clean_model_evidence,
@@ -92,6 +127,42 @@ import app.main as main_module
 
 
 class ProgressEtaTests(unittest.TestCase):
+    def test_content_speech_worker_counts_are_exposed_during_finalization(self) -> None:
+        progress = main_module._content_speech_progress_snapshot(None, 40, 40, "finalizing")
+        self.assertEqual(progress["completed"], 40)
+        self.assertEqual(progress["total"], 40)
+        self.assertEqual(progress["progress_mode"], "finalizing")
+        self.assertEqual(progress["eta_mode"], "finalizing")
+        self.assertIn("40/40", progress["detail"])
+
+        facts = main_module.progress_facts_snapshot({
+            "status": "running",
+            "stage": "content_transcription",
+            "progress": progress["value"],
+            "stageProgress": 1.0,
+            "stageCompleted": progress["completed"],
+            "stageTotal": progress["total"],
+            "stageUnit": progress["unit"],
+            "progressMode": progress["progress_mode"],
+            "etaMode": progress["eta_mode"],
+        })
+        self.assertEqual(facts["stage"]["mode"], "finalizing")
+        self.assertIsNone(facts["stage"]["fraction"])
+        self.assertEqual(facts["stage"]["completed"], 40)
+        self.assertEqual(facts["stage"]["total"], 40)
+
+    def test_content_speech_worker_reports_measured_batch_progress(self) -> None:
+        progress = main_module._content_speech_progress_snapshot(.5, 20, 40, "recognizing_measured")
+        self.assertEqual(progress["progress_mode"], "determinate")
+        self.assertEqual(progress["completed"], 20)
+        self.assertEqual(progress["total"], 40)
+        self.assertIn("20/40", progress["detail"])
+
+    def test_content_speech_worker_exposes_queue_position(self) -> None:
+        progress = main_module._content_speech_progress_snapshot(None, None, None, "queued:2:4")
+        self.assertEqual(progress["progress_mode"], "indeterminate")
+        self.assertIn("队列第 2/4", progress["detail"])
+
     def test_speech_finalizing_does_not_invent_a_percentage(self) -> None:
         facts = structured_progress(
             {
@@ -225,31 +296,6 @@ class JsonParsingTests(unittest.TestCase):
         self.assertFalse(ArkRequestError("bad request").retryable)
 
 
-class RuntimeConfigurationTests(unittest.TestCase):
-    def test_media_tools_are_discovered_from_path(self) -> None:
-        def resolve(command: str) -> str | None:
-            return {
-                "ffmpeg": "/opt/media/bin/ffmpeg",
-                "ffprobe": "/opt/media/bin/ffprobe",
-            }.get(command)
-
-        with patch.dict(os.environ, {}, clear=True), patch("app.config.shutil.which", side_effect=resolve):
-            settings = Settings.from_environment()
-
-        self.assertEqual(settings.ffmpeg, "/opt/media/bin/ffmpeg")
-        self.assertEqual(settings.ffprobe, "/opt/media/bin/ffprobe")
-
-    def test_explicit_media_tool_path_takes_precedence(self) -> None:
-        with patch.dict(os.environ, {
-            "FFMPEG_BIN": "/custom/ffmpeg",
-            "FFPROBE_BIN": "/custom/ffprobe",
-        }, clear=True), patch("app.config.shutil.which", return_value=None):
-            settings = Settings.from_environment()
-
-        self.assertEqual(settings.ffmpeg, "/custom/ffmpeg")
-        self.assertEqual(settings.ffprobe, "/custom/ffprobe")
-
-
 class ChatTimeRangeTests(unittest.TestCase):
     def test_parses_seconds_and_clock_ranges(self) -> None:
         self.assertEqual(parse_absolute_time_range("把 00:10 到 00:20 合成"), {"start": 10.0, "end": 20.0})
@@ -298,6 +344,30 @@ class EditPlanTests(unittest.TestCase):
         self.assertEqual({row["id"] for row in rows}, {"segment_1", "segment_2"})
         self.assertEqual({row["candidateId"] for row in rows}, {"segment_1", "segment_2"})
 
+    def test_manual_technique_plan_never_deletes_selected_shots(self) -> None:
+        segments = [
+            {"id": "talk", "start": 0, "end": 10, "hasSpeech": True, "role": "上下文"},
+            {"id": "action", "start": 12, "end": 32, "hasSpeech": False, "role": "过程"},
+            {"id": "climax", "start": 35, "end": 45, "role": "高潮"},
+        ]
+        plan = plan_editing_techniques(
+            segments, target_seconds=20, policy={"preset": "attraction"}, manual_selection=True,
+        )
+        self.assertEqual([item["id"] for item in plan["segments"]], ["talk", "action", "climax"])
+        self.assertEqual(plan["segments"][0]["playbackRate"], 1.0)
+        self.assertEqual(plan["segments"][2]["playbackRate"], 1.0)
+        self.assertGreater(plan["segments"][1]["playbackRate"], 1.0)
+        self.assertEqual(plan["durationStatus"], "over_target")
+        self.assertIn("手动选择不会被自动删除", "".join(plan["warnings"]))
+
+    def test_silence_compression_and_speed_change_effective_duration(self) -> None:
+        segment = {
+            "id": "action", "start": 0, "end": 10, "playbackRate": 1.25,
+            "silenceCuts": [{"start": 3, "end": 5, "retained": .2}],
+        }
+        self.assertEqual(source_pieces(segment), [{"start": 0.0, "end": 3.2}, {"start": 5.0, "end": 10.0}])
+        self.assertAlmostEqual(composition_effective_duration([segment]), 6.56, places=2)
+
     def test_normalise_edit_plan_clamps_subrange_and_rejects_overlap(self) -> None:
         rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
         plans = _normalise_edit_plans({"plans": [{"label": "测试", "sequence": [
@@ -307,7 +377,8 @@ class EditPlanTests(unittest.TestCase):
         self.assertEqual(len(plans), 1)
         self.assertEqual(len(plans[0]["sequence"]), 2)
         self.assertEqual(plans[0]["sequence"][0]["start"], 10.0)
-        self.assertAlmostEqual(plans[0]["estimatedDuration"], 20.0, places=2)
+        self.assertAlmostEqual(plans[0]["sourceDuration"], 20.0, places=2)
+        self.assertAlmostEqual(plans[0]["estimatedDuration"], 19.78, places=2)
 
     def test_edit_plan_prompt_requires_local_subranges(self) -> None:
         prompt = llm_edit_plan_prompt(content_profile={}, theme="情绪", target_seconds=60, scope="selected_only", selected_group_ids=["event_1"], variants=["叙事完整版"], candidates=[], transcript_context="")
@@ -331,6 +402,22 @@ class EditPlanTests(unittest.TestCase):
         ]}]}, rows, scope="selected_only", selected_group_ids=["event_1"], target=None, speech_segments=speech)
         segment = plans[0]["sequence"][0]
         self.assertEqual((segment["start"], segment["end"]), (12.0, 27.0))
+
+    def test_edit_plan_keeps_story_and_speech_evidence_for_later_validation(self) -> None:
+        self.job["eventGroups"][0]["segments"][0].update({
+            "candidateIndex": 7, "semanticUnitId": "story_7", "storyFunction": "结果",
+            "requiresCandidateIndices": [6], "standalone": False, "hasSpeech": True,
+            "speechUnits": [{"start": 10, "end": 20, "text": "完整结论"}],
+        })
+        rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
+        plans = _normalise_edit_plans({"plans": [{"label": "测试", "sequence": [
+            {"candidate_id": "segment_1", "source_start": 10, "source_end": 20, "role": "result"},
+        ]}]}, rows, scope="selected_only", selected_group_ids=["event_1"], target=None)
+        segment = plans[0]["sequence"][0]
+        self.assertEqual(segment["candidateIndex"], 7)
+        self.assertEqual(segment["semanticUnitId"], "story_7")
+        self.assertTrue(segment["hasSpeech"])
+        self.assertEqual(segment["requiresCandidateIndices"], [6])
 
     def test_final_edl_removes_whole_shot_instead_of_cutting_speech(self) -> None:
         segments = [
@@ -366,6 +453,46 @@ class EditPlanTests(unittest.TestCase):
         self.assertEqual(optimized["eventCount"], 2)
         self.assertEqual(optimized["actualDuration"], 20.0)
         self.assertTrue(optimized["qualityReport"]["passed"])
+
+    def test_final_edl_never_semantically_deduplicates_user_confirmed_segments(self) -> None:
+        segments = [
+            {"id": "a", "candidateId": "m1", "semanticUnitId": "chapter_0000",
+             "userConfirmed": True, "start": 0, "end": 5, "score": 90},
+            {"id": "b", "candidateId": "m2", "semanticUnitId": "chapter_0000",
+             "userConfirmed": True, "start": 10, "end": 15, "score": 80},
+        ]
+        optimized = optimize_edl(
+            segments, target_seconds=None, order_mode="source", allow_fill=False,
+            video_duration=20,
+        )
+        self.assertEqual(optimized["shotCount"], 2)
+        self.assertEqual(
+            [item["candidateId"] for item in optimized["segments"]], ["m1", "m2"],
+        )
+        self.assertEqual(optimized["semanticDeduplication"], [])
+
+    def test_content_selection_fidelity_counts_merged_confirmed_ranges(self) -> None:
+        fidelity = _content_selection_fidelity([{"segments": [
+            {"candidateId": "m1", "contributingMatchIds": ["m1", "m2"]},
+            {"candidateId": "m3"},
+        ]}], ["m1", "m2", "m3"])
+        self.assertTrue(fidelity["passed"])
+        self.assertEqual(fidelity["renderedCount"], 3)
+
+        missing = _content_selection_fidelity(
+            [{"segments": [{"candidateId": "m1"}]}], ["m1", "m2"],
+        )
+        self.assertFalse(missing["passed"])
+        self.assertEqual(missing["missingMatchIds"], ["m2"])
+
+    def test_safe_boundary_optimization_preserves_merged_content_match_ids(self) -> None:
+        job = {"videoInfo": {"duration": 30}, "request": {}}
+        selections, _ = _semantic_safe_selections(job, [{"segments": [
+            {"candidateId": "m1", "contributingMatchIds": ["m1", "m2"], "start": 0, "end": 5},
+            {"candidateId": "m3", "start": 5, "end": 10},
+        ]}], order_mode="source", target_seconds=None, allow_fill=False)
+        fidelity = _content_selection_fidelity(selections, ["m1", "m2", "m3"])
+        self.assertTrue(fidelity["passed"])
 
     def test_final_edl_reports_when_only_one_event_can_fill_target(self) -> None:
         selected = [{
@@ -444,7 +571,109 @@ class EditPlanTests(unittest.TestCase):
         self.assertAlmostEqual(validated[0]["actualDuration"], 42.6, places=2)
 
 
+class CompositionReviewTests(unittest.TestCase):
+    def test_review_timeline_maps_source_to_rendered_time(self) -> None:
+        timeline = composition_review_timeline([
+            {"id": "s1", "start": 10, "end": 14, "playbackRate": 1.0},
+            {"id": "s2", "start": 30, "end": 35, "playbackRate": 1.25,
+             "transitionIn": {"type": "dissolve", "duration": .2}},
+        ], [{"start": 10.5, "end": 12, "speaker": "A", "text": "完整表达"}])
+        self.assertEqual(len(timeline["segments"]), 2)
+        self.assertEqual(timeline["segments"][0]["transcript"][0]["text"], "完整表达")
+        self.assertAlmostEqual(timeline["segments"][1]["outputStart"], 3.8, places=2)
+        self.assertAlmostEqual(timeline["duration"], 7.8, places=2)
+
+    def test_review_report_merges_scores_and_limits_actions(self) -> None:
+        report = normalize_review_report(
+            {"scores": {"continuity": 55}, "issues": [{
+                "id": "v1", "severity": "major", "category": "continuity",
+                "segmentIds": ["s2"], "description": "动作跳切", "evidence": "切点前后动作不连续",
+            }]},
+            {"overallScore": 68, "scores": {"content": 80}, "repairActions": [
+                {"type": "set_transition", "segmentId": "s2", "transitionIn": {"type": "dissolve", "duration": .2}, "reason": "缓冲时空跳跃"},
+                {"type": "invent_clip", "segmentId": "s2"},
+            ]},
+        )
+        self.assertEqual(report["overallScore"], 68)
+        self.assertEqual(report["majorCount"], 1)
+        self.assertEqual(report["repairActions"][0]["type"], "set_transition")
+        self.assertEqual(len(report["repairActions"]), 1)
+
+    def test_repairs_are_constrained_to_candidate_boundaries(self) -> None:
+        segments = [
+            {"id": "s1", "candidateId": "c1", "start": 10, "end": 15, "role": "发展"},
+            {"id": "s2", "candidateId": "c2", "start": 20, "end": 25, "role": "人物反应"},
+        ]
+        candidates = [
+            {"id": "c1", "start": 9, "end": 16, "minimumKeepSeconds": 2},
+            {"id": "c2", "start": 19, "end": 26, "minimumKeepSeconds": 2},
+        ]
+        repaired = apply_review_repairs(segments, [
+            {"type": "adjust_bounds", "segmentId": "s1", "start": 5, "end": 18, "reason": "补完整动作"},
+            {"type": "set_speed", "segmentId": "s2", "playbackRate": 1.25, "reason": "压缩反应"},
+        ], candidates)
+        self.assertEqual(repaired["segments"][0]["start"], 9)
+        self.assertEqual(repaired["segments"][0]["end"], 16)
+        self.assertEqual(len(repaired["appliedActions"]), 1)
+        self.assertEqual(repaired["rejectedActions"][0]["rejectedReason"], "对白、高潮、反应或结尾镜头禁止自动变速")
+
+    def test_review_can_insert_a_real_unused_candidate(self) -> None:
+        repaired = apply_review_repairs(
+            [{"id": "s1", "candidateId": "c1", "start": 1, "end": 4}],
+            [{"type": "insert_segment", "replacementCandidateId": "c2", "afterSegmentId": "s1", "reason": "补充结果"}],
+            [
+                {"id": "c1", "start": 1, "end": 4, "minimumKeepSeconds": 1},
+                {"id": "c2", "start": 8, "end": 12, "minimumKeepSeconds": 2, "storyFunction": "结果"},
+            ],
+        )
+        self.assertEqual([item["candidateId"] for item in repaired["segments"]], ["c1", "c2"])
+        self.assertEqual(len(repaired["appliedActions"]), 1)
+
+    def test_repair_is_only_preferred_for_real_improvement(self) -> None:
+        before = {"overallScore": 72, "criticalCount": 0, "majorCount": 2}
+        self.assertTrue(review_improved(before, {"overallScore": 75, "criticalCount": 0, "majorCount": 2}))
+        self.assertTrue(review_improved(before, {"overallScore": 72, "criticalCount": 0, "majorCount": 1}))
+        self.assertFalse(review_improved(before, {"overallScore": 74, "criticalCount": 1, "majorCount": 1}))
+
+    def test_review_score_is_calibrated_by_rendered_media_failures(self) -> None:
+        report = normalize_review_report(
+            {"scores": {key: 90 for key in ("content", "narrative", "rhythm", "continuity", "audiovisual", "goalMatch")}},
+            {"overallScore": 96, "scores": {"content": 95}},
+        )
+        calibrated = calibrate_review_report(report, media_evidence={
+            "audioMetrics": {"issues": [{"severity": "major", "category": "audio_cut", "description": "突变"}]},
+            "visualMetrics": {"blackFrameRatio": .12, "freezePairRatio": 0},
+        }, target_seconds=30, actual_seconds=15)
+        self.assertLess(calibrated["overallScore"], calibrated["modelOverallScore"])
+        self.assertEqual(calibrated["calibrationVersion"], "composition-calibration-v3-user-intent")
+        self.assertGreaterEqual(calibrated["majorCount"], 2)
+
+
 class PublicJobPayloadTests(unittest.TestCase):
+    def test_output_explanation_traces_selection_order_timing_and_quality(self) -> None:
+        job = {
+            "request": {"theme": "人物反应", "totalTargetSeconds": 30},
+            "brief": {"focus": ["人物反应"], "excludeRules": ["片头广告"]},
+            "eventGroups": [{"id": "e1", "title": "关键回应"}],
+        }
+        output = {
+            "title": "情绪集中版", "displayName": "情绪集中版",
+            "strategyDescription": "优先保留情绪高点", "duration": 28.4,
+            "targetSeconds": 30, "durationStatus": "on_target", "eventGroupIds": ["e1"],
+            "segments": [
+                {"id": "s1", "groupId": "e1", "start": 10, "end": 16, "role": "事件建立", "reason": "交代人物与现场"},
+                {"id": "s2", "groupId": "e1", "start": 20, "end": 28, "role": "人物反应", "reason": "保留情绪变化", "hasSpeech": True, "speechBoundaryStatus": "complete"},
+            ],
+            "qualityReport": {"score": 88, "passed": True, "userIntent": {"score": 91}},
+        }
+        explanation = build_output_editing_explanation(job, output, {"recommended": True})
+        self.assertEqual(explanation["selection"]["eventTitles"], ["关键回应"])
+        self.assertEqual(explanation["selection"]["shotCount"], 2)
+        self.assertEqual(explanation["ordering"]["label"], "按源视频时间顺序")
+        self.assertEqual(explanation["duration"]["statusLabel"], "已进入目标区间")
+        self.assertEqual(explanation["quality"]["score"], 88)
+        self.assertEqual(len(explanation["shots"]), 2)
+
     def test_new_jobs_snapshot_both_model_roles_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.mp4"
@@ -483,6 +712,26 @@ class PublicJobPayloadTests(unittest.TestCase):
         self.assertNotIn("autoPlans", status)
         self.assertEqual(status["autoComposition"]["currentVersionProgress"], .26)
         self.assertEqual(status["autoComposition"]["renderedSeconds"], 7.8)
+
+    def test_public_preview_output_uses_sample_directly_and_stays_marked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.touch()
+            job = main_module.new_job_record(
+                job_id="job_preview", source=source, filename="source.mp4",
+                size=0, count="auto", target_seconds="auto", theme="",
+            )
+            job["outputDirectory"] = str(root)
+            job["outputVersions"] = [{
+                "id": "v001", "number": 1, "previewOnly": True,
+                "outputs": [{"filename": "sample.mp4", "title": "AI 样片", "previewOnly": True}],
+            }]
+            visible = main_module.public_job(job)
+        output = visible["outputVersions"][0]["outputs"][0]
+        self.assertTrue(output["previewOnly"])
+        self.assertTrue(output["previewReady"])
+        self.assertEqual(output["previewUrl"], "/api/jobs/job_preview/outputs/sample.mp4")
 
     def test_accepts_literal_control_character_in_json_string(self) -> None:
         parsed = parse_json_object('{"reason":"line one\nline two"}')
@@ -684,7 +933,7 @@ class PromptContractTests(unittest.TestCase):
             content_profile=profile, theme="人物反应", requested_count=1,
             total_target_seconds=30, transcript_available=False,
         )
-        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v9-semantic-boundaries"))
+        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v12-evidence-graph"))
         self.assertIn("不得虚构", COMMON_SYSTEM_PROMPT)
         self.assertIn('"primary_type"', classification)
         self.assertIn('"center_seconds"', discovery)
@@ -693,18 +942,86 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn('"boundary_confidence"', refinement)
         self.assertIn('"event_groups"', director)
         self.assertIn("START、PEAK、END", director)
+        self.assertIn("requires_candidate_indices", director)
+
+
+class EditingIntentTests(unittest.TestCase):
+    def test_chat_feedback_becomes_durable_constraints(self) -> None:
+        brief, changes = apply_user_feedback_to_brief(
+            {"focus": ["人物反应"]},
+            "开头太慢，不要片头广告，必须保留医生结论，目标控制在45秒，保持原顺序",
+        )
+        self.assertEqual(brief["targetDurationSeconds"], 45)
+        self.assertIn("片头广告", brief["excludeRules"])
+        self.assertIn("医生结论", brief["includeRules"])
+        self.assertEqual(brief["style"]["pace"], "紧凑")
+        self.assertFalse(brief["style"]["allowReorder"])
+        self.assertGreaterEqual(len(changes), 4)
+
+    def test_intent_filters_exclusions_and_requires_explicit_keep(self) -> None:
+        intent = compile_editing_intent({
+            "targetDurationSeconds": 10,
+            "includeRules": ["医生结论"],
+            "excludeRules": ["广告"],
+        }, {})
+        self.assertTrue(candidate_requirement_alignment({"title": "片头广告"}, intent)["hardRejected"])
+        missing = evaluate_sequence_against_intent([
+            {"id": "s1", "start": 0, "end": 10, "title": "普通介绍", "speechBoundaryStatus": "complete"},
+        ], intent)
+        self.assertIn("医生结论", missing["missingIncludeRules"])
+        self.assertFalse(missing["passed"])
+        covered = evaluate_sequence_against_intent([
+            {"id": "s2", "start": 0, "end": 10, "title": "医生结论", "speechBoundaryStatus": "complete"},
+        ], intent)
+        self.assertTrue(covered["passed"])
 
     def test_adaptive_sampling_bounds_typical_vlm_round_trips(self) -> None:
         frames = coarse_frame_limit(263)
         refined = refinement_candidate_limit(
             discovery_only=True, total_target_seconds=30, target_seconds=8, count=6,
+            video_duration=263,
         )
         discovery_pages = math.ceil(frames / 16)
         base_calls = 1 + discovery_pages + refined + 1
         self.assertEqual(frames, 48)
-        self.assertEqual(refined, 5)
+        self.assertEqual(refined, 4)
         # Only the two strongest candidates may request a second boundary pass.
-        self.assertLessEqual(base_calls + 2, 12)
+        self.assertLessEqual(base_calls + 2, 15)
+
+    def test_long_video_sampling_uses_duration_tiers(self) -> None:
+        self.assertEqual(coarse_frame_limit(600), 72)
+        self.assertEqual(coarse_frame_limit(601), 96)
+        self.assertEqual(coarse_frame_limit(1801), 120)
+        self.assertEqual(coarse_frame_limit(3601), 150)
+        self.assertEqual(coarse_frame_limit(7201), 180)
+        self.assertEqual(coarse_frame_limit(9002), 180)
+
+    def test_priority_sampling_combines_global_evidence_within_budget(self) -> None:
+        duration = 9000.0
+        times = coarse_priority_times(
+            duration=duration,
+            frame_budget=180,
+            scene_cuts=[100, 2000, 4000, 6000, 8000],
+            waveform={"rms": [.1, .9, .2, .8, .1, .7, .2, .6]},
+            speech_segments=[
+                {"start": 500, "end": 510},
+                {"start": 4500, "end": 4510},
+                {"start": 8500, "end": 8510},
+            ],
+        )
+        self.assertLessEqual(len(times), 45)
+        self.assertTrue(any(value < 1000 for value in times))
+        self.assertTrue(any(value > 8000 for value in times))
+
+    def test_priority_frames_replace_nearest_uniform_frames_without_growing_budget(self) -> None:
+        uniform = [SampledFrame(Path(f"u-{index}.jpg"), index * 10.0) for index in range(10)]
+        priority = [SampledFrame(Path("p-1.jpg"), 23.0), SampledFrame(Path("p-2.jpg"), 77.0)]
+        merged = merge_priority_frames(uniform, priority)
+        self.assertEqual(len(merged), len(uniform))
+        self.assertEqual(merged[0].time, 0.0)
+        self.assertEqual(merged[-1].time, 90.0)
+        self.assertIn(23.0, [item.time for item in merged])
+        self.assertIn(77.0, [item.time for item in merged])
 
 
 class SenseVoiceParsingTests(unittest.TestCase):
@@ -978,6 +1295,182 @@ class EventGroupEditingTests(unittest.TestCase):
                 main_module.job_store = original_store
 
 
+class ConversationalEditProposalTests(unittest.TestCase):
+    def _job(self, job_id: str) -> dict:
+        segment_1 = {
+            "id": "shot_1", "start": 10.0, "end": 15.0, "duration": 5.0,
+            "role": "开场", "score": 86, "essential": True,
+        }
+        segment_2 = {
+            "id": "shot_2", "start": 20.0, "end": 26.0, "duration": 6.0,
+            "role": "发展", "score": 82,
+        }
+        group = main_module.recalculate_event_group({
+            "id": "event_1", "title": "原事件",
+            "segments": [segment_1, segment_2],
+            "availableSegments": [copy.deepcopy(segment_1), copy.deepcopy(segment_2)],
+        })
+        return {
+            "id": job_id, "taskMode": "highlight", "status": "awaiting_confirmation",
+            "stage": "review", "progress": 1.0, "detail": "等待确认", "filename": "test.mp4",
+            "sourcePath": f"/tmp/{job_id}/source.mp4", "workDirectory": f"/tmp/{job_id}/work",
+            "outputDirectory": f"/tmp/{job_id}/outputs",
+            "videoInfo": {"duration": 60}, "eventGroups": [group],
+            "recommendedGroupIds": ["event_1"], "confirmedSegmentIds": {"event_1": ["shot_1", "shot_2"]},
+            "candidates": [], "recommendedIndices": [], "reviewExcludedCandidates": [],
+            "contentSearch": {}, "messages": [], "request": {},
+            "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+
+    def test_proposal_previews_then_applies_atomically_and_can_be_undone(self) -> None:
+        job_id = "job_conversational_proposal"
+        main_module.jobs[job_id] = self._job(job_id)
+        decision = {
+            "answer": "缩短开场并调整顺序。",
+            "editProposal": {
+                "title": "收紧开场",
+                "summary": "把开场收紧一秒，再把发展镜头放到前面。",
+                "operations": [
+                    {"type": "adjust_range", "targetType": "segment", "groupId": "event_1", "segmentId": "shot_1", "start": 11, "end": 15},
+                    {"type": "reorder_segments", "groupId": "event_1", "segmentIds": ["shot_2", "shot_1"]},
+                ],
+            },
+        }
+        try:
+            with patch.object(main_module, "save_job"):
+                response = main_module.create_edit_proposal(
+                    job_id, "开场短一点，第二个镜头放前面", decision,
+                    {"playheadSeconds": 12.0, "viewer": {"kind": "segment", "segmentId": "shot_1"}},
+                )
+                proposal = response["job"]["pendingEditProposal"]
+                self.assertNotIn("_previewWorkspace", proposal)
+                self.assertEqual(main_module.jobs[job_id]["eventGroups"][0]["segments"][0]["start"], 10.0)
+                self.assertTrue(proposal["preview"]["ranges"])
+                self.assertEqual(
+                    [item["segmentId"] for item in proposal["preview"]["schedule"]],
+                    ["shot_2", "shot_1"],
+                )
+                self.assertEqual(proposal["preview"]["schedule"][0]["outputStart"], 0.0)
+                self.assertEqual(proposal["preview"]["totalOutputDuration"], 10.0)
+                self.assertEqual(proposal["preview"]["durationBefore"], 11.0)
+                self.assertEqual(proposal["preview"]["durationAfter"], 10.0)
+
+                main_module.apply_edit_proposal(job_id, proposal["id"])
+                group = main_module.jobs[job_id]["eventGroups"][0]
+                self.assertEqual([item["id"] for item in group["segments"]], ["shot_2", "shot_1"])
+                self.assertEqual(group["segments"][1]["start"], 11.0)
+                self.assertEqual(main_module.jobs[job_id]["timelineUndo"][-1]["target"], "editorialWorkspace")
+
+                main_module.undo_job_timeline(job_id)
+                restored = main_module.jobs[job_id]["eventGroups"][0]
+                self.assertEqual([item["id"] for item in restored["segments"]], ["shot_1", "shot_2"])
+                self.assertEqual(restored["segments"][0]["start"], 10.0)
+        finally:
+            main_module.jobs.pop(job_id, None)
+
+    def test_cancel_keeps_workspace_and_stale_proposal_cannot_overwrite_changes(self) -> None:
+        job_id = "job_conversational_cancel"
+        main_module.jobs[job_id] = self._job(job_id)
+        decision = {
+            "editProposal": {
+                "title": "选择镜头", "summary": "只保留第一个镜头。",
+                "operations": [{
+                    "type": "select_event_segments", "groupIds": ["event_1"],
+                    "segmentIds": {"event_1": ["shot_1"]},
+                }],
+            },
+        }
+        try:
+            with patch.object(main_module, "save_job"):
+                first = main_module.create_edit_proposal(job_id, "只留第一个", decision, None)
+                main_module.cancel_edit_proposal(job_id, first["proposalId"])
+                self.assertEqual(main_module.jobs[job_id]["confirmedSegmentIds"]["event_1"], ["shot_1", "shot_2"])
+
+                second = main_module.create_edit_proposal(job_id, "只留第一个", decision, None)
+                main_module.jobs[job_id]["confirmedSegmentIds"]["event_1"] = ["shot_2"]
+                with self.assertRaises(main_module.HTTPException) as raised:
+                    main_module.apply_edit_proposal(job_id, second["proposalId"])
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertEqual(main_module.jobs[job_id]["confirmedSegmentIds"]["event_1"], ["shot_2"])
+        finally:
+            main_module.jobs.pop(job_id, None)
+
+    def test_compose_proposal_rejects_unknown_ids_before_persisting(self) -> None:
+        job_id = "job_conversational_invalid_compose"
+        main_module.jobs[job_id] = self._job(job_id)
+        decision = {"editProposal": {
+            "title": "立即生成", "summary": "生成不存在的事件。",
+            "operations": [{
+                "type": "compose", "groupIds": ["invented_event"],
+                "outputMode": "single_reel", "orderMode": "selection",
+            }],
+        }}
+        try:
+            with patch.object(main_module, "save_job"), self.assertRaises(main_module.HTTPException) as raised:
+                main_module.create_edit_proposal(job_id, "生成这个", decision, None)
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertNotIn("pendingEditProposal", main_module.jobs[job_id])
+            self.assertEqual(main_module.jobs[job_id]["recommendedGroupIds"], ["event_1"])
+        finally:
+            main_module.jobs.pop(job_id, None)
+
+    def test_content_proposal_builds_one_output_time_track_per_export(self) -> None:
+        job_id = "job_content_proposal_schedule"
+        job = self._job(job_id)
+        job.update({
+            "taskMode": "content_extract", "status": "awaiting_content_confirmation",
+            "eventGroups": [], "recommendedGroupIds": [], "confirmedSegmentIds": {},
+            "contentSearch": {
+                "id": "search_1", "defaultSelectedIds": ["match_1", "match_2"],
+                "candidates": [
+                    {"id": "match_1", "title": "后出现", "start": 20, "end": 24},
+                    {"id": "match_2", "title": "先出现", "start": 5, "end": 8},
+                ],
+            },
+        })
+        main_module.jobs[job_id] = job
+        decision = {"editProposal": {
+            "title": "分别导出", "summary": "每段单独输出。",
+            "operations": [{
+                "type": "compose", "matchIds": ["match_1", "match_2"],
+                "outputMode": "separate_events", "orderMode": "selection",
+            }],
+        }}
+        try:
+            with patch.object(main_module, "save_job"):
+                response = main_module.create_edit_proposal(job_id, "分别导出", decision, None)
+            preview = response["job"]["pendingEditProposal"]["preview"]
+            self.assertEqual(preview["outputMode"], "separate_events")
+            self.assertEqual(len(preview["outputs"]), 2)
+            self.assertEqual([item["duration"] for item in preview["outputs"]], [4.0, 3.0])
+            self.assertTrue(all(item["schedule"][0]["outputStart"] == 0 for item in preview["outputs"]))
+            self.assertEqual(preview["totalOutputDuration"], 7.0)
+        finally:
+            main_module.jobs.pop(job_id, None)
+
+    def test_proposal_schedule_uses_speed_and_transition_overlap(self) -> None:
+        job_id = "job_proposal_technique_schedule"
+        main_module.jobs[job_id] = self._job(job_id)
+        decision = {"editProposal": {
+            "title": "加快发展镜头", "summary": "发展镜头加速并叠化进入。",
+            "operations": [{
+                "type": "set_technique", "groupId": "event_1", "segmentId": "shot_2",
+                "playbackRate": 1.5, "transitionType": "dissolve",
+            }],
+        }}
+        try:
+            with patch.object(main_module, "save_job"):
+                response = main_module.create_edit_proposal(job_id, "第二段加速并叠化", decision, None)
+            preview = response["job"]["pendingEditProposal"]["preview"]
+            second = preview["schedule"][1]
+            self.assertEqual(second["playbackRate"], 1.5)
+            self.assertEqual(second["transitionType"], "dissolve")
+            self.assertEqual(second["transitionOverlap"], .35)
+            self.assertEqual(preview["totalOutputDuration"], 8.65)
+        finally:
+            main_module.jobs.pop(job_id, None)
+
+
 class KeptLibraryTests(unittest.TestCase):
     def test_kept_output_survives_job_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1012,7 +1505,7 @@ class KeptLibraryTests(unittest.TestCase):
                 self.assertEqual(kept_media.read_bytes(), b"retained-video")
                 self.assertTrue(kept_metadata.is_file())
                 self.assertTrue(main_module.jobs[job_id]["outputs"][0]["kept"])
-                main_module.delete_job(job_id)
+                main_module._perform_job_deletion(job_id, source="test")
                 self.assertTrue(kept_media.is_file())
                 records = main_module.list_kept_records()
                 self.assertEqual(len(records), 1)
@@ -1023,6 +1516,186 @@ class KeptLibraryTests(unittest.TestCase):
                 main_module.jobs.pop(job_id, None)
                 main_module.settings = original_settings
                 main_module.job_store = original_store
+
+    def test_shared_derived_caches_are_removed_only_after_last_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings = main_module.settings
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            identity = "shared-source-hash"
+            analysis_key = "shared-analysis-key"
+            base = {
+                "status": "completed", "stage": "completed", "taskMode": "content_extract",
+                "sourceHash": identity, "analysisCacheKey": analysis_key,
+                "request": {"analysisMode": "audiovisual", "searchScopeKind": "all"},
+                "videoInfo": {"duration": 30}, "recognitionSchemaVersion": 4,
+            }
+            first = {**base, "id": "job_shared_cache_1"}
+            second = {**base, "id": "job_shared_cache_2"}
+            main_module.jobs[first["id"]] = first
+            main_module.jobs[second["id"]] = second
+            waveform = main_module.waveform_cache_path(identity)
+            waveform.parent.mkdir(parents=True, exist_ok=True)
+            waveform.write_text("{}", encoding="utf-8")
+            analysis = main_module.analysis_cache_path(analysis_key)
+            analysis.write_text("{}", encoding="utf-8")
+            content_directory = main_module.content_index_directory(first)
+            content_directory.mkdir(parents=True)
+            (content_directory / "index.json").write_text("{}", encoding="utf-8")
+            try:
+                main_module.jobs.pop(first["id"])
+                main_module.cleanup_unreferenced_media_cache(first)
+                main_module.cleanup_unreferenced_analysis_cache(first)
+                main_module.cleanup_unreferenced_content_index(first)
+                self.assertTrue(waveform.is_file())
+                self.assertTrue(analysis.is_file())
+                self.assertTrue(content_directory.is_dir())
+
+                main_module.jobs.pop(second["id"])
+                main_module.cleanup_unreferenced_media_cache(second)
+                main_module.cleanup_unreferenced_analysis_cache(second)
+                main_module.cleanup_unreferenced_content_index(second)
+                self.assertFalse(waveform.exists())
+                self.assertFalse(analysis.exists())
+                self.assertFalse(content_directory.exists())
+            finally:
+                main_module.jobs.pop(first["id"], None)
+                main_module.jobs.pop(second["id"], None)
+                main_module.settings = original_settings
+
+    def test_persisted_previous_content_index_is_protected_from_orphan_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings = main_module.settings
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            job = {
+                "id": "job_previous_index", "taskMode": "content_extract",
+                "sourceHash": "source-v2", "recognitionSchemaVersion": 4,
+                "request": {"analysisMode": "audiovisual", "searchScopeKind": "all"},
+                "videoInfo": {"duration": 30},
+                "contentIndex": {"cacheKey": "persisted-old-key"},
+                "contentSearch": {"indexCacheKey": "search-old-key"},
+            }
+            main_module.jobs[job["id"]] = job
+            old_directory = root / "cache" / "content-index-persisted-old-key"
+            search_directory = root / "cache" / "content-index-search-old-key"
+            orphan_directory = root / "cache" / "content-index-no-reference"
+            for path in (old_directory, search_directory, orphan_directory):
+                path.mkdir(parents=True)
+            try:
+                main_module.cleanup_orphaned_media_cache()
+                self.assertTrue(old_directory.is_dir())
+                self.assertTrue(search_directory.is_dir())
+                self.assertFalse(orphan_directory.exists())
+            finally:
+                main_module.jobs.pop(job["id"], None)
+                main_module.settings = original_settings
+
+    def test_finalize_one_off_keeps_formal_output_then_removes_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings = main_module.settings
+            original_store = main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_one_off_test"
+            source = root / "uploads" / f"{job_id}.mp4"
+            work_directory = root / "work" / job_id
+            output_directory = root / "outputs" / job_id
+            work_directory.mkdir(parents=True)
+            output_directory.mkdir(parents=True)
+            source.write_bytes(b"source")
+            filename = "final.mp4"
+            (output_directory / filename).write_bytes(b"formal-video")
+            job = {
+                "id": job_id, "status": "completed", "stage": "completed", "storageMode": "one_off",
+                "filename": "source.mp4", "sourcePath": str(source), "sourceHash": "one-off-source",
+                "workDirectory": str(work_directory), "outputDirectory": str(output_directory),
+                "outputs": [{"filename": filename, "title": "正式成片", "duration": 8, "score": 90}],
+                "outputVersions": [], "messages": [], "request": {},
+                "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
+            }
+            main_module.jobs[job_id] = job
+            main_module.job_store.save(job)
+            try:
+                with patch.object(main_module.render_task_store, "recoverable_job_ids", return_value=set()):
+                    result = main_module.finalize_one_off_job(
+                        job_id, main_module.FinalizeOneOffJobRequest(filenames=[filename]),
+                    )
+                self.assertTrue(result["deleted"])
+                self.assertNotIn(job_id, main_module.jobs)
+                self.assertFalse(source.exists())
+                self.assertFalse(work_directory.exists())
+                self.assertFalse(output_directory.exists())
+                kept_media, kept_metadata = main_module.kept_output_paths(job_id, filename)
+                self.assertEqual(kept_media.read_bytes(), b"formal-video")
+                self.assertTrue(kept_metadata.is_file())
+            finally:
+                main_module.jobs.pop(job_id, None)
+                main_module.settings = original_settings
+                main_module.job_store = original_store
+
+    def test_finalize_one_off_copy_failure_preserves_workspace(self) -> None:
+        job_id = "job_one_off_copy_failure"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            output_directory = root / "outputs"
+            output_directory.mkdir()
+            source.write_bytes(b"source")
+            (output_directory / "final.mp4").write_bytes(b"video")
+            job = {
+                "id": job_id, "status": "completed", "stage": "completed", "storageMode": "one_off",
+                "filename": "source.mp4", "sourcePath": str(source), "sourceHash": job_id,
+                "workDirectory": str(root / "work"), "outputDirectory": str(output_directory),
+                "outputs": [{"filename": "final.mp4", "title": "正式成片", "duration": 8}],
+                "outputVersions": [], "messages": [], "request": {},
+                "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
+            }
+            main_module.jobs[job_id] = job
+            try:
+                with patch.object(main_module.render_task_store, "recoverable_job_ids", return_value=set()), patch.object(
+                    main_module, "save_output_to_kept_library", side_effect=OSError("disk full"),
+                ):
+                    with self.assertRaisesRegex(main_module.HTTPException, "原任务尚未清理"):
+                        main_module.finalize_one_off_job(
+                            job_id, main_module.FinalizeOneOffJobRequest(filenames=["final.mp4"]),
+                        )
+                self.assertIn(job_id, main_module.jobs)
+                self.assertTrue(source.is_file())
+                self.assertTrue((output_directory / "final.mp4").is_file())
+            finally:
+                main_module.jobs.pop(job_id, None)
+
+    def test_finalize_one_off_rejects_preview_only_output(self) -> None:
+        job_id = "job_one_off_preview"
+        job = {
+            "id": job_id, "status": "completed", "stage": "completed", "storageMode": "one_off",
+            "filename": "source.mp4", "sourcePath": "/tmp/missing-source.mp4", "sourceHash": job_id,
+            "workDirectory": "/tmp/missing-work", "outputDirectory": "/tmp/missing-outputs",
+            "outputs": [],
+            "outputVersions": [{
+                "id": "v001", "number": 1, "previewOnly": True, "outputs": [],
+                "previewOutputs": [{"filename": "preview.mp4", "title": "审核样片", "previewOnly": True}],
+            }],
+            "messages": [], "request": {}, "createdAt": "2026-01-01T00:00:00+00:00",
+            "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+        main_module.jobs[job_id] = job
+        try:
+            with patch.object(main_module.render_task_store, "recoverable_job_ids", return_value=set()):
+                with self.assertRaises(main_module.HTTPException) as captured:
+                    main_module.finalize_one_off_job(
+                        job_id, main_module.FinalizeOneOffJobRequest(filenames=["preview.mp4"]),
+                    )
+            self.assertEqual(captured.exception.status_code, 409)
+            self.assertIn("先导出高清成片", str(captured.exception.detail))
+            self.assertIn(job_id, main_module.jobs)
+        finally:
+            main_module.jobs.pop(job_id, None)
 
 
 class ReeditingTests(unittest.TestCase):
@@ -1147,6 +1820,218 @@ class OutputVersionTests(unittest.TestCase):
                 main_module.jobs.pop(job_id, None)
                 main_module.settings, main_module.job_store = original_settings, original_store
 
+    def test_content_extract_render_uses_content_copy_and_exposes_a_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_content_version"
+            job = self._job(root, job_id)
+            job["taskMode"] = "content_extract"
+            job["contentSearch"] = {"orderMode": "source"}
+            job["eventGroups"][0]["segments"][0]["candidateId"] = "match_1"
+            main_module.jobs[job_id] = job
+            main_module.cancel_events[job_id] = main_module.threading.Event()
+            info = MagicMock(duration=20, width=1280, height=720, has_audio=True)
+
+            def fake_render(_source, output, **_kwargs):
+                output.write_bytes(b"content-version")
+                return 5.0
+
+            try:
+                with patch.object(main_module, "probe_video", return_value=info), \
+                     patch.object(main_module, "render_composition", side_effect=fake_render), \
+                     patch.object(main_module, "validate_rendered_clip", return_value=MagicMock(duration=5.0, width=1280, height=720, has_audio=True)), \
+                     patch.object(main_module.output_preview_executor, "submit"):
+                    main_module.run_confirmed_render(
+                        job_id, ["event_1"], "single_reel", order_mode="source",
+                        auto_meta={
+                            "strategyKey": "content_extract", "displayName": "内容剪辑",
+                            "sourceLabel": "找出绿衣哥说话的片段", "matchIds": ["match_1"],
+                        },
+                    )
+                current = main_module.jobs[job_id]
+                self.assertEqual(current["status"], "completed")
+                self.assertEqual(current["detail"], "已将 1 个已确认内容片段合成为 1 条视频")
+                self.assertEqual(current["outputs"][0]["reason"], "由用户审核确认的内容片段按指定顺序合成")
+                self.assertIn("内容视频", current["outputs"][0]["filename"])
+                self.assertNotIn("高光", current["outputs"][0]["filename"])
+                self.assertEqual(current["outputVersions"][-1]["strategyKey"], "content_extract")
+                result_text = next(
+                    item["text"] for item in reversed(current["messages"])
+                    if item.get("kind") == "result"
+                )
+                self.assertIn("按源视频时间顺序将 1 个已确认内容片段合成为 1 条视频", result_text)
+                self.assertNotIn("高光", result_text)
+            finally:
+                main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_requested_subtitles_are_blocked_without_confirmed_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_subtitle_no_dialogue"
+            job = self._job(root, job_id)
+            job["speechAnalysis"] = {"segments": []}
+            main_module.jobs[job_id] = job
+            main_module.cancel_events[job_id] = main_module.threading.Event()
+            info = MagicMock(duration=20, width=1280, height=720, has_audio=True)
+            render_arguments = {}
+
+            def fake_render(_source, output, **kwargs):
+                render_arguments.update(kwargs)
+                output.write_bytes(b"no-dialogue-version")
+                return 5.0
+
+            try:
+                with patch.object(main_module, "probe_video", return_value=info), \
+                     patch.object(main_module, "render_composition", side_effect=fake_render), \
+                     patch.object(main_module, "validate_rendered_clip", return_value=MagicMock(duration=5.0, width=1280, height=720, has_audio=True)), \
+                     patch.object(main_module.output_preview_executor, "submit"):
+                    main_module.run_confirmed_render(
+                        job_id, ["event_1"], "single_reel", subtitle_mode="burn",
+                    )
+                current = main_module.jobs[job_id]
+                self.assertFalse(render_arguments)
+                self.assertIn("必须完成字幕校对", current.get("error", ""))
+                self.assertEqual(current["outputs"][0]["title"], "旧成片")
+            finally:
+                main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_requested_subtitles_remain_enabled_for_overlapping_dialogue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_subtitle_with_dialogue"
+            job = self._job(root, job_id)
+            job["speechAnalysis"] = {"segments": [{"start": 3, "end": 4.5, "text": "这是一段有效对白。"}]}
+            final_reel = build_final_reel(job["eventGroups"], order_mode="source")
+            safe_selections, _ = main_module._semantic_safe_selections(
+                job, [final_reel], order_mode="source", target_seconds=None, allow_fill=False,
+            )
+            draft_id = "sub_1234567890abcdef"
+            save_draft(job["workDirectory"], {
+                "id": draft_id, "jobId": job_id, "status": "confirmed", "revision": 2,
+                "outputFingerprints": output_fingerprints([{"segments": safe_selections[0]["segments"]}]),
+                "globalStyle": {"preset": "clean", "fontSizeRatio": .04, "horizontal": "center", "vertical": "bottom", "offsetXRatio": 0, "offsetYRatio": 0},
+                "cueStyleOverrides": {},
+                "cues": [{"id": "cue_1", "outputIndex": 0, "start": 1, "end": 2.5, "sourceStart": 3, "sourceEnd": 4.5, "text": "人工校正后的对白。", "originalText": "这是一段有效对白。", "suggestionStatus": "none"}],
+            })
+            main_module.jobs[job_id] = job
+            main_module.cancel_events[job_id] = main_module.threading.Event()
+            info = MagicMock(duration=20, width=1280, height=720, has_audio=True)
+            render_arguments = {}
+
+            def fake_render(_source, output, **kwargs):
+                render_arguments.update(kwargs)
+                output.write_bytes(b"dialogue-version")
+                return 5.0
+
+            try:
+                with patch.object(main_module, "probe_video", return_value=info), \
+                     patch.object(main_module, "render_composition", side_effect=fake_render), \
+                     patch.object(main_module, "validate_rendered_clip", return_value=MagicMock(duration=5.0, width=1280, height=720, has_audio=True)), \
+                     patch.object(main_module.output_preview_executor, "submit"):
+                    main_module.run_confirmed_render(
+                        job_id, ["event_1"], "single_reel", subtitle_mode="burn",
+                        subtitle_draft_id=draft_id,
+                    )
+                current = main_module.jobs[job_id]
+                self.assertEqual(current["outputs"][0]["subtitleMode"], "burn")
+                self.assertEqual(current["outputVersions"][-1]["subtitleMode"], "burn")
+                self.assertIsNotNone(render_arguments["subtitle_path"])
+                self.assertEqual(len(render_arguments["subtitle_cues"]), 1)
+                self.assertEqual(render_arguments["subtitle_cues"][0]["text"], "人工校正后的对白。")
+            finally:
+                main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_finalizing_preview_attaches_master_to_same_logical_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_finalize_preview"
+            job = self._job(root, job_id)
+            output_directory = Path(job["outputDirectory"])
+            sample_filename = "v001-01-情绪集中版.mp4"
+            (output_directory / sample_filename).write_bytes(b"review-sample")
+            segments = [{
+                "id": "segment_1", "groupId": "event_1", "start": 2, "end": 7,
+                "duration": 5, "role": "climax", "reason": "保留情绪高点",
+            }]
+            sample_output = {
+                "filename": sample_filename, "title": "情绪集中版", "displayName": "情绪集中版",
+                "duration": 5, "score": 91, "previewOnly": True, "segments": segments,
+            }
+            job.update({
+                "outputs": [sample_output], "currentOutputVersionId": "v001",
+                "outputVersions": [{
+                    "id": "v001", "number": 1, "createdAt": "2026-01-01T00:00:00+00:00",
+                    "previewOnly": True, "strategyKey": "emotion", "displayName": "情绪集中版",
+                    "sourceLabel": "剪辑规划", "strategyDescription": "优先保留情绪高点",
+                    "recommended": True, "outputs": [sample_output],
+                }],
+            })
+            main_module.jobs[job_id] = job
+            main_module.cancel_events[job_id] = main_module.threading.Event()
+            info = MagicMock(duration=20, width=1280, height=720, has_audio=True)
+
+            def fake_render(_source, output, **_kwargs):
+                output.write_bytes(b"high-resolution-master")
+                return 5.0
+
+            try:
+                with patch.object(main_module, "probe_video", return_value=info), \
+                     patch.object(main_module, "render_composition", side_effect=fake_render), \
+                     patch.object(main_module, "validate_rendered_clip", return_value=MagicMock(duration=5.0, width=1280, height=720, has_audio=True)), \
+                     patch.object(main_module.output_preview_executor, "submit"):
+                    main_module.run_confirmed_render(
+                        job_id, [], "single_reel", planned_sequence=segments,
+                        planned_title="情绪集中版", auto_meta={
+                            "strategyKey": "emotion", "displayName": "情绪集中版",
+                            "sourceLabel": "剪辑规划", "strategyDescription": "优先保留情绪高点",
+                            "recommended": True,
+                        }, finalize_source_version_id="v001",
+                    )
+                current = main_module.jobs[job_id]
+                self.assertEqual(len(current["outputVersions"]), 1)
+                version = current["outputVersions"][0]
+                self.assertEqual(version["id"], "v001")
+                self.assertEqual(version["number"], 1)
+                self.assertFalse(version["previewOnly"])
+                self.assertTrue(version["masterReady"])
+                self.assertEqual(version["displayName"], "情绪集中版")
+                self.assertTrue(version["recommended"])
+                self.assertEqual(version["previewOutputs"][0]["filename"], sample_filename)
+                self.assertEqual(current["currentOutputVersionId"], "v001")
+                master_filename = version["outputs"][0]["filename"]
+                self.assertTrue(master_filename.startswith("v001-master-"))
+                self.assertEqual((output_directory / master_filename).read_bytes(), b"high-resolution-master")
+                self.assertEqual((output_directory / sample_filename).read_bytes(), b"review-sample")
+                sample_context = main_module.output_download_context(current, sample_filename)
+                self.assertIsNotNone(sample_context)
+                self.assertTrue(sample_context[0]["previewOnly"])
+            finally:
+                main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
     def test_failed_recomposition_preserves_previous_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             original_settings, original_store = main_module.settings, main_module.job_store
@@ -1245,14 +2130,14 @@ class SourceProxySchedulingTests(unittest.TestCase):
                 "updatedAt": "2026-01-01T00:00:00+00:00",
             }
             try:
-                with patch.object(main_module.source_proxy_executor, "submit") as submit:
+                isolated_scheduler = main_module.PreviewProxyScheduler(
+                    executor=MagicMock(), prepare=main_module.prepare_preview_proxy,
+                )
+                with patch.object(main_module, "preview_proxy_scheduler", isolated_scheduler):
                     self.assertTrue(main_module.schedule_preview_proxy(job_id))
                     self.assertFalse(main_module.schedule_preview_proxy(job_id))
-                    submit.assert_called_once()
+                    isolated_scheduler.executor.submit.assert_called_once()
             finally:
-                with main_module.source_proxy_schedule_lock:
-                    main_module.scheduled_source_proxies.discard(identity)
-                    main_module.source_proxy_failures.pop(identity, None)
                 main_module.jobs.pop(job_id, None)
                 main_module.settings = original_settings
 
@@ -1272,7 +2157,7 @@ class SourceProxySchedulingTests(unittest.TestCase):
             }
             info = MagicMock(duration=4542.7, has_audio=True)
             try:
-                with patch.object(main_module, "probe_video", return_value=info), patch.object(main_module, "create_preview_proxy") as create:
+                with patch("app.preview_assets.probe_video", return_value=info), patch("app.preview_assets.create_preview_proxy") as create:
                     main_module.prepare_preview_proxy(job_id)
                     self.assertEqual(create.call_args.kwargs["maximum_dimension"], 720)
             finally:
@@ -1289,6 +2174,23 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual((candidates[0].start, candidates[0].end), (10.0, 16.0))
         self.assertEqual(candidates[0].audio_evidence["source"], "sensevoice")
+
+    def test_visual_and_waveform_hotspots_expand_recall_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            for index, value in enumerate((10, 12, 245, 240)):
+                path = root / f"{index}.png"
+                from PIL import Image
+                Image.new("L", (32, 32), color=value).save(path)
+                frames.append(SampledFrame(path, index * 5.0))
+            visual = visual_change_candidates(frames, video_duration=20)
+        audio = waveform_hotspot_candidates(
+            {"rms": [.01, .012, .011, .2, .01, .18, .01]}, video_duration=20,
+        )
+        self.assertTrue(visual)
+        self.assertTrue(audio)
+        self.assertEqual(audio[0].audio_evidence["source"], "waveform")
 
     def test_undo_snapshot_restores_candidate_collection(self) -> None:
         job = {"candidates": [{"index": 0, "title": "新标题"}], "recommendedIndices": [0]}
@@ -1390,14 +2292,16 @@ class CandidateSelectionTests(unittest.TestCase):
         groups = build_event_groups(candidates, {"event_groups": [{
             "title": "暴雪列车救援", "score": 95, "summary": "同一救援事件",
             "moments": [
-                {"candidate_index": 0, "role": "事件建立", "essential": True, "transition_in": "cut"},
-                {"candidate_index": 1, "role": "高潮", "essential": True, "transition_in": "cut"},
+                {"candidate_index": 0, "role": "事件建立", "story_function": "建立", "leads_to_candidate_indices": [1], "essential": True, "transition_in": "cut"},
+                {"candidate_index": 1, "role": "高潮", "story_function": "升级", "requires_candidate_indices": [0], "essential": True, "transition_in": "cut"},
                 {"candidate_index": 2, "role": "人物反应", "essential": False, "transition_in": "dissolve"},
             ],
         }]})
         self.assertEqual(len(groups), 1)
         self.assertEqual(len(groups[0]["segments"]), 3)
         self.assertAlmostEqual(groups[0]["actualDuration"], 22.82, places=2)
+        self.assertEqual(groups[0]["segments"][1]["requiresCandidateIndices"], [0])
+        self.assertEqual(groups[0]["storyGraph"][0]["leadsTo"], [1])
 
     def test_scene_cuts_expose_multiple_shots_inside_one_event(self) -> None:
         candidates = [{"index": 0, "start": 10, "end": 20, "score": 92, "title": "连续事件", "reason": ""}]
@@ -1467,6 +2371,16 @@ class CandidateSelectionTests(unittest.TestCase):
         )
         self.assertEqual((safe["start"], safe["end"]), (9.0, 21.5))
         self.assertEqual(safe["speechBoundaryStatus"], "adjusted")
+
+    def test_semantic_boundary_reports_candidate_window_that_cannot_hold_full_speech(self) -> None:
+        safe = semantic_safe_range(
+            10, 20,
+            speech_segments=[{"start": 5, "end": 25, "text": "候选框外仍在说话"}],
+            lower_bound=10, upper_bound=20,
+        )
+        self.assertEqual((safe["start"], safe["end"]), (10.0, 20.0))
+        self.assertEqual(safe["speechBoundaryStatus"], "unsafe")
+        self.assertTrue(safe["unresolvedSpeechBoundary"])
 
     def test_broad_spoken_candidate_uses_sentence_level_minimum_keep(self) -> None:
         annotated = annotate_candidate_boundaries(
@@ -1539,6 +2453,33 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertAlmostEqual(reel["actualDuration"], 16.0)
         self.assertTrue(all(segment["transitionIn"]["type"] == "cut" for segment in reel["segments"]))
 
+    def test_final_reel_records_all_matches_when_confirmed_ranges_overlap(self) -> None:
+        groups = [
+            {"id": "one", "title": "片段一", "segments": [
+                {"id": "a", "candidateId": "m1", "start": 10, "end": 15},
+            ]},
+            {"id": "two", "title": "片段二", "segments": [
+                {"id": "b", "candidateId": "m2", "start": 14, "end": 20},
+            ]},
+        ]
+        reel = build_final_reel(groups)
+        self.assertEqual(len(reel["segments"]), 1)
+        self.assertEqual(reel["segments"][0]["contributingMatchIds"], ["m1", "m2"])
+        self.assertEqual((reel["segments"][0]["start"], reel["segments"][0]["end"]), (10.0, 20.0))
+
+    def test_exact_two_tenths_source_range_is_renderable_despite_float_precision(self) -> None:
+        self.assertTrue(source_duration_meets_minimum(49.52, 49.72))
+        reel = build_final_reel([{
+            "id": "boundary",
+            "title": "边界片段",
+            "segments": [{
+                "id": "boundary_segment", "candidateId": "boundary_match",
+                "start": 49.52, "end": 49.72,
+            }],
+        }])
+        self.assertEqual(len(reel["segments"]), 1)
+        self.assertEqual(reel["segments"][0]["contributingMatchIds"], ["boundary_match"])
+
     def test_automatic_refinement_window_uses_candidate_duration(self) -> None:
         candidate = HighlightCandidate(70, 125, 90, "事件", "", [])
         window = refinement_window_seconds(
@@ -1575,6 +2516,115 @@ class CandidateSelectionTests(unittest.TestCase):
 
 
 class MediaIntegrationTests(unittest.TestCase):
+    def test_content_render_uses_right_open_end_boundary(self) -> None:
+        import subprocess
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "boundary-source.mp4"
+            output = root / "boundary-output.mp4"
+            subprocess.run([
+                "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=red:size=160x90:rate=30:duration=1",
+                "-f", "lavfi", "-i", "color=c=blue:size=160x90:rate=30:duration=1",
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(source),
+            ], check=True)
+            expected = render_composition(
+                source, output,
+                segments=[{"start": 0.0, "end": 1.0, "transitionIn": {"type": "cut"}}],
+                has_audio=False, ffmpeg="/usr/bin/ffmpeg", strict_source_boundaries=True,
+            )
+            self.assertLess(exclusive_render_duration(1.0, strict=True), 1.0)
+            self.assertEqual(exclusive_render_duration(1.0, strict=False), 1.0)
+            last_frame = root / "last-frame.jpg"
+            subprocess.run([
+                "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(output),
+                "-vf", r"select=eq(n\,29)", "-frames:v", "1", "-y", str(last_frame),
+            ], check=True)
+            with Image.open(last_frame) as image:
+                red, _, blue = image.convert("RGB").getpixel((80, 45))
+            self.assertGreater(red, blue, "内容片段末帧不应落入结束边界之后的蓝色画面")
+
+    def test_analysis_frame_snapshot_survives_source_cache_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cached = root / "coarse-frames" / "frame-00001.jpg"
+            cached.parent.mkdir()
+            cached.write_bytes(b"jpeg-data")
+            frozen = snapshot_sampled_frames(
+                [SampledFrame(cached, 1.5)], root / "analysis-frames",
+            )
+            cached.unlink()
+            self.assertTrue(frozen[0].path.is_file())
+            self.assertEqual(frozen[0].path.read_bytes(), b"jpeg-data")
+
+    def test_uniform_sampling_rejects_partial_timeline_coverage(self) -> None:
+        frames = [
+            SampledFrame(Path(f"frame-{index}.jpg"), index * 125.028)
+            for index in range(3)
+        ]
+        with self.assertRaisesRegex(MediaError, "实际仅获得 3 帧"):
+            validate_uniform_frame_coverage(
+                frames, duration=9002.015, maximum_frames=72,
+            )
+
+    def test_tail_validation_requires_a_decoded_frame(self) -> None:
+        completed = __import__("subprocess").CompletedProcess(
+            args=[], returncode=0,
+            stdout="#stream#, dts, pts, duration, size, hash\n",
+            stderr="",
+        )
+        with patch("app.media.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(MediaError, "源视频没有可解码画面"):
+                validate_video_decodable_coverage(
+                    Path("partial.mp4"), duration=9002.015, ffmpeg="ffmpeg",
+                )
+
+    def test_tail_validation_falls_back_across_long_gop_without_rejecting(self) -> None:
+        import subprocess
+        empty = subprocess.CompletedProcess(args=[], returncode=0, stdout="# framehash\n", stderr="")
+        decoded = subprocess.CompletedProcess(args=[], returncode=0, stdout="# framehash\n0, 0, 0, 1, 1, hash\n", stderr="")
+        with patch("app.media.subprocess.run", side_effect=[empty, empty, decoded]) as run:
+            report = validate_video_decodable_coverage(
+                Path("long-gop.mp4"), duration=9002.015, container_duration=9018.0, ffmpeg="ffmpeg",
+            )
+        self.assertEqual(report["status"], "warning")
+        self.assertEqual(len(run.call_args_list), 3)
+        self.assertTrue(any("长 GOP" in warning for warning in report["warnings"]))
+        self.assertTrue(any("尾部可能只有声音" in warning for warning in report["warnings"]))
+
+    def test_truncated_tail_is_rejected_instead_of_shortening_timeline(self) -> None:
+        import subprocess
+        def fake_run(command, **_kwargs):
+            second = float(command[command.index("-ss") + 1])
+            body = "# framehash\n0, 0, 0, 1, 1, hash\n" if second <= 300 else "# framehash\n"
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=body, stderr="")
+        with patch("app.media.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(MediaError, "内容不完整.*2:30:02.*05:00"):
+                validate_video_decodable_coverage(
+                    Path("metadata-too-long.mp4"), duration=9002.015, ffmpeg="ffmpeg",
+                )
+
+    def test_probe_uses_video_stream_duration_instead_of_longer_audio_container(self) -> None:
+        import subprocess
+        payload = {
+            "streams": [
+                {"codec_type": "video", "duration": "120.0", "width": 1280, "height": 720, "avg_frame_rate": "25/1"},
+                {"codec_type": "audio", "duration": "132.5"},
+            ],
+            "format": {"duration": "132.5"},
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(payload), stderr="")
+        with patch("app.media._run", return_value=completed):
+            info = probe_video(Path("audio-tail.mp4"), "ffprobe")
+        self.assertEqual(info.duration, 120.0)
+        self.assertEqual(info.video_duration, 120.0)
+        self.assertEqual(info.audio_duration, 132.5)
+        self.assertEqual(info.container_duration, 132.5)
+        self.assertEqual(info.frame_rate, 25.0)
+
     def test_sensevoice_failure_pauses_with_audio_checkpoint(self) -> None:
         import subprocess
 
@@ -1742,6 +2792,9 @@ class MediaIntegrationTests(unittest.TestCase):
             info = probe_video(source, "/usr/bin/ffprobe")
             self.assertGreater(info.duration, 2.8)
             self.assertTrue(info.has_audio)
+            validate_video_decodable_coverage(
+                source, duration=info.duration, ffmpeg="/usr/bin/ffmpeg",
+            )
             waveform_progress: list[tuple[float, float, float]] = []
             waveform = extract_audio_waveform(
                 source, ffmpeg="/usr/bin/ffmpeg", bins=200, duration=info.duration,
@@ -1824,6 +2877,36 @@ class MediaIntegrationTests(unittest.TestCase):
             self.assertEqual(composition_progress, sorted(composition_progress))
             self.assertTrue(any(0 < value < 1 for value in composition_progress))
             self.assertEqual(composition_progress[-1], 1.0)
+            advanced = root / "advanced-composition.mp4"
+            advanced_segments = [
+                {
+                    "id": "a", "start": 0, "end": 1.2, "playbackRate": 1.25,
+                    "silenceCuts": [{"start": .35, "end": .85, "retained": .15}],
+                    "transitionIn": {"type": "cut"},
+                },
+                {
+                    "id": "b", "start": 1.35, "end": 2.75, "playbackRate": 1.1,
+                    "transitionIn": {"type": "fade_black", "duration": .3},
+                    "audioBridge": {"type": "j_cut", "duration": .3},
+                },
+            ]
+            advanced_expected = render_composition(
+                source, advanced, segments=advanced_segments, has_audio=True,
+                ffmpeg="/usr/bin/ffmpeg",
+                preview_width=160,
+                cutaways=[{
+                    "primarySegmentId": "b", "sourceStart": .1, "sourceEnd": .55,
+                    "outputOffset": .35, "duration": .45, "muted": True,
+                }],
+            )
+            advanced_info = validate_rendered_clip(
+                advanced, expected_duration=advanced_expected, expect_audio=True,
+                ffmpeg="/usr/bin/ffmpeg", ffprobe="/usr/bin/ffprobe",
+            )
+            self.assertAlmostEqual(
+                advanced_info.duration, composition_effective_duration(advanced_segments), delta=.3,
+            )
+            self.assertEqual(advanced_info.width, 160)
 
     def test_portrait_preview_proxy_caps_the_long_edge(self) -> None:
         import subprocess

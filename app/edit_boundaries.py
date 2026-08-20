@@ -101,13 +101,24 @@ def semantic_safe_range(
     safe_end = max(safe_start, safe_end)
     adjusted = abs(safe_start - original_start) > .01 or abs(safe_end - original_end) > .01
     overlaps_speech = any(item["end"] > safe_start and item["start"] < safe_end for item in speech)
+    unresolved_start = _speech_containing(safe_start, speech)
+    unresolved_end = _speech_containing(safe_end, speech)
+    if unresolved_start and any(abs(safe_start - item["start"]) <= .02 or abs(safe_start - item["end"]) <= .02 for item in quiet):
+        unresolved_start = None
+    if unresolved_end and any(abs(safe_end - item["start"]) <= .02 or abs(safe_end - item["end"]) <= .02 for item in quiet):
+        unresolved_end = None
+    unresolved = bool(unresolved_start or unresolved_end)
     return {
         "start": round(safe_start, 3),
         "end": round(safe_end, 3),
         "originalStart": round(original_start, 3),
         "originalEnd": round(original_end, 3),
         "boundarySource": "+".join(dict.fromkeys(sources)) if sources else ("speech_aligned" if overlaps_speech else "visual"),
-        "speechBoundaryStatus": "adjusted" if adjusted else ("complete" if overlaps_speech else "no_speech"),
+        "speechBoundaryStatus": (
+            "unsafe" if unresolved else "adjusted" if adjusted else "complete" if overlaps_speech else "no_speech"
+        ),
+        "unresolvedSpeechBoundary": bool(unresolved),
+        "unresolvedSpeechText": str((unresolved_start or unresolved_end or {}).get("text") or "")[:240],
         "boundaryAdjusted": adjusted,
         "hasSpeech": overlaps_speech,
     }

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VideoPilot real interview content-search case",
+  "type": "object",
+  "required": [
+    "caseId", "sourceType", "sourceAssetId", "query", "expectedIntent",
+    "predictedIntent", "expected", "predicted", "annotatedTurnCount",
+    "annotatedQaPairCount", "retrievalStats"
+  ],
+  "properties": {
+    "caseId": {"type": "string", "minLength": 1},
+    "sourceType": {"const": "real"},
+    "sourceAssetId": {"type": "string", "minLength": 1},
+    "query": {"type": "string", "minLength": 1},
+    "resultMode": {"enum": ["top_k", "exhaustive"]},
+    "annotatedTurnCount": {"type": "integer", "minimum": 1},
+    "annotatedQaPairCount": {"type": "integer", "minimum": 0},
+    "expectedIntent": {"type": "object"},
+    "predictedIntent": {"type": "object"},
+    "expected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["start", "end"],
+        "properties": {
+          "start": {"type": "number", "minimum": 0},
+          "end": {"type": "number", "exclusiveMinimum": 0},
+          "speaker": {"type": ["string", "null"]},
+          "promptTurnIds": {"type": "array", "items": {"type": "string"}},
+          "answerTurnIds": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "predicted": {"type": "array", "items": {"type": "object"}},
+    "wrongSpeakerSeconds": {"type": "number", "minimum": 0},
+    "predictedSpeechSeconds": {"type": "number", "minimum": 0},
+    "retrievalStats": {"type": "object"}
+  }
+}

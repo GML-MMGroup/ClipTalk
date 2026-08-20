@@ -5,11 +5,11 @@ import math
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from .edit_boundaries import annotate_candidate_boundaries
 from .ark_client import VisionModelClient
@@ -27,6 +27,8 @@ from .media import (
     silence_intervals_from_waveform,
     probe_video,
     render_clip,
+    snapshot_sampled_frames,
+    validate_video_decodable_coverage,
     validate_rendered_clip,
 )
 from .prompts import (
@@ -42,7 +44,7 @@ from .speech import analyze_speech, speech_evidence, transcript_context
 
 
 ProgressCallback = Callable[[float, str, str], None]
-ANALYSIS_CACHE_VERSION = f"visual-highlights-v12-sentence-units-{PROMPT_VERSION}"
+ANALYSIS_CACHE_VERSION = f"visual-highlights-v15-evidence-routing-{PROMPT_VERSION}"
 
 
 class ModelDecisionRequired(RuntimeError):
@@ -112,17 +114,208 @@ def _number(value: Any, default: float) -> float:
 
 
 def coarse_frame_limit(video_duration: float) -> int:
-    """Adaptive full-video sampling cap used to bound VLM page requests."""
-    return max(48, min(72, math.ceil(max(0.0, float(video_duration)) / 6.0)))
+    """Duration-tiered full-video sampling budget for VLM discovery.
+
+    Long recordings need materially denser evidence than the former 72-frame
+    ceiling. The tiers keep short-video latency stable while allowing a
+    2-hour-plus source to use 180 frames (roughly 12 contact sheets).
+    """
+    duration = max(0.0, float(video_duration))
+    if duration <= 600:
+        return max(48, min(72, math.ceil(duration / 6.0)))
+    if duration <= 1800:
+        return 96
+    if duration <= 3600:
+        return 120
+    if duration <= 7200:
+        return 150
+    return 180
+
+
+def _spread_priority_times(values: list[float], count: int, duration: float) -> list[float]:
+    """Choose evidence throughout the timeline instead of only near the start."""
+    cleaned = sorted({
+        round(max(.05, min(float(duration) - .05, float(value))), 3)
+        for value in values
+        if math.isfinite(float(value)) and .05 < float(value) < float(duration) - .05
+    })
+    if count <= 0 or not cleaned:
+        return []
+    if len(cleaned) <= count:
+        return cleaned
+    selected: list[float] = []
+    # Pick the evidence point nearest each equally spaced time bucket. This
+    # avoids a dense cluster of cuts/dialogue at the beginning consuming the
+    # entire supplemental sampling budget.
+    available = set(range(len(cleaned)))
+    for index in range(count):
+        center = (index + .5) * float(duration) / count
+        chosen = min(available, key=lambda item: abs(cleaned[item] - center))
+        selected.append(cleaned[chosen])
+        available.remove(chosen)
+    return sorted(selected)
+
+
+def coarse_priority_times(
+    *,
+    duration: float,
+    frame_budget: int,
+    scene_cuts: list[float] | None,
+    waveform: dict[str, Any] | None,
+    speech_segments: list[dict[str, Any]] | None,
+) -> list[float]:
+    """Select scene, sound and dialogue evidence to replace nearby uniform frames."""
+    duration = max(0.0, float(duration))
+    budget = max(0, min(int(frame_budget), round(int(frame_budget) * .25)))
+    if budget <= 0 or duration <= 0:
+        return []
+    scene_values = [float(value) + .12 for value in (scene_cuts or [])]
+    speech_values = []
+    for segment in speech_segments or []:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start = float(segment.get("start") or segment.get("startSeconds") or 0)
+            end = float(segment.get("end") or segment.get("endSeconds") or start)
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            speech_values.append(start + min(.5, (end - start) * .5))
+
+    rms = [float(value) for value in (waveform or {}).get("rms", [])]
+    audio_values: list[float] = []
+    if rms:
+        ranked = sorted(range(len(rms)), key=lambda index: rms[index], reverse=True)
+        audio_separation = max(6.0, duration / max(24, budget * 4))
+        for index in ranked:
+            second = index / max(1, len(rms) - 1) * duration
+            if all(abs(second - existing) >= audio_separation for existing in audio_values):
+                audio_values.append(second)
+            if len(audio_values) >= budget:
+                break
+
+    pools = [
+        _spread_priority_times(scene_values, budget, duration),
+        _spread_priority_times(speech_values, budget, duration),
+        sorted(audio_values),
+    ]
+    pools = [pool for pool in pools if pool]
+    selected: list[float] = []
+    minimum_gap = max(1.5, duration / max(1, frame_budget * 10))
+    while pools and len(selected) < budget:
+        remaining = []
+        for pool in pools:
+            while pool:
+                value = pool.pop(0)
+                if all(abs(value - existing) >= minimum_gap for existing in selected):
+                    selected.append(value)
+                    break
+            if pool:
+                remaining.append(pool)
+            if len(selected) >= budget:
+                break
+        pools = remaining
+    return sorted(selected)
+
+
+def merge_priority_frames(
+    uniform_frames: list[SampledFrame], priority_frames: list[SampledFrame],
+) -> list[SampledFrame]:
+    """Replace the nearest interior uniform samples without increasing VLM calls."""
+    if not priority_frames or len(uniform_frames) < 3:
+        return sorted(uniform_frames, key=lambda item: item.time)
+    result = list(uniform_frames)
+    available = set(range(1, len(result) - 1))
+    for frame in sorted(priority_frames, key=lambda item: item.time):
+        if not available:
+            break
+        nearest = min(available, key=lambda index: abs(result[index].time - frame.time))
+        result[nearest] = frame
+        available.remove(nearest)
+    return sorted(result, key=lambda item: item.time)
 
 
 def refinement_candidate_limit(
     *, discovery_only: bool, total_target_seconds: float | None, target_seconds: float, count: int,
+    video_duration: float | None = None,
 ) -> int:
     if discovery_only:
-        duration_hint = float(total_target_seconds or max(30.0, target_seconds * max(1, count)))
-        return max(5, min(8, math.ceil(duration_hint / 12.0) + 2))
-    return max(count, min(8, count * 2))
+        duration = max(0.0, float(video_duration or 0.0))
+        # Deep visual boundary review is the expensive part of the pipeline.
+        # Keep a small duration-aware budget here; the wider recall pool is
+        # still retained and aligned locally with speech/scene evidence below.
+        if duration <= 180:
+            return 2
+        if duration <= 900:
+            return 4
+        if duration <= 3600:
+            return 5
+        return 6
+    return max(count, min(16, count * 2))
+
+
+def locally_align_candidate(
+    candidate: HighlightCandidate,
+    *,
+    speech_segments: list[dict[str, Any]],
+    scene_cuts: list[float],
+    video_duration: float,
+) -> HighlightCandidate:
+    """Give recalled candidates safe deterministic boundaries without a VLM call.
+
+    Speech turns are authoritative for spoken material.  Otherwise nearby
+    scene cuts are used as conservative visual boundaries.  This preserves a
+    broad recall pool while reserving dynamic VLM inspection for the most
+    valuable or uncertain moments.
+    """
+    start = max(0.0, float(candidate.start))
+    end = min(float(video_duration), max(start + .05, float(candidate.end)))
+    overlaps: list[tuple[float, float]] = []
+    for item in speech_segments or []:
+        try:
+            speech_start = max(0.0, float(item.get("start") or item.get("startSeconds") or 0.0))
+            speech_end = min(float(video_duration), float(item.get("end") or item.get("endSeconds") or speech_start))
+        except (TypeError, ValueError):
+            continue
+        if speech_end > speech_start and max(start, speech_start) < min(end, speech_end):
+            overlaps.append((speech_start, speech_end))
+    boundary_source = "scene"
+    confidence = max(.58, float(candidate.boundary_confidence or 0.0))
+    if overlaps:
+        # Never grow a recalled window without limit; only complete the turns
+        # that already intersect the observed visual moment.
+        start = max(0.0, min(start, min(value[0] for value in overlaps)))
+        end = min(float(video_duration), max(end, max(value[1] for value in overlaps)))
+        if end - start > 45.0:
+            center = (candidate.start + candidate.end) / 2
+            start = max(0.0, center - 22.5)
+            end = min(float(video_duration), start + 45.0)
+        boundary_source = "speech"
+        confidence = max(.76, confidence)
+    else:
+        left = [float(value) for value in scene_cuts or [] if 0 <= float(value) <= start and start - float(value) <= 3.0]
+        right = [float(value) for value in scene_cuts or [] if end <= float(value) <= video_duration and float(value) - end <= 3.0]
+        if left:
+            start = max(left)
+        if right:
+            end = min(right)
+    audio = speech_evidence(speech_segments, start, end) if speech_segments else dict(candidate.audio_evidence or {})
+    evidence = list(candidate.evidence)
+    evidence.append(
+        "边界由完整话语对齐" if boundary_source == "speech" else "边界由场景切点与已观测范围对齐"
+    )
+    duration = max(.05, end - start)
+    return replace(
+        candidate,
+        start=round(start, 3),
+        end=round(end, 3),
+        evidence=evidence,
+        audio_evidence=audio,
+        peak_start=round(max(start, min(end, candidate.peak_start or start)), 3),
+        peak_end=round(max(start, min(end, candidate.peak_end or end)), 3),
+        minimum_keep_seconds=round(min(duration, max(.8, candidate.minimum_keep_seconds or min(2.0, duration))), 3),
+        boundary_confidence=round(confidence, 3),
+    )
 
 
 def normalize_content_profile(raw: Any, theme: str) -> dict[str, Any]:
@@ -378,6 +571,74 @@ def speech_signal_candidates(
             continue
         selected.append(candidate)
         if len(selected) >= max(1, maximum):
+            break
+    return selected
+
+
+def visual_change_candidates(
+    frames: list[SampledFrame], *, video_duration: float, maximum: int = 5,
+) -> list[HighlightCandidate]:
+    """Recall motion/scene-change hotspots that a coarse VLM page may miss."""
+    scored: list[tuple[float, float]] = []
+    previous: Image.Image | None = None
+    for frame in frames:
+        try:
+            with Image.open(frame.path) as source:
+                gray = source.convert("L").resize((96, 54), Image.Resampling.BILINEAR)
+                if previous is not None:
+                    difference = float(ImageStat.Stat(ImageChops.difference(previous, gray)).mean[0])
+                    scored.append((difference, float(frame.time)))
+                previous = gray.copy()
+        except (OSError, ValueError):
+            continue
+    if not scored:
+        return []
+    values = sorted(value for value, _ in scored)
+    threshold = values[max(0, round(len(values) * .72) - 1)]
+    selected: list[HighlightCandidate] = []
+    for value, center in sorted(scored, reverse=True):
+        if value < threshold or any(abs(center - (item.start + item.end) / 2) < 5.0 for item in selected):
+            continue
+        start, end = max(0.0, center - 4.0), min(video_duration, center + 4.0)
+        selected.append(HighlightCandidate(
+            start=start, end=end, score=min(91.0, 72.0 + value * .55),
+            title="画面变化热点", reason="由全片真实画面变化触发，交给视觉模型复核是否构成精彩动作或场景转折。",
+            evidence=[f"相邻采样帧变化强度 {value:.1f}"], role="视觉转折", possible_event="画面变化",
+            peak_start=max(start, center - 1.0), peak_end=min(end, center + 1.0),
+            minimum_keep_seconds=min(3.0, end - start), boundary_confidence=.35,
+        ))
+        if len(selected) >= maximum:
+            break
+    return selected
+
+
+def waveform_hotspot_candidates(
+    waveform: dict[str, Any], *, video_duration: float, maximum: int = 4,
+) -> list[HighlightCandidate]:
+    """Recall applause/music/impact peaks even when ASR has no words."""
+    values = [max(0.0, _number(value, 0.0)) for value in waveform.get("rms") or []]
+    if len(values) < 4 or video_duration <= 0:
+        return []
+    ranked = sorted(range(len(values)), key=lambda index: values[index], reverse=True)
+    selected: list[HighlightCandidate] = []
+    baseline = sorted(values)[len(values) // 2]
+    for index in ranked:
+        strength = values[index]
+        if strength < max(.018, baseline * 2.2):
+            break
+        center = video_duration * (index + .5) / len(values)
+        if any(abs(center - (item.start + item.end) / 2) < 5.0 for item in selected):
+            continue
+        start, end = max(0.0, center - 3.5), min(video_duration, center + 3.5)
+        selected.append(HighlightCandidate(
+            start=start, end=end, score=min(90.0, 74.0 + strength * 80.0),
+            title="声音能量热点", reason="由渲染前全片音频能量峰值触发，需结合真实画面与声音事件复核。",
+            evidence=[f"相对音频能量峰值 {strength:.3f}"], role="声音高潮", possible_event="视听高潮",
+            audio_evidence={"energy": round(strength, 4), "source": "waveform"},
+            peak_start=max(start, center - .8), peak_end=min(end, center + .8),
+            minimum_keep_seconds=min(2.5, end - start), boundary_confidence=.4,
+        ))
+        if len(selected) >= maximum:
             break
     return selected
 
@@ -757,6 +1018,15 @@ class HighlightPipeline:
             for start, end in (excluded_ranges or [])
             if float(end) > float(start)
         ]
+        progress(0.01, "probing", "正在验证源视频是否完整")
+        verified_info = probe_video(source, self.ffprobe)
+        source_validation = validate_video_decodable_coverage(
+            source, duration=verified_info.duration, ffmpeg=self.ffmpeg,
+            container_duration=verified_info.container_duration,
+        )
+        effective_duration = verified_info.duration
+        if cancelled():
+            raise RuntimeError("任务已取消")
         checkpoint = load_analysis_checkpoint(work_directory) if resume_action else None
         if resume_action and not checkpoint:
             raise RuntimeError("分析检查点不存在或版本不兼容，请重新创建任务")
@@ -795,7 +1065,7 @@ class HighlightPipeline:
                 raise RuntimeError("不支持的分析恢复操作")
             manifest = self._finish_event_manifest(
                 source=source,
-                info=dict(checkpoint["video"]),
+                info={**dict(checkpoint["video"]), "duration": effective_duration},
                 candidates=candidates,
                 grouping=grouping,
                 content_profile=content_profile,
@@ -814,12 +1084,14 @@ class HighlightPipeline:
                 progress=progress,
                 degraded=degraded,
             )
+            manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {**checkpoint, "phase": "completed", "decisionRequired": False})
             return manifest
 
         speech_resumed = bool(checkpoint and checkpoint.get("decisionStage") == "speech_analysis")
         if speech_resumed:
             info = VideoInfo(**dict(checkpoint["video"]))
+            info = replace(info, duration=min(info.duration, effective_duration))
             audio_waveform = dict(checkpoint.get("audioWaveform") or {})
             audio_context = str(checkpoint.get("audioContext") or "")
             speech_error = ""
@@ -857,6 +1129,7 @@ class HighlightPipeline:
         if checkpoint and checkpoint.get("decisionStage") == "content_classification":
             info_data = dict(checkpoint["video"])
             info = VideoInfo(**info_data)
+            info = replace(info, duration=min(info.duration, effective_duration))
             frames = [SampledFrame(path=Path(item["path"]), time=float(item["time"])) for item in checkpoint.get("frames", [])]
             audio_context = str(checkpoint.get("audioContext") or "")
             audio_waveform = dict(checkpoint.get("audioWaveform") or {})
@@ -890,7 +1163,7 @@ class HighlightPipeline:
                     "engine": speech_engine, "status": "not_run", "segments": 0,
                 }
                 progress(0.02, "probing", "正在读取视频信息")
-                info = probe_video(source, self.ffprobe)
+                info = verified_info
                 if cancelled():
                     raise RuntimeError("任务已取消")
                 audio_waveform: dict[str, Any] = {}
@@ -980,10 +1253,7 @@ class HighlightPipeline:
                 elif analysis_mode == "audiovisual":
                     speech_analysis = {"engine": speech_engine, "status": "no_audio", "segments": 0}
 
-            progress(0.08, "sampling", "正在均匀抽取视频画面")
-            # Bound sequential VLM round trips while retaining full-video
-            # coverage. Four-minute sources use 48 frames; long sources rise
-            # gradually to a hard limit of 72.
+            progress(0.08, "sampling", "正在抽取全片与关键变化画面")
             maximum_coarse_frames = coarse_frame_limit(info.duration)
             sampling_interval = max(2.0, info.duration / max(12, maximum_coarse_frames))
             expected_coarse_frames = max(1, min(maximum_coarse_frames, math.ceil(info.duration / sampling_interval)))
@@ -1003,6 +1273,39 @@ class HighlightPipeline:
                 progress_first_batch_size=1,
                 cancelled=cancelled,
             )
+            priority_times = coarse_priority_times(
+                duration=info.duration,
+                frame_budget=maximum_coarse_frames,
+                scene_cuts=list(scene_cuts or []),
+                waveform=audio_waveform,
+                speech_segments=speech_segments,
+            )
+            priority_frames: list[SampledFrame] = []
+            if priority_times:
+                progress(
+                    0.115, "sampling",
+                    f"正在补充镜头、声音与对白变化画面 0/{len(priority_times)} 帧",
+                )
+                priority_frames = extract_frames_at_times(
+                    source,
+                    work_directory / "coarse-priority-frames",
+                    priority_times,
+                    ffmpeg=self.ffmpeg,
+                    progress_callback=lambda completed, total: progress(
+                        0.115 + 0.005 * completed / max(1, total),
+                        "sampling",
+                        f"正在补充镜头、声音与对白变化画面 {completed}/{total} 帧",
+                    ),
+                )
+                frames = merge_priority_frames(frames, priority_frames)
+            # Downstream VLM requests may run for minutes. Keep immutable
+            # hard-linked snapshots instead of holding paths into a mutable
+            # extraction cache that another background task could refresh.
+            frames = snapshot_sampled_frames(frames, work_directory / "analysis-frames")
+            progress(
+                0.12, "sampling",
+                f"全片采样完成：{len(frames)} 帧，其中 {len(priority_frames)} 帧来自关键变化",
+            )
             if len(frames) < 2:
                 raise RuntimeError("视频可用画面不足，无法进行视觉高光分析")
             overview_count = min(16, len(frames))
@@ -1018,6 +1321,12 @@ class HighlightPipeline:
                 "audioContext": audio_context, "audioWaveform": audio_waveform,
                 "speechSegments": speech_segments, "speechRecognitionError": speech_error,
                 "speechAnalysis": speech_analysis,
+                "sampling": {
+                    "strategy": "adaptive_dense_hybrid",
+                    "frameBudget": maximum_coarse_frames,
+                    "frameCount": len(frames),
+                    "priorityFrameCount": len(priority_frames),
+                },
                 "overviewSheet": str(overview_sheet), "usage": usage,
             }
             write_analysis_checkpoint(work_directory, base_checkpoint)
@@ -1100,7 +1409,12 @@ class HighlightPipeline:
             speech_signal_candidates(speech_segments, video_duration=info.duration)
             if analysis_mode == "audiovisual" and speech_segments else []
         )
-        coarse.extend(audio_candidates)
+        visual_hotspots = visual_change_candidates(frames, video_duration=info.duration)
+        energy_hotspots = (
+            waveform_hotspot_candidates(audio_waveform, video_duration=info.duration)
+            if analysis_mode == "audiovisual" else []
+        )
+        coarse.extend([*audio_candidates, *visual_hotspots, *energy_hotspots])
         if not coarse:
             raise RuntimeError("视觉大模型没有发现可用高光，请调整主题后重试")
         if exclusions:
@@ -1119,13 +1433,24 @@ class HighlightPipeline:
             total_target_seconds=total_target_seconds,
             target_seconds=target_seconds,
             count=count,
+            video_duration=info.duration,
         )
         # Adjacent moments can be different physical shots belonging to the
         # same event. Do not apply title/one-second-gap deduplication before
         # visual refinement, otherwise a complete event can collapse into one
         # shot. Exact overlaps are removed here; semantic/visual deduplication
         # is deferred until the model has refined the real boundaries.
-        refinement_pool = select_montage_moments(coarse, refinement_target)
+        recall_target = min(18, max(8, count * 3, math.ceil(float(total_target_seconds or 30.0) / 7.0)))
+        recall_pool = select_montage_moments(coarse, recall_target)
+        refinement_pool = sorted(
+            recall_pool,
+            key=lambda item: (
+                -float(item.score),
+                float(item.boundary_confidence or 0.0),
+                float(item.start),
+            ),
+        )[:refinement_target]
+        refined_ids = {id(item) for item in refinement_pool}
         refined: list[HighlightCandidate] = []
         for index, candidate in enumerate(refinement_pool):
             if cancelled():
@@ -1262,9 +1587,24 @@ class HighlightPipeline:
                 )
             refined.append(refined_candidate)
 
+        # Candidates outside the deep-review budget remain available to the
+        # evidence graph and LLM planner.  Their boundaries are aligned using
+        # deterministic speech turns and scene cuts, and their confidence
+        # remains lower so uncertainty-aware follow-up can target them later.
+        locally_aligned: list[HighlightCandidate] = []
+        for candidate in recall_pool:
+            if id(candidate) in refined_ids:
+                continue
+            locally_aligned.append(locally_align_candidate(
+                candidate,
+                speech_segments=speech_segments,
+                scene_cuts=list(scene_cuts or []),
+                video_duration=info.duration,
+            ))
+
         progress(.80, "refine_vlm", f"已完成 {len(refinement_pool)}/{len(refinement_pool)} 个候选精修")
 
-        eligible = [candidate for candidate in refined if not overlaps_ranges(candidate, exclusions)]
+        eligible = [candidate for candidate in [*refined, *locally_aligned] if not overlaps_ranges(candidate, exclusions)]
         selected = select_montage_moments(eligible, min(14, max(8, count * 3)))
         if not selected:
             raise RuntimeError(
@@ -1358,6 +1698,7 @@ class HighlightPipeline:
                 speech_analysis=speech_analysis,
                 exclusions=exclusions, usage=usage, progress=progress,
             )
+            manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {
                 **director_checkpoint, "phase": "completed", "decisionRequired": False,
             })

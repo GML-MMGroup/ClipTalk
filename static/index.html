@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#090f14" />
-    <meta name="description" content="使用视觉大模型与富语音分析发现、审核并合成视频高光。" />
+    <meta name="description" content="使用多模态分析发现视频高光，或按描述查找并截取指定内容。" />
     <title>ClipTalk</title>
     <link rel="icon" type="image/png" href="/static/assets/cliptalk-icon.png?v=20260812-transparent-1" />
     <link rel="preload" href="/static/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/static/generative-loaders.css?v=20260811-loader-runtime-2" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260813-cancel-flow-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-thumbnail-delete-1" />
   </head>
   <body>
     <div class="ambient-grid" aria-hidden="true"></div>
@@ -30,7 +30,7 @@
     <main class="studio home-mode">
       <section id="homeView" class="home-view" aria-label="全部任务">
         <header class="home-heading">
-          <div><div class="home-eyebrow">AI VIDEO EDITING WORKSPACE</div><h1>全部任务</h1><p>从真实视频中发现精彩瞬间，再由 AI 筛选、排序并组合成片。</p></div>
+          <div><div class="home-eyebrow">AI VIDEO EDITING WORKSPACE</div><h1>全部任务</h1><p>让 AI 通看全片发现高光，或按描述查找对白、人物、文字与声音。</p></div>
           <div class="home-summary"><span><b id="homeTaskCount">0</b><small>个任务</small></span><span><b id="homeAssetCount">0</b><small>个视频</small></span><span><b id="homeOutputCount">0</b><small>条成片</small></span></div>
         </header>
         <section class="home-section"><div class="home-section-heading"><div><small>RECENT TASKS</small><h2>最近编辑</h2></div><span>自动保存任务 · 记录成片版本</span></div>
@@ -39,11 +39,12 @@
       </section>
       <aside class="chat-panel glass-panel">
         <header class="panel-header">
-          <div class="director"><img class="director-brand-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><strong>AI 高光导演</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
+          <div class="director"><img class="director-brand-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><strong>AI 视频剪辑助手</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
           <ol id="directorStageNav" class="director-stage-flow" aria-label="高光剪辑流程">
             <li data-director-flow="brief"><span>1</span><div><strong>准备</strong><small>确认要求并准备媒体</small></div></li>
             <li data-director-flow="analysis"><span>2</span><div><strong>AI 分析</strong><small>发现并整理高光事件</small></div></li>
-            <li data-director-flow="compose"><span>3</span><div><strong>生成成片</strong><small>合成、预览并下载</small></div></li>
+            <li data-director-flow="events"><span>3</span><div><strong>审核结果</strong><small>确认事件或内容片段</small></div></li>
+            <li data-director-flow="compose"><span>4</span><div><strong>生成成片</strong><small>合成、预览并下载</small></div></li>
           </ol>
         </header>
         <section id="directorTaskSummary" class="director-task-summary" aria-live="polite">
@@ -53,12 +54,14 @@
         <section id="chatMessages" class="chat-messages" aria-live="polite">
           <article class="chat-message assistant">
             <span class="avatar">AI</span>
-            <div class="bubble"><small>高光导演</small><p>请先上传视频。我会发现精彩镜头，把属于同一事件的镜头整理在一起供你审核。</p></div>
+            <div class="bubble"><small>视频剪辑助手</small><p>请先上传视频。之后可以选择发现高光，或按描述搜索指定内容。</p></div>
           </article>
           <div id="chatStageHost" class="chat-stage-host" aria-live="polite"></div>
         </section>
 
         <form id="chatForm" class="chat-composer">
+          <section id="contentSelectionBasket" class="content-selection-basket hidden" aria-live="polite"></section>
+          <div id="chatContextBar" class="chat-context-bar hidden" aria-label="本次对话引用的剪辑界面状态"></div>
           <div class="chat-input-shell composer-homepage-beam" data-border-beam data-beam-size="md" data-beam-color="ocean" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="3.8" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="22" data-beam-radius="12">
             <textarea id="chatInput" maxlength="500" rows="2" disabled placeholder="请输入指令或补充需求……"></textarea>
             <button id="sendButton" type="submit" disabled title="发送" aria-label="发送"><span data-ui-icon="send" aria-hidden="true"></span></button>
@@ -73,9 +76,9 @@
       <section class="review-panel glass-panel">
         <div id="uploadView" class="upload-view">
           <div class="intro">
-            <p>VLM + LLM EDITORIAL WORKFLOW</p>
-            <h1>从真实画面中发现高光<br /><em>再剪成节奏清晰的成片</em></h1>
-            <span>VLM 负责发现画面、对白和声音中的精彩瞬间，LLM 再根据你的要求筛选、排序并组合高光片段，生成节奏更紧凑的成片。</span>
+            <p>MULTIMODAL VIDEO WORKFLOW</p>
+            <h1>从真实视频中发现高光<br /><em>也能按描述找到具体内容</em></h1>
+            <span>AI 理解画面、对白、屏幕文字和声音：既可以通看全片发现精彩事件，也可以按你的描述查找片段；确认内容后，再完成排序、组合与生成。</span>
           </div>
           <form id="uploadForm" class="upload-card" onsubmit="return false">
             <label class="drop-zone" id="dropZone">
@@ -84,15 +87,15 @@
             </label>
             <div id="localPreviewPanel" class="local-preview hidden">
               <video id="localPreviewVideo" controls preload="auto" playsinline></video>
-              <div><strong>源视频已就绪</strong><small>请在 AI 高光导演中确认剪辑要求</small></div>
+              <div><strong>源视频已就绪</strong><small>请在 AI 视频剪辑助手中确认任务方式</small></div>
             </div>
           </form>
         </div>
 
         <div id="reviewView" class="review-view hidden">
           <header class="review-header">
-            <div class="asset-heading"><span class="file-icon">▶</span><div><small id="reviewKicker">SOURCE VIDEO</small><h2 id="reviewTitle">源视频</h2></div><span id="reviewStatus" class="review-status">等待分析</span></div>
-            <div class="asset-actions"><span id="assetDuration" class="asset-chip">时长 --:--</span><span id="assetResolution" class="asset-chip">分辨率 --</span><div id="reviewLayoutSwitch" class="review-layout-switch" role="group" aria-label="审核工作区布局"><button type="button" data-review-layout-mode="landscape" aria-pressed="true" title="横向布局，仅调整工作区，不改变视频方向">横向布局</button><button type="button" data-review-layout-mode="portrait" aria-pressed="false" title="竖向布局，仅调整工作区，不改变视频方向">竖向布局</button></div><select id="videoViewSelect" class="video-view-select" aria-label="选择视频预览"><option value="source">源视频</option></select><a id="downloadButton" class="download-button hidden" href="#">下载 MP4</a><button id="subtitleButton" class="download-button hidden" type="button">下载字幕 SRT</button></div>
+            <div class="asset-heading"><span class="file-icon">▶</span><div><small id="reviewKicker">SOURCE VIDEO</small><h2 id="reviewTitle">源视频</h2></div><span id="reviewTaskMode" class="task-mode-badge hidden"></span><span id="reviewStatus" class="review-status">等待分析</span></div>
+            <div class="asset-actions"><span id="assetDuration" class="asset-chip">时长 --:--</span><span id="assetResolution" class="asset-chip">分辨率 --</span><div id="reviewLayoutSwitch" class="review-layout-switch" role="group" aria-label="审核工作区布局"><button type="button" data-review-layout-mode="landscape" aria-pressed="true" title="横向布局，仅调整工作区，不改变视频方向">横向布局</button><button type="button" data-review-layout-mode="portrait" aria-pressed="false" title="竖向布局，仅调整工作区，不改变视频方向">竖向布局</button></div><select id="videoViewSelect" class="video-view-select" aria-label="选择视频预览"><option value="source">源视频</option></select><button id="finalizePreviewButton" class="download-button hidden" type="button">导出高清成片</button><button id="finalizeOneOffButton" class="download-button one-off-finalize-button hidden" type="button">保留成片并清理素材</button><a id="downloadButton" class="download-button hidden" href="#">下载 MP4</a><button id="subtitleButton" class="download-button hidden" type="button">下载字幕 SRT</button></div>
           </header>
 
           <div id="reviewStage" class="review-stage">
@@ -136,6 +139,7 @@
             <section id="evidencePanel" class="evidence-panel evidence-placeholder">
               <header><div><small id="clipTime">审核说明</small><h3 id="clipTitle">选择事件或镜头</h3></div><div class="evidence-header-actions"><b id="clipScore"></b><button id="closeEvidenceButton" type="button" aria-label="清空当前详情">×</button></div></header>
               <p id="clipReason">点击下方时间轴中的事件或镜头，在这里查看内容说明、时间范围和判断依据。</p>
+              <section id="outputExplanation" class="output-explanation hidden" aria-label="AI 成片解释"></section>
               <div id="clipTranscript" class="clip-transcript hidden" aria-label="候选对应转写"></div>
               <div id="clipEvidenceMeta" class="clip-evidence-meta"></div>
               <ul id="clipEvidence"></ul>
@@ -143,21 +147,29 @@
             </section>
           </div>
 
+          <div id="portraitVideoResizer" class="portrait-video-resizer" role="separator" aria-label="调整竖屏视频区域宽度" aria-orientation="vertical" tabindex="0" title="左右拖动调整视频宽度，双击恢复默认"></div>
+
           <div class="timeline-resizer" id="timelineResizer" role="separator" aria-label="调整视频与时间线高度" aria-orientation="horizontal" tabindex="0" title="上下拖动调整视频与时间线高度"></div>
 
           <section id="timelinePanel" class="timeline-panel hidden" aria-label="视频审核时间轴">
             <header>
-              <div><strong>智能剪辑时间线</strong><span id="timelineHint">点击事件查看内容说明</span></div>
+              <div><strong id="timelineTitle">智能剪辑时间线</strong><span id="timelineHint">点击事件查看内容说明</span></div>
               <section id="timelineEventSummary" class="timeline-event-summary hidden" aria-live="polite">
                 <div><small id="timelineEventSummaryType">当前事件</small><strong id="timelineEventSummaryTitle"></strong></div>
                 <p id="timelineEventSummaryText"></p>
                 <span id="timelineEventSummaryTime"></span>
               </section>
               <div class="timeline-review-controls">
-                <button id="timelineFitReview" type="button" aria-pressed="true">显示全片</button>
+                <div id="timelineCoordinateSwitch" class="timeline-coordinate-switch hidden" role="group" aria-label="时间轴坐标">
+                  <button id="timelineOutputAxis" type="button" aria-pressed="true">成片时间轴</button>
+                  <button id="timelineSourceAxis" type="button" aria-pressed="false">源片对照</button>
+                </div>
+                <button id="timelineZoomOutReview" class="timeline-review-zoom" type="button" title="缩小时间轴" aria-label="缩小时间轴">−</button>
+                <button id="timelineFitReview" type="button" aria-pressed="true">全览</button>
+                <button id="timelineZoomInReview" class="timeline-review-zoom" type="button" title="放大时间轴" aria-label="放大时间轴">＋</button>
                 <button id="timelineFocusReview" type="button" disabled>缩放到当前事件</button>
                 <button id="timelineLocatePlayhead" class="timeline-locate-playhead hidden" type="button">回到播放头</button>
-                <b><span id="timelineCurrent">00:00.0</span> / <span id="timelineDuration">00:00.0</span></b>
+                <b><small id="timelineClockLabel">源片</small><span id="timelineCurrent">00:00.0</span> / <span id="timelineDuration">00:00.0</span></b>
               </div>
             </header>
             <div class="timeline-toolbar">
@@ -177,8 +189,12 @@
             <div id="timelineOverview" class="timeline-overview">
               <div id="timelineOverviewClips"></div><i id="timelineViewWindow"></i><b id="timelineOverviewPlayhead"></b>
             </div>
+            <section id="timelineProposalTrack" class="timeline-proposal-track hidden" aria-label="AI 剪辑提案时间轴">
+              <header><div><small>AI 提案 · 尚未应用</small><strong id="timelineProposalTitle">剪辑编排预览</strong></div><span id="timelineProposalDuration">00:00</span></header>
+              <div id="timelineProposalOutputs" class="timeline-proposal-outputs"></div>
+            </section>
             <div id="timelineViewport" class="timeline-viewport waveform-mode">
-              <div class="timeline-track-labels" aria-hidden="true"><span>事件</span><span>镜头</span><span>画面</span><span>音频</span></div>
+              <div id="timelineTrackLabels" class="timeline-track-labels" aria-hidden="true"><span>事件</span><span>镜头</span><span>画面</span><span>音频</span></div>
               <div id="timelineTrackContent" class="timeline-track-content">
                 <canvas id="waveformCanvas"></canvas>
                 <div id="timelineLinkedRanges" class="timeline-linked-ranges" aria-hidden="true"></div>
@@ -187,6 +203,7 @@
                 <svg id="timelineEventRelations" class="timeline-event-relations" aria-hidden="true" focusable="false"></svg>
                 <div id="timelineLabels" class="timeline-labels"></div>
                 <div id="timelineClips" class="timeline-clips"></div>
+                <div id="timelineProposalPreview" class="timeline-proposal-preview hidden" aria-hidden="true"></div>
                 <div id="timelineShotMarkers" class="timeline-shot-markers"></div>
                 <div id="timelineSelection" class="timeline-selection hidden">
                   <button class="timeline-handle start" type="button" aria-label="调整开始时间"></button>
@@ -205,7 +222,7 @@
       <div class="panel-resizer panel-resizer-right" data-panel-resizer="right" role="separator" aria-label="调整高光审核面板宽度" aria-orientation="vertical" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
 
       <aside class="review-rail glass-panel">
-        <header class="rail-header"><div><small>AI REVIEW</small><strong id="railTitle">事件审核</strong></div><button id="openCandidateDrawer" type="button" disabled>镜头候选</button></header>
+        <header class="rail-header"><div><small>AI REVIEW</small><strong id="railTitle">审核结果</strong></div><button id="openCandidateDrawer" type="button" disabled>查看候选</button></header>
         <section id="jobStatus" class="analysis-console hidden" aria-label="AI 分析进度">
           <div class="progress-orb" id="progressOrb"><span>AI</span><b id="jobPercent">0%</b></div>
           <div class="analysis-copy"><small>AI 分析进度</small><div class="analysis-detail-heading"><span id="pipelineThinkingOrb" class="thinking-orb-slot pipeline-thinking-orb hidden" data-thinking-orb data-orb-state="working" data-orb-size="20" data-orb-theme="light" data-orb-label="AI 正在分析"></span><strong id="jobDetail">准备中</strong></div><p id="jobElapsed">任务已运行 00:00</p><div class="progress-facts"><span id="jobStageProgress">阶段准备中</span><span id="jobModel">系统</span><span id="jobEta">等待阶段结果</span></div><i class="analysis-progress"><b id="jobProgress"></b></i></div>
@@ -220,7 +237,7 @@
         </section>
         <div id="railBody" class="rail-body"><div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="shaping" data-orb-size="64" data-orb-theme="light" data-orb-label="等待分析任务"></span><strong>等待分析任务</strong><p>上传素材后，这里会显示事件高光、内部镜头与输出状态。</p></div></div>
         <section id="clipSection" class="clip-section hidden">
-          <header><div><small>OUTPUT VERSIONS</small><h3>高光成片</h3></div><div class="clip-header-actions"><span id="clipSummary"></span><button id="outputReeditButton" type="button">返回事件审核</button></div></header>
+          <header><div><small>OUTPUT VERSIONS</small><h3>生成结果</h3></div><div class="clip-header-actions"><span id="clipSummary"></span><button id="outputReeditButton" type="button">返回审核</button></div></header>
           <div id="clipStrip" class="clip-strip"></div>
         </section>
         <section id="railOutput" class="rail-output hidden"></section>
@@ -308,13 +325,53 @@
       </details>
     </div>
     <div id="actionConfirm" class="action-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="actionConfirmTitle">
-      <div class="action-confirm-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="2.2" data-beam-brightness="1.2" data-beam-saturation="1" data-beam-hue-range="15" data-beam-radius="15"><header><div><small>确认操作</small><strong id="actionConfirmTitle">请确认</strong></div><button id="actionConfirmClose" type="button" aria-label="关闭">×</button></header><p id="actionConfirmSummary"></p><ul id="actionConfirmDetails"></ul><div id="actionConfirmOrderList" class="action-confirm-order-list hidden"></div><label id="actionConfirmOrderWrap" class="action-confirm-order hidden"><span>合成顺序</span><select id="actionConfirmOrder"><option value="selection">按选择顺序 · 保持你的编排</option></select><small id="actionConfirmOrderHint"></small></label><div id="actionConfirmWarning" class="action-confirm-warning"></div><footer><button id="actionConfirmCancel" type="button">返回修改</button><button id="actionConfirmOk" class="primary" type="button">确认执行</button></footer></div>
+      <div class="action-confirm-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="2.2" data-beam-brightness="1.2" data-beam-saturation="1" data-beam-hue-range="15" data-beam-radius="15"><header><div><small>确认操作</small><strong id="actionConfirmTitle">请确认</strong></div><button id="actionConfirmClose" type="button" aria-label="关闭">×</button></header><p id="actionConfirmSummary"></p><ul id="actionConfirmDetails"></ul><div id="actionConfirmSelectionList" class="action-confirm-selection-list hidden"></div><div id="actionConfirmOrderList" class="action-confirm-order-list hidden"></div><label id="actionConfirmOrderWrap" class="action-confirm-order hidden"><span>合成顺序</span><select id="actionConfirmOrder"><option value="selection">按选择顺序 · 保持你的编排</option><option value="source">按源视频时间顺序</option><option value="llm_recommend">由 LLM 推荐顺序 · 不改起止点</option></select><small id="actionConfirmOrderHint"></small></label><div id="actionConfirmWarning" class="action-confirm-warning"></div><footer><button id="actionConfirmCancel" type="button">返回修改</button><button id="actionConfirmOk" class="primary" type="button">确认执行</button></footer></div>
     </div>
+    <section id="subtitleReview" class="subtitle-review hidden" aria-labelledby="subtitleReviewTitle">
+      <button class="subtitle-review-scrim" type="button" data-subtitle-close aria-label="关闭字幕校对"></button>
+      <aside class="subtitle-review-panel" role="dialog" aria-modal="true">
+        <header class="subtitle-review-header">
+          <div><small>FINAL SUBTITLE CHECK</small><h2 id="subtitleReviewTitle">字幕校对</h2><p>识别结果只是草稿。确认后才会烧录进正式成片。</p></div>
+          <button type="button" class="subtitle-review-close" data-subtitle-close aria-label="关闭">×</button>
+        </header>
+        <div class="subtitle-review-body">
+          <section class="subtitle-preview-card">
+            <div class="subtitle-preview-stage" id="subtitlePreviewStage">
+              <video id="subtitleReviewVideo" muted playsinline preload="metadata"></video>
+              <div id="subtitlePreviewText" class="subtitle-preview-text">选择一条字幕查看位置</div>
+              <i class="subtitle-safe-area" aria-hidden="true"></i>
+            </div>
+            <div class="subtitle-preview-meta"><span id="subtitleStyleSummary">字号 4.0% · 底部居中</span><span>虚线为 5% 安全区</span></div>
+          </section>
+          <section class="subtitle-source-card">
+            <div class="subtitle-section-heading"><div><strong>原视频字幕确认</strong><small>AI 字幕会直接叠加到源视频画面，无法自动移除已烧录的原字幕</small></div></div>
+            <label class="subtitle-source-ack"><input id="subtitleSourceAck" type="checkbox"><span>我已检查预览：原视频没有需要保留的字幕，或我确认允许 AI 字幕叠加（可能出现双字幕）</span></label>
+            <p class="subtitle-source-warning">未勾选前不能确认字幕，也不能进入正式导出。</p>
+          </section>
+          <section class="subtitle-command-card">
+            <div class="subtitle-section-heading"><div><strong>字号与位置</strong><small>默认作用于全部字幕；命令写“当前这条”才只改单条</small></div></div>
+            <div class="subtitle-quick-controls">
+              <button type="button" data-subtitle-command="字号小一点">A−</button><button type="button" data-subtitle-command="字号大一点">A＋</button>
+              <button type="button" data-subtitle-command="放到顶部">顶部</button><button type="button" data-subtitle-command="放到画面中央">中央</button><button type="button" data-subtitle-command="放到底部">底部</button>
+            </div>
+            <form id="subtitleCommandForm" class="subtitle-command-form"><input id="subtitleCommandInput" type="text" autocomplete="off" placeholder="例如：字号 48px、整体上移 5%、当前这条放到左上"><button type="submit">应用命令</button></form>
+            <p id="subtitleCommandStatus" class="subtitle-command-status" aria-live="polite"></p>
+          </section>
+          <section class="subtitle-cues-section">
+            <div class="subtitle-section-heading"><div><strong>逐条核对</strong><small id="subtitleCueCount">0 条字幕</small></div><button id="subtitleSuggestButton" type="button" class="subtitle-ai-button">AI 检查文字</button></div>
+            <p class="subtitle-ai-notice">AI 只依据相邻文字上下文提出建议，不会听音频，也不会自动改写。听不清或拿不准时请保留原文并人工确认。</p>
+            <div id="subtitleCueList" class="subtitle-cue-list"></div>
+          </section>
+        </div>
+        <footer class="subtitle-review-footer"><div><span id="subtitleSaveState">尚未确认</span><small>修改文字或时间后会回到待确认状态</small></div><button type="button" data-subtitle-close>返回</button><button id="subtitleSaveButton" type="button">保存草稿</button><button id="subtitleConfirmButton" class="primary" type="button" disabled>确认字幕并继续导出</button></footer>
+      </aside>
+    </section>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/thinking-orbs.js?v=20260806-subtitle-label-69" defer></script>
     <script src="/static/generative-loaders.js?v=20260811-loader-runtime-2" defer></script>
     <script src="/static/border-beam.js?v=20260811-border-beam-2" defer></script>
     <script src="/static/ui-icons.js?v=20260811-send-icon-1" defer></script>
-    <script src="/static/app.js?v=20260813-cancel-flow-1" defer></script>
+    <script src="/static/api-client.js?v=20260820-thumbnail-delete-1" defer></script>
+    <script src="/static/app.js?v=20260820-recall-first-results-1" defer></script>
   </body>
 </html>
