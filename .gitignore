@@ -10,7 +10,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
@@ -20,6 +23,7 @@ data/
 *.log
 *.pid
 *.sqlite3
+*.sqlite
 *.db
 /*.mp4
 /*.mov
@@ -41,6 +45,12 @@ tmp/
 /readme-preview-assets/
 /tools/readme-preview.html
 
+# Root-level screenshots are local review artifacts. Documentation media must
+# live under photo/ or assets/ so an accidental git add cannot publish them.
+/*.png
+/*.jpg
+/*.jpeg
+
 # Local design drafts and uncategorized root screenshots
 /2.png
 /11.png
@@ -57,3 +67,5 @@ tmp/
 .vscode/
 .idea/
 .DS_Store
+*.orig
+*.rej

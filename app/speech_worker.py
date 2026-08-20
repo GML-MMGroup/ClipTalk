@@ -7,10 +7,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .speech import _analyze_sensevoice, _resolve_sensevoice_device, _sensevoice_instance
+from .speech import (
+    SPEECH_REQUEST_LEASE_SECONDS,
+    _analyze_sensevoice, _resolve_sensevoice_device, _sensevoice_instance,
+)
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
+    value = dict(value)
+    if path.name == "status.json":
+        value.setdefault("updatedAt", time.time())
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -29,6 +35,28 @@ def main() -> int:
     results = worker_directory / "results"
     requests.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
+    # Requests are owned by a live web-process lease. Discard leftovers from
+    # crashes/restarts so they can never run hours later without a user job.
+    now = time.time()
+    for request_path in requests.glob("*.json"):
+        lease_path = requests / f"{request_path.stem}.lease"
+        try:
+            live = now - lease_path.stat().st_mtime <= SPEECH_REQUEST_LEASE_SECONDS
+        except OSError:
+            live = False
+        if not live:
+            request_path.unlink(missing_ok=True)
+            lease_path.unlink(missing_ok=True)
+            (requests / f"{request_path.stem}.cancel").unlink(missing_ok=True)
+    for marker in [*requests.glob("*.cancel"), *requests.glob("*.lease")]:
+        if not (requests / f"{marker.stem}.json").is_file():
+            marker.unlink(missing_ok=True)
+    for result_path in results.glob("*.json"):
+        try:
+            if now - result_path.stat().st_mtime > 24 * 60 * 60:
+                result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         selected_device = _resolve_sensevoice_device(str(config.get("device") or "auto"))
         config["device"] = selected_device
@@ -51,13 +79,26 @@ def main() -> int:
             time.sleep(.2)
             continue
         request_path = pending[0]
+        request_id = request_path.stem
+        cancel_path = requests / f"{request_id}.cancel"
+        lease_path = requests / f"{request_id}.lease"
         try:
             request = json.loads(request_path.read_text(encoding="utf-8"))
             request_id = str(request["id"])
             cancel_path = requests / f"{request_id}.cancel"
-            if cancel_path.is_file():
+            lease_path = requests / f"{request_id}.lease"
+
+            def request_is_live() -> bool:
+                try:
+                    lease_fresh = time.time() - lease_path.stat().st_mtime <= SPEECH_REQUEST_LEASE_SECONDS
+                except OSError:
+                    return False
+                return lease_fresh and time.time() < float(request.get("deadlineAt") or float("inf"))
+
+            if cancel_path.is_file() or not request_is_live():
                 cancel_path.unlink(missing_ok=True)
                 request_path.unlink(missing_ok=True)
+                lease_path.unlink(missing_ok=True)
                 continue
             write_json(status_path, {"status": "running", "phase": "recognizing", "device": config.get("device"), "error": None, "pid": os.getpid(), "requestId": request_id, "progress": 0.0, "processed": 0, "total": None})
             has_intermediate_progress = False
@@ -69,6 +110,8 @@ def main() -> int:
                 # recording before noticing it.
                 if cancel_path.is_file():
                     raise RuntimeError("任务已取消")
+                if not request_is_live():
+                    raise RuntimeError("请求租约已失效，识别已停止")
                 numeric = [item for item in args if isinstance(item, (int, float))]
                 processed = numeric[0] if numeric else None
                 total = numeric[1] if len(numeric) > 1 else None
@@ -94,10 +137,10 @@ def main() -> int:
             write_json(status_path, {"status": "running", "phase": "finalizing", "device": config.get("device"), "error": None, "pid": os.getpid(), "requestId": request_id, "progress": None, "processed": None, "total": None})
             write_json(results / f"{request_id}.json", {"payload": payload})
         except Exception as error:
-            request_id = str(locals().get("request", {}).get("id") or request_path.stem)
             write_json(results / f"{request_id}.json", {"error": str(error)[:2000]})
         finally:
             request_path.unlink(missing_ok=True)
+            cancel_path.unlink(missing_ok=True)
             write_json(status_path, {"status": "ready", "device": config.get("device"), "error": None, "pid": os.getpid(), "loadedAt": time.time()})
 
 

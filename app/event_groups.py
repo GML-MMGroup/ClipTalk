@@ -6,6 +6,15 @@ import math
 import uuid
 from typing import Any
 
+from .editing_techniques import (
+    composition_effective_duration,
+    normalize_audio_bridge,
+    normalize_playback_rate,
+    normalize_transition,
+    source_duration_meets_minimum,
+    segment_effective_duration,
+)
+
 
 def _number(value: Any, default: float = 0.0) -> float:
     try:
@@ -16,24 +25,22 @@ def _number(value: Any, default: float = 0.0) -> float:
 
 
 def composition_duration(segments: list[dict[str, Any]]) -> float:
-    total = sum(max(0.0, _number(item.get("end")) - _number(item.get("start"))) for item in segments)
-    overlap = sum(
-        max(0.0, _number((item.get("transitionIn") or {}).get("duration")))
-        for item in segments[1:]
-        if (item.get("transitionIn") or {}).get("type") == "dissolve"
-    )
-    return round(max(0.0, total - overlap), 3)
+    return composition_effective_duration(segments)
 
 
 def recalculate_event_group(group: dict[str, Any]) -> dict[str, Any]:
     segments = group.setdefault("segments", [])
     for position, segment in enumerate(segments):
         segment["editOrder"] = position
-        segment["duration"] = round(max(0.0, _number(segment.get("end")) - _number(segment.get("start"))), 3)
-        transition = segment.setdefault("transitionIn", {"type": "cut", "duration": 0.0})
-        transition_type = "dissolve" if transition.get("type") == "dissolve" and position else "cut"
-        transition["type"] = transition_type
-        transition["duration"] = round(max(0.0, min(.4, _number(transition.get("duration"), .18))), 3) if transition_type == "dissolve" else 0.0
+        segment["sourceDuration"] = round(max(0.0, _number(segment.get("end")) - _number(segment.get("start"))), 3)
+        segment["playbackRate"] = normalize_playback_rate(segment.get("playbackRate"))
+        segment["transitionIn"] = normalize_transition(segment.get("transitionIn"), first=position == 0)
+        segment["audioBridge"] = normalize_audio_bridge(segment.get("audioBridge"), first=position == 0)
+        segment["effectiveDuration"] = segment_effective_duration(segment)
+        # Keep the legacy duration field as the source duration.  Existing
+        # timeline code uses it for source ranges while actualDuration is the
+        # executable output duration.
+        segment["duration"] = segment["sourceDuration"]
     group["actualDuration"] = composition_duration(segments)
     group["totalDuration"] = group["actualDuration"]
     available = group.get("availableSegments") or segments
@@ -94,6 +101,11 @@ def _segment_from_candidate(
             "type": "dissolve" if transition_type == "dissolve" and order else "cut",
             "duration": .18 if transition_type == "dissolve" and order else 0.0,
         },
+        "playbackRate": 1.0,
+        "speedLocked": False,
+        "speedReason": "保持自然节奏",
+        "audioBridge": {"type": "none", "duration": 0.0, "reason": "保持同步音画"},
+        "silenceCuts": [],
     }
 
 
@@ -129,7 +141,7 @@ def build_event_groups(
                 continue
             if not reusable:
                 used_subject_indices.add(index)
-            segments.append(_segment_from_candidate(
+            segment = _segment_from_candidate(
                 candidates[index],
                 group_id=group_id,
                 order=len(segments),
@@ -137,7 +149,22 @@ def build_event_groups(
                 essential=bool(raw_moment.get("essential", len(segments) == 0)),
                 reusable_anchor=reusable,
                 transition_type=str(raw_moment.get("transition_in") or raw_moment.get("transitionIn") or "cut"),
-            ))
+            )
+            valid_indices = set(range(len(candidates)))
+            segment.update({
+                "storyFunction": str(raw_moment.get("story_function") or raw_moment.get("storyFunction") or segment["role"])[:80],
+                "requiresCandidateIndices": [
+                    int(value) for value in (raw_moment.get("requires_candidate_indices") or raw_moment.get("requiresCandidateIndices") or [])
+                    if isinstance(value, (int, float)) and int(value) in valid_indices and int(value) != index
+                ][:8],
+                "leadsToCandidateIndices": [
+                    int(value) for value in (raw_moment.get("leads_to_candidate_indices") or raw_moment.get("leadsToCandidateIndices") or [])
+                    if isinstance(value, (int, float)) and int(value) in valid_indices and int(value) != index
+                ][:8],
+                "standalone": bool(raw_moment.get("standalone", not raw_moment.get("requires_candidate_indices"))),
+                "emotionDirection": str(raw_moment.get("emotion_direction") or raw_moment.get("emotionDirection") or "")[:100],
+            })
+            segments.append(segment)
         if not segments:
             continue
         group = {
@@ -147,6 +174,15 @@ def build_event_groups(
             "summary": str(raw_group.get("summary") or raw_group.get("reason") or "由多个相关镜头组成的事件高光")[:600],
             "score": round(max(0.0, min(100.0, _number(raw_group.get("score"), max(item["score"] for item in segments)))), 2),
             "assemblyStrategy": "adaptive",
+            "storyArc": str(raw_group.get("story_arc") or raw_group.get("storyArc") or raw_group.get("summary") or "")[:600],
+            "storyGraph": [
+                {
+                    "candidateIndex": item["candidateIndex"], "storyFunction": item.get("storyFunction"),
+                    "requires": item.get("requiresCandidateIndices") or [], "leadsTo": item.get("leadsToCandidateIndices") or [],
+                    "standalone": bool(item.get("standalone")), "emotionDirection": item.get("emotionDirection") or "",
+                }
+                for item in segments
+            ],
             "segments": segments,
             "availableSegments": copy.deepcopy(segments),
         }
@@ -165,12 +201,17 @@ def build_event_groups(
             "summary": str(candidate.get("reason") or "当前只发现一个可靠镜头")[:600],
             "score": round(_number(candidate.get("score"), 50), 2),
             "assemblyStrategy": "source_order",
+            "storyArc": str(candidate.get("reason") or "独立精彩瞬间")[:600],
             "segments": [_segment_from_candidate(
                 candidate, group_id=group_id, order=0, role="核心镜头",
                 essential=True, reusable_anchor=False, transition_type="cut",
             )],
         }
         group["availableSegments"] = copy.deepcopy(group["segments"])
+        group["storyGraph"] = [{
+            "candidateIndex": index, "storyFunction": "独立精彩瞬间", "requires": [], "leadsTo": [],
+            "standalone": True, "emotionDirection": "",
+        }]
         groups.append(recalculate_event_group(group))
     groups.sort(key=lambda item: (-_number(item.get("score")), min(segment["start"] for segment in item["segments"])))
     for index, group in enumerate(groups):
@@ -529,7 +570,7 @@ def build_final_reel(selections: list[dict[str, Any]], *, order_mode: str = "sou
             "start": selection.get("start", 0), "end": selection.get("end", 0),
             "transitionIn": {"type": "cut", "duration": 0.0},
         }])
-        valid = [item for item in segments if _number(item.get("end")) - _number(item.get("start")) >= .2]
+        valid = [item for item in segments if source_duration_meets_minimum(item.get("start"), item.get("end"))]
         if not valid:
             continue
         chapters.append({
@@ -582,6 +623,12 @@ def build_final_reel(selections: list[dict[str, Any]], *, order_mode: str = "sou
             contributors = existing.setdefault("contributingChapterIds", [str(existing.get("chapterId") or "")])
             if contributor not in contributors:
                 contributors.append(contributor)
+            match_id = str(segment.get("candidateId") or "")
+            contributing_matches = existing.setdefault(
+                "contributingMatchIds", [str(existing.get("candidateId") or "")],
+            )
+            if match_id and match_id not in contributing_matches:
+                contributing_matches.append(match_id)
             occupied[overlapping_index] = (existing["start"], existing["end"])
             deduplication_log.append({
                 "action": "merged_overlap",
@@ -598,8 +645,14 @@ def build_final_reel(selections: list[dict[str, Any]], *, order_mode: str = "sou
         segment["chapterTitle"] = chapter["title"]
         segment["chapterOrder"] = chapter_order_map[chapter_id]
         segment["editOrder"] = len(reel_segments)
-        segment["transitionIn"] = {"type": "cut", "duration": 0.0}
+        # Preserve a reviewed transition/bridge while flattening chapters.
+        # Resetting every item to a hard cut here made the technique controls
+        # appear to save successfully but silently discarded them at render.
+        segment["transitionIn"] = normalize_transition(segment.get("transitionIn"), first=not reel_segments)
+        segment["audioBridge"] = normalize_audio_bridge(segment.get("audioBridge"), first=not reel_segments)
         segment["contributingChapterIds"] = [chapter_id]
+        if segment.get("candidateId"):
+            segment["contributingMatchIds"] = [str(segment["candidateId"])]
         reel_segments.append(segment)
         chapter_segments_map.setdefault(chapter_id, []).append(segment)
         occupied.append((start, end))

@@ -2,6 +2,8 @@ const $ = (selector) => {
   const node = document.querySelector(selector);
   return node || (selector === "#chatMessages" ? ensureChatMessages() : null);
 };
+const api = window.ClipTalkApi.request;
+const apiBlob = window.ClipTalkApi.requestBlob;
 function ensureChatMessages() {
   let root = document.querySelector("#chatMessages");
   if (root) return root;
@@ -208,12 +210,21 @@ let pollFailureDelay = 2500;
 let sourcePreviewPollTimer = null;
 let localPreviewUrl = null;
 let actionBusy = false;
+let contentReviewDraftTimer = null;
+let contentReviewDraftGeneration = 0;
+let contentBasketSaveTimer = null;
+let contentBasketSaveGeneration = 0;
+let speakerConfirmationBusy = false;
+const expandedContentSearchIds = new Set();
+const contentSearchDetailCache = new Map();
+const contentSearchFilterState = new Map();
 const borderBeamSeenOutputJobs = new Set();
 const borderBeamSeenOutputs = new Set();
 const borderBeamArrivalTimers = new WeakMap();
 let fragmentDownloadBusy = false;
 let candidatePreviewEnd = null;
 let candidatePreviewToken = 0;
+let contentEvidenceRequestToken = 0;
 let sourcePreviewRetryToken = 0;
 let playbackRequestToken = 0;
 let mainVideoAutoplayToken = 0;
@@ -233,6 +244,7 @@ let timelineTranscriptJobId = null;
 let transcriptRetryAt = 0;
 let timelineViewStart = 0;
 let timelineViewEnd = 0;
+let timelineCoordinateSpace = "output";
 let timelineReviewFollow = false;
 let timelineSnapEnabled = true;
 let timelineFrame = null;
@@ -264,6 +276,8 @@ let outputAssemblyMode = "single_reel";
 let pendingSegmentSelections = new Map();
 let timelineChatSelections = [];
 let eventGroupSelectionOrder = [];
+let ignoredChatContextKeys = new Set();
+let activeProposalSourceRange = null;
 let autoPlanScope = "selected_only";
 let autoAdvanceCandidates = true;
 let candidateReviewSort = "score";
@@ -286,6 +300,7 @@ const panelLayoutStorageKey = "vlm-highlight-panel-layout-v2";
 const timelineLayerStorageKey = "vlm-highlight-timeline-layers-v1";
 const currentJobStorageKey = "vlm-highlight-current-job-v1";
 const reviewLayoutStorageKey = "cliptalk-review-layout-v1";
+const portraitVideoWidthStorageKey = "cliptalk-portrait-video-width-v1";
 let recommendedReviewLayout = "landscape";
 let directorStage = "conversation";
 let openingHomeTaskId = null;
@@ -299,6 +314,212 @@ let activeChatController = null;
 // immediately after resetWorkspace() clears it.
 let homeNavigationRequested = false;
 window.alert = (message) => showToast(message);
+
+let subtitleReviewDraft = null;
+let subtitleReviewResolver = null;
+let subtitleReviewActiveCueId = null;
+let subtitleReviewBusy = false;
+
+function subtitleCueId() {
+  return `cue_local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function markSubtitleDraftChanged() {
+  if (!subtitleReviewDraft) return;
+  subtitleReviewDraft.status = "draft";
+  subtitleReviewDraft.confirmedAt = null;
+  const state = $("#subtitleSaveState");
+  if (state) state.textContent = "有未确认修改";
+}
+
+function subtitlePositionLabel(style = {}) {
+  const horizontal = ({ left: "左", center: "居中", right: "右" })[style.horizontal] || "居中";
+  const vertical = ({ top: "顶部", middle: "中央", bottom: "底部" })[style.vertical] || "底部";
+  return `${vertical}${horizontal}`;
+}
+
+function activeSubtitleCue() {
+  return subtitleReviewDraft?.cues?.find((cue) => cue.id === subtitleReviewActiveCueId) || subtitleReviewDraft?.cues?.[0] || null;
+}
+
+function updateSubtitlePreview() {
+  const cue = activeSubtitleCue();
+  const text = $("#subtitlePreviewText");
+  const stage = $("#subtitlePreviewStage");
+  if (!text || !stage || !subtitleReviewDraft) return;
+  if (cue && subtitleReviewActiveCueId !== cue.id) subtitleReviewActiveCueId = cue.id;
+  const style = subtitleReviewDraft.cueStyleOverrides?.[cue?.id] || subtitleReviewDraft.globalStyle || {};
+  const horizontalBase = ({ left: 5, center: 50, right: 95 })[style.horizontal] ?? 50;
+  const verticalBase = ({ top: 5, middle: 50, bottom: 95 })[style.vertical] ?? 95;
+  const left = Math.max(5, Math.min(95, horizontalBase + Number(style.offsetXRatio || 0) * 100));
+  const top = Math.max(5, Math.min(95, verticalBase + Number(style.offsetYRatio || 0) * 100));
+  text.textContent = cue?.text || "（空字幕不会烧录）";
+  text.style.left = `${left}%`;
+  text.style.top = `${top}%`;
+  text.style.fontSize = `${Math.max(14, stage.clientHeight * Number(style.fontSizeRatio || .04))}px`;
+  text.style.transform = `translate(${style.horizontal === "left" ? "0" : style.horizontal === "right" ? "-100%" : "-50%"},${style.vertical === "top" ? "0" : style.vertical === "bottom" ? "-100%" : "-50%"})`;
+  const summary = $("#subtitleStyleSummary");
+  if (summary) summary.textContent = `字号 ${(Number(style.fontSizeRatio || .04) * 100).toFixed(1)}% · ${subtitlePositionLabel(style)}${subtitleReviewDraft.cueStyleOverrides?.[cue?.id] ? " · 本条单独设置" : " · 全部字幕"}`;
+  const video = $("#subtitleReviewVideo");
+  if (cue && video && Number.isFinite(Number(cue.sourceStart))) {
+    const seek = () => { try { video.currentTime = Math.max(0, Number(cue.sourceStart)); } catch (_) {} };
+    if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, { once: true });
+  }
+}
+
+function renderSubtitleCueList() {
+  const list = $("#subtitleCueList");
+  if (!list || !subtitleReviewDraft) return;
+  const cues = subtitleReviewDraft.cues || [];
+  if (subtitleReviewActiveCueId && !cues.some((cue) => cue.id === subtitleReviewActiveCueId)) subtitleReviewActiveCueId = cues[0]?.id || null;
+  const count = $("#subtitleCueCount");
+  if (count) count.textContent = `${cues.length} 条字幕${new Set(cues.map((cue) => cue.outputIndex)).size > 1 ? ` · ${new Set(cues.map((cue) => cue.outputIndex)).size} 条成片` : ""}`;
+  list.innerHTML = cues.length ? cues.map((cue, index) => `
+    <article class="subtitle-cue ${cue.id === subtitleReviewActiveCueId ? "is-active" : ""}" data-subtitle-cue="${escapeHtml(cue.id)}">
+      <div class="subtitle-cue-head"><span class="subtitle-cue-index">${String(index + 1).padStart(2, "0")}${Number(cue.outputIndex || 0) ? ` · 成片 ${Number(cue.outputIndex) + 1}` : ""}</span><label class="subtitle-cue-time"><input data-cue-start type="number" min="0" step="0.01" value="${Number(cue.start || 0).toFixed(2)}"><span>→</span><input data-cue-end type="number" min="0" step="0.01" value="${Number(cue.end || 0).toFixed(2)}"><span>秒</span></label></div>
+      <textarea data-cue-text maxlength="500" aria-label="字幕文字">${escapeHtml(cue.text || "")}</textarea>
+      ${cue.suggestionStatus === "pending" ? `<div class="subtitle-suggestion"><strong>AI 文字建议（未应用）</strong><span>${escapeHtml(cue.suggestedText || "")}</span><small>${escapeHtml(cue.suggestionReason || "仅根据相邻文字上下文")}</small><div class="subtitle-suggestion-actions"><button type="button" data-cue-accept>接受</button><button type="button" data-cue-ignore>忽略</button></div></div>` : ""}
+      <div class="subtitle-cue-actions"><button type="button" data-cue-play>试听定位</button><button type="button" data-cue-split>拆分</button><button type="button" data-cue-merge>与下一条合并</button><button type="button" data-cue-delete>删除</button></div>
+    </article>`).join("") : `<p class="subtitle-ai-notice">当前没有字幕条目。可返回并选择不添加字幕。</p>`;
+  list.querySelectorAll("[data-subtitle-cue]").forEach((card) => {
+    const cue = cues.find((item) => item.id === card.dataset.subtitleCue);
+    if (!cue) return;
+    card.addEventListener("click", () => {
+      subtitleReviewActiveCueId = cue.id;
+      list.querySelectorAll(".subtitle-cue").forEach((node) => node.classList.toggle("is-active", node === card));
+      updateSubtitlePreview();
+    });
+    card.querySelector("[data-cue-text]")?.addEventListener("input", (event) => {
+      cue.text = event.target.value;
+      if (cue.suggestionStatus === "pending") cue.suggestionStatus = "ignored";
+      markSubtitleDraftChanged(); updateSubtitlePreview();
+    });
+    [["[data-cue-start]", "start"], ["[data-cue-end]", "end"]].forEach(([selector, key]) => card.querySelector(selector)?.addEventListener("change", (event) => {
+      cue[key] = Number(event.target.value); markSubtitleDraftChanged();
+    }));
+    card.querySelector("[data-cue-play]")?.addEventListener("click", () => {
+      showSource({ autoplay: false }); seekSourceTime(Number(cue.sourceStart ?? 0));
+      const video = $("#subtitleReviewVideo"); if (video) { video.currentTime = Math.max(0, Number(cue.sourceStart ?? 0)); video.play().catch(() => {}); }
+    });
+    card.querySelector("[data-cue-accept]")?.addEventListener("click", () => {
+      cue.text = cue.suggestedText || cue.text; cue.suggestionStatus = "accepted"; markSubtitleDraftChanged(); renderSubtitleCueList(); updateSubtitlePreview();
+    });
+    card.querySelector("[data-cue-ignore]")?.addEventListener("click", () => {
+      cue.suggestionStatus = "ignored"; markSubtitleDraftChanged(); renderSubtitleCueList();
+    });
+    card.querySelector("[data-cue-delete]")?.addEventListener("click", () => {
+      subtitleReviewDraft.cues = cues.filter((item) => item.id !== cue.id); markSubtitleDraftChanged(); renderSubtitleCueList(); updateSubtitlePreview();
+    });
+    card.querySelector("[data-cue-split]")?.addEventListener("click", () => {
+      const duration = Number(cue.end) - Number(cue.start); if (duration < .2) return void showToast("这条字幕太短，无法继续拆分");
+      const middle = Number(cue.start) + duration / 2;
+      const textValue = String(cue.text || "");
+      let textBreak = Math.floor(textValue.length / 2);
+      for (let offset = 0; offset < textValue.length / 2; offset += 1) { const candidate = [textBreak + offset, textBreak - offset].find((value) => /[，。！？、；\s]/.test(textValue[value] || "")); if (candidate !== undefined) { textBreak = candidate + 1; break; } }
+      const second = { ...cue, id: subtitleCueId(), start: Number(middle.toFixed(3)), text: textValue.slice(textBreak).trim(), originalText: textValue.slice(textBreak).trim(), suggestionStatus: "none", suggestedText: null };
+      cue.end = Number(middle.toFixed(3)); cue.text = textValue.slice(0, textBreak).trim(); cue.suggestionStatus = "none";
+      subtitleReviewDraft.cues.splice(cues.indexOf(cue) + 1, 0, second); markSubtitleDraftChanged(); renderSubtitleCueList();
+    });
+    card.querySelector("[data-cue-merge]")?.addEventListener("click", () => {
+      const index = cues.indexOf(cue); const next = cues[index + 1];
+      if (!next || Number(next.outputIndex || 0) !== Number(cue.outputIndex || 0)) return void showToast("没有可合并的下一条字幕");
+      cue.end = Math.max(Number(cue.end), Number(next.end)); cue.text = [cue.text, next.text].filter(Boolean).join(" "); cue.suggestionStatus = "none";
+      subtitleReviewDraft.cues.splice(index + 1, 1); markSubtitleDraftChanged(); renderSubtitleCueList(); updateSubtitlePreview();
+    });
+  });
+  updateSubtitlePreview();
+}
+
+function setSubtitleReviewBusy(busy, label = "") {
+  subtitleReviewBusy = Boolean(busy);
+  $("#subtitleReview")?.querySelectorAll("button,input,textarea").forEach((node) => { node.disabled = subtitleReviewBusy; });
+  const state = $("#subtitleSaveState"); if (state && label) state.textContent = label;
+}
+
+async function saveSubtitleReviewDraft(confirmed = false) {
+  if (!currentJob || !subtitleReviewDraft || subtitleReviewBusy) return null;
+  setSubtitleReviewBusy(true, confirmed ? "正在确认字幕…" : "正在保存…");
+  try {
+    const payload = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}/subtitle-drafts/${encodeURIComponent(subtitleReviewDraft.id)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision: subtitleReviewDraft.revision, cues: subtitleReviewDraft.cues, globalStyle: subtitleReviewDraft.globalStyle, cueStyleOverrides: subtitleReviewDraft.cueStyleOverrides || {}, confirmed, sourceSubtitleAcknowledged: Boolean($("#subtitleSourceAck")?.checked) }),
+    });
+    subtitleReviewDraft = payload.draft;
+    const sourceAck = $("#subtitleSourceAck"); if (sourceAck) sourceAck.checked = Boolean(subtitleReviewDraft.sourceSubtitleAcknowledged);
+    const confirmButton = $("#subtitleConfirmButton"); if (confirmButton) confirmButton.disabled = !sourceAck?.checked;
+    const state = $("#subtitleSaveState"); if (state) state.textContent = confirmed ? "字幕已确认" : "草稿已保存，仍需确认";
+    renderSubtitleCueList();
+    return subtitleReviewDraft;
+  } catch (error) { showToast(error.message); return null; }
+  finally { setSubtitleReviewBusy(false); }
+}
+
+function closeSubtitleReview(result = null) {
+  $("#subtitleReview")?.classList.add("hidden");
+  $("#subtitleReviewVideo")?.pause();
+  const resolve = subtitleReviewResolver; subtitleReviewResolver = null;
+  if (resolve) resolve(result);
+}
+
+async function reviewSubtitlesBeforeRender(outputs, subtitleStyle = "clean") {
+  if (!currentJob || subtitleReviewBusy) return null;
+  setSubtitleReviewBusy(true, "正在建立字幕草稿…");
+  try {
+    const payload = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}/subtitle-drafts`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outputs, subtitleStyle }),
+    });
+    subtitleReviewDraft = payload.draft;
+    subtitleReviewActiveCueId = subtitleReviewDraft.cues?.[0]?.id || null;
+    const review = $("#subtitleReview"); review?.classList.remove("hidden");
+    const sourceAck = $("#subtitleSourceAck"); if (sourceAck) sourceAck.checked = Boolean(subtitleReviewDraft.sourceSubtitleAcknowledged);
+    const confirmButton = $("#subtitleConfirmButton"); if (confirmButton) confirmButton.disabled = !sourceAck?.checked;
+    const video = $("#subtitleReviewVideo");
+    if (video && mainVideo?.currentSrc) { video.src = mainVideo.currentSrc; video.load(); }
+    const state = $("#subtitleSaveState"); if (state) state.textContent = "识别草稿待人工确认";
+    renderSubtitleCueList();
+    setSubtitleReviewBusy(false);
+    return await new Promise((resolve) => { subtitleReviewResolver = resolve; });
+  } catch (error) { showToast(error.message); return null; }
+  finally { setSubtitleReviewBusy(false); }
+}
+
+async function applySubtitleStyleCommand(command) {
+  if (!currentJob || !subtitleReviewDraft || subtitleReviewBusy) return;
+  const status = $("#subtitleCommandStatus"); if (status) status.textContent = "正在理解命令…";
+  setSubtitleReviewBusy(true);
+  try {
+    const payload = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}/subtitle-drafts/${encodeURIComponent(subtitleReviewDraft.id)}/style-command`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: command, cueId: subtitleReviewActiveCueId }),
+    });
+    const proposal = payload.proposal;
+    if (proposal.scope === "cue" && proposal.cueId) subtitleReviewDraft.cueStyleOverrides = { ...(subtitleReviewDraft.cueStyleOverrides || {}), [proposal.cueId]: proposal.style };
+    else subtitleReviewDraft.globalStyle = proposal.style;
+    markSubtitleDraftChanged(); updateSubtitlePreview();
+    if (status) status.textContent = `${proposal.summary} · ${proposal.scope === "cue" ? "仅当前字幕" : "已应用到全部字幕"}`;
+  } catch (error) { if (status) status.textContent = error.message; }
+  finally { setSubtitleReviewBusy(false); }
+}
+
+$("#subtitleReview")?.querySelectorAll("[data-subtitle-close]").forEach((button) => button.addEventListener("click", () => closeSubtitleReview(null)));
+$("#subtitleSaveButton")?.addEventListener("click", () => saveSubtitleReviewDraft(false));
+$("#subtitleConfirmButton")?.addEventListener("click", async () => { const draft = await saveSubtitleReviewDraft(true); if (draft) closeSubtitleReview(draft); });
+$("#subtitleSourceAck")?.addEventListener("change", (event) => {
+  const checked = Boolean(event.currentTarget?.checked);
+  const button = $("#subtitleConfirmButton"); if (button) button.disabled = !checked;
+  const state = $("#subtitleSaveState"); if (state && !checked) state.textContent = "请先确认原视频字幕状态";
+});
+$("#subtitleSuggestButton")?.addEventListener("click", async () => {
+  if (!subtitleReviewDraft || subtitleReviewBusy) return;
+  if (!await saveSubtitleReviewDraft(false)) return;
+  setSubtitleReviewBusy(true, "AI 正在检查文字上下文…");
+  try {
+    const payload = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}/subtitle-drafts/${encodeURIComponent(subtitleReviewDraft.id)}/suggestions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    subtitleReviewDraft = payload.draft; renderSubtitleCueList();
+    $("#subtitleSaveState").textContent = payload.suggestionCount ? `发现 ${payload.suggestionCount} 条待处理建议` : "未发现有把握的文字问题";
+  } catch (error) { showToast(error.message); }
+  finally { setSubtitleReviewBusy(false); }
+});
+$("#subtitleCommandForm")?.addEventListener("submit", (event) => { event.preventDefault(); const input = $("#subtitleCommandInput"); const value = input?.value.trim(); if (value) applySubtitleStyleCommand(value); });
+$("#subtitleReview")?.querySelectorAll("[data-subtitle-command]").forEach((button) => button.addEventListener("click", () => applySubtitleStyleCommand(button.dataset.subtitleCommand)));
 
 function captureJobAction(job = currentJob) {
   return { generation: workspaceGeneration, jobId: String(job?.id || "") };
@@ -320,6 +541,7 @@ function commitJobAction(job, token) {
 
 function invalidateWorkspaceRequests() {
   workspaceGeneration += 1;
+  contentEvidenceRequestToken += 1;
   activeChatController?.abort();
   activeChatController = null;
   clearTimeout(pollTimer);
@@ -397,6 +619,71 @@ function rememberReviewLayout(layout, jobId = currentJob?.id) {
   catch { /* storage may be disabled */ }
 }
 
+function storedPortraitVideoWidth(jobId = currentJob?.id) {
+  if (!jobId) return null;
+  try {
+    const saved = JSON.parse(localStorage.getItem(portraitVideoWidthStorageKey) || "{}");
+    const width = Number(saved?.[String(jobId)]);
+    return Number.isFinite(width) && width > 0 ? width : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberPortraitVideoWidth(width, jobId = currentJob?.id) {
+  if (!jobId || !Number.isFinite(Number(width))) return;
+  let preferences = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(portraitVideoWidthStorageKey) || "{}");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) preferences = saved;
+  } catch { /* replace malformed legacy data below */ }
+  preferences[String(jobId)] = Math.round(Number(width));
+  try { localStorage.setItem(portraitVideoWidthStorageKey, JSON.stringify(preferences)); }
+  catch { /* storage may be disabled */ }
+}
+
+function forgetPortraitVideoWidth(jobId = currentJob?.id) {
+  if (!jobId) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(portraitVideoWidthStorageKey) || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
+    delete saved[String(jobId)];
+    localStorage.setItem(portraitVideoWidthStorageKey, JSON.stringify(saved));
+  } catch { /* storage may be disabled */ }
+}
+
+function portraitVideoWidthLimits() {
+  const reviewView = $("#reviewView");
+  const available = Math.max(0, reviewView?.clientWidth || 0);
+  const minimum = Math.min(280, Math.max(220, Math.round(available * .28)));
+  const leftMinimum = Math.min(440, Math.max(320, Math.round(available * .38)));
+  const maximum = Math.max(minimum, Math.min(640, available - leftMinimum - 22));
+  const fallback = Math.max(minimum, Math.min(maximum, Math.round(Math.min(440, available * .34))));
+  return { minimum, maximum, fallback };
+}
+
+function setPortraitVideoWidth(value, { persist = false } = {}) {
+  const reviewView = $("#reviewView");
+  const handle = $("#portraitVideoResizer");
+  if (!reviewView || !handle) return 0;
+  const { minimum, maximum, fallback } = portraitVideoWidthLimits();
+  const requested = Number(value);
+  const width = Math.round(Math.max(minimum, Math.min(maximum, Number.isFinite(requested) ? requested : fallback)));
+  reviewView.style.setProperty("--portrait-video-width", `${width}px`);
+  reviewView.dataset.portraitVideoWidth = String(width);
+  handle.setAttribute("aria-valuemin", String(minimum));
+  handle.setAttribute("aria-valuemax", String(maximum));
+  handle.setAttribute("aria-valuenow", String(width));
+  if (persist) rememberPortraitVideoWidth(width);
+  scheduleMediaFrameFit(true);
+  return width;
+}
+
+function restorePortraitVideoWidth() {
+  const saved = storedPortraitVideoWidth();
+  return setPortraitVideoWidth(saved ?? portraitVideoWidthLimits().fallback);
+}
+
 function updateReviewLayoutControls(layout) {
   document.querySelectorAll("#reviewLayoutSwitch [data-review-layout-mode]").forEach((button) => {
     const active = button.dataset.reviewLayoutMode === layout;
@@ -411,6 +698,7 @@ function setReviewLayout(layout, { persist = false } = {}) {
   if (reviewView) reviewView.dataset.reviewLayout = normalized;
   updateReviewLayoutControls(normalized);
   if (persist) rememberReviewLayout(normalized);
+  if (normalized === "portrait") restorePortraitVideoWidth();
   scheduleTimelineResizeRender(true);
   scheduleMediaFrameFit(true);
   return normalized;
@@ -493,7 +781,7 @@ function isActiveJobStatus(status) {
 
 function isPipelineRunningStatus(status) {
   const value = String(status || "");
-  return isActiveJobStatus(value) && !["briefing", "awaiting_model_decision"].includes(value);
+  return isActiveJobStatus(value) && !["briefing", "queued", "cancelling", "awaiting_model_decision"].includes(value);
 }
 
 function jobNeedsPolling(job = currentJob) {
@@ -509,7 +797,7 @@ function jobPollDelay(job = currentJob) {
 }
 
 function analysisConsoleVisible(job) {
-  return isActiveJobStatus(job?.status);
+  return ["briefing", "queued", "running", "processing", "analyzing", "cancelling"].includes(String(job?.status || ""));
 }
 
 function setDirectorStage(stage = "conversation") {
@@ -539,6 +827,10 @@ function setDirectorStage(stage = "conversation") {
 
 function directorFlowStage(job = currentJob) {
   if (!job) return "brief";
+  if (String(job.taskMode || "") === "content_extract" && job.workflow?.phase) {
+    const contentPhases = { prepare: "brief", search: "analysis", review: "events", render: "compose", complete: "compose" };
+    return contentPhases[String(job.workflow.phase)] || "analysis";
+  }
   if (["briefing", "brief_confirmation"].includes(job.status)) return "brief";
   const compositionStage = ["edit_planning", "edit_planning_complete", "rendering", "render", "auto_composition"].includes(String(job.stage || ""));
   const autoCompositionStatus = String(job.autoComposition?.status || "");
@@ -549,7 +841,8 @@ function directorFlowStage(job = currentJob) {
   // job as if analysis were still in progress.
   if (job.status === "completed" || compositionStage || ["queued", "running", "completed"].includes(autoCompositionStatus)) return "compose";
   if (["queued", "running", "cancelling", "awaiting_model_decision"].includes(job.status)) return "analysis";
-  if (job.status === "awaiting_confirmation") return hasOutputs ? "compose" : "analysis";
+  if (job.status === "awaiting_confirmation") return hasOutputs ? "compose" : "events";
+  if (job.status === "awaiting_content_confirmation") return "events";
   if (["cancelled", "failed"].includes(job.status)) return "analysis";
   return "brief";
 }
@@ -563,7 +856,7 @@ function compositionIsComplete(job = currentJob) {
 function updateDirectorFlow(job = currentJob) {
   const internalStage = directorFlowStage(job);
   const current = internalStage;
-  const order = ["brief", "analysis", "compose"];
+  const order = ["brief", "analysis", "events", "compose"];
   const position = order.indexOf(current);
   const finished = current === "compose" && compositionIsComplete(job);
   document.querySelectorAll("[data-director-flow]").forEach((step) => {
@@ -577,12 +870,65 @@ function updateDirectorFlow(job = currentJob) {
   });
 }
 
+function taskModePresentation(job = currentJob) {
+  const content = String(job?.taskMode || "highlight") === "content_extract";
+  return content
+    ? {
+        key: "content_extract",
+        label: "内容探索",
+        phaseLabels: { brief: "需求确认", analysis: "内容探索", events: "片段确认", compose: "确认生成" },
+        nav: [
+          ["准备", "描述要查找的内容"],
+          ["内容探索", "识别并检索目标内容"],
+          ["片段确认", "预览并选择匹配片段"],
+          ["生成结果", "合成、预览并下载"],
+        ],
+      }
+    : {
+        key: "highlight",
+        label: "高光发现",
+        phaseLabels: { brief: "需求确认", analysis: "高光发现", events: "事件审核", compose: "生成版本" },
+        nav: [
+          ["准备", "确认要求并准备媒体"],
+          ["高光发现", "发现并组织精彩事件"],
+          ["事件审核", "确认事件与内部镜头"],
+          ["生成版本", "合成、预览并下载"],
+        ],
+      };
+}
+
+function updateTaskModeNavigation(job = currentJob) {
+  const presentation = taskModePresentation(job);
+  const nav = $("#directorStageNav");
+  if (!nav) return;
+  nav.setAttribute("aria-label", `${presentation.label}流程`);
+  nav.querySelectorAll("[data-director-flow]").forEach((step, index) => {
+    const [label, detail] = presentation.nav[index] || presentation.nav.at(-1);
+    const strong = step.querySelector("strong");
+    const small = step.querySelector("small");
+    if (strong) strong.textContent = label;
+    if (small) small.textContent = detail;
+  });
+}
+
 function renderDirectorContext(job = currentJob) {
   const summary = $("#directorContextSummary");
   if (!summary) return;
   if (!job || directorStage === "conversation") {
     summary.classList.add("hidden");
     summary.innerHTML = "";
+    return;
+  }
+  if (String(job.taskMode || "") === "content_extract") {
+    const search = job.contentSearch || {};
+    const query = search.intent?.query || search.instruction || job.request?.contentInstruction || "按描述查找内容";
+    const scope = search.intent?.searchScope || search.retrievalStats?.searchScope || {};
+    const scopeText = Number(scope.end) > Number(scope.start)
+      ? `${formatTime(scope.start)} → ${formatTime(scope.end)}`
+      : "整个源视频";
+    const resultMode = String(search.resultMode || search.queryPlan?.result?.mode || "top_k") === "exhaustive" ? "全部匹配" : "最相关片段";
+    summary.innerHTML = `<div><small>当前查找条件</small><strong>${escapeHtml(query)}</strong></div><span>范围：${escapeHtml(scopeText)}</span><span>结果：${escapeHtml(resultMode)}</span><span>边界以真实索引证据为准</span>`;
+    summary.classList.remove("hidden");
     return;
   }
   const brief = job.brief || {};
@@ -598,31 +944,53 @@ function renderDirectorTaskSummary(job = currentJob) {
   if (!summary) return;
   if (!job) {
     summary.innerHTML = `<strong>等待创建任务</strong><span>上传视频后，AI 会先确认你的剪辑目标。</span>`;
+    updateTaskModeNavigation(null);
     return;
   }
+  const presentation = taskModePresentation(job);
+  updateTaskModeNavigation(job);
   const brief = job.brief || {};
   const objective = brief.objective || job.request?.objective || "事件高光合集";
   const duration = Number(job.videoInfo?.duration || 0);
   const target = Number(brief.targetDurationSeconds || job.totalTargetSeconds || 0);
   const outputCount = jobOutputCount(job);
   const compositionComplete = compositionIsComplete(job);
+  const contentMode = presentation.key === "content_extract";
   const status = compositionComplete
-    ? `${outputCount} 个成片版本已完成${job.status === "awaiting_confirmation" ? " · 事件和镜头均可单独下载" : ""}`
-    : job.status === "awaiting_confirmation" ? "事件已就绪 · 待审核"
-      : job.status === "completed" ? "成片已完成" : job.detail || "任务进行中";
-  const stageLabels = { brief: "需求确认", analysis: "AI 分析", events: "事件审核", compose: "生成成片" };
-  summary.innerHTML = `<small>当前任务 · ${stageLabels[directorFlowStage(job)]}</small><strong title="${escapeHtml(job.filename || objective)}">${escapeHtml(job.filename || objective)}</strong><p>${escapeHtml(status)}</p><div><span>${duration ? `源视频 ${formatClock(duration)}` : "源视频待准备"}</span>${target ? `<span>目标 ${target.toFixed(1)} 秒</span>` : ""}</div>`;
+    ? (contentMode ? `${outputCount} 个内容视频版本已完成` : `${outputCount} 个成片版本已完成${job.status === "awaiting_confirmation" ? " · 事件和镜头均可单独下载" : ""}`)
+    : job.status === "awaiting_content_confirmation" ? "内容候选已就绪 · 待确认"
+      : job.status === "awaiting_confirmation" ? "事件已就绪 · 待审核"
+      : job.status === "completed" ? (contentMode ? "内容视频已完成" : "成片已完成") : job.detail || "任务进行中";
+  const flowStage = directorFlowStage(job);
+  summary.innerHTML = `<div class="director-task-heading"><span class="task-mode-badge ${presentation.key}">${presentation.label}</span><small>当前阶段 · ${presentation.phaseLabels[flowStage] || "处理中"}</small></div><strong title="${escapeHtml(job.filename || objective)}">${escapeHtml(job.filename || objective)}</strong><p>${escapeHtml(status)}</p><div class="director-task-facts"><span>${duration ? `源视频 ${formatClock(duration)}` : "源视频待准备"}</span>${target && presentation.key === "highlight" ? `<span>目标 ${target.toFixed(1)} 秒</span>` : ""}</div>`;
 }
 
 function renderReviewStatus(job = currentJob) {
   const node = $("#reviewStatus");
   if (!node) return;
+  const modeBadge = $("#reviewTaskMode");
+  if (modeBadge) {
+    const presentation = taskModePresentation(job);
+    modeBadge.textContent = presentation.label;
+    modeBadge.classList.toggle("content_extract", presentation.key === "content_extract");
+    modeBadge.classList.toggle("highlight", presentation.key === "highlight");
+    modeBadge.classList.toggle("hidden", !job);
+  }
   const stageLabels = {
     starting: "读取素材",
     probing: "读取素材",
     audio_analysis: "理解声音",
     speech_recognition: "理解对白",
     speech_analysis: "分析语音",
+    content_transcription: "识别对白",
+    content_sampling: "准备画面检索",
+    content_indexing: "准备所需索引",
+    content_recognition: "建立所需索引",
+    content_index_ready: "索引已就绪",
+    content_search: "搜索内容",
+    content_active_speaker: "识别说话人物",
+    content_refinement: "精修边界",
+    content_search_ready: "等待确认",
     sampling: "粗看全片",
     coarse_vlm: "粗看全片",
     refine_vlm: "精修镜头",
@@ -634,10 +1002,12 @@ function renderReviewStatus(job = currentJob) {
   const active = isActiveJobStatus(job?.status);
   const outputCount = jobOutputCount(job);
   const compositionComplete = compositionIsComplete(job);
+  const contentMode = String(job?.taskMode || "") === "content_extract";
   const label = !job ? "等待分析"
-    : compositionComplete ? `${outputCount} 个成片已完成`
+    : compositionComplete ? `${outputCount} 个${contentMode ? "内容视频" : "成片"}已完成`
       : active ? `AI 分析 · ${stageLabels[String(job.stage || "")] || "处理中"}`
-      : job.status === "awaiting_confirmation" ? "等待审核"
+      : job.status === "awaiting_content_confirmation" ? "等待确认内容片段"
+        : job.status === "awaiting_confirmation" ? "等待审核"
         : job.status === "completed" ? "已完成"
           : job.status === "failed" ? "分析失败" : "已停止";
   node.textContent = label;
@@ -855,9 +1225,67 @@ function bindTimelineResizer() {
   });
 }
 
+function bindPortraitVideoResizer() {
+  const handle = $("#portraitVideoResizer");
+  const reviewView = $("#reviewView");
+  if (!handle || !reviewView || handle.dataset.bound === "true") return;
+  handle.dataset.bound = "true";
+  handle.addEventListener("pointerdown", (event) => {
+    if (window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait" || event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = Math.round($("#viewerShell")?.getBoundingClientRect().width || restorePortraitVideoWidth());
+    let pendingWidth = startWidth;
+    let resizeFrame = null;
+    handle.classList.add("dragging");
+    document.body.classList.add("portrait-video-resizing");
+    handle.setPointerCapture?.(event.pointerId);
+    const applyPendingWidth = () => {
+      resizeFrame = null;
+      setPortraitVideoWidth(pendingWidth);
+    };
+    const move = (moveEvent) => {
+      pendingWidth = startWidth - (moveEvent.clientX - startX);
+      if (resizeFrame === null) resizeFrame = requestAnimationFrame(applyPendingWidth);
+    };
+    const finish = () => {
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      const width = setPortraitVideoWidth(pendingWidth, { persist: true });
+      handle.classList.remove("dragging");
+      document.body.classList.remove("portrait-video-resizing");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      if (width) scheduleTimelineResizeRender(true);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key) || window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait") return;
+    event.preventDefault();
+    const current = Number(reviewView.dataset.portraitVideoWidth) || restorePortraitVideoWidth();
+    const width = setPortraitVideoWidth(current + (event.key === "ArrowLeft" ? 16 : -16), { persist: true });
+    if (width) scheduleTimelineResizeRender(true);
+  });
+  handle.addEventListener("dblclick", () => {
+    if (reviewView.dataset.reviewLayout !== "portrait") return;
+    forgetPortraitVideoWidth();
+    reviewView.style.removeProperty("--portrait-video-width");
+    delete reviewView.dataset.portraitVideoWidth;
+    restorePortraitVideoWidth();
+    scheduleTimelineResizeRender(true);
+  });
+  window.addEventListener("resize", () => {
+    if (reviewView.dataset.reviewLayout === "portrait") restorePortraitVideoWidth();
+  });
+}
+
 restorePanelLayout();
 bindPanelResizers();
 bindTimelineResizer();
+bindPortraitVideoResizer();
 requestAnimationFrame(clampPanelLayoutToViewport);
 window.addEventListener("resize", clampPanelLayoutToViewport);
 
@@ -1209,6 +1637,27 @@ function progressContract(job = currentJob) {
   return { workflow, stage, timing, activity };
 }
 
+function processingElapsedSeconds(job = currentJob) {
+  if (!job) return 0;
+  const timing = progressContract(job).timing;
+  const hasPersistedTiming = timing.processingTimingVersion != null || job.processingTimingVersion != null;
+  if (!hasPersistedTiming && !isPipelineRunningStatus(job.status)) return null;
+  const persisted = Number(timing.processingElapsedSeconds ?? job.processingElapsedSeconds ?? 0);
+  const base = Number.isFinite(persisted) ? Math.max(0, persisted) : 0;
+  if (!isPipelineRunningStatus(job.status)) return base;
+  const activeSince = Date.parse(String(timing.processingActiveSince || job.processingActiveSince || ""));
+  return Number.isFinite(activeSince)
+    ? base + Math.max(0, (Date.now() - activeSince) / 1000)
+    : base;
+}
+
+function processingElapsedLabel(job = currentJob) {
+  const seconds = processingElapsedSeconds(job);
+  if (seconds == null) return "处理用时不可用";
+  const elapsed = formatClock(seconds);
+  return isPipelineRunningStatus(job?.status) ? `正在处理 ${elapsed}` : `处理用时 ${elapsed}`;
+}
+
 function workflowProgress(job = currentJob) {
   const raw = progressContract(job).workflow.fraction;
   const fallback = job?.progress;
@@ -1227,10 +1676,14 @@ function stageDisplayMode(job = currentJob) {
 }
 
 function progressEtaText(job, waiting = false) {
+  if (job?.status === "queued") return "等待队列，不计入处理用时";
+  if (job?.status === "cancelling") return "停止请求已提交，正在收尾";
+  if (job?.status === "awaiting_model_decision") return "等待你选择重试、降级继续或取消";
   const timing = progressContract(job).timing;
   const rawEta = timing.etaSeconds ?? job?.etaSeconds;
   const eta = Number(rawEta);
   const etaMode = String(timing.etaMode || job?.etaMode || "");
+  if (stageDisplayMode(job) === "completed" && job?.status === "running") return "正在进入下一阶段";
   if (etaMode === "finalizing") return "正在整理标点、情绪和说话人";
   if (etaMode === "unavailable") return "本阶段耗时取决于模型响应";
   if (etaMode === "encoding") return "FFmpeg 实时编码中";
@@ -1247,7 +1700,9 @@ function progressEtaText(job, waiting = false) {
   const completed = Number(stage.completed ?? job?.stageCompleted);
   const total = Number(stage.total ?? job?.stageTotal);
   if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
-    const unit = String(job?.stageUnit || "项");
+    const unit = String(stage.unit || job?.stageUnit || "项");
+    if (completed >= total) return "本项计数已完成 · 正在进入下一步";
+    if (completed > 0) return "正在采集本阶段耗时";
     const firstResult = unit === "%" ? "首个进度样本" : `首${unit}`;
     return `等待${firstResult}结果`;
   }
@@ -1255,14 +1710,24 @@ function progressEtaText(job, waiting = false) {
 }
 
 function stageProgressFact(job, fallbackPercent = 0, waiting = false) {
+  if (job?.status === "queued") return "尚未开始处理";
+  if (job?.status === "cancelling") return "正在停止当前任务";
+  if (job?.status === "awaiting_model_decision") return "等待处理模型阶段";
   const { stage, timing } = progressContract(job);
   const etaMode = String(timing.etaMode || job?.etaMode || "");
   const mode = stageDisplayMode(job);
   if (etaMode === "encoding") return `编码 ${fallbackPercent}%`;
   if (etaMode === "quality_check") return "正在检查成片";
-  if (mode === "finalizing") return "正在整理结果";
+  if (mode === "completed") return "当前阶段已完成";
   const completed = Number(stage.completed ?? job?.stageCompleted);
   const total = Number(stage.total ?? job?.stageTotal);
+  if (mode === "finalizing") {
+    if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+      const unit = String(stage.unit || job?.stageUnit || "项");
+      return `已处理 ${completed}/${total} ${unit} · 正在整理结果`;
+    }
+    return "正在整理结果";
+  }
   if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
     const unit = String(stage.unit || job?.stageUnit || "项");
     return unit === "%" ? `已处理 ${completed}%` : `已完成 ${completed}/${total} ${unit}`;
@@ -1334,6 +1799,10 @@ function itemSpeakers(item) {
 function seekTimeline(second) {
   const value = Math.max(0, Number(second) || 0);
   if (currentJob) setTimelineView(Math.max(0, value - 20), value + 20);
+  if (timelineOutputAxisActive()) {
+    seekCurrentMediaTime(value, { autoplay: false });
+    return;
+  }
   if (viewerMediaKind === "output") showSource();
   if (mainVideo.readyState >= 1) mainVideo.currentTime = Math.min(Math.max(0, mainVideo.duration - 0.05), value);
   else mainVideo.addEventListener("loadedmetadata", () => { mainVideo.currentTime = value; }, { once: true });
@@ -1344,13 +1813,38 @@ function compositionTransitionOverlap(segments, index) {
   if (!Array.isArray(segments) || index <= 0 || index >= segments.length) return 0;
   const current = segments[index] || {};
   const transition = current.transitionIn || {};
-  if (transition.type !== "dissolve") return 0;
+  if (!["dissolve", "fade_black"].includes(transition.type)) return 0;
   const previous = segments[index - 1] || {};
-  const previousDuration = Math.max(0, Number(previous.end) - Number(previous.start));
-  const currentDuration = Math.max(0, Number(current.end) - Number(current.start));
+  const previousDuration = segmentOutputDuration(previous);
+  const currentDuration = segmentOutputDuration(current);
   if (!previousDuration || !currentDuration) return 0;
   const requested = Math.max(.08, Number(transition.duration) || .18);
   return Math.max(0, Math.min(.4, requested, previousDuration / 3, currentDuration / 3));
+}
+
+function segmentOutputDuration(segment) {
+  const sourceStart = Math.max(0, Number(segment?.start) || 0);
+  const sourceEnd = Math.max(sourceStart, Number(segment?.end) || sourceStart);
+  const removed = (Array.isArray(segment?.silenceCuts) ? segment.silenceCuts : []).reduce((sum, item) => {
+    const start = Math.max(sourceStart, Number(item?.start) || sourceStart);
+    const end = Math.min(sourceEnd, Number(item?.end) || start);
+    const retained = Math.max(0, Math.min(end - start, Number(item?.retained) || 0));
+    return sum + Math.max(0, end - start - retained);
+  }, 0);
+  return Math.max(0, sourceEnd - sourceStart - removed) / Math.max(1, Number(segment?.playbackRate) || 1);
+}
+
+function segmentOutputOffsetForSource(segment, sourceTime) {
+  const start = Math.max(0, Number(segment?.start) || 0);
+  const end = Math.max(start, Number(segment?.end) || start);
+  const target = Math.max(start, Math.min(end, Number(sourceTime) || start));
+  const removedBefore = (Array.isArray(segment?.silenceCuts) ? segment.silenceCuts : []).reduce((sum, item) => {
+    const left = Math.max(start, Number(item?.start) || start);
+    const right = Math.min(target, Number(item?.end) || left);
+    const retained = Math.max(0, Math.min(right - left, Number(item?.retained) || 0));
+    return sum + Math.max(0, right - left - retained);
+  }, 0);
+  return Math.max(0, target - start - removedBefore) / Math.max(1, Number(segment?.playbackRate) || 1);
 }
 
 function compositionSchedule(composed) {
@@ -1362,17 +1856,39 @@ function compositionSchedule(composed) {
     const sourceDuration = Math.max(0, sourceEnd - sourceStart);
     const overlap = compositionTransitionOverlap(segments, index);
     const outputStart = Math.max(0, composedEnd - overlap);
-    const outputEnd = outputStart + sourceDuration;
+    const outputDuration = segmentOutputDuration(segment);
+    const outputEnd = outputStart + outputDuration;
     composedEnd = outputEnd;
-    return { segment, index, sourceStart, sourceEnd, sourceDuration, overlap, outputStart, outputEnd };
+    return { segment, index, sourceStart, sourceEnd, sourceDuration, outputDuration, overlap, outputStart, outputEnd };
   });
 }
 
 function compositionTimeForSource(composed, segmentIndex, sourceTime) {
   const entry = compositionSchedule(composed)[Number(segmentIndex)];
   if (!entry) return 0;
-  const within = Math.max(0, Math.min(entry.sourceDuration, Number(sourceTime) - entry.sourceStart || 0));
-  return entry.outputStart + within;
+  return entry.outputStart + segmentOutputOffsetForSource(entry.segment, sourceTime);
+}
+
+function compositionSourceTimeAtOutputTime(composed, outputTime) {
+  const schedule = compositionSchedule(composed);
+  const time = Math.max(0, Number(outputTime) || 0);
+  // During a dissolve both ranges are visible. Prefer the incoming segment so
+  // the source marker follows the image that is taking over the frame.
+  const entry = [...schedule].reverse().find((item) => time >= item.outputStart - .001)
+    || schedule[0];
+  if (!entry) return 0;
+  const targetOffset = Math.max(0, Math.min(entry.outputDuration, time - entry.outputStart));
+  let low = entry.sourceStart;
+  let high = entry.sourceEnd;
+  // Silence removal and playback-rate changes make the mapping piecewise.
+  // Invert the existing monotonic source->output mapping instead of assuming
+  // one output second always equals one source second.
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    const middle = (low + high) / 2;
+    if (segmentOutputOffsetForSource(entry.segment, middle) < targetOffset) low = middle;
+    else high = middle;
+  }
+  return Math.max(entry.sourceStart, Math.min(entry.sourceEnd, (low + high) / 2));
 }
 
 function seekCurrentMediaTime(second, { autoplay = true } = {}) {
@@ -1398,7 +1914,10 @@ function seekComposedMedia(composed, segmentIndex, sourceTime, kind = "output") 
   if (!entry) return;
   const sourceTarget = Math.max(entry.sourceStart, Math.min(entry.sourceEnd, Number(sourceTime) || entry.sourceStart));
   const outputTarget = compositionTimeForSource(composed, entry.index, sourceTarget);
-  if (currentJob) setTimelineView(Math.max(0, sourceTarget - 20), sourceTarget + 20);
+  if (currentJob) {
+    const timelineTarget = timelineOutputAxisActive() ? outputTarget : sourceTarget;
+    setTimelineView(Math.max(0, timelineTarget - 20), timelineTarget + 20);
+  }
   if (kind === "event") {
     const sameEvent = viewerMediaKind === "event" && currentEventGroup
       && String(currentEventGroup.id || "") === String(composed?.id || "");
@@ -1434,11 +1953,12 @@ function renderTimelineInsights(job = currentJob) {
   const list = $("#timelineInsightsList");
   if (!panel || !list || !job) return;
   const insights = [];
+  const contentMode = String(job.taskMode || "") === "content_extract";
   (job.eventGroups || []).filter((group) => group.assemblyStrategy !== "manual" && !/时间轴选区高光|用户从时间轴创建/.test(String(group.title || group.summary || ""))).forEach((group) => {
     const first = group.segments?.[0];
-    if (first) insights.push({ type: "事件编排", title: group.title, reason: group.summary, score: group.score, start: first.start, end: group.segments[group.segments.length - 1]?.end || first.end, _speakers: group.segments.flatMap(itemSpeakers) });
+    if (first) insights.push({ type: contentMode ? "内容片段" : "事件编排", title: group.title, reason: group.summary, score: group.score, start: first.start, end: group.segments[group.segments.length - 1]?.end || first.end, _speakers: group.segments.flatMap(itemSpeakers) });
   });
-  (job.candidates || []).forEach((candidate) => insights.push({ type: "高光候选", title: candidate.title, reason: candidate.reason, score: candidate.score, start: candidate.start, end: candidate.end, _speakers: itemSpeakers(candidate) }));
+  (job.candidates || []).forEach((candidate) => insights.push({ type: contentMode ? "匹配候选" : "高光候选", title: candidate.title, reason: candidate.reason, score: candidate.score, start: candidate.start, end: candidate.end, _speakers: itemSpeakers(candidate) }));
   const visible = insights.filter((item) => timelineSpeakerFilter === "all" || item._speakers?.includes(timelineSpeakerFilter)).slice(0, 10);
   panel.classList.toggle("hidden", !visible.length);
   const count = $("#timelineInsightsCount");
@@ -1447,27 +1967,100 @@ function renderTimelineInsights(job = currentJob) {
   list?.querySelectorAll("[data-insight-start]").forEach((button) => button.addEventListener("click", () => seekTimeline(Number(button.dataset.insightStart))));
 }
 
+function taskWorkflowForJob(job = currentJob) {
+  const contentMode = String(job?.taskMode || "highlight") === "content_extract";
+  const stage = String(job?.stage || "queued");
+  const status = String(job?.status || "");
+  const publicSteps = contentMode && Array.isArray(job?.workflow?.steps) ? job.workflow.steps : [];
+  if (publicSteps.length) {
+    const currentIndex = publicSteps.findIndex((item) => item.state === "current");
+    const complete = publicSteps.every((item) => item.state === "complete");
+    return {
+      contentMode,
+      stepItems: publicSteps,
+      steps: publicSteps.map((item) => item.label),
+      currentIndex: currentIndex >= 0 ? currentIndex : (complete ? publicSteps.length : 0),
+      complete,
+    };
+  }
+  const steps = contentMode
+    ? ["读取素材", "识别对白", "建立轻量索引", "搜索内容", "局部画面复检", "等待确认"]
+    : ["读取素材", "理解视听内容", "发现候选", "精修镜头", "组织事件", "生成版本"];
+  const contentStageIndex = {
+    queued: 0, starting: 0, probing: 0,
+    audio_analysis: 1, speech_recognition: 1, speech_analysis: 1, content_transcription: 1,
+    content_sampling: 2, content_indexing: 2, content_recognition: 2,
+    content_index_ready: 3, content_search: 3,
+    content_active_speaker: 3,
+    content_refinement: 4,
+    content_search_ready: 5, awaiting_content_confirmation: 5,
+    rendering: 6, render: 6, completed: 6,
+  };
+  const highlightStageIndex = {
+    queued: 0, starting: 0, probing: 0,
+    audio_analysis: 1, speech_recognition: 1, speech_analysis: 1,
+    sampling: 2, content_classification: 2, coarse_vlm: 2,
+    refine_vlm: 3,
+    event_grouping: 4, event_director: 4,
+    edit_planning: 5, edit_planning_complete: 5, rendering: 5, render: 5,
+    auto_composition: 5, awaiting_confirmation: 5, completed: 6,
+  };
+  let currentIndex = (contentMode ? contentStageIndex : highlightStageIndex)[stage];
+  if (currentIndex === undefined) currentIndex = 0;
+  if (contentMode && status === "awaiting_content_confirmation") currentIndex = 5;
+  if (!contentMode && status === "awaiting_confirmation") currentIndex = 5;
+  if (status === "completed") currentIndex = steps.length;
+  return { contentMode, steps, currentIndex, complete: currentIndex >= steps.length };
+}
+
+function workflowStepDetails(job, workflow) {
+  const recognition = job?.recognition || {};
+  const counts = recognition.counts || {};
+  const search = job?.contentSearch || {};
+  if (workflow.contentMode) {
+    const scan = search.scanProgress || {};
+    const searchDetail = Number(scan.totalBatches || 0) > 0
+      ? `${Number(scan.processedBatches || 0)}/${Number(scan.totalBatches)} 批 · 暂找到 ${Number(scan.provisionalCandidateCount || 0)} 段`
+      : `${Number(search.retrievalStats?.localRecallCount || 0)} 条索引召回`;
+    if (workflow.stepItems?.length) {
+      const details = {
+        source: `媒体 ${job?.filename || "当前视频"}`,
+        capability_speech: `${Number(counts.speech || job?.transcript?.length || 0)} 个对白单元`,
+        capability_visual: `${Number(counts.shots || 0)} 个镜头画面`,
+        capability_ocr: `${Number(counts.ocr || 0)} 条屏幕文字`,
+        capability_audio: `${Number(counts.audio || 0)} 条声音证据`,
+        capability_person: `${Number(counts.persons || 0)} 个人物轨迹`,
+        search: searchDetail,
+        review: `${Number(search.candidateCount || search.candidates?.length || 0)} 个匹配片段`,
+        render: `${jobOutputCount(job)} 个内容视频版本`,
+      };
+      return workflow.stepItems.map((item) => details[item.id] || "按需执行");
+    }
+    return [`媒体 ${job?.filename || "当前视频"}`, searchDetail, `${Number(search.candidateCount || search.candidates?.length || 0)} 个候选待确认`];
+  }
+  const outputCount = jobOutputCount(job);
+  return [
+    `媒体 ${job?.filename || "当前视频"}`,
+    `${job?.speechAnalysis?.segments?.length || job?.transcript?.length || 0} 个视听片段`,
+    `${job?.candidates?.length || 0} 个候选`,
+    `${job?.candidates?.length || 0} 个精修镜头`,
+    `${job?.eventGroups?.length || 0} 个事件`,
+    `${outputCount} 个版本`,
+  ];
+}
+
 function renderAnalysisActivity(job = currentJob) {
   const body = $("#analysisActivityBody");
   const summary = $("#analysisActivitySummary");
   if (!body || !summary || !job) return;
   const stage = String(job.stage || "");
-  const running = ["queued", "running", "cancelling"].includes(job.status);
-  const stageRank = { queued: 0, starting: 0, probing: 0, audio_analysis: 1, speech_recognition: 1, speech_analysis: 1, sampling: 2, content_classification: 2, coarse_vlm: 2, refine_vlm: 3, event_grouping: 4, event_director: 4, edit_planning: 5, edit_planning_complete: 5, rendering: 5, auto_composition: 5, awaiting_confirmation: 5, completed: 6 };
-  const rank = stageRank[stage] ?? 0;
-  const outputCount = jobOutputCount(job);
-  const steps = [
-    ["读取素材", Boolean(job.videoInfo || rank >= 1), `媒体 ${job.filename || "当前视频"}`],
-    ["SenseVoice 语音理解", Boolean(job.speechAnalysis?.status === "ready" || job.speechAnalysis?.segments?.length || job.transcript?.length || rank >= 2), `${job.speechAnalysis?.segments?.length || job.transcript?.length || 0} 个语音片段`],
-    ["粗看全片", Boolean(job.candidates?.length || rank >= 3), `${job.candidates?.length || 0} 个候选`],
-    ["精修镜头", Boolean(job.eventGroups?.length || rank >= 4), `${job.eventGroups?.length || 0} 个事件`],
-    ["事件编排", Boolean(job.eventGroups?.length || rank >= 5), `${job.eventGroups?.reduce((sum, item) => sum + (item.segments?.length || 0), 0) || 0} 个镜头`],
-    ["生成成片", Boolean(outputCount || job.status === "completed"), `${outputCount} 个版本`],
-  ];
+  const workflow = taskWorkflowForJob(job);
+  const details = workflowStepDetails(job, workflow);
+  const steps = workflow.steps.map((label, index) => [label, workflow.complete || index < workflow.currentIndex, details[index]]);
   const done = steps.filter((step) => step[1]).length;
   summary.textContent = job.error ? "出现错误" : `${done}/${steps.length} 已完成`;
   body.innerHTML = `<div class="activity-current">${escapeHtml(job.detail || stage || "等待任务数据")}</div>${steps.map(([label, complete, detail], index) => {
-    const current = running && index === rank;
+    const current = !workflow.complete && index === workflow.currentIndex;
     const failed = Boolean(job.error) && current;
     return `<div class="activity-step ${complete ? "done" : current ? "current" : failed ? "failed" : "waiting"}"><i>${complete ? "✓" : current ? "•" : "·"}</i><span><b>${label}</b><small>${detail}</small></span></div>`;
   }).join("")}${job.error ? `<div class="activity-error">${escapeHtml(job.error)}</div>` : ""}`;
@@ -1476,7 +2069,7 @@ function renderAnalysisActivity(job = currentJob) {
 function analysisPhase(stage, status) {
   if (status === "completed") return 3;
   if (["rendering", "render", "edit_planning", "auto_composition"].includes(stage)) return 2;
-  if (["audio_analysis", "speech_recognition", "speech_analysis", "content_classification", "coarse_vlm", "sampling", "refine_vlm", "event_grouping", "event_director", "awaiting_confirmation"].includes(stage)) return 1;
+  if (["audio_analysis", "speech_recognition", "speech_analysis", "content_transcription", "content_sampling", "content_indexing", "content_recognition", "content_index_ready", "content_search", "content_active_speaker", "content_refinement", "content_search_ready", "content_classification", "coarse_vlm", "sampling", "refine_vlm", "event_grouping", "event_director", "awaiting_confirmation"].includes(stage)) return 1;
   return 0;
 }
 
@@ -1502,6 +2095,15 @@ function thinkingConfigForJob(job) {
   if (["speech_recognition", "speech_analysis"].includes(stage)) {
     return { state: "listening", label: "正在理解对白、情绪与声音事件" };
   }
+  if (stage === "content_transcription") {
+    return { state: "listening", label: "正在建立可检索的对白与匿名说话人索引" };
+  }
+  if (["content_sampling", "content_indexing", "content_recognition"].includes(stage)) {
+    return { state: "searching", label: stage === "content_recognition" ? "正在建立本次检索需要的内容索引" : "正在准备本次检索需要的素材证据" };
+  }
+  if (["content_index_ready", "content_search", "content_active_speaker", "content_refinement"].includes(stage)) {
+    return { state: "solving", label: "正在执行本次所需分析、检索证据并精修匹配边界" };
+  }
   if (["sampling", "content_classification", "coarse_vlm"].includes(stage)) {
     return { state: "searching", label: stage === "content_classification" ? "正在识别内容类型与叙事结构" : "正在通看全片并寻找精彩瞬间" };
   }
@@ -1512,7 +2114,7 @@ function thinkingConfigForJob(job) {
     return { state: "shaping", label: "正在把精彩镜头编排成事件高光" };
   }
   if (["rendering", "render"].includes(stage)) {
-    return { state: "composing", label: "正在合成高光成片并检查输出" };
+    return { state: "composing", label: String(job.taskMode || "") === "content_extract" ? "正在合成已确认内容并检查输出" : "正在合成高光成片并检查输出" };
   }
   if (stage === "edit_planning") {
     return { state: "solving", label: "LLM 正在设计局部镜头、叙事结构与排列顺序" };
@@ -1593,25 +2195,26 @@ function updateAnalysisConsole(job) {
   if (etaElement) etaElement.textContent = progressEtaText(job, waiting);
   if ($("#jobDetail")) $("#jobDetail").textContent = job.currentAction || job.detail || job.stage || "准备中";
   $("#jobStatus")?.classList.toggle("waiting-mode", waiting);
-  const current = analysisPhase(job.stage, job.status);
-  $("#jobStageList")?.querySelectorAll("li").forEach((item, index) => {
-    item.classList.toggle("done", index < current || job.status === "completed");
-    item.classList.toggle("current", index === current && !["completed", "failed", "cancelled", "awaiting_model_decision"].includes(job.status));
-  });
+  const workflow = taskWorkflowForJob(job);
+  const stageList = $("#jobStageList");
+  if (stageList) {
+    const signature = `${workflow.contentMode ? "content" : "highlight"}:${workflow.steps.join("|")}`;
+    if (stageList.dataset.workflowSignature !== signature) {
+      stageList.dataset.workflowSignature = signature;
+      stageList.innerHTML = workflow.steps.map((label) => `<li><i></i><span>${label}</span></li>`).join("");
+    }
+    stageList.querySelectorAll("li").forEach((item, index) => {
+      item.classList.toggle("done", workflow.complete || index < workflow.currentIndex);
+      item.classList.toggle("current", !workflow.complete && index === workflow.currentIndex && !["failed", "cancelled", "awaiting_model_decision"].includes(job.status));
+    });
+  }
   updatePipelineThinkingOrb(job);
 }
 
 function updateJobElapsedClock(job = currentJob) {
   const elapsedElement = $("#jobElapsed");
   if (!elapsedElement || !job) return;
-  const startValue = job.startedAt || job.createdAt || job.updatedAt;
-  const start = Date.parse(String(startValue || ""));
-  if (!Number.isFinite(start)) {
-    elapsedElement.textContent = "任务已运行 00:00";
-    return;
-  }
-  const elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000));
-  elapsedElement.textContent = `任务已运行 ${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+  elapsedElement.textContent = processingElapsedLabel(job);
 }
 
 function renderAnalysisDecision(job) {
@@ -1719,7 +2322,37 @@ function updatePlayerChrome() {
 }
 
 function timelineDurationValue() {
+  if (timelineOutputAxisActive()) return timelineOutputDurationValue(currentOutput);
   return Number(waveformData?.duration || currentJob?.videoInfo?.duration || mainVideo.duration || 0);
+}
+
+function timelineOutputDurationValue(output = currentOutput) {
+  if (!output?.segments?.length) return Number(output?.duration || 0);
+  const schedule = compositionSchedule(output);
+  return Number(output.duration) || Number(schedule.at(-1)?.outputEnd || 0);
+}
+
+function timelineHasOutputComparison() {
+  return Boolean(viewerMediaKind === "output" && currentOutput?.segments?.length);
+}
+
+function timelineOutputAxisActive() {
+  return Boolean(timelineHasOutputComparison() && timelineCoordinateSpace === "output");
+}
+
+function setTimelineCoordinateSpace(space) {
+  const next = space === "source" ? "source" : "output";
+  if (!timelineHasOutputComparison()) return;
+  timelineCoordinateSpace = next;
+  timelineReviewFollow = false;
+  timelineFrameSelectionTime = null;
+  timelineViewStart = 0;
+  timelineViewEnd = next === "output"
+    ? timelineOutputDurationValue(currentOutput)
+    : Number(waveformData?.duration || currentJob?.videoInfo?.duration || 0);
+  timelineMediaRenderKey = "";
+  waveformRenderKey = "";
+  updateTimeline();
 }
 
 function timelineViewRange() {
@@ -1760,22 +2393,31 @@ function timelineDensityProfile(viewportHeight, detailMode) {
   };
 }
 
-function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLanes = 1) {
+function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLanes = 1, layoutKind = "hierarchy") {
   const height = Math.max(190, Number(viewportHeight) || 260);
   const profile = timelineDensityProfile(height, detailMode);
-  const pictureHeight = clampTimelineValue(Math.round(height * .2), profile.pictureMinimum, profile.pictureMaximum);
+  const singleContentRow = layoutKind === "content-review";
+  const pictureHeight = clampTimelineValue(
+    Math.round(height * (singleContentRow ? .29 : .2)),
+    profile.pictureMinimum,
+    singleContentRow ? Math.round(profile.pictureMaximum * 1.6) : profile.pictureMaximum,
+  );
   // Audio carries real waveform and speech-energy evidence, so it receives a
   // full quarter of the review surface. Event and shot hierarchy stays
   // readable but no longer consumes nearly two thirds of the timeline.
-  const audioHeight = clampTimelineValue(Math.round(height * .26), profile.audioMinimum, profile.audioMaximum);
-  const hierarchyHeight = Math.max(96, height - pictureHeight - audioHeight);
-  const eventRowHeight = Math.round(hierarchyHeight * .55);
-  const shotRowHeight = hierarchyHeight - eventRowHeight;
-  const eventLabelsHeight = Math.max(32, eventRowHeight - profile.relationHeight);
+  const audioHeight = clampTimelineValue(
+    Math.round(height * (singleContentRow ? .34 : .26)),
+    profile.audioMinimum,
+    singleContentRow ? Math.round(profile.audioMaximum * 1.7) : profile.audioMaximum,
+  );
+  const hierarchyHeight = Math.max(singleContentRow ? 70 : 96, height - pictureHeight - audioHeight);
+  const eventRowHeight = singleContentRow ? hierarchyHeight : Math.round(hierarchyHeight * .55);
+  const shotRowHeight = singleContentRow ? 0 : hierarchyHeight - eventRowHeight;
+  const eventLabelsHeight = Math.max(32, eventRowHeight - (singleContentRow ? 4 : profile.relationHeight));
   const labelLaneHeight = eventLabelsHeight / Math.max(1, labelLanes);
-  const shotLaneHeight = Math.max(28, (shotRowHeight - 4) / Math.max(1, shotLanes));
+  const shotLaneHeight = singleContentRow ? 0 : Math.max(28, (shotRowHeight - 4) / Math.max(1, shotLanes));
   const eventCardHeight = clampTimelineValue(labelLaneHeight - 8, 32, 44);
-  const shotCardHeight = clampTimelineValue(shotLaneHeight - 8, 24, 36);
+  const shotCardHeight = singleContentRow ? 0 : clampTimelineValue(shotLaneHeight - 8, 24, 36);
   return {
     ...profile,
     height,
@@ -1802,7 +2444,12 @@ function currentTimelineLinkedIntervals() {
   if (currentEventSegment) return [normalize(currentEventSegment)].filter(Boolean);
   if (currentCandidate) return [normalize(currentCandidate)].filter(Boolean);
   if (currentEventGroup?.segments?.length) return currentEventGroup.segments.map(normalize).filter(Boolean);
-  if (currentOutput?.segments?.length) return currentOutput.segments.map(normalize).filter(Boolean);
+  if (currentOutput?.segments?.length) {
+    if (timelineOutputAxisActive()) {
+      return compositionSchedule(currentOutput).map((entry) => ({ start: entry.outputStart, end: entry.outputEnd }));
+    }
+    return currentOutput.segments.map(normalize).filter(Boolean);
+  }
   return [];
 }
 
@@ -1819,15 +2466,10 @@ function timelineEventSegmentAtTime(time) {
 }
 
 function timelineAbsoluteTime() {
+  if (timelineOutputAxisActive()) return Number(mainVideo.currentTime || 0);
   const composed = viewerMediaKind === "event" ? currentEventGroup : viewerMediaKind === "output" ? currentOutput : null;
   if (composed?.segments?.length) {
-    const time = Number(mainVideo.currentTime || 0);
-    const schedule = compositionSchedule(composed);
-    // During a dissolve both source ranges are visible. Prefer the incoming
-    // shot so the source-time playhead agrees with a click on that shot.
-    const entry = [...schedule].reverse().find((item) => time >= item.outputStart)
-      || schedule[0];
-    if (entry) return Math.min(entry.sourceEnd, entry.sourceStart + Math.max(0, time - entry.outputStart));
+    return compositionSourceTimeAtOutputTime(composed, Number(mainVideo.currentTime || 0));
   }
   if (viewerMediaKind === "output" && currentOutput) return Number(currentOutput.start) + Number(mainVideo.currentTime || 0);
   return Number(mainVideo.currentTime || 0);
@@ -1843,7 +2485,7 @@ function drawWaveform(force = false) {
   const renderKey = [
     waveformJobId, Math.round(bounds.width), Math.round(bounds.height), ratio,
     view.start.toFixed(3), view.end.toFixed(3), timelineVisualMode,
-    viewerMediaKind, currentOutput?.filename || "",
+    viewerMediaKind, currentOutput?.filename || "", timelineCoordinateSpace,
     waveformData?.schemaVersion || 0,
     waveformData?.minimums?.length || waveformData?.peaks?.length || 0,
   ].join("|");
@@ -1869,6 +2511,7 @@ function drawWaveform(force = false) {
     timelineViewport?.dataset.timelineMode === "detail",
     Math.max(1, Number(timelineViewport?.dataset.eventLabelLanes || 1)),
     Math.max(1, Number(timelineViewport?.dataset.shotMarkerLanes || 1)),
+    timelineViewport?.dataset.trackLayout || "hierarchy",
   );
   // The waveform uses the exact same track geometry as labels, shots and
   // thumbnails. This avoids the previous duplicate constants drifting apart
@@ -1882,11 +2525,13 @@ function drawWaveform(force = false) {
   const waveformBottom = waveformTop + waveformHeight;
   const center = (waveformTop + waveformBottom) / 2;
   const amplitude = Math.max(4, waveformHeight / 2 - 3);
-  context.fillStyle = "#46545a";
-  context.fillRect(0, center - 0.5, bounds.width, 1);
-  context.fillRect(0, waveformTop, bounds.width, 1);
-  context.fillRect(0, waveformBottom, bounds.width, 1);
-  if (sampleCount) {
+  if (!timelineOutputAxisActive()) {
+    context.fillStyle = "#46545a";
+    context.fillRect(0, center - 0.5, bounds.width, 1);
+    context.fillRect(0, waveformTop, bounds.width, 1);
+    context.fillRect(0, waveformBottom, bounds.width, 1);
+  }
+  if (sampleCount && !timelineOutputAxisActive()) {
     const fullDuration = timelineDurationValue();
     const comparisonIntervals = viewerMediaKind === "output" && currentOutput?.segments?.length
       ? currentTimelineLinkedIntervals()
@@ -1928,13 +2573,20 @@ function drawWaveform(force = false) {
   const duration = timelineDurationValue();
   if (duration > 0) {
     const view = timelineViewRange();
-    const ticks = Math.max(4, Math.min(10, Math.floor(bounds.width / 90)));
+    const targetTicks = Math.max(4, Math.min(10, Math.floor(bounds.width / 90)));
+    const rawStep = view.duration / targetTicks;
+    const magnitude = 10 ** Math.floor(Math.log10(Math.max(.001, rawStep)));
+    const normalizedStep = rawStep / magnitude;
+    const niceFactor = normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
+    const tickStep = niceFactor * magnitude;
+    const firstTick = Math.ceil((view.start - .0001) / tickStep) * tickStep;
     context.fillStyle = "#68777e";
     context.font = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
-    for (let index = 0; index <= ticks; index += 1) {
-      const x = bounds.width * index / ticks;
+    for (let tick = firstTick; tick <= view.end + .0001; tick += tickStep) {
+      const cleanTick = Math.round(tick * 1000) / 1000;
+      const x = (cleanTick - view.start) / view.duration * bounds.width;
       context.fillRect(Math.round(x), bounds.height - 13, 1, 4);
-      const label = formatTime(view.start + view.duration * index / ticks);
+      const label = formatTime(cleanTick);
       const measured = context.measureText(label).width;
       context.fillText(label, Math.max(2, Math.min(bounds.width - measured - 2, x - measured / 2)), bounds.height - 2);
     }
@@ -2419,6 +3071,60 @@ function timelineEventSequenceNumber(group) {
   return display.entries.findIndex((entry) => String(entry.group.id) === canonicalId) + 1;
 }
 
+function timelinePresentationModel(job = currentJob, outputComparison = null) {
+  const contentMode = String(job?.taskMode || "") === "content_extract";
+  const comparingOutput = Boolean(outputComparison);
+  if (comparingOutput) {
+    const outputAxis = timelineCoordinateSpace === "output";
+    return {
+      contentMode,
+      layoutKind: outputAxis ? "composed-output" : "composed-source",
+      title: outputAxis ? "成片时间轴" : "源片对照",
+      trackLabels: outputAxis ? ["成片顺序"] : ["采用位置", "源画面", "源音频"],
+      hint: outputAxis ? "按最终播放顺序连续展示" : "查看每个成片片段在源视频中的位置",
+      emptyTitle: outputAxis ? "选择成片片段" : "选择采用位置",
+      emptyReason: outputAxis ? "点击片段可从对应成片位置预览。" : "点击编号片段可回看它在源视频中的位置。",
+      ariaLabel: outputAxis ? "成片时间轴" : "源片位置对照时间轴",
+    };
+  }
+  if (!contentMode) {
+    return {
+      contentMode: false,
+      layoutKind: "hierarchy",
+      title: "智能剪辑时间线",
+      trackLabels: ["事件", "镜头", "画面", "音频"],
+      hint: "点击事件查看内容说明",
+      emptyTitle: "选择事件或镜头",
+      emptyReason: "点击下方时间轴中的事件或镜头，在这里查看内容说明、时间范围和判断依据。",
+      ariaLabel: "视频审核时间轴",
+    };
+  }
+  return {
+    contentMode: true,
+    layoutKind: "content-review",
+    title: "内容检索时间轴",
+    trackLabels: ["匹配片段", "画面", "音频"],
+    hint: "点击匹配片段查看内容与证据",
+    emptyTitle: "选择匹配片段",
+    emptyReason: "点击下方时间轴中的匹配片段，在这里查看时间范围、命中内容和判断证据。",
+    ariaLabel: "内容检索时间轴",
+  };
+}
+
+function applyTimelinePresentation(presentation) {
+  const title = $("#timelineTitle");
+  const labels = $("#timelineTrackLabels");
+  if (title) title.textContent = presentation.title;
+  if (labels) labels.innerHTML = presentation.trackLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join("");
+  if (timelinePanel) timelinePanel.setAttribute("aria-label", presentation.ariaLabel);
+  if (timelineViewport) timelineViewport.dataset.trackLayout = presentation.layoutKind;
+  if ($("#timelineHint")) $("#timelineHint").textContent = presentation.hint;
+  if ($("#evidencePanel")?.classList.contains("evidence-placeholder")) {
+    if ($("#clipTitle")) $("#clipTitle").textContent = presentation.emptyTitle;
+    if ($("#clipReason")) $("#clipReason").textContent = presentation.emptyReason;
+  }
+}
+
 function renderTimelineEventSummary() {
   const root = $("#timelineEventSummary");
   const titleNode = $("#timelineEventSummaryTitle");
@@ -2434,6 +3140,8 @@ function renderTimelineEventSummary() {
   let end = 0;
   let type = "当前事件";
   const currentEventNumber = timelineEventSequenceNumber(currentEventGroup);
+  const contentMode = String(currentJob?.taskMode || "") === "content_extract";
+  const groupPrefix = contentMode ? "片段 P" : "事件 E";
   const currentEventRecommended = currentEventGroup
     ? (currentJob?.recommendedGroupIds || []).map(String).includes(String(currentEventGroup.id))
     : false;
@@ -2441,33 +3149,33 @@ function renderTimelineEventSummary() {
     const schedule = compositionSchedule(currentOutput);
     const located = locateJobOutput(currentOutput.filename);
     const presentation = located ? autoVersionPresentation(currentJob, located.version) : {};
-    title = String(currentOutput.displayTitle || presentation.displayName || currentOutput.title || "高光成片");
+    title = String(currentOutput.displayTitle || presentation.displayName || currentOutput.title || (contentMode ? "内容视频" : "高光成片"));
     detail = schedule.map((entry, index) =>
-      `${String(index + 1).padStart(2, "0")} ${normalizedTimelineShotRole(entry.segment)}`,
+      `${String(index + 1).padStart(2, "0")} ${contentMode ? String(entry.segment.chapterTitle || entry.segment.title || "匹配片段") : normalizedTimelineShotRole(entry.segment)}`,
     ).join(" → ");
     start = schedule.length ? Math.min(...schedule.map((entry) => entry.sourceStart)) : 0;
     end = schedule.length ? Math.max(...schedule.map((entry) => entry.sourceEnd)) : start;
-    type = `${presentation.sourceLabel || "AI 成片"} · 源片对照`;
+    type = `${presentation.sourceLabel || (contentMode ? "内容视频" : "AI 成片")} · ${timelineOutputAxisActive() ? "成片时间轴" : "源片对照"}`;
   } else if (currentEventSegment && currentEventGroup) {
     const role = String(currentEventSegment.role || "精彩镜头");
     title = `${currentEventGroup.title} · ${role}`;
     detail = String(currentEventSegment.reason || currentEventGroup.summary || "该事件中的精彩镜头");
     start = Number(currentEventSegment.start) || 0;
     end = Number(currentEventSegment.end) || start;
-    type = `${currentEventNumber ? `事件 E${currentEventNumber} · ` : ""}当前镜头${currentEventRecommended ? " · AI 推荐" : ""}`;
+    type = `${currentEventNumber ? `${groupPrefix}${currentEventNumber} · ` : ""}${contentMode ? "当前内容片段" : "当前镜头"}${currentEventRecommended && !contentMode ? " · AI 推荐" : ""}`;
   } else if (currentEventGroup) {
-    title = String(currentEventGroup.title || "精彩事件");
-    detail = String(currentEventGroup.summary || currentEventGroup.reason || "点击事件镜头可继续查看对应依据");
+    title = String(currentEventGroup.title || (contentMode ? "匹配片段" : "精彩事件"));
+    detail = String(currentEventGroup.summary || currentEventGroup.reason || (contentMode ? "点击片段可继续查看对应依据" : "点击事件镜头可继续查看对应依据"));
     const segments = currentEventGroup.segments || [];
     start = segments.length ? Math.min(...segments.map((item) => Number(item.start) || 0)) : Number(currentEventGroup.start) || 0;
     end = segments.length ? Math.max(...segments.map((item) => Number(item.end) || 0)) : Number(currentEventGroup.end) || start;
-    type = `${currentEventNumber ? `事件 E${currentEventNumber} · ` : ""}${segments.length} 个镜头${currentEventRecommended ? " · AI 推荐" : " · 备选"}`;
+    type = `${currentEventNumber ? `${groupPrefix}${currentEventNumber} · ` : ""}${segments.length} 个${contentMode ? "内容片段" : "镜头"}${contentMode ? "" : (currentEventRecommended ? " · AI 推荐" : " · 备选")}`;
   } else if (currentCandidate) {
-    title = String(currentCandidate.title || "精彩镜头");
-    detail = String(currentCandidate.reason || currentCandidate.summary || "视觉模型发现的精彩镜头");
+    title = String(currentCandidate.title || (contentMode ? "匹配片段" : "精彩镜头"));
+    detail = String(currentCandidate.reason || currentCandidate.summary || currentCandidate.matchedEvidence || (contentMode ? "与检索要求匹配的内容片段" : "视觉模型发现的精彩镜头"));
     start = Number(currentCandidate.start) || 0;
     end = Number(currentCandidate.end) || start;
-    type = "当前候选镜头";
+    type = contentMode ? "当前匹配片段" : "当前候选镜头";
   }
 
   const visible = Boolean(title);
@@ -2479,14 +3187,9 @@ function renderTimelineEventSummary() {
   titleNode.textContent = title;
   if (currentOutput?.segments?.length) {
     const schedule = compositionSchedule(currentOutput);
-    textNode.innerHTML = schedule.map((entry, index) =>
-      `<button type="button" data-summary-output-index="${index}" title="从成片 ${formatTime(entry.outputStart)} 开始预览；源片 ${formatTime(entry.sourceStart)} → ${formatTime(entry.sourceEnd)}"><b>${String(index + 1).padStart(2, "0")}</b><span>${escapeHtml(normalizedTimelineShotRole(entry.segment))}</span></button>`,
-    ).join('<i aria-hidden="true">→</i>');
-    textNode.querySelectorAll("[data-summary-output-index]").forEach((button) => button.addEventListener("click", () => {
-      const index = Number(button.dataset.summaryOutputIndex);
-      const entry = schedule[index];
-      if (entry) seekComposedMedia(currentOutput, index, entry.sourceStart, "output");
-    }));
+    textNode.textContent = timelineOutputAxisActive()
+      ? `${schedule.length} 个片段按最终播放顺序连续衔接，播放头与上方播放器使用同一成片时间。`
+      : `编号表示最终播放顺序；片段位置表示它在源视频中的原始时间。`;
   } else {
     textNode.textContent = detail;
   }
@@ -2494,12 +3197,14 @@ function renderTimelineEventSummary() {
     const schedule = compositionSchedule(currentOutput);
     const outputDuration = Number(currentOutput.duration)
       || Number(schedule.at(-1)?.outputEnd || 0);
-    timeNode.textContent = `${schedule.length} 个镜头 · 成片 ${outputDuration.toFixed(1)} 秒`;
+    timeNode.textContent = contentMode
+      ? `${schedule.length} 个片段 · 内容视频 ${outputDuration.toFixed(1)} 秒`
+      : `${schedule.length} 个镜头 · 成片 ${outputDuration.toFixed(1)} 秒`;
     timeNode.title = `源视频覆盖 ${formatTime(start)} → ${formatTime(end)}；编号表示最终播放顺序`;
   } else if (currentEventGroup && !currentEventSegment) {
     const segments = currentEventGroup.segments || [];
     const contentDuration = segments.reduce((sum, segment) => sum + Math.max(0, Number(segment.duration || (Number(segment.end) - Number(segment.start)) || 0)), 0);
-    timeNode.textContent = `${segments.length} 个镜头 · 有效内容 ${contentDuration.toFixed(1)} 秒`;
+    timeNode.textContent = `${segments.length} 个${contentMode ? "片段" : "镜头"} · 有效内容 ${contentDuration.toFixed(1)} 秒`;
     timeNode.title = segments.length ? `源视频范围 ${formatTime(start)} → ${formatTime(end)}` : "";
   } else {
     timeNode.textContent = `${formatTime(start)} → ${formatTime(end)} · ${Math.max(0, end - start).toFixed(1)} 秒`;
@@ -2512,20 +3217,35 @@ function updateTimelineReviewControls() {
   const view = timelineViewRange();
   const fitButton = $("#timelineFitReview");
   const focusButton = $("#timelineFocusReview");
+  const outputComparison = timelineHasOutputComparison();
+  const coordinateSwitch = $("#timelineCoordinateSwitch");
+  const outputAxisButton = $("#timelineOutputAxis");
+  const sourceAxisButton = $("#timelineSourceAxis");
+  const clockLabel = $("#timelineClockLabel");
   const reviewRange = currentTimelineReviewRange();
   if (!reviewRange) timelineReviewFollow = false;
   const fullView = duration <= 0 || view.duration >= duration - .25;
   const focusActive = Boolean(timelineReviewFollow && reviewRange && !fullView);
   const eventNumber = timelineEventSequenceNumber(currentEventGroup);
+  const contentMode = String(currentJob?.taskMode || "") === "content_extract";
   const focusTarget = currentOutput?.segments?.length
-    ? "当前成片"
-    : currentEventSegment ? "当前镜头" : eventNumber ? `E${eventNumber}` : currentCandidate ? "当前镜头" : "当前事件";
+    ? (contentMode ? "当前版本" : "当前成片")
+    : contentMode
+      ? (currentEventSegment || currentCandidate || eventNumber ? "当前片段" : "匹配片段")
+      : currentEventSegment ? "当前镜头" : eventNumber ? `E${eventNumber}` : currentCandidate ? "当前镜头" : "当前事件";
   fitButton?.classList.toggle("active", fullView);
+  coordinateSwitch?.classList.toggle("hidden", !outputComparison);
+  outputAxisButton?.classList.toggle("active", outputComparison && timelineCoordinateSpace === "output");
+  sourceAxisButton?.classList.toggle("active", outputComparison && timelineCoordinateSpace === "source");
+  outputAxisButton?.setAttribute("aria-pressed", String(outputComparison && timelineCoordinateSpace === "output"));
+  sourceAxisButton?.setAttribute("aria-pressed", String(outputComparison && timelineCoordinateSpace === "source"));
+  if (clockLabel) clockLabel.textContent = timelineOutputAxisActive() ? "成片" : "源片";
   fitButton?.setAttribute("aria-pressed", String(fullView));
   focusButton?.classList.toggle("active", focusActive);
   focusButton?.setAttribute("aria-pressed", String(focusActive));
   if (focusButton) {
-    focusButton.disabled = !reviewRange;
+    focusButton.classList.toggle("hidden", outputComparison);
+    focusButton.disabled = outputComparison || !reviewRange;
     focusButton.textContent = focusActive ? `已聚焦 ${focusTarget}` : `聚焦 ${focusTarget}`;
   }
   timelineViewport?.classList.toggle("timeline-zoomed", !fullView);
@@ -2534,14 +3254,22 @@ function updateTimelineReviewControls() {
   if (timelineViewport) {
     timelineViewport.title = timelineManualSelectMode
       ? "拖动生成选区；按住空格拖动或使用中键可左右移动"
-      : fullView ? (currentOutput ? "点击成片镜头可从对应位置预览；需要时聚焦当前成片" : "点击事件查看；需要时使用“聚焦”按钮放大")
+      : contentMode
+        ? fullView
+          ? (currentOutput ? (timelineOutputAxisActive() ? "点击片段从成片时间预览" : "编号表示成片顺序，位置表示源片时间") : "点击匹配片段查看；需要时使用“聚焦”按钮放大")
+          : "点击匹配片段预览；时间轴缩放与移动由你控制"
+        : fullView ? (currentOutput ? "点击成片镜头可从对应位置预览；需要时聚焦当前成片" : "点击事件查看；需要时使用“聚焦”按钮放大")
         : "点击事件或镜头预览；时间轴缩放与移动由你控制";
   }
   if (!pendingTimelineSelection) {
     const hint = $("#timelineHint");
     if (hint) hint.textContent = timelineManualSelectMode
       ? "拖动生成选区，按住空格拖动可平移"
-      : fullView ? (currentOutput ? "源事件为对照底图；编号镜头按成片顺序播放" : "点击事件查看，使用“聚焦”按钮放大")
+      : contentMode
+        ? fullView
+          ? (currentOutput ? (timelineOutputAxisActive() ? "成片时间与播放器同步" : "编号表示成片顺序，位置表示源片时间") : "点击匹配片段查看证据，使用“聚焦”按钮放大")
+          : "点击片段预览，拖动左右移动"
+        : fullView ? (currentOutput ? "源事件为对照底图；编号镜头按成片顺序播放" : "点击事件查看，使用“聚焦”按钮放大")
         : "点击预览，拖动左右移动";
   }
 }
@@ -2584,6 +3312,111 @@ function renderTimelineOverview(items) {
   windowElement.style.width = `${view.duration / duration * 100}%`;
 }
 
+function composedTimelineDisplayItems(outputComparison) {
+  const outputAxis = timelineOutputAxisActive();
+  return outputComparison.schedule.map((entry, index) => ({
+    ...entry.segment,
+    _output: currentOutput,
+    _outputSegmentIndex: entry.index,
+    _compositionOrder: index + 1,
+    _sourceStart: entry.sourceStart,
+    _sourceEnd: entry.sourceEnd,
+    _outputStart: entry.outputStart,
+    _outputEnd: entry.outputEnd,
+    start: outputAxis ? entry.outputStart : entry.sourceStart,
+    end: outputAxis ? entry.outputEnd : entry.sourceEnd,
+    filename: currentOutput?.filename,
+  }));
+}
+
+function assignComposedTimelineLanes(items, outputAxis) {
+  if (outputAxis) {
+    items.forEach((item) => { item._timelineLane = 0; });
+    return 1;
+  }
+  const laneEnds = [];
+  [...items].sort((left, right) => Number(left.start) - Number(right.start)).forEach((item) => {
+    const start = Number(item.start) || 0;
+    let lane = laneEnds.findIndex((end) => start >= end - .001);
+    if (lane < 0) lane = laneEnds.length;
+    item._timelineLane = lane;
+    laneEnds[lane] = Math.max(Number(item.end) || start, Number(laneEnds[lane]) || 0);
+  });
+  return Math.max(1, laneEnds.length);
+}
+
+function renderComposedTimeline(outputComparison, presentation) {
+  const outputAxis = timelineOutputAxisActive();
+  const duration = timelineDurationValue();
+  const view = timelineViewRange();
+  const items = composedTimelineDisplayItems(outputComparison);
+  const laneCount = assignComposedTimelineLanes(items, outputAxis);
+  const sequenceHeight = outputAxis ? 112 : Math.max(64, laneCount * 42 + 16);
+  const labels = $("#timelineLabels");
+  const relations = $("#timelineEventRelations");
+  const clips = $("#timelineClips");
+  const markers = $("#timelineShotMarkers");
+  const linkedRanges = $("#timelineLinkedRanges");
+  const thumbnails = $("#timelineThumbnails");
+  const cuts = $("#timelineSceneCuts");
+
+  timelineViewport?.setAttribute("data-coordinate-space", outputAxis ? "output" : "source");
+  timelineViewport?.setAttribute("data-timeline-mode", view.duration >= duration - .25 ? "overview" : "detail");
+  timelineViewport?.setAttribute("data-event-label-lanes", String(laneCount));
+  timelineViewport?.style.setProperty("--timeline-sequence-height", `${sequenceHeight}px`);
+  timelineViewport?.style.setProperty("--timeline-picture-track-top", `${sequenceHeight}px`);
+  timelineViewport?.style.setProperty("--timeline-picture-track-height", outputAxis ? "0px" : "58px");
+  timelineViewport?.style.setProperty("--timeline-audio-track-top", `${sequenceHeight + (outputAxis ? 0 : 58)}px`);
+  timelineViewport?.style.setProperty("--timeline-audio-track-height", outputAxis ? "0px" : "74px");
+  timelineViewport?.style.setProperty("--timeline-ruler-height", "24px");
+  timelineViewport?.style.setProperty("--timeline-review-min-height", outputAxis ? "142px" : `${Math.max(220, sequenceHeight + 132)}px`);
+
+  if (relations) relations.innerHTML = "";
+  if (clips) clips.innerHTML = "";
+  if (markers) markers.innerHTML = "";
+  if (linkedRanges) linkedRanges.innerHTML = "";
+  if (labels) {
+    labels.innerHTML = items.map((item) => {
+      if (Number(item.end) <= view.start || Number(item.start) >= view.end) return "";
+      const visibleStart = Math.max(view.start, Number(item.start) || 0);
+      const visibleEnd = Math.min(view.end, Number(item.end) || visibleStart);
+      const left = Math.max(0, timelinePercentInView(visibleStart));
+      const width = Math.max(.12, (visibleEnd - visibleStart) / view.duration * 100);
+      const index = Number(item._outputSegmentIndex);
+      const order = String(Number(item._compositionOrder)).padStart(2, "0");
+      const title = String(item.chapterTitle || item.title || item.role || `片段 ${order}`);
+      const axisRange = `${formatTime(item.start)} → ${formatTime(item.end)}`;
+      const sourceRange = `${formatTime(item._sourceStart)} → ${formatTime(item._sourceEnd)}`;
+      const outputRange = `${formatTime(item._outputStart)} → ${formatTime(item._outputEnd)}`;
+      const tooltip = outputAxis
+        ? `成片顺序 ${order} · ${title} · 成片 ${outputRange} · 源片 ${sourceRange}`
+        : `成片顺序 ${order} · ${title} · 源片 ${sourceRange} · 成片 ${outputRange}`;
+      return `<button type="button" class="timeline-sequence-segment" data-output-segment-index="${index}" style="left:${left}%;width:${width}%;--timeline-sequence-lane:${Number(item._timelineLane || 0)}" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(tooltip)}"><b>${order}</b><span>${escapeHtml(title)}</span><small>${escapeHtml(axisRange)}</small></button>`;
+    }).join("");
+    labels.querySelectorAll("[data-output-segment-index]").forEach((button) => button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const entry = outputComparison.schedule[Number(button.dataset.outputSegmentIndex)];
+      if (entry) seekComposedMedia(currentOutput, entry.index, entry.sourceStart, "output");
+    }));
+  }
+
+  if (outputAxis) {
+    if (thumbnails) thumbnails.innerHTML = "";
+    if (cuts) cuts.innerHTML = "";
+  } else {
+    renderTimelineMediaAssets(true);
+  }
+  renderTimelineOverview(items);
+  updateTimelineSelection();
+  updateTimelinePlayhead();
+  updateSpeakerFilterOptions(currentJob);
+  renderTimelineInsights(currentJob);
+  drawWaveform(true);
+  renderTimelineEventSummary();
+  updateTimelineReviewControls();
+  renderTimelineProposalPreview(currentJob);
+}
+
 function downsampleTimelinePoints(points, view, minimumPixelGap) {
   const trackContent = timelineTrackContent || timelineViewport;
   const width = Math.max(1, trackContent?.clientWidth || 1);
@@ -2609,7 +3442,7 @@ function renderTimelineMediaAssets(force = false) {
     timelineCutsVisible, timelineAssets?.spriteUrl || "",
     sprite?.items?.length || 0, timelineAssets?.sceneCuts?.length || 0,
     currentEventGroup?.id || "", currentEventSegment?.id || "", currentCandidate?.index ?? "",
-    currentOutput?.filename || "", Number.isFinite(timelineFrameSelectionTime) ? timelineFrameSelectionTime.toFixed(3) : "",
+    currentOutput?.filename || "", timelineCoordinateSpace, Number.isFinite(timelineFrameSelectionTime) ? timelineFrameSelectionTime.toFixed(3) : "",
   ].join("|");
   if (!force && timelineMediaRenderKey === renderKey) return;
   timelineMediaRenderKey = renderKey;
@@ -2697,6 +3530,8 @@ async function loadTimelineTranscript(job) {
       if (currentCandidate) renderClipEvidence(currentCandidate, "candidate");
       else if (currentEventSegment) renderClipEvidence(currentEventSegment, "segment");
       else if (currentEventGroup) renderClipEvidence(currentEventGroup, "event");
+      const contentSearchRoot = document.querySelector(".content-search-review");
+      if (contentSearchRoot) syncContentSearchSubtitleControls(contentSearchRoot, currentJob);
     }
   } catch {
     if (currentJob?.id === job.id) {
@@ -2766,6 +3601,85 @@ async function loadTimelineAssets(job) {
   }
 }
 
+function renderTimelineProposalPreview(job = currentJob) {
+  const track = $("#timelineProposalTrack");
+  const outputsRoot = $("#timelineProposalOutputs");
+  const sourceRoot = $("#timelineProposalPreview");
+  if (!track || !outputsRoot || !sourceRoot) return;
+  const proposal = job?.pendingEditProposal;
+  const pending = proposal?.status === "pending";
+  const preview = pending && proposal.preview && typeof proposal.preview === "object" ? proposal.preview : {};
+  let outputs = Array.isArray(preview.outputs) ? preview.outputs.filter((output) => Array.isArray(output?.schedule) && output.schedule.length) : [];
+  if (!outputs.length && Array.isArray(preview.schedule) && preview.schedule.length) {
+    outputs = [{ id: "proposal_reel", label: "提案成片", duration: Number(preview.totalOutputDuration || preview.durationAfter || 0), schedule: preview.schedule }];
+  }
+  // Jobs created by the previous proposal schema only carry source ranges.
+  // Present them as a simple sequential strip instead of dropping the track.
+  if (!outputs.length && Array.isArray(preview.ranges) && preview.ranges.length) {
+    let cursor = 0;
+    const schedule = preview.ranges.map((range, index) => {
+      const duration = Math.max(.1, Number(range.end) - Number(range.start));
+      const entry = {
+        objectId: String(range.id || index), objectType: String(range.targetType || "segment"), groupId: "",
+        label: range.label || `片段 ${index + 1}`, state: range.state || "adjusted",
+        sourceStart: Number(range.start) || 0, sourceEnd: Number(range.end) || 0,
+        outputStart: cursor, outputEnd: cursor + duration, effectiveDuration: duration,
+        transitionOverlap: 0, order: index + 1, outputId: "legacy_proposal",
+      };
+      cursor += duration;
+      return entry;
+    });
+    outputs = [{ id: "legacy_proposal", label: "提案片段", duration: cursor, schedule }];
+  }
+  track.classList.toggle("hidden", !pending || !outputs.length);
+  if ($("#timelineProposalTitle")) $("#timelineProposalTitle").textContent = proposal?.title || "剪辑编排预览";
+  if ($("#timelineProposalDuration")) $("#timelineProposalDuration").textContent = `${outputs.length > 1 ? `${outputs.length} 条 · ` : ""}${formatTime(Number(preview.totalOutputDuration || outputs.reduce((sum, output) => sum + Number(output.duration || 0), 0)))}`;
+  outputsRoot.innerHTML = pending ? outputs.map((output, outputIndex) => {
+    const duration = Math.max(.001, Number(output.duration) || Math.max(...output.schedule.map((entry) => Number(entry.outputEnd) || 0), .001));
+    const blocks = output.schedule.map((entry, index) => {
+      const start = Math.max(0, Number(entry.outputStart) || 0);
+      const end = Math.max(start, Number(entry.outputEnd) || start);
+      const left = start / duration * 100;
+      const width = Math.max(.65, (end - start) / duration * 100);
+      const state = String(entry.state || "unchanged");
+      const speed = Number(entry.playbackRate || 1);
+      const technique = [speed !== 1 ? `${speed}×` : "", Number(entry.transitionOverlap || 0) > 0 ? `${entry.transitionType === "fade_black" ? "淡黑" : "叠化"} ${Number(entry.transitionOverlap).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
+      const title = [`镜头 ${index + 1}`, entry.label, `成片 ${formatTime(start)}→${formatTime(end)}`, `源 ${formatTime(entry.sourceStart)}→${formatTime(entry.sourceEnd)}`, technique].filter(Boolean).join(" · ");
+      return `<button type="button" class="proposal-schedule-block state-${escapeHtml(state)}${activeProposalSourceRange?.proposalId === proposal.id && activeProposalSourceRange?.outputId === String(output.id) && Number(activeProposalSourceRange?.index) === index ? " active" : ""}" data-proposal-output="${escapeHtml(String(output.id || outputIndex))}" data-proposal-index="${index}" style="left:${left}%;width:${width}%" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"><b>${String(index + 1).padStart(2, "0")}</b><span>${escapeHtml(entry.label || `镜头 ${index + 1}`)}</span>${technique ? `<em>${escapeHtml(technique)}</em>` : ""}</button>`;
+    }).join("");
+    return `<div class="proposal-output-row" data-proposal-output-row="${escapeHtml(String(output.id || outputIndex))}"><div class="proposal-output-label"><b>${escapeHtml(outputs.length > 1 ? `输出 ${outputIndex + 1}` : "成片顺序")}</b><span>${escapeHtml(output.label || "提案成片")} · ${formatTime(duration)}</span></div><div class="proposal-output-line"><i aria-hidden="true"></i>${blocks}</div></div>`;
+  }).join("") : "";
+  outputsRoot.querySelectorAll("[data-proposal-index]").forEach((button) => button.addEventListener("click", () => {
+    const output = outputs.find((item, index) => String(item.id || index) === String(button.dataset.proposalOutput));
+    const index = Number(button.dataset.proposalIndex);
+    const entry = output?.schedule?.[index];
+    if (!entry) return;
+    activeProposalSourceRange = {
+      proposalId: String(proposal.id || ""), outputId: String(output.id || ""), index,
+      start: Number(entry.sourceStart) || 0, end: Number(entry.sourceEnd) || Number(entry.sourceStart) || 0,
+    };
+    showSource({ autoplay: false });
+    candidatePreviewEnd = Number(entry.sourceEnd) || null;
+    const padding = Math.max(3, Math.min(12, (Number(entry.sourceEnd) - Number(entry.sourceStart)) * 1.2));
+    setTimelineView(Math.max(0, Number(entry.sourceStart) - padding), Number(entry.sourceEnd) + padding);
+    seekSourceTime(Number(entry.sourceStart) || 0);
+    updateTimeline();
+  }));
+
+  const active = pending && activeProposalSourceRange?.proposalId === String(proposal?.id || "") ? activeProposalSourceRange : null;
+  const view = timelineViewRange();
+  const visible = active && Number(active.end) > view.start && Number(active.start) < view.end;
+  sourceRoot.classList.toggle("hidden", !visible);
+  sourceRoot.setAttribute("aria-hidden", String(!visible));
+  if (!visible) {
+    sourceRoot.innerHTML = "";
+  } else {
+    const start = Math.max(view.start, Number(active.start) || 0);
+    const end = Math.min(view.end, Number(active.end) || start);
+    sourceRoot.innerHTML = `<i class="proposal-source-highlight" style="left:${timelinePercentInView(start)}%;width:${Math.max(.35, (end - start) / view.duration * 100)}%"><span>提案镜头来源</span></i>`;
+  }
+}
+
 function updateTimeline() {
   if (!timelinePanel) return;
   if (!currentJob) {
@@ -2774,6 +3688,7 @@ function updateTimeline() {
   }
   timelinePanel.classList.remove("hidden");
   const duration = timelineDurationValue();
+  const contentMode = String(currentJob.taskMode || "") === "content_extract";
   const durationNode = $("#timelineDuration");
   if (durationNode) durationNode.textContent = formatTime(duration);
   const eventDisplay = timelineEventDisplayModel(currentJob);
@@ -2781,16 +3696,25 @@ function updateTimeline() {
   const outputComparison = viewerMediaKind === "output" && currentOutput?.segments?.length
     ? timelineOutputComparisonModel(currentJob, currentOutput)
     : null;
+  const timelinePresentation = timelinePresentationModel(currentJob, outputComparison);
+  const contentReviewSingleLayer = timelinePresentation.layoutKind === "content-review";
+  applyTimelinePresentation(timelinePresentation);
   timelineViewport?.classList.toggle("output-comparison-mode", Boolean(outputComparison));
   timelinePanel?.classList.toggle("output-comparison-mode", Boolean(outputComparison));
   const legendItems = [...timelinePanel.querySelectorAll(":scope > footer > span")].slice(0, 4);
   const legendLabels = outputComparison
-    ? ["源事件", "当前成片镜头", "已采用事件", "当前播放"]
-    : ["事件镜头", "AI 推荐", "当前选中", "播放位置"];
+    ? (timelineOutputAxisActive()
+        ? ["成片片段", "播放顺序", "当前播放", "播放位置"]
+        : ["采用片段", "成片顺序", "当前播放", "源片位置"])
+    : (contentMode ? ["匹配片段", "已选片段", "当前预览", "播放位置"] : ["事件镜头", "AI 推荐", "当前选中", "播放位置"]);
   legendItems.forEach((node, index) => {
     const textNode = [...node.childNodes].find((child) => child.nodeType === 3);
     if (textNode) textNode.textContent = legendLabels[index];
   });
+  if (outputComparison) {
+    renderComposedTimeline(outputComparison, timelinePresentation);
+    return;
+  }
   let items;
   if (outputComparison && displayEventGroups.length) {
     // Source events remain as a quiet comparison layer. Only the currently
@@ -2808,6 +3732,8 @@ function updateTimeline() {
     items = [...outputComparison.outputSegments];
   } else if (viewerMediaKind === "candidate" && currentCandidate) {
     items = currentJob.candidates || [];
+  } else if (currentJob.status === "awaiting_content_confirmation") {
+    items = (currentJob.contentSearch?.candidates || []).map((item, index) => ({ ...item, index }));
   } else if (currentJob.status === "awaiting_confirmation" && currentJob.eventGroups?.length) {
     items = displayEventGroups.flatMap((group) => group.segments.map((segment) => ({ ...segment, _group: group })));
   } else if (currentJob.status === "awaiting_confirmation") {
@@ -2843,6 +3769,9 @@ function updateTimeline() {
   });
   const view = timelineViewRange();
   const recommended = new Set(currentJob.recommendedIndices || []);
+  const selectedContentMatches = new Set(
+    (currentJob.contentSearch?.defaultSelectedIds || currentJob.contentSearch?.reviewDraft?.selectedMatchIds || []).map(String),
+  );
   const recommendedEventIds = eventDisplay.recommendedIds;
   const chronologicalEventGroups = displayEventGroups;
   const eventSequence = new Map(chronologicalEventGroups.map((group, index) => [String(group.id), index + 1]));
@@ -2867,6 +3796,7 @@ function updateTimeline() {
   const timelineItemIsActive = (item) => Boolean(
     currentEventSegment?.id != null && item?.id != null && String(currentEventSegment.id) === String(item.id)
     || currentCandidate?.index != null && item?.index != null && Number(currentCandidate.index) === Number(item.index)
+    || contentMode && currentCandidate?.id != null && item?.id != null && String(currentCandidate.id) === String(item.id)
     || currentOutput?.filename && item?.filename && String(currentOutput.filename) === String(item.filename)
   );
   const timelineItemTitle = (item, position = 0) => {
@@ -2890,7 +3820,10 @@ function updateTimeline() {
     const candidate = Number.isFinite(candidateIndex)
       ? (currentJob.candidates || []).find((entry) => Number(entry.index) === candidateIndex)
       : null;
-    return String(candidate?.title || item?.title || timelineShotRole(item) || "镜头").trim();
+    return String(
+      candidate?.title || item?.title || (contentMode ? item?.chapterTitle || item?._group?.title : "")
+      || timelineShotRole(item) || (contentMode ? "匹配片段" : "镜头"),
+    ).trim();
   };
   const labels = $("#timelineLabels");
   const trackWidth = Math.max(320, Math.round(timelineTrackContent?.getBoundingClientRect().width || timelineViewport?.getBoundingClientRect().width || 1000));
@@ -2920,9 +3853,14 @@ function updateTimeline() {
     const labelEnd = groupEnd;
     const detail = item._group?.summary || item.summary || item.reason || "";
     const characterCount = Array.from(String(title)).length;
-    const isRecommendedEvent = item._group
-      ? recommendedEventIds.has(String(item._group.id))
-      : recommended.has(Number(item.index));
+    const contentMatchId = String(item._group?.contentMatchId || item.candidateId || item.id || "");
+    const isRecommendedEvent = contentMode
+      ? (item._group
+          ? recommendedEventIds.has(String(item._group.id)) || selectedContentMatches.has(contentMatchId)
+          : selectedContentMatches.has(contentMatchId))
+      : item._group
+        ? recommendedEventIds.has(String(item._group.id))
+        : recommended.has(Number(item.index));
     const eventNumber = item._group ? Number(eventSequence.get(String(item._group.id)) || 0) : 0;
     const relationKey = eventNumber ? `event-${eventNumber}` : `candidate-${position + 1}`;
     const duplicateCount = item._group
@@ -2991,7 +3929,9 @@ function updateTimeline() {
   });
   const labelLanes = Math.max(1, Math.min(maximumLabelLanes, laneEnds.length || 1));
   const hasSourceReviewItems = items.some((item) => !item._output);
-  const numberedShots = outputComparison
+  const numberedShots = contentReviewSingleLayer
+    ? []
+    : outputComparison
     ? items.filter((item) => item._output)
     : items.filter((item) => !hasSourceReviewItems || !item._output);
   numberedShots.forEach((item, index) => {
@@ -3034,7 +3974,9 @@ function updateTimeline() {
     ? Math.max(...numberedShots.map((item) => Number(item._timelineShotLane || 0))) + 1
     : 1;
   const shotLanes = Math.max(1, Math.min(densityProfile.maximumShotLanes, usedShotLanes));
-  const layout = timelineTrackLayout(viewportHeight, timelineDetailMode, labelLanes, shotLanes);
+  const layout = timelineTrackLayout(
+    viewportHeight, timelineDetailMode, labelLanes, shotLanes, timelinePresentation.layoutKind,
+  );
   labelLaneHeight = layout.labelLaneHeight;
   shotLaneHeight = layout.shotLaneHeight;
   const relationLaneHeight = layout.relationHeight;
@@ -3081,7 +4023,7 @@ function updateTimeline() {
         rangeEnd: Number(item._timelineShotRangeEnd || 0),
       };
     }).filter(Boolean);
-    const bandMarkup = labelEntries.flatMap((entry) => {
+    const bandMarkup = contentReviewSingleLayer ? "" : labelEntries.flatMap((entry) => {
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
       return entry.scopeFragments.map((fragment) => {
         const x = fragment.left / 100 * trackWidth;
@@ -3098,7 +4040,7 @@ function updateTimeline() {
       const markerTarget = Math.max(start, Math.min(end || start, Number(target.item._timelineShotMarkerTarget || target.x)));
       return `<g class="timeline-shot-range${stateClasses}"${target.relationKey ? ` data-timeline-relation="${target.relationKey}"` : ""}><line class="timeline-shot-range-line" x1="${start.toFixed(2)}" y1="${target.lineY.toFixed(2)}" x2="${end.toFixed(2)}" y2="${target.lineY.toFixed(2)}"></line><line class="timeline-shot-centre-guide" x1="${target.x.toFixed(2)}" y1="${(target.y + layout.shotCardHeight).toFixed(2)}" x2="${markerTarget.toFixed(2)}" y2="${target.lineY.toFixed(2)}"></line><circle class="timeline-shot-range-end start" cx="${start.toFixed(2)}" cy="${target.lineY.toFixed(2)}" r="2.5"></circle><circle class="timeline-shot-range-end end" cx="${end.toFixed(2)}" cy="${target.lineY.toFixed(2)}" r="2.5"></circle></g>`;
     }).join("");
-    const curveMarkup = labelEntries.flatMap((entry) => {
+    const curveMarkup = contentMode ? "" : labelEntries.flatMap((entry) => {
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
       const labelTop = Math.max(0, entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) - 4);
       const startX = Math.max(0, Math.min(trackWidth, entry.left + entry.width / 2));
@@ -3110,7 +4052,7 @@ function updateTimeline() {
         return `<path class="timeline-event-curve${stateClasses}" data-timeline-relation="${entry.relationKey}" d="${path}"></path>`;
       });
     }).join("");
-    const connectionPointMarkup = labelEntries.flatMap((entry) => {
+    const connectionPointMarkup = contentMode ? "" : labelEntries.flatMap((entry) => {
       const targets = relationTargets.filter((target) => target.relationKey === entry.relationKey);
       if (!targets.length) return [];
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
@@ -3137,15 +4079,20 @@ function updateTimeline() {
   if (labels) labels.innerHTML = labelEntries.map((entry) => {
     const anchorOffset = Math.max(8, Math.min(entry.width - 8, entry.anchor - entry.left));
     const range = `${formatTime(entry.groupStart)} → ${formatTime(entry.groupEnd)}`;
-    const sequenceLabel = entry.eventNumber ? `E${entry.eventNumber}` : `C${entry.position + 1}`;
-    const kindLabel = entry.eventNumber ? `事件 ${sequenceLabel}` : `候选 ${sequenceLabel}`;
+    const sequenceLabel = contentMode
+      ? `P${String(entry.eventNumber || entry.position + 1).padStart(2, "0")}`
+      : entry.eventNumber ? `E${entry.eventNumber}` : `C${entry.position + 1}`;
+    const kindLabel = contentMode
+      ? `匹配片段 ${sequenceLabel}`
+      : entry.eventNumber ? `事件 ${sequenceLabel}` : `候选 ${sequenceLabel}`;
     const duplicateFact = entry.duplicateCount ? `已折叠 ${entry.duplicateCount} 个重复分析结果` : "";
     const labelTop = entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) - 4;
     const comparisonClass = outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : "";
     const statusBadge = outputComparison
       ? (entry.usedInOutput && !entry.compact && !entry.narrow ? "<em>已采用</em>" : "")
-      : (entry.isRecommendedEvent && !entry.compact && !entry.narrow ? "<em>推荐</em>" : "");
-    return `<button type="button" class="timeline-label${entry.narrow ? " narrow" : ""}${entry.compact ? " compact" : ""}${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${comparisonClass}" data-timeline-label-position="${entry.position}" data-timeline-relation="${entry.relationKey}" style="--timeline-label-left:${entry.left}px;--timeline-label-width:${entry.width}px;--timeline-label-top:${Math.max(0, labelTop)}px;--timeline-label-anchor:${anchorOffset}px" title="${escapeHtml([kindLabel, entry.title, `${entry.shotCount} 个镜头`, outputComparison ? (entry.usedInOutput ? "当前成片已采用" : "当前成片未采用") : "", range, duplicateFact, entry.detail].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([kindLabel, entry.title, outputComparison ? (entry.usedInOutput ? "当前成片已采用" : "当前成片未采用") : (entry.isRecommendedEvent ? "AI 推荐" : "备选"), duplicateFact, entry.detail].filter(Boolean).join("，"))}"><b>${sequenceLabel}</b><span>${escapeHtml(entry.title)}</span>${statusBadge}</button>`;
+      : (entry.isRecommendedEvent && !entry.compact && !entry.narrow ? `<em>${contentMode ? "已选" : "推荐"}</em>` : "");
+    const countFact = contentMode ? "" : `${entry.shotCount} 个镜头`;
+    return `<button type="button" class="timeline-label${contentMode ? " content-match" : ""}${entry.narrow ? " narrow" : ""}${entry.compact ? " compact" : ""}${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${comparisonClass}" data-timeline-label-position="${entry.position}" data-timeline-relation="${entry.relationKey}" style="--timeline-label-left:${entry.left}px;--timeline-label-width:${entry.width}px;--timeline-label-top:${Math.max(0, labelTop)}px;--timeline-label-anchor:${anchorOffset}px" title="${escapeHtml([kindLabel, entry.title, countFact, outputComparison ? (entry.usedInOutput ? `当前${contentMode ? "内容视频" : "成片"}已采用` : `当前${contentMode ? "内容视频" : "成片"}未采用`) : "", range, duplicateFact, entry.detail].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([kindLabel, entry.title, outputComparison ? (entry.usedInOutput ? "当前版本已采用" : "当前版本未采用") : (entry.isRecommendedEvent ? (contentMode ? "已选" : "AI 推荐") : "备选"), duplicateFact, entry.detail].filter(Boolean).join("，"))}"><b>${sequenceLabel}</b><span>${escapeHtml(entry.title)}</span>${statusBadge}</button>`;
   }).join("");
   const highlightTimelineRelation = (relationKey, highlighted) => {
     timelineTrackContent?.querySelectorAll("[data-timeline-relation]").forEach((element) => {
@@ -3162,7 +4109,8 @@ function updateTimeline() {
   labels?.querySelectorAll("[data-timeline-label-position]").forEach((button) => button.addEventListener("click", () => {
     const item = items[Number(button.dataset.timelineLabelPosition)];
     timelineFrameSelectionTime = null;
-    if (item?._group) previewEventGroup(item._group);
+    if (contentMode && !item?._group && !item?._output) previewContentMatch(item);
+    else if (item?._group) contentMode ? previewEventSegment(item._group, item) : previewEventGroup(item._group);
     else if (item?._output) seekComposedMedia(item._output, Number(item._outputSegmentIndex), Number(item.start), "output");
     else if (currentJob.status === "awaiting_confirmation") previewCandidate(Number(item.index));
     else if (item?.filename) selectOutput(item.filename, true);
@@ -3170,7 +4118,7 @@ function updateTimeline() {
   }));
   bindTimelineRelationHover(labels);
   const clips = $("#timelineClips");
-  if (clips) clips.innerHTML = duration > 0 ? items.map((item, position) => {
+  if (clips) clips.innerHTML = duration > 0 && !contentReviewSingleLayer ? items.map((item, position) => {
     if (outputComparison && !item._output) return "";
     const isCandidate = currentJob.status === "awaiting_confirmation";
     const active = timelineItemIsActive(item);
@@ -3186,7 +4134,7 @@ function updateTimeline() {
     const clipTop = layout.eventRowHeight + shotLane * shotLaneHeight + Math.max(2, (shotLaneHeight - layout.shotCardHeight) / 2);
     const { eventNumber, relationKey } = timelineRelationForItem(item, position);
     const outputSegmentAttribute = item._output ? ` data-output-segment-index="${Number(item._outputSegmentIndex)}"` : "";
-    return `<button type="button" class="${classes}" data-timeline-position="${position}"${outputSegmentAttribute} data-event-sequence="${eventNumber || ""}"${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="left:${timelinePercentInView(item.start)}%;width:${Math.max(.2, (Number(item.end) - Number(item.start)) / view.duration * 100)}%;--timeline-clip-top:${clipTop}px" title="${escapeHtml([outputComparison ? `成片顺序 ${String(shotNumber).padStart(2, "0")}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, `${formatTime(item.start)} → ${formatTime(item.end)}`, clipDescription].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([outputComparison ? `成片顺序 ${shotNumber}` : (eventNumber ? `事件 E${eventNumber}` : ""), clipTitle, clipDescription].filter(Boolean).join("，"))}"></button>`;
+    return `<button type="button" class="${classes}" data-timeline-position="${position}"${outputSegmentAttribute} data-event-sequence="${eventNumber || ""}"${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="left:${timelinePercentInView(item.start)}%;width:${Math.max(.2, (Number(item.end) - Number(item.start)) / view.duration * 100)}%;--timeline-clip-top:${clipTop}px" title="${escapeHtml([outputComparison ? `${contentMode ? "内容视频" : "成片"}顺序 ${String(shotNumber).padStart(2, "0")}` : (eventNumber ? `${contentMode ? "片段 P" : "事件 E"}${eventNumber}` : ""), clipTitle, `${formatTime(item.start)} → ${formatTime(item.end)}`, clipDescription].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([outputComparison ? `${contentMode ? "内容视频" : "成片"}顺序 ${shotNumber}` : (eventNumber ? `${contentMode ? "片段 P" : "事件 E"}${eventNumber}` : ""), clipTitle, clipDescription].filter(Boolean).join("，"))}"></button>`;
   }).join("") : "";
   clips?.querySelectorAll("[data-timeline-position]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -3199,7 +4147,7 @@ function updateTimeline() {
   }));
   bindTimelineRelationHover(clips);
   const markers = $("#timelineShotMarkers");
-  if (markers) markers.innerHTML = duration > 0 ? items.map((item, position) => {
+  if (markers) markers.innerHTML = duration > 0 && !contentReviewSingleLayer ? items.map((item, position) => {
     if (outputComparison && !item._output) return "";
     const shotNumber = Number(item._timelineShotNumber || 0);
     const showMarker = shotNumber && Number(item.end) > view.start && Number(item.start) < view.end;
@@ -3212,9 +4160,9 @@ function updateTimeline() {
     const markerWidth = Number(item._timelineShotBadgeWidth || 112);
     const markerTop = layout.eventRowHeight + Number(item._timelineShotLane || 0) * shotLaneHeight + Math.max(2, (shotLaneHeight - layout.shotCardHeight) / 2);
     const markerClasses = ["timeline-shot-marker", outputComparison && item._output ? "comparison-output-shot" : "", groupActive ? "group-active" : "", active ? "active" : ""].filter(Boolean).join(" ");
-    const visibleMarkerNumber = `镜头 ${markerText}`;
+    const visibleMarkerNumber = `${contentMode ? (outputComparison ? "顺序" : "片段") : "镜头"} ${markerText}`;
     const markerContent = `<b>${escapeHtml(visibleMarkerNumber)}</b><em>${escapeHtml(markerRole)}</em>`;
-    const title = [eventNumber ? `事件 E${eventNumber}` : "", `镜头 ${shotNumber}`, markerRole, `${formatTime(item.start)} → ${formatTime(item.end)}`, item.reason || item.summary || item._group?.summary || ""].filter(Boolean).join(" · ");
+    const title = [eventNumber ? `${contentMode ? "片段 P" : "事件 E"}${eventNumber}` : "", `${contentMode ? "内容片段" : "镜头"} ${shotNumber}`, markerRole, `${formatTime(item.start)} → ${formatTime(item.end)}`, item.reason || item.summary || item._group?.summary || ""].filter(Boolean).join(" · ");
     return `<button type="button" class="${markerClasses}" data-timeline-marker-position="${position}"${item._output ? ` data-output-segment-index="${Number(item._outputSegmentIndex)}"` : ""}${relationKey ? ` data-timeline-relation="${relationKey}"` : ""} style="--timeline-shot-marker-left:${Number(item._timelineShotBadgeLeft || 0)}px;--timeline-shot-marker-top:${markerTop}px;--timeline-shot-marker-width:${markerWidth}px;--timeline-shot-anchor-offset:${Number(item._timelineShotMarkerTarget || 0) - Number(item._timelineShotBadgeLeft || 0)}px" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${markerContent}</button>`;
   }).join("") : "";
   markers?.querySelectorAll("[data-timeline-marker-position]").forEach((button) => button.addEventListener("click", (event) => {
@@ -3237,6 +4185,7 @@ function updateTimeline() {
   drawWaveform();
   renderTimelineEventSummary();
   updateTimelineReviewControls();
+  renderTimelineProposalPreview(currentJob);
 }
 
 async function loadWaveform(job) {
@@ -3272,14 +4221,7 @@ async function loadWaveform(job) {
   }
 }
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || body.error || `请求失败（${response.status}）`);
-  return body;
-}
-
-function requestActionConfirmation({ title, summary, details = [], warning = "", confirmLabel = "确认执行", orderMode = null, orderItems = [] }) {
+function requestActionConfirmation({ title, summary, details = [], warning = "", confirmLabel = "确认执行", orderMode = null, orderItems = [], showOrderOptions = false, selectionItems = [], onDraftChange = null }) {
   return new Promise((resolve) => {
     const modal = $("#actionConfirm");
     if (!modal) return resolve(window.confirm(`${title}\n\n${summary}`));
@@ -3291,22 +4233,40 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
     const orderSelect = $("#actionConfirmOrder");
     const orderHint = $("#actionConfirmOrderHint");
     const orderList = $("#actionConfirmOrderList");
+    const selectionList = $("#actionConfirmSelectionList");
     let mutableOrder = orderItems.map((item) => ({ ...item }));
     const orderHints = {
       selection: "按照你当前勾选/加入选区的先后合成，不会自动调换。",
+      source: "按镜头在源视频中的时间先后排序，适合纪实、访谈和过程记录。",
+      llm_recommend: "LLM 只推荐排列顺序，不会增加、删除或改变任何镜头起止点；完成后还会再次请你确认。",
     };
-    orderWrap?.classList.toggle("hidden", !orderMode);
+    orderWrap?.classList.toggle("content-order-enabled", Boolean(orderMode && showOrderOptions));
+    orderWrap?.classList.toggle("hidden", !orderMode || !showOrderOptions);
     orderList?.classList.toggle("hidden", !orderItems.length);
+    if (selectionList) {
+      selectionList.classList.toggle("hidden", !selectionItems.length);
+      selectionList.innerHTML = selectionItems.map((item, index) => `<label class="${item.disabled ? "disabled" : ""}"><input type="checkbox" data-confirm-selection="${index}" value="${escapeHtml(item.value)}" ${item.checked && !item.disabled ? "checked" : ""} ${item.disabled ? "disabled" : ""}><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.meta || (item.disabled ? "当前不可保留" : "正式成片"))}</small></span></label>`).join("");
+    }
     const renderOrderList = () => {
       if (!orderList) return;
-      orderList.innerHTML = `<small>可手动调整镜头顺序</small>${mutableOrder.map((item, index) => `<div><b>${index + 1}</b><span>${escapeHtml(item.label || item.title || `镜头 ${index + 1}`)}<em>${escapeHtml(item.meta || "")}</em></span><button type="button" data-order-up="${index}" ${index === 0 ? "disabled" : ""}>↑</button><button type="button" data-order-down="${index}" ${index === mutableOrder.length - 1 ? "disabled" : ""}>↓</button></div>`).join("")}`;
-      orderList?.querySelectorAll("[data-order-up]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderUp); [mutableOrder[index - 1], mutableOrder[index]] = [mutableOrder[index], mutableOrder[index - 1]]; renderOrderList(); }));
-      orderList?.querySelectorAll("[data-order-down]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderDown); [mutableOrder[index], mutableOrder[index + 1]] = [mutableOrder[index + 1], mutableOrder[index]]; renderOrderList(); }));
+      const selectedMode = orderSelect?.value || orderMode;
+      const editable = selectedMode === "selection";
+      const heading = editable ? "可手动调整镜头顺序" : selectedMode === "llm_recommend" ? "已选镜头 · LLM 推荐后再次确认" : "已选镜头 · 将按源时间排序";
+      orderList.innerHTML = `<small>${heading}</small>${mutableOrder.map((item, index) => `<div><b>${index + 1}</b><span>${escapeHtml(item.label || item.title || `镜头 ${index + 1}`)}<em>${escapeHtml(item.meta || "")}</em></span>${editable ? `<button type="button" data-order-up="${index}" ${index === 0 ? "disabled" : ""}>↑</button><button type="button" data-order-down="${index}" ${index === mutableOrder.length - 1 ? "disabled" : ""}>↓</button>` : ""}</div>`).join("")}`;
+      orderList?.querySelectorAll("[data-order-up]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderUp); [mutableOrder[index - 1], mutableOrder[index]] = [mutableOrder[index], mutableOrder[index - 1]]; renderOrderList(); onDraftChange?.({ orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder }); }));
+      orderList?.querySelectorAll("[data-order-down]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderDown); [mutableOrder[index], mutableOrder[index + 1]] = [mutableOrder[index + 1], mutableOrder[index]]; renderOrderList(); onDraftChange?.({ orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder }); }));
     };
-    renderOrderList();
     if (orderSelect && orderMode) orderSelect.value = orderMode;
+    renderOrderList();
     if (orderHint) orderHint.textContent = orderHints[orderSelect?.value || orderMode] || "";
-    $("#actionConfirmOk").textContent = confirmLabel;
+    const confirmButton = $("#actionConfirmOk");
+    confirmButton.textContent = confirmLabel;
+    const syncSelectionState = () => {
+      if (selectionItems.length) confirmButton.disabled = !selectionList?.querySelector("input:not(:disabled):checked");
+      else confirmButton.disabled = false;
+    };
+    selectionList?.querySelectorAll("input").forEach((input) => input.addEventListener("change", syncSelectionState));
+    syncSelectionState();
     modal.classList.remove("hidden");
     const finish = (value) => { modal.classList.add("hidden"); cleanup(); resolve(value); };
     const cleanup = () => {
@@ -3314,11 +4274,24 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
       $("#actionConfirmCancel").removeEventListener("click", onCancel);
       $("#actionConfirmClose").removeEventListener("click", onCancel);
       orderSelect?.removeEventListener("change", onOrderChange);
+      selectionList?.querySelectorAll("input").forEach((input) => input.removeEventListener("change", syncSelectionState));
+      confirmButton.disabled = false;
       document.removeEventListener("keydown", onKey);
     };
-    const onOk = () => finish(orderMode ? { confirmed: true, orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder } : true);
+    const onOk = () => {
+      if (selectionItems.length) {
+        const selectedValues = [...selectionList.querySelectorAll("input:not(:disabled):checked")].map((input) => input.value);
+        if (!selectedValues.length) return;
+        return finish({ confirmed: true, selectedValues });
+      }
+      return finish(orderMode ? { confirmed: true, orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder } : true);
+    };
     const onCancel = () => finish(false);
-    const onOrderChange = () => { if (orderHint) orderHint.textContent = orderHints[orderSelect?.value || orderMode] || ""; };
+    const onOrderChange = () => {
+      if (orderHint) orderHint.textContent = orderHints[orderSelect?.value || orderMode] || "";
+      renderOrderList();
+      onDraftChange?.({ orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder });
+    };
     const onKey = (event) => { if (event.key === "Escape") finish(false); };
     $("#actionConfirmOk").addEventListener("click", onOk);
     $("#actionConfirmCancel").addEventListener("click", onCancel);
@@ -3363,36 +4336,50 @@ function setDirectorState(text, running = false) {
 }
 
 function directorStatusForJob(job = currentJob) {
-  if (!job) return { text: "等待素材", running: false };
+  return displayStatusForJob(job);
+}
+
+function jobOutputVersionCount(job = currentJob) {
+  return jobOutputVersions(job).filter((version) => (version.outputs || []).length > 0).length;
+}
+
+function jobResultSummary(job = currentJob) {
+  const outputCount = jobOutputCount(job);
+  if (!outputCount) return "";
+  const contentMode = String(job?.taskMode || "") === "content_extract";
+  const versionCount = jobOutputVersionCount(job);
+  if (contentMode) return `${outputCount} 条内容视频`;
+  return `${versionCount} 个版本${outputCount !== versionCount ? ` · ${outputCount} 条视频` : ""}`;
+}
+
+function displayStatusForJob(job = currentJob) {
+  if (!job) return { text: "等待素材", running: false, className: "empty" };
+  const status = String(job.status || "");
+  const result = jobResultSummary(job);
+  const suffix = result ? ` · ${result}` : "";
+  if (status === "failed") return { text: `处理失败${result ? ` · 已保留 ${result}` : ""}`, running: false, className: "failed" };
+  if (status === "cancelled") return { text: `已取消${suffix}`, running: false, className: "cancelled" };
+  if (status === "cancelling") return { text: `正在停止${suffix}`, running: false, className: "cancelling" };
+  if (status === "awaiting_model_decision") return { text: "等待你处理模型阶段", running: false, className: "awaiting-model-decision" };
+  if (status === "brief_confirmation") return { text: "等待你确认需求", running: false, className: "brief-confirmation" };
+  if (status === "awaiting_content_confirmation") return { text: `等待确认内容片段${suffix}`, running: false, className: "awaiting-content-confirmation" };
+  if (status === "awaiting_confirmation") return { text: `等待确认高光${suffix}`, running: false, className: "awaiting-confirmation" };
+  if (status === "completed") return { text: `已完成${suffix}`, running: false, className: "completed" };
+  if (status === "briefing") return { text: "正在理解需求", running: false, className: "briefing" };
+  if (status === "queued") return { text: `排队中 · 尚未开始处理${suffix}`, running: false, className: "queued" };
 
   const autoCompositionStatus = String(job.autoComposition?.status || "");
-  const autoCompositionRunning = ["queued", "running"].includes(autoCompositionStatus);
-  if (autoCompositionRunning) {
+  if (["queued", "running"].includes(autoCompositionStatus)) {
     const completed = Math.max(0, Number(job.autoComposition?.completedVersions) || 0);
     const total = Math.max(0, Number(job.autoComposition?.totalVersions) || 0);
     return {
       text: total > 0 ? `正在生成成片 · 已完成 ${Math.min(completed, total)}/${total} 个` : "正在生成成片",
       running: true,
+      className: "running",
     };
   }
-
-  const outputCount = jobOutputCount(job);
-  if (outputCount > 0) return { text: `${outputCount} 个成片已生成`, running: false };
-
-  if (job.status === "briefing") return { text: "正在理解需求", running: false };
-  if (job.status === "brief_confirmation") return { text: "等待你确认需求", running: false };
-  if (job.status === "awaiting_model_decision") return { text: "需要处理", running: false };
-  if (job.status === "awaiting_confirmation") return { text: "事件已就绪 · 待审核", running: false };
-  if (job.status === "completed") return { text: "已完成", running: false };
-  if (job.status === "failed") return { text: "任务失败", running: false };
-  if (["cancelled", "cancelling"].includes(String(job.status || ""))) return { text: "已停止", running: false };
-
-  const pipelineRunning = isPipelineRunningStatus(job.status);
   const rendering = ["rendering", "render", "edit_planning", "auto_composition"].includes(String(job.stage || ""));
-  return {
-    text: pipelineRunning && rendering ? "正在生成成片" : pipelineRunning ? "正在分析" : "任务进行中",
-    running: pipelineRunning,
-  };
+  return { text: rendering ? "正在生成成片" : "正在处理", running: isPipelineRunningStatus(status), className: "running" };
 }
 
 function updateDirectorState(job = currentJob) {
@@ -3402,35 +4389,39 @@ function updateDirectorState(job = currentJob) {
 
 function thinkingMessageMarkup(config, job = null) {
   if (!config) return "";
+  const roleLabel = taskModePresentation(job).key === "content_extract" ? "内容探索助手" : "高光发现助手";
   return `<article class="chat-message assistant thinking-message" role="status">
     <span class="avatar thinking-avatar"><span class="thinking-orb-slot" data-thinking-orb data-orb-state="${escapeHtml(config.state)}" data-orb-size="30" data-orb-theme="light" data-orb-label="${escapeHtml(config.label)}"></span></span>
-    <div class="bubble" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.58" data-beam-duration="2.25" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="16" data-beam-radius="13"><small>高光导演</small><p>${escapeHtml(config.label)}</p></div>
+    <div class="bubble" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.58" data-beam-duration="2.25" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="16" data-beam-radius="13"><small>${roleLabel}</small><p>${escapeHtml(config.label)}</p></div>
   </article>`;
 }
 
 function compactConversationMessages(messages = []) {
   const compacted = [];
   const retryKinds = new Set(["retry", "notice"]);
-  const repeatIndex = new Map();
   messages.forEach((message) => {
     const text = String(message?.text || "").trim();
     const kind = String(message?.kind || "");
-    const key = `${String(message?.role || "")}:${kind}:${text}`;
-    const previousIndex = repeatIndex.get(key);
-    const previous = previousIndex === undefined ? null : compacted[previousIndex];
-    if (previous && retryKinds.has(kind)) {
+    const previous = compacted[compacted.length - 1];
+    const sameTurn = String(previous?.conversationTurnId || "") === String(message?.conversationTurnId || "");
+    if (previous && retryKinds.has(kind) && sameTurn
+      && String(previous.role || "") === String(message?.role || "")
+      && String(previous.kind || "") === kind
+      && String(previous.text || "").trim() === text) {
       previous.repeatCount = Number(previous.repeatCount || 1) + 1;
       previous.lastCreatedAt = message.createdAt || previous.lastCreatedAt;
       return;
     }
     const next = { ...message, repeatCount: 1 };
     compacted.push(next);
-    if (retryKinds.has(kind)) repeatIndex.set(key, compacted.length - 1);
   });
   return compacted;
 }
 
 function analysisActivityLoader(job = {}) {
+  const status = String(job.status || "");
+  if (status === "queued") return { variant: "orbit", label: "等待后台开始处理" };
+  if (status === "cancelling") return { variant: "orbit", label: "正在停止当前任务" };
   const context = [job.stage, job.detail, job.currentAction, job.model]
     .filter(Boolean).join(" ").toLowerCase();
   if (/(?:sensevoice|speech|audio|语音|音频|对白|声音)/.test(context)) {
@@ -3455,26 +4446,29 @@ function inlineAnalysisProgressMarkup(job) {
   const rawStageProgress = measuredStageProgress(job);
   const stageFraction = rawStageProgress !== null ? rawStageProgress : 0;
   const stagePercent = Math.round(Math.max(0, Math.min(1, stageFraction)) * 100);
-  const parsedStart = Date.parse(String(contract.timing.startedAt || job?.startedAt || job?.createdAt || ""));
-  const elapsedSeconds = Number.isFinite(parsedStart) ? Math.max(0, (Date.now() - parsedStart) / 1000) : 0;
-  const phaseIndex = analysisPhase(String(job?.stage || ""), String(job?.status || ""));
-  const phaseItems = ["准备", "AI 分析", "生成成片"];
+  const elapsedSeconds = processingElapsedSeconds(job);
+  const workflow = taskWorkflowForJob(job);
+  const phaseIndex = workflow.currentIndex;
+  const phaseItems = workflow.steps;
   const stageMode = stageDisplayMode(job);
-  const waiting = !["determinate", "completed"].includes(stageMode);
+  const waiting = (isPipelineRunningStatus(job?.status) || job?.status === "briefing")
+    && !["determinate", "completed"].includes(stageMode);
   const stageFact = stageProgressFact(job, stagePercent, waiting);
   const activity = analysisActivityLoader(job);
   const stageLabel = contract.stage.label || "当前阶段";
   const model = contract.activity.model || job?.model || "系统";
   const stageBarPercent = stageMode === "completed" ? 100 : stagePercent;
   const cancelling = String(job?.status || "") === "cancelling";
-  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.84" data-beam-duration="2.05" data-beam-brightness="1.42" data-beam-saturation="1.06" data-beam-hue-range="14" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${waiting}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${percent}%</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>流程完成度</span><b data-inline-workflow-percent>${percent}%</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${percent}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed="1.08" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>当前阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>已运行 ${formatClock(elapsedSeconds)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel${cancelling ? " disabled" : ""}>${cancelling ? "正在停止…" : "停止分析"}</button></section>`;
+  const activityRunning = isPipelineRunningStatus(job?.status) || job?.status === "briefing";
+  const actionLabel = cancelling ? "正在停止…" : job?.status === "queued" ? "等待处理" : "停止分析";
+  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.84" data-beam-duration="2.05" data-beam-brightness="1.42" data-beam-saturation="1.06" data-beam-hue-range="14" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${activityRunning}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${percent}%</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>流程完成度</span><b data-inline-workflow-percent>${percent}%</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${percent}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-active="${activityRunning}" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed="1.08" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>当前阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>${processingElapsedLabel(job)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${workflow.complete || index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel${cancelling || job?.status === "queued" ? " disabled" : ""}>${actionLabel}</button></section>`;
 }
 
 function autoCompositionVersionFacts(job) {
   const state = job?.autoComposition || {};
   const stateVersions = Array.isArray(state.versions) ? state.versions.length : 0;
   const savedAutoVersions = jobOutputVersions(job).filter((version) =>
-    ["vlm", "narrative", "emotion", "information"].includes(String(version?.strategyKey || ""))
+    ["vlm", "narrative", "emotion", "information", "review_repair"].includes(String(version?.strategyKey || ""))
   ).length;
   const explicitCompleted = Number(state.completedVersions);
   const completed = Math.max(0, Number.isFinite(explicitCompleted) ? explicitCompleted : 0, stateVersions, savedAutoVersions);
@@ -3489,12 +4483,16 @@ function autoCompositionVersionFacts(job) {
     1,
   );
   const reportedProgress = Number(state.progress);
+  const reviewPhases = ["review_vlm", "review_llm", "repair_render", "review_compare"];
+  const reviewProgress = Math.max(0, Math.min(1, Number(state.reviewProgress) || 0));
   const ratio = state.status === "completed"
     ? 1
-    : Math.max(
-      completed / total,
-      Number.isFinite(reportedProgress) ? reportedProgress : 0,
-    );
+    : reviewPhases.includes(String(state.phase || ""))
+      ? Math.min(.99, .85 + reviewProgress * .14)
+      : Math.max(
+        completed / total,
+        Number.isFinite(reportedProgress) ? reportedProgress : 0,
+      );
   const currentVersionProgress = Math.round(Math.max(0, Math.min(1, Number(state.currentVersionProgress) || 0)) * 100);
   return {
     completed,
@@ -3512,6 +4510,10 @@ function autoCompositionProgressHint(job, facts) {
   if (state.phase === "quality_check") {
     return `已完成 ${facts.completed}/${facts.total} 个版本，正在检查第 ${currentVersion} 个版本的可播放性`;
   }
+  if (state.phase === "review_vlm") return `正在检查动态成片、真实音轨和剪切点 · 审片 ${Math.round((Number(state.reviewProgress) || 0) * 100)}%`;
+  if (state.phase === "review_llm") return `正在校准故事、节奏、声音连续性和目标匹配 · 审片 ${Math.round((Number(state.reviewProgress) || 0) * 100)}%`;
+  if (state.phase === "repair_render") return "已保留初版，正在生成一轮局部返修样片";
+  if (state.phase === "review_compare") return "正在复审返修版并与初版比较";
   const renderedSeconds = Number(state.renderedSeconds);
   const renderTotalSeconds = Number(state.renderTotalSeconds);
   const renderFact = Number.isFinite(renderedSeconds) && Number.isFinite(renderTotalSeconds) && renderTotalSeconds > 0
@@ -3525,7 +4527,8 @@ function autoCompositionProgressMarkup(job) {
   const detail = state.detail || "自动成片在后台生成";
   const facts = autoCompositionVersionFacts(job);
   const { percent } = facts;
-  const stateLabel = state.status === "queued" ? "等待后台启动" : "后台运行";
+  const reviewing = ["review_vlm", "review_llm", "repair_render", "review_compare"].includes(String(state.phase || ""));
+  const stateLabel = state.status === "queued" ? "等待后台启动" : reviewing ? "成片审片" : "后台运行";
   const versionHint = autoCompositionProgressHint(job, facts);
   return `<section class="auto-compose-progress" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.88" data-beam-duration="1.85" data-beam-brightness="1.46" data-beam-saturation="1.08" data-beam-hue-range="14" data-beam-radius="11" role="progressbar" aria-label="自动成片进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="auto-compose-progress-head"><span class="thinking-orb-slot" data-thinking-orb data-orb-state="composing" data-orb-size="24" data-orb-theme="light" data-orb-label="自动成片"></span><div><small>AI 自动成片 · ${stateLabel}</small><strong data-auto-compose-detail>${escapeHtml(detail)}</strong></div><b data-auto-compose-count>${percent}%</b></div><div class="auto-compose-progress-track"><i data-auto-compose-bar style="width:${percent}%"></i></div><p data-auto-compose-versions>${escapeHtml(versionHint)}</p></section>`;
 }
@@ -3573,7 +4576,8 @@ function updateInlineAnalysisProgress(job = currentJob) {
   if (detailNode) detailNode.textContent = detail;
   if (stageLabelNode) stageLabelNode.textContent = `当前阶段 · ${contract.stage.label || "处理中"}`;
   const stageMode = stageDisplayMode(job);
-  const waiting = !["determinate", "completed"].includes(stageMode);
+  const waiting = (isPipelineRunningStatus(job.status) || job.status === "briefing")
+    && !["determinate", "completed"].includes(stageMode);
   panel.classList.toggle("indeterminate", waiting);
   panel.classList.toggle("stage-indeterminate", stageMode === "indeterminate");
   panel.classList.toggle("stage-finalizing", stageMode === "finalizing");
@@ -3588,6 +4592,9 @@ function updateInlineAnalysisProgress(job = currentJob) {
   if (stageBar) stageBar.style.width = `${stageMode === "completed" ? 100 : stagePercent}%`;
   if (activityNode) {
     const activity = analysisActivityLoader(job);
+    const activityRunning = isPipelineRunningStatus(job.status) || job.status === "briefing";
+    activityNode.dataset.loaderActive = String(activityRunning);
+    activityNode.classList.toggle("hidden", !activityRunning);
     const changed = activityNode.dataset.loaderVariant !== activity.variant || activityNode.dataset.loaderLabel !== activity.label;
     if (changed) {
       activityNode.dataset.loaderVariant = activity.variant;
@@ -3597,14 +4604,13 @@ function updateInlineAnalysisProgress(job = currentJob) {
       renderGenerativeLoader(activityNode, { kind: "inline", variant: activity.variant, size: 46, speed: .9, label: activity.label });
     }
   }
-  const parsedStart = Date.parse(String(contract.timing.startedAt || job.startedAt || job.createdAt || ""));
-  const start = Number.isFinite(parsedStart) ? parsedStart : Date.now();
   const elapsed = panel.querySelector("[data-inline-elapsed]");
-  if (elapsed) elapsed.textContent = `任务已运行 ${formatClock(Math.max(0, (Date.now() - start) / 1000))}`;
-  const phaseIndex = analysisPhase(String(job.stage || ""), String(job.status || ""));
+  if (elapsed) elapsed.textContent = processingElapsedLabel(job);
+  const workflow = taskWorkflowForJob(job);
+  const phaseIndex = workflow.currentIndex;
   panel.querySelectorAll(".inline-stage-chain li").forEach((item, index) => {
-    item.classList.toggle("done", index < phaseIndex || job.status === "completed");
-    item.classList.toggle("current", index === phaseIndex && job.status !== "completed");
+    item.classList.toggle("done", workflow.complete || index < phaseIndex);
+    item.classList.toggle("current", !workflow.complete && index === phaseIndex);
   });
 }
 
@@ -3631,7 +4637,7 @@ function appendTransientThinking(value) {
 
 function initialConversation() {
   ensureChatMessages().innerHTML = `
-    <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>高光导演</small><p>请先上传视频。我会先发现精彩镜头，再把属于同一事件的镜头整理在一起供你审核。</p></div></article>`;
+    <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>视频剪辑助手</small><p>请先上传视频。之后可以选择让 AI 发现高光，或按描述搜索指定内容。</p></div></article>`;
 }
 
 function recommendedEventCountForDuration(rawSeconds) {
@@ -3642,20 +4648,182 @@ function recommendedEventCountForDuration(rawSeconds) {
   return 6;
 }
 
+function contentScopeBaseRange(kind, duration) {
+  const total = Math.max(0, Number(duration) || 0);
+  const edge = Math.min(total * .15, 600);
+  const ranges = {
+    all: [0, total], opening: [0, edge], front_half: [0, total * .5],
+    middle: [total * .25, total * .75], back_half: [total * .5, total],
+    ending: [Math.max(0, total - edge), total],
+  };
+  return ranges[kind] || null;
+}
+
+function contentClockSeconds(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (text.includes(":")) {
+    const parts = text.split(":").map(Number);
+    if (parts.some((item) => !Number.isFinite(item))) return null;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  const hours = Number(text.match(/(\d+(?:\.\d+)?)\s*小时/)?.[1] || 0);
+  const minutes = Number(text.match(/(\d+(?:\.\d+)?)\s*(?:分钟|分)/)?.[1] || 0);
+  const seconds = Number(text.match(/(\d+(?:\.\d+)?)\s*秒/)?.[1] || 0);
+  return hours || minutes || seconds ? hours * 3600 + minutes * 60 + seconds : null;
+}
+
+function contentTextRange(text, duration) {
+  const value = String(text || "");
+  const total = Math.max(0, Number(duration) || 0);
+  const token = "(\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?|\\d+(?:\\.\\d+)?\\s*(?:小时|分钟|分|秒))";
+  let match = value.match(new RegExp(`${token}\\s*(?:到|至|[-~～])\\s*${token}`, "i"));
+  if (match) {
+    const start = contentClockSeconds(match[1]);
+    const end = contentClockSeconds(match[2]);
+    if (start !== null && end !== null && end > start) return [Math.max(0, start), Math.min(total, end)];
+  }
+  match = value.match(new RegExp(`(?:最后|末尾|结尾)\\s*${token}`, "i"));
+  if (match) { const span = contentClockSeconds(match[1]); if (span !== null) return [Math.max(0, total - span), total]; }
+  match = value.match(new RegExp(`(?:开头|开始|最前)\\s*${token}`, "i"));
+  if (match) { const span = contentClockSeconds(match[1]); if (span !== null) return [0, Math.min(total, span)]; }
+  match = value.match(new RegExp(`${token}\\s*(?:附近|左右|前后)`, "i"));
+  if (match) { const center = contentClockSeconds(match[1]); if (center !== null) return [Math.max(0, center - 120), Math.min(total, center + 120)]; }
+  if (/前半段|前一半/.test(value)) return [0, total * .5];
+  if (/后半段|后一半/.test(value)) return [total * .5, total];
+  if (/(?:视频)?中间|中段/.test(value)) return [total * .25, total * .75];
+  if (/(?:视频)?开头|片头/.test(value)) return contentScopeBaseRange("opening", total);
+  if (/(?:视频)?结尾|片尾/.test(value)) return contentScopeBaseRange("ending", total);
+  return null;
+}
+
+function activeContentEvidencePlan() {
+  const selected = $("#contentEvidenceQuestion [data-content-evidence-mode].active");
+  if (selected) {
+    const mode = selected.dataset.contentEvidenceMode;
+    const capabilities = {
+      speech: ["speech"], screen_text: ["ocr"], visual: ["visual"],
+      person: ["person"], sound: ["audio"],
+    }[mode] || [];
+    return { mode, capabilities, source: "advanced_user_override" };
+  }
+  // Empty means that the backend should compile the natural-language request
+  // and authorize every indispensable evidence source automatically.
+  return null;
+}
+
+function activeContentSearchOptions() {
+  const duration = Math.max(0, Number($("#localPreviewVideo")?.duration) || 0);
+  const kind = $("#chatMessages [data-content-scope].active")?.dataset.contentScope || "all";
+  const customStart = kind === "custom" ? contentClockSeconds($("#contentScopeStartText")?.value) : null;
+  const customEnd = kind === "custom" ? contentClockSeconds($("#contentScopeEndText")?.value) : null;
+  const start = Math.max(0, customStart == null ? Number($("#contentScopeStart")?.value) || 0 : customStart);
+  const end = Math.min(duration, customEnd == null ? Number($("#contentScopeEnd")?.value) || duration : customEnd);
+  return {
+    duration, kind, start, end,
+    limit: Number($("#chatMessages [data-content-limit].active")?.dataset.contentLimit || 12),
+    boundary: $("#chatMessages [data-content-boundary].active")?.dataset.contentBoundary || "complete",
+    autoGenerate: Boolean($("#contentAutoGenerate")?.checked),
+    exclusions: $("#contentExclusions")?.value?.trim() || "",
+    evidence: activeContentEvidencePlan(),
+  };
+}
+
+function syncContentSearchPreflight({ resetRange = false } = {}) {
+  const localVideo = $("#localPreviewVideo");
+  const duration = Math.max(0, Number(localVideo?.duration) || 0);
+  const startInput = $("#contentScopeStart");
+  const endInput = $("#contentScopeEnd");
+  if (!startInput || !endInput) return;
+  startInput.max = String(duration || 1);
+  endInput.max = String(duration || 1);
+  const activeScope = $("#chatMessages [data-content-scope].active")?.dataset.contentScope || "all";
+  const base = contentScopeBaseRange(activeScope, duration);
+  if (resetRange || base) {
+    const [baseStart, baseEnd] = base || [Number(startInput.value) || 0, Number(endInput.value) || duration];
+    startInput.value = String(baseStart);
+    endInput.value = String(baseEnd);
+  }
+  let start = Math.max(0, Math.min(duration, Number(startInput.value) || 0));
+  let end = Math.max(0, Math.min(duration, Number(endInput.value) || duration));
+  if (start > end - .2) {
+    if (document.activeElement === startInput) start = Math.max(0, end - .2);
+    else end = Math.min(duration, start + .2);
+    startInput.value = String(start);
+    endInput.value = String(end);
+  }
+  const startText = $("#contentScopeStartText");
+  const endText = $("#contentScopeEndText");
+  if (startText && document.activeElement !== startText) startText.value = formatTime(start);
+  if (endText && document.activeElement !== endText) endText.value = formatTime(end);
+  const textRange = contentTextRange($("#briefContentInstruction")?.value, duration);
+  const shownStart = textRange ? Math.max(start, textRange[0]) : start;
+  const shownEnd = textRange ? Math.min(end, textRange[1]) : end;
+  const conflict = shownEnd <= shownStart;
+  const fill = $("#contentScopeFill");
+  if (fill) {
+    fill.style.left = `${duration ? shownStart / duration * 100 : 0}%`;
+    fill.style.width = `${duration && !conflict ? Math.max(.3, (shownEnd - shownStart) / duration * 100) : 0}%`;
+  }
+  if ($("#contentScopeStartLabel")) $("#contentScopeStartLabel").textContent = formatTime(shownStart);
+  if ($("#contentScopeEndLabel")) $("#contentScopeEndLabel").textContent = formatTime(shownEnd);
+  const scopeDuration = Math.max(0, shownEnd - shownStart);
+  if ($("#contentScopeDurationLabel")) $("#contentScopeDurationLabel").textContent = conflict ? "时间条件冲突" : `${formatTime(scopeDuration)} 范围`;
+  const file = videoInput.files[0];
+  if ($("#contentMaterialFacts") && file) {
+    const orientation = localVideo?.videoWidth && localVideo?.videoHeight
+      ? (localVideo.videoHeight > localVideo.videoWidth ? "竖屏" : localVideo.videoHeight === localVideo.videoWidth ? "方形" : "横屏")
+      : "读取中";
+    const resolution = localVideo?.videoWidth ? `${localVideo.videoWidth}×${localVideo.videoHeight}` : "分辨率读取中";
+    $("#contentMaterialFacts").textContent = `${formatTime(duration)}，${resolution}，${orientation}，${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  }
+  const fraction = duration ? scopeDuration / duration : 1;
+  const cost = fraction <= .25 ? "较低" : fraction <= .60 ? "中等" : "较高";
+  if ($("#contentSearchCost")) $("#contentSearchCost").textContent = conflict
+    ? "文字时间与位置选项没有交集，请调整范围"
+    : `扫描 ${formatTime(scopeDuration)}，约占全片 ${Math.round(fraction * 100)}%，检索成本${cost}`;
+  const query = $("#briefContentInstruction")?.value.trim() || "你描述的内容";
+  if ($("#contentEvidencePlan")) $("#contentEvidencePlan").innerHTML =
+    `<span>系统自动判断</span><b>根据描述组合必要的音画证据</b><small>无需选择对白、文字、画面、人物或声音；只有检索含义存在歧义时才会询问</small>`;
+  const limitLabel = activeContentSearchOptions().limit === 12 ? "全部可靠结果" : `最多 ${activeContentSearchOptions().limit} 段`;
+  const boundaryLabel = ({ exact: "匹配时刻", complete: "完整句子或动作", context: "完整内容并保留前后 2 秒" })[activeContentSearchOptions().boundary];
+  if ($("#contentQueryPreview")) $("#contentQueryPreview").textContent = conflict
+    ? "当前时间条件互相冲突，调整后才能开始检索。"
+    : `将在 ${formatTime(shownStart)} 到 ${formatTime(shownEnd)} 查找“${query}”，返回${limitLabel}，保留${boundaryLabel}。`;
+  $(".content-query-preview")?.classList.toggle("conflict", conflict);
+}
+
 function showBriefCard(file) {
   ensureChatMessages().innerHTML = `
     <article class="chat-message user"><span class="avatar">你</span><div class="bubble"><small>你</small><p>已选择 ${escapeHtml(file.name)}</p></div></article>
     <article class="chat-message assistant brief-message"><span class="avatar">AI</span><div class="brief-wrap">
-      <div class="bubble"><small>高光导演</small><p>视频已就绪。先选这次想要的成片方向，我会再开始分析。</p></div>
+      <div class="bubble"><small>视频剪辑助手</small><p>视频已就绪。不确定哪段精彩，可以让 AI 通看全片；已经知道要找什么，可以直接搜索内容。</p></div>
       <section class="brief-card brief-card-redesign">
         <header class="brief-card-header"><div><small>剪辑目标</small><strong>这次想怎么剪？</strong><p>先选成片方向，其他要求都可以稍后调整。</p></div><span class="brief-ready-badge">视频已就绪</span></header>
-        <section class="brief-section brief-intent-section"><div class="brief-section-heading"><b>1</b><div><strong>成片方式</strong><small>AI 会先找出真实事件，再组合成高光成片</small></div></div><div class="brief-choice-grid"><button type="button" class="brief-choice active" data-brief-mode="auto"><b>AI 自动发现</b><span>由 AI 推荐合理的事件数量和时长</span></button><button type="button" class="brief-choice" data-brief-mode="specified"><b>设置事件上限</b><span>最多推荐指定数量，不会为了凑数降低质量</span></button></div><p class="brief-mode-note">先发现真实视觉事件，再推荐合理数量和各自时长，不凑数。</p><div id="briefExplicitFields" class="brief-fields brief-inline-field hidden"><label><span>最多推荐几个事件</span><div><input id="briefCount" type="number" min="1" max="8" value="5"><b>个</b></div><small class="brief-field-help">系统会结合目标时长设置默认上限；高质量事件不足时不会凑数。</small></label></div></section>
-        <section class="brief-section brief-goal-section"><div class="brief-section-heading"><b>2</b><div><strong>成片要求</strong><small>可选，不填则由 AI 综合判断</small></div></div><div class="brief-goal-grid"><label class="brief-theme"><span>单条成片目标时长</span><div class="brief-input-with-unit"><input id="briefTotalDuration" type="number" min="4" max="86400" step="0.1" value="60" placeholder="AI 推荐"><b>秒</b></div><small class="brief-field-help">每个自动成片版本都会参考该时长；实际时长会随素材完整性浮动。</small></label><label class="brief-theme"><span>重点关注</span><input id="briefTheme" maxlength="500" placeholder="例如：人物反应、动作高潮"><small class="brief-field-help">用于候选排序；留空则综合判断。</small></label></div><div class="brief-chips duration-chips"><small>时长</small><button type="button" data-total-duration="30">30 秒</button><button type="button" class="active" data-total-duration="60">60 秒</button><button type="button" data-total-duration="90">90 秒</button><button type="button" data-total-duration="">AI 推荐</button></div><div class="brief-chips"><small>重点</small><button type="button" data-brief-theme="人物反应">人物反应</button><button type="button" data-brief-theme="动作高潮">动作高潮</button><button type="button" data-brief-theme="视觉冲击">视觉冲击</button><button type="button" data-brief-theme="">综合判断</button></div></section>
-        <section class="brief-section brief-analysis-section"><div class="brief-section-heading"><b>3</b><div><strong>分析信号</strong><small>有对白或环境声时推荐视听综合</small></div></div><div class="brief-segmented"><button type="button" data-analysis-mode="visual">纯视觉</button><button type="button" class="active" data-analysis-mode="audiovisual">视听综合 · SenseVoice</button></div></section>
+        <section class="brief-section brief-task-section"><div class="brief-section-heading"><b>1</b><div><strong>任务模式</strong><small>两种模式目标不同，后续流程也会分别展示</small></div></div><div class="brief-choice-grid"><button type="button" class="brief-choice active" data-task-mode="highlight"><b>高光发现</b><span>不知道具体片段？让 AI 通看全片，发现精彩事件并生成多个版本。</span></button><button type="button" class="brief-choice" data-task-mode="content_extract"><b>内容探索</b><span>知道想找什么？搜索对白、人物、屏幕文字、动作、场景和声音。</span></button></div></section>
+        <section class="brief-section brief-storage-section"><div class="brief-section-heading"><b>存</b><div><strong>任务保留方式</strong><small>一次性任务会在你确认成片后清理源素材和工程缓存</small></div></div><div class="brief-choice-grid"><button type="button" class="brief-choice active" data-storage-mode="editable"><b>保留可编辑工程</b><span>默认选项。保留素材、时间线和分析结果，之后可以继续修改。</span></button><button type="button" class="brief-choice" data-storage-mode="one_off"><b>一次性使用</b><span>成片确认后单独保存 MP4，再由你确认清理工程占用。</span></button></div></section>
+        <section id="contentInstructionSection" class="brief-section brief-content-only hidden"><div class="brief-section-heading"><b>2</b><div><strong>要截取什么？</strong><small>先限定范围，再从对白和真实画面中查找</small></div></div>
+          <div class="content-material-overview"><div><strong>素材概况</strong><span id="contentMaterialFacts">正在读取视频信息</span></div><div><strong>严格按需</strong><span>只运行本次查找需要的能力，未找到时先询问再扩展</span></div></div>
+          <label class="brief-theme"><span>内容描述</span><textarea id="briefContentInstruction" maxlength="500" rows="3" placeholder="例如：找出后半段 Speaker 1 介绍离线功能的完整发言"></textarea><small class="brief-field-help">可以描述对白、屏幕文字、匿名人物、动作、场景、物体或声音，也可以直接写“10 分钟附近”。</small></label>
+          <div id="contentEvidencePlan" class="content-query-preview"><span>系统自动判断</span><b>根据描述组合必要的音画证据</b><small>无需选择技术能力；只有检索含义存在歧义时才会询问</small></div>
+          <div class="content-search-conditions">
+            <div class="content-condition-row"><span>大概位置</span><div class="content-condition-options content-scope-options"><button type="button" class="active" data-content-scope="all">全片</button><button type="button" data-content-scope="opening">开头</button><button type="button" data-content-scope="front_half">前半段</button><button type="button" data-content-scope="middle">中间</button><button type="button" data-content-scope="back_half">后半段</button><button type="button" data-content-scope="ending">结尾</button><button type="button" data-content-scope="custom">自定义</button></div></div>
+            <div class="content-scope-timeline" aria-label="内容检索时间范围"><div class="content-scope-track"><i id="contentScopeFill"></i></div><input id="contentScopeStart" type="range" min="0" max="1" step="0.1" value="0" aria-label="检索开始时间"><input id="contentScopeEnd" type="range" min="0" max="1" step="0.1" value="1" aria-label="检索结束时间"><footer><span id="contentScopeStartLabel">00:00.0</span><b id="contentScopeDurationLabel">全片</b><span id="contentScopeEndLabel">00:00.0</span></footer><div id="contentScopeCustomFields" class="content-scope-custom-fields hidden"><label>开始 <input id="contentScopeStartText" type="text" inputmode="decimal" placeholder="00:00.0"></label><label>结束 <input id="contentScopeEndText" type="text" inputmode="decimal" placeholder="02:00.0"></label><small>支持 90、01:30、1 分 30 秒</small></div></div>
+            <div class="content-condition-row"><span>返回数量</span><div class="content-condition-options"><button type="button" data-content-limit="1">最相关 1 段</button><button type="button" data-content-limit="3">前 3 段</button><button type="button" class="active" data-content-limit="12">全部可靠结果</button></div></div>
+            <div class="content-condition-row"><span>片段边界</span><div class="content-condition-options"><button type="button" data-content-boundary="exact">匹配时刻</button><button type="button" class="active" data-content-boundary="complete">完整句子或动作</button><button type="button" data-content-boundary="context">前后保留 2 秒</button></div></div>
+            <div class="content-query-preview"><small>本次检索</small><p id="contentQueryPreview">将在全片查找你描述的内容，返回全部可靠结果，并保留完整片段。</p><span id="contentSearchCost">扫描全片，检索成本较高</span></div>
+          </div>
+          <details class="content-more-conditions"><summary>更多条件 <span>排除内容和自动生成</span></summary><div><label><span>排除内容</span><input id="contentExclusions" maxlength="300" placeholder="例如：片头、重复画面、Speaker 2"><small class="brief-field-help">用逗号分隔，只影响内容检索，不改变源视频。</small></label><label class="content-auto-generate"><input id="contentAutoGenerate" type="checkbox"><span><strong>可靠结果直接生成</strong><small>低置信度或边界不确定时仍会先让你确认。</small></span></label></div></details>
+        </section>
+        <section class="brief-section brief-intent-section brief-highlight-only"><div class="brief-section-heading"><b>2</b><div><strong>成片方式</strong><small>AI 会先找出真实事件，再组合成高光成片</small></div></div><div class="brief-choice-grid"><button type="button" class="brief-choice active" data-brief-mode="auto"><b>AI 自动发现</b><span>由 AI 推荐合理的事件数量和时长</span></button><button type="button" class="brief-choice" data-brief-mode="specified"><b>设置事件上限</b><span>最多推荐指定数量，不会为了凑数降低质量</span></button></div><p class="brief-mode-note">先发现真实视觉事件，再推荐合理数量和各自时长，不凑数。</p><div id="briefExplicitFields" class="brief-fields brief-inline-field hidden"><label><span>最多推荐几个事件</span><div><input id="briefCount" type="number" min="1" max="8" value="5"><b>个</b></div><small class="brief-field-help">系统会结合目标时长设置默认上限；高质量事件不足时不会凑数。</small></label></div></section>
+        <section class="brief-section brief-goal-section brief-highlight-only"><div class="brief-section-heading"><b>3</b><div><strong>成片要求</strong><small>可选，不填则由 AI 综合判断</small></div></div><div class="brief-goal-grid"><label class="brief-theme"><span>单条成片目标时长</span><div class="brief-input-with-unit"><input id="briefTotalDuration" type="number" min="4" max="86400" step="0.1" value="60" placeholder="AI 推荐"><b>秒</b></div><small class="brief-field-help">每个自动成片版本都会参考该时长；实际时长会随素材完整性浮动。</small></label><label class="brief-theme"><span>重点关注</span><input id="briefTheme" maxlength="500" placeholder="例如：人物反应、动作高潮"><small class="brief-field-help">用于候选排序；留空则综合判断。</small></label></div><div class="brief-chips duration-chips"><small>时长</small><button type="button" data-total-duration="30">30 秒</button><button type="button" class="active" data-total-duration="60">60 秒</button><button type="button" data-total-duration="90">90 秒</button><button type="button" data-total-duration="">AI 推荐</button></div><div class="brief-chips"><small>重点</small><button type="button" data-brief-theme="人物反应">人物反应</button><button type="button" data-brief-theme="动作高潮">动作高潮</button><button type="button" data-brief-theme="视觉冲击">视觉冲击</button><button type="button" data-brief-theme="">综合判断</button></div></section>
+        <section class="brief-section brief-analysis-section brief-highlight-only"><div class="brief-section-heading"><b>4</b><div><strong>分析信号</strong><small>有对白或环境声时推荐视听综合</small></div></div><div class="brief-segmented"><button type="button" data-analysis-mode="visual">纯视觉</button><button type="button" class="active" data-analysis-mode="audiovisual">视听综合 · SenseVoice</button></div></section>
+        <section class="brief-section brief-technique-section brief-highlight-only"><div class="brief-section-heading"><b>5</b><div><strong>剪辑策略</strong><small>决定如何压缩节奏和衔接镜头，不改变你选择的内容</small></div></div><div class="brief-technique-presets"><button type="button" class="active" data-technique-preset="auto"><b>AI 自适应</b><span>按语音、动作和事件关系克制使用剪辑手法</span></button><button type="button" data-technique-preset="natural"><b>自然连贯</b><span>少变速、少转场，优先完整表达</span></button><button type="button" data-technique-preset="tight"><b>紧凑高光</b><span>压缩停顿和无对白过程，保持可理解</span></button><button type="button" data-technique-preset="attraction"><b>吸引力优先</b><span>允许更强节奏，但对白和高潮仍受保护</span></button></div><details class="brief-technique-options"><summary>可使用的剪辑手法</summary><div class="brief-technique-toggles"><label><input type="checkbox" data-technique-option="allowSpeed" checked>安全变速</label><label><input type="checkbox" data-technique-option="allowTransitions" checked>语义转场</label><label><input type="checkbox" data-technique-option="allowAudioBridges" checked>声音桥接</label><label><input type="checkbox" data-technique-option="allowCutaways" checked>反应/细节插入镜头</label><label><input type="checkbox" data-technique-option="allowSilenceCompression" checked>压缩无语义停顿</label><label><input type="checkbox" data-technique-option="allowColdOpen">结果前置开场</label></div><p>AI 只在证据允许时使用；手动选择的镜头不会因目标时长不足被自动删除。</p></details></section>
         <details class="brief-advanced-options"><summary>高级分析选项 <span>默认设置适合大多数视频</span></summary><div class="brief-advanced-body"><div class="brief-mode brief-cache-mode"><span>分析策略</span><div><button type="button" class="active" data-cache-policy="refresh">重新分析</button><button type="button" data-cache-policy="reuse">复用缓存</button></div><small class="brief-field-help">只有视频和剪辑要求都没有变化时，才建议复用缓存。</small></div><p class="brief-cache-note">默认重新调用视觉模型；源文件、波形和播放代理仍会复用。</p><div class="brief-mode brief-variant-mode"><span>自动成片版本</span><div><button type="button" data-auto-variants="1">1 版</button><button type="button" data-auto-variants="2">2 版</button><button type="button" class="active" data-auto-variants="3">3 版</button><button type="button" data-auto-variants="4">4 版</button></div><small class="brief-field-help">包含 1 个完整事件版，其余版本由剪辑规划模型按不同策略重新编排。</small></div></div></details>
         <div class="brief-fields brief-production-fields brief-advanced-hidden"><label><span>字幕（推荐）</span><select id="briefSubtitleMode"><option value="none" selected>不添加字幕</option><option value="ask">稍后确认</option><option value="burn">添加字幕</option><option value="custom">自定义</option></select><small class="brief-field-help">字幕设置已移至成片阶段的高级设置。</small><input class="brief-custom-input hidden" id="briefSubtitleCustom" placeholder="例如：只添加重点对白字幕"></label><label><span>剪辑方式（推荐）</span><select id="briefEditMode"><option value="ai_plan" selected>AI 智能规划</option><option value="recommend_review">AI 推荐后我审核</option><option value="manual">我手动选择镜头</option><option value="custom">自定义</option></select><small class="brief-field-help">剪辑方式由当前时间轴和事件审核流程统一处理。</small><input class="brief-custom-input hidden" id="briefEditCustom" placeholder="例如：先给我 3 个版本再选择"></label></div>
         <label class="brief-theme brief-advanced-hidden"><span>成片结构</span><select id="briefStructure"><option value="auto" selected>由 AI 根据素材决定</option><option value="hook_story_result">连贯叙事（素材具备时）</option><option value="montage">节奏剪辑，优先连续精彩瞬间</option><option value="custom">自定义</option></select><small class="brief-field-help">自动模式会按素材完整性决定结构，不会为了补齐固定段落加入低价值镜头。</small><input class="brief-custom-input hidden" id="briefStructureCustom" placeholder="例如：先展示结果，再补充关键过程"></label>
-        <footer class="brief-submit-row"><span>确认后会分析素材，并在后台自动生成成片版本</span><button id="startAnalysisButton" class="brief-submit" type="button"><span>开始分析并自动生成成片</span><b>→</b></button></footer>
+        <footer class="brief-submit-row"><span id="briefSubmitHint">确认后会分析素材，并在后台自动生成成片版本</span><button id="startAnalysisButton" class="brief-submit" type="button"><span>开始分析并自动生成成片</span><b>→</b></button></footer>
       </section>
     </div></article>`;
   let briefCountTouched = false;
@@ -3670,6 +4838,53 @@ function showBriefCard(file) {
   briefTotalDurationInput?.addEventListener("input", syncRecommendedBriefCount);
   briefTotalDurationInput?.addEventListener("change", syncRecommendedBriefCount);
   syncRecommendedBriefCount();
+  const syncTaskMode = (mode) => {
+    const contentMode = mode === "content_extract";
+    $("#chatMessages")?.querySelectorAll(".brief-content-only").forEach((node) => node.classList.toggle("hidden", !contentMode));
+    $("#chatMessages")?.querySelectorAll(".brief-highlight-only, .brief-advanced-options, .brief-production-fields, .brief-card > .brief-advanced-hidden").forEach((node) => node.classList.toggle("hidden", contentMode));
+    if ($("#briefSubmitHint")) $("#briefSubmitHint").textContent = contentMode
+      ? "先确认查找依据，只运行本次需要的能力；候选确认后才会生成视频"
+      : "确认后会分析素材，并在后台自动生成成片版本";
+    if ($("#startAnalysisButton span")) $("#startAnalysisButton span").textContent = contentMode
+      ? "上传并查找内容"
+      : "开始分析并自动生成成片";
+  };
+  $("#chatMessages")?.querySelectorAll("[data-task-mode]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-task-mode]").forEach((item) => item.classList.toggle("active", item === button));
+    syncTaskMode(button.dataset.taskMode || "highlight");
+  }));
+  $("#chatMessages")?.querySelectorAll("[data-storage-mode]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-storage-mode]").forEach((item) => item.classList.toggle("active", item === button));
+  }));
+  $("#chatMessages")?.querySelectorAll("[data-content-scope]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-content-scope]").forEach((item) => item.classList.toggle("active", item === button));
+    $("#contentScopeCustomFields")?.classList.toggle("hidden", button.dataset.contentScope !== "custom");
+    $(".content-scope-timeline")?.classList.toggle("is-custom", button.dataset.contentScope === "custom");
+    syncContentSearchPreflight({ resetRange: button.dataset.contentScope !== "custom" });
+  }));
+  [$("#contentScopeStart"), $("#contentScopeEnd")].forEach((input) => input?.addEventListener("input", () => {
+    $("#chatMessages")?.querySelectorAll("[data-content-scope]").forEach((item) => item.classList.toggle("active", item.dataset.contentScope === "custom"));
+    $("#contentScopeCustomFields")?.classList.remove("hidden");
+    $(".content-scope-timeline")?.classList.add("is-custom");
+    syncContentSearchPreflight();
+  }));
+  [$("#contentScopeStartText"), $("#contentScopeEndText")].forEach((input) => input?.addEventListener("change", () => {
+    const seconds = contentClockSeconds(input.value);
+    const duration = Math.max(0, Number($("#localPreviewVideo")?.duration) || 0);
+    if (seconds == null || seconds < 0 || seconds > duration) return void showToast("自定义时间必须在视频范围内，例如 01:30");
+    if (input.id === "contentScopeStartText") $("#contentScopeStart").value = String(seconds);
+    else $("#contentScopeEnd").value = String(seconds);
+    syncContentSearchPreflight();
+  }));
+  $("#chatMessages")?.querySelectorAll("[data-content-limit]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-content-limit]").forEach((item) => item.classList.toggle("active", item === button));
+    syncContentSearchPreflight();
+  }));
+  $("#chatMessages")?.querySelectorAll("[data-content-boundary]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-content-boundary]").forEach((item) => item.classList.toggle("active", item === button));
+    syncContentSearchPreflight();
+  }));
+  [$("#briefContentInstruction"), $("#contentExclusions"), $("#contentAutoGenerate")].forEach((input) => input?.addEventListener("input", () => syncContentSearchPreflight()));
   $("#chatMessages")?.querySelectorAll("[data-brief-mode]").forEach((button) => button.addEventListener("click", () => {
     $("#chatMessages")?.querySelectorAll("[data-brief-mode]").forEach((item) => item.classList.toggle("active", item === button));
     const automatic = button.dataset.briefMode === "auto";
@@ -3696,6 +4911,9 @@ function showBriefCard(file) {
   $("#chatMessages")?.querySelectorAll("[data-auto-variants]").forEach((button) => button.addEventListener("click", () => {
     $("#chatMessages")?.querySelectorAll("[data-auto-variants]").forEach((item) => item.classList.toggle("active", item === button));
   }));
+  $("#chatMessages")?.querySelectorAll("[data-technique-preset]").forEach((button) => button.addEventListener("click", () => {
+    $("#chatMessages")?.querySelectorAll("[data-technique-preset]").forEach((item) => item.classList.toggle("active", item === button));
+  }));
   $("#chatMessages")?.querySelectorAll("[data-total-duration]").forEach((button) => button.addEventListener("click", () => {
     $("#briefTotalDuration").value = button.dataset.totalDuration;
     $("#chatMessages")?.querySelectorAll("[data-total-duration]").forEach((item) => item.classList.toggle("active", item === button));
@@ -3705,12 +4923,26 @@ function showBriefCard(file) {
     $(select)?.addEventListener("change", () => $(input)?.classList.toggle("hidden", $(select).value !== "custom"));
   });
   $("#startAnalysisButton").addEventListener("click", createJobFromBrief);
-  $("#chatMessages").scrollTop = $("#chatMessages").scrollHeight;
+  syncContentSearchPreflight({ resetRange: true });
+  // The brief is the next action after upload. Keep it at the top of the
+  // conversation viewport so users never have to scroll back up to find it.
+  const briefCard = $("#chatMessages .brief-card");
+  const chat = $("#chatMessages");
+  if (briefCard && chat) {
+    requestAnimationFrame(() => {
+      chat.scrollTop = Math.max(0, briefCard.offsetTop - 12);
+      briefCard.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 }
 
 async function createJobFromBrief() {
   if (!videoInput.files.length || actionBusy) return;
   const createGeneration = workspaceGeneration;
+  const taskMode = $("#chatMessages [data-task-mode].active")?.dataset.taskMode || "highlight";
+  const storageMode = $("#chatMessages [data-storage-mode].active")?.dataset.storageMode || "editable";
+  const contentInstruction = $("#briefContentInstruction")?.value.trim() || "";
+  const contentSearchOptions = activeContentSearchOptions();
   const automatic = $("#chatMessages [data-brief-mode].active")?.dataset.briefMode === "auto";
   const count = automatic ? "auto" : Number($("#briefCount").value);
   const rawTotalDuration = $("#briefTotalDuration").value.trim();
@@ -3726,6 +4958,23 @@ async function createJobFromBrief() {
   const analysisMode = $("#chatMessages [data-analysis-mode].active")?.dataset.analysisMode || "audiovisual";
   const forceReanalyze = $("#chatMessages [data-cache-policy].active")?.dataset.cachePolicy !== "reuse";
   const autoVariantCount = Number($("#chatMessages [data-auto-variants].active")?.dataset.autoVariants || 3);
+  const techniquePreset = $("#chatMessages [data-technique-preset].active")?.dataset.techniquePreset || "auto";
+  const techniqueOption = (name) => Boolean($(`#chatMessages [data-technique-option="${name}"]`)?.checked);
+  if (taskMode === "content_extract" && !contentInstruction) return void window.alert("请先描述要从视频中截取的内容");
+  if (taskMode === "content_extract") {
+    const textRange = contentTextRange(contentInstruction, contentSearchOptions.duration);
+    const effectiveStart = textRange ? Math.max(contentSearchOptions.start, textRange[0]) : contentSearchOptions.start;
+    const effectiveEnd = textRange ? Math.min(contentSearchOptions.end, textRange[1]) : contentSearchOptions.end;
+    if (effectiveEnd <= effectiveStart) return void window.alert("文字中的时间条件与选择的位置没有交集，请调整后再检索");
+    if (contentSearchOptions.duration > 600 && effectiveEnd - effectiveStart >= contentSearchOptions.duration - .2) {
+      const confirmed = await requestActionConfirmation({
+        title: "确认检索全片",
+        summary: `当前视频长 ${formatTime(contentSearchOptions.duration)}，全片检索会处理更多索引证据。`,
+        details: ["可以返回上方选择前半段、后半段或自定义范围", "系统会根据描述自动选择必要的识别能力"],
+      });
+      if (!confirmed) return;
+    }
+  }
   if (!automatic && (!Number.isInteger(count) || count < 1 || count > 8)) return void window.alert("事件上限必须为 1–8 个");
   if (targetSeconds !== "auto" && (!Number.isFinite(targetSeconds) || targetSeconds < 4)) return void window.alert("单条成片目标时长必须大于等于 4 秒");
   const button = $("#startAnalysisButton");
@@ -3734,16 +4983,37 @@ async function createJobFromBrief() {
   button.querySelector("span").textContent = "正在上传视频…";
   const form = new FormData();
   form.append("video", videoInput.files[0]);
-  form.append("count", String(count));
-  form.append("target_seconds", String(targetSeconds));
-  form.append("total_target_seconds", String(targetSeconds));
+  form.append("expected_size_bytes", String(videoInput.files[0].size));
+  form.append("task_mode", taskMode);
+  form.append("storage_mode", storageMode);
+  form.append("instruction", contentInstruction);
+  form.append("count", String(taskMode === "content_extract" ? "auto" : count));
+  form.append("target_seconds", String(taskMode === "content_extract" ? "auto" : targetSeconds));
+  form.append("total_target_seconds", String(taskMode === "content_extract" ? "auto" : targetSeconds));
   form.append("theme", requestTheme);
   form.append("analysis_mode", analysisMode);
+  form.append("recognition_profile", "auto");
   form.append("force_reanalyze", String(forceReanalyze));
   form.append("subtitle_mode", subtitleMode);
   form.append("edit_mode", editMode);
   form.append("structure", structure);
   form.append("auto_variant_count", String(autoVariantCount));
+  form.append("technique_preset", techniquePreset);
+  form.append("allow_speed", String(techniqueOption("allowSpeed")));
+  form.append("allow_transitions", String(techniqueOption("allowTransitions")));
+  form.append("allow_audio_bridges", String(techniqueOption("allowAudioBridges")));
+  form.append("allow_cutaways", String(techniqueOption("allowCutaways")));
+  form.append("allow_silence_compression", String(techniqueOption("allowSilenceCompression")));
+  form.append("allow_cold_open", String(techniqueOption("allowColdOpen")));
+  form.append("search_scope_kind", taskMode === "content_extract" ? contentSearchOptions.kind : "all");
+  form.append("search_scope_start", taskMode === "content_extract" ? String(contentSearchOptions.start) : "");
+  form.append("search_scope_end", taskMode === "content_extract" ? String(contentSearchOptions.end) : "");
+  form.append("search_result_limit", taskMode === "content_extract" ? String(contentSearchOptions.limit) : "3");
+  form.append("search_boundary_mode", taskMode === "content_extract" ? contentSearchOptions.boundary : "complete");
+  form.append("content_auto_generate", String(taskMode === "content_extract" && contentSearchOptions.autoGenerate));
+  form.append("content_exclusions", taskMode === "content_extract" ? contentSearchOptions.exclusions : "");
+  form.append("search_evidence_mode", taskMode === "content_extract" ? contentSearchOptions.evidence?.mode || "" : "");
+  form.append("search_allowed_capabilities", taskMode === "content_extract" ? (contentSearchOptions.evidence?.capabilities || []).join(",") : "");
   try {
     const { job } = await api("/api/jobs", { method: "POST", body: form });
     // The user may have returned home or started another task while the
@@ -3756,7 +5026,7 @@ async function createJobFromBrief() {
     if (createGeneration !== workspaceGeneration) return;
     window.alert(error.message);
     button.disabled = false;
-    button.querySelector("span").textContent = "开始分析并自动生成成片";
+    button.querySelector("span").textContent = taskMode === "content_extract" ? "上传并查找内容" : "开始分析并自动生成成片";
   } finally {
     if (createGeneration === workspaceGeneration) actionBusy = false;
   }
@@ -3809,12 +5079,935 @@ function timelineEditedAfterLatestOutput(job, generatedVersions = []) {
   });
 }
 
+function contentMatchTypeLabel(match = {}) {
+  const labels = { speech: "对白", visual: "画面", ocr: "屏幕文字", audio: "声音", person: "匿名人物", audiovisual: "多模态", spoken_question: "口头问题", screen_question: "画面问题", audiovisual_question: "音画问题" };
+  const evidenceType = String(match.evidenceType || "").toLowerCase();
+  if (labels[evidenceType]) return labels[evidenceType];
+  const modalities = [...new Set((match.matchedModalities || []).map((value) => String(value).toLowerCase()).filter(Boolean))];
+  if (modalities.length > 1) return "多模态";
+  return labels[modalities[0]] || "画面";
+}
+
+function contentQuestionSourceKey(match = {}) {
+  const source = String(match.questionSource || "").toLowerCase();
+  if (source === "spoken" || source === "screen" || source === "both") return source;
+  const sources = [...new Set((match.questionSources || []).map((value) => String(value).toLowerCase()))];
+  return sources.includes("spoken") && sources.includes("screen") ? "both" : sources[0] || "";
+}
+
+function contentQuestionSourceLabel(source = "") {
+  return ({ spoken: "口头提问", screen: "画面问题", both: "口头 + 画面" })[String(source).toLowerCase()] || "";
+}
+
+function contentMatchMethodLabel(match = {}) {
+  const method = String(match.matchType || "").toLowerCase();
+  const labels = {
+    exact_quote: "对白原句匹配",
+    semantic_speech: "对白语义匹配",
+    lexical_speech: "对白关键词匹配",
+    visual_semantic: "画面语义匹配",
+    visual_refined: "连续画面复核",
+    visual_dense_fallback: "局部逐帧复检",
+    ocr_text: "屏幕文字匹配",
+    audio_event: "声音事件匹配",
+    anonymous_person: "匿名人物轨迹匹配",
+    labeled_person_speaking: "已标记人物发言复核",
+    dialogue_response_block: "问答图完整回答",
+    screen_question: "画面问题 OCR 识别",
+    dialogue_role_turn: "对话角色轮次",
+    predicate_match: "原子条件证据匹配",
+    multi_predicate: "多条件时间约束匹配",
+    multi_evidence: "多类证据交叉匹配",
+  };
+  return labels[method] || `${contentMatchTypeLabel(match)}证据匹配`;
+}
+
+function contentBoundarySourceLabel(source = "") {
+  const normalized = String(source || "").toLowerCase();
+  const withContext = normalized.endsWith("_with_context");
+  const base = withContext ? normalized.slice(0, -"_with_context".length) : normalized;
+  const labels = {
+    word_timestamps: "字词时间戳",
+    grounded_segments: "对白片段定位",
+    speech_sentences: "完整句子边界",
+    speech_aligned: "对白时间轴",
+    visual: "画面窗口",
+    visual_window: "画面窗口",
+    visual_dense_frames: "连续画面复核",
+    targeted_dense_frames: "局部画面复检",
+    ocr_stable_range: "文字稳定区间",
+    screen_question_card_shot: "问题卡完整镜头",
+    screen_question_readable_window: "问题文字可读区间",
+    question_evidence_union: "音画问题证据合并",
+    audio_window: "声音事件窗口",
+    person_track: "匿名人物轨迹",
+    grounding_dino_evidence: "画面目标定位",
+    speaker_turn_with_visual_verification: "说话人轮次与连续画面复核",
+    direct_active_speaker_visual: "人物近景口型与语音活动交叉定位",
+    active_speaker_asd: "本地视听主动说话人逐帧定位",
+    active_speaker_asd_refined: "候选级主动说话人精修",
+    person_track_feedback_refined: "人物逐帧轨迹反馈精修",
+    dialogue_word_timestamps: "完整回答词级边界",
+    dialogue_turn_timestamps: "完整回答轮次边界",
+    dialogue_word_alignment_refined: "反馈后词级边界精修",
+    predicate_temporal_join: "条件时间关系连接",
+    merged_evidence: "多类证据合并",
+    user_manual_trim: "人工调整",
+    user_boundary_feedback: "用户反馈",
+    feedback_sentence_retry: "句子边界复检",
+  };
+  const label = labels[base] || "索引证据窗口";
+  return withContext ? `${label}并保留上下文` : label;
+}
+
+function contentPersonLabelingMarkup(job, targetState = {}, allowTargetSelection = false) {
+  const persons = Array.isArray(job?.contentIndex?.persons) ? job.contentIndex.persons : [];
+  // A content index may contain person clusters for many unrelated queries.
+  // Do not expose those cards for topic, dialogue, or question searches unless
+  // the current query explicitly requires a person target.
+  if (!persons.length || !allowTargetSelection) return "";
+  const normalizedTarget = typeof targetState === "string"
+    ? { personIds: targetState ? [targetState] : [], matchMode: "any" }
+    : (targetState || {});
+  const targetPersonIds = new Set((normalizedTarget.personIds || []).map(String));
+  const speaking = String(normalizedTarget.activity || "") === "speaking";
+  const inferredMode = normalizedTarget.matchMode || "any";
+  const anyLabel = speaking ? "任一人发言" : "任一人物出现";
+  const allLabel = speaking ? "所有人都发言（同一对话）" : "所有人物同时出现";
+  const history = Array.isArray(job?.contentPersonTargetHistory) ? job.contentPersonTargetHistory.slice(-8).reverse() : [];
+  const historyMarkup = history.length ? `<div class="content-person-history"><strong>已确认人物</strong>${history.map((item) => {
+    const ids = (item.personIds || []).map(String).filter(Boolean);
+    const labels = (item.labels || ids).filter(Boolean);
+    return `<div class="content-person-history-row"><span>${escapeHtml(labels.join("、"))}<small>${item.matchMode === "all" ? "同一对话中全部发言" : "任一人物"}</small></span><button type="button" data-person-history-target="${escapeHtml(ids.join(","))}" data-person-history-mode="${escapeHtml(item.matchMode || "any")}">再次探索</button></div>`;
+  }).join("")}</div>` : "";
+  return `<details class="content-person-panel" data-person-target-panel data-person-target-activity="${speaking ? "speaking" : "appearance"}" ${targetPersonIds.size ? "" : "open"}>
+    <summary><span>确认视频中的人物</span><small>${persons.length} 个画面人物簇 · 可能包含同一人物的重复卡片</small></summary>
+    <div class="content-person-grid">${persons.map((person) => {
+      const isTarget = targetPersonIds.has(String(person.id || ""));
+      const speaker = person.primarySpeaker
+        ? `${escapeHtml(person.primarySpeaker)} · ${Math.round(Number(person.speakerConfidence || 0) * 100)}%${person.speakerReviewRequired ? " · 需复核" : ""}`
+        : "尚未关联说话人";
+      return `<article class="content-person-card${isTarget ? " target" : ""}" data-content-person="${escapeHtml(person.id)}"${isTarget ? ' data-content-person-target-state="true"' : ""}>
+        <button type="button" class="content-person-preview" data-person-preview="${escapeHtml(person.id)}" data-person-preview-time="${escapeHtml(person.representativeTime ?? 0)}" aria-label="预览${escapeHtml(person.label || person.defaultLabel || "匿名人物")}的代表画面"><img src="${escapeHtml(person.thumbnailUrl || "")}" alt="${escapeHtml(person.label || person.defaultLabel || "匿名人物")}" loading="lazy"><em>预览</em></button>
+        <div><small>${isTarget ? "本次检索人物 · " : ""}${escapeHtml(person.defaultLabel || person.id)}</small><strong>${escapeHtml(person.label || person.defaultLabel || person.id)}${isTarget ? " · 已选择" : ""}</strong><span>${speaker}</span></div>
+        <div class="content-person-actions">${allowTargetSelection ? `<label class="content-person-choice"><input type="checkbox" data-person-target value="${escapeHtml(person.id)}" ${isTarget ? "checked" : ""}><span>${isTarget ? "已选择" : "选择人物"}</span></label>` : ""}<button type="button" data-person-label="${escapeHtml(person.id)}" data-person-current-label="${escapeHtml(person.label || "")}">${person.userLabeled ? "修改标签" : "添加标签（可选）"}</button></div>
+      </article>`;
+    }).join("")}</div>${allowTargetSelection ? `<div class="content-person-target-controls" data-person-target-controls data-selection-count="${targetPersonIds.size}">
+      <div><strong data-person-selection-summary>已选 ${targetPersonIds.size} 人</strong><small>${speaking ? "选择发言匹配方式" : "选择画面匹配方式"}</small></div>
+      <div class="content-person-match-modes" role="radiogroup" aria-label="人物匹配方式">
+        <label><input type="radio" name="content-person-match-mode" data-person-match-mode value="any" ${inferredMode === "any" ? "checked" : ""}><span>${anyLabel}</span></label>
+        <label><input type="radio" name="content-person-match-mode" data-person-match-mode value="all" ${inferredMode === "all" ? "checked" : ""}><span>${allLabel}</span></label>
+      </div>
+      <button type="button" class="primary" data-person-target-confirm>确认并开始检索</button>
+    </div>` : ""}
+    ${historyMarkup}<p>${allowTargetSelection ? "可选择一个或多个人物；选择两人并使用“所有人都发言（同一对话）”可查找两人对话。添加项目内标签是可选操作。" : ""} 建议使用项目内标签或匿名编号。系统不会把外观推断当成真实身份或性别事实。</p>
+  </details>`;
+}
+
+function contentFlowMarkup({ search = {}, candidates = [], personRequested = false, targetState = {}, reviewDraft = {} } = {}) {
+  const hasTarget = Array.isArray(targetState.personIds) && targetState.personIds.length > 0;
+  const hasCandidates = candidates.length > 0;
+  const reliableCount = candidates.filter((item) => String(item.confidenceTier || (item.requiresReview ? "possible" : "reliable")) === "reliable").length;
+  const possibleCount = Math.max(0, candidates.length - reliableCount);
+  const selectedCount = Array.isArray(reviewDraft.selectedMatchIds) ? reviewDraft.selectedMatchIds.length : 0;
+  const complete = search.completeness?.status === "complete";
+  const subtitleReady = Boolean(reviewDraft.subtitleDraftId || reviewDraft.subtitleEnabled === false);
+  const steps = [
+    ["条件", "done", "检索条件已记录"],
+    ["人物", personRequested ? (hasTarget ? "done" : "active") : "done", personRequested ? (hasTarget ? "目标人物已确认" : "请选择一个或多个人物") : "无需单独确认人物"],
+    ["片段", hasCandidates ? "active" : "pending", hasCandidates ? `已找到 ${reliableCount} 个可靠片段${possibleCount ? `，另有 ${possibleCount} 个可能相关` : ""}` : "等待检索结果"],
+    ["字幕", subtitleReady ? "done" : "pending", subtitleReady ? "字幕状态已确认" : "生成时可选择字幕校对"],
+    ["导出", complete || hasCandidates ? "active" : "pending", complete ? "完整性检查通过" : hasCandidates ? "确认选择后生成" : "等待候选片段"],
+  ];
+  const next = steps.find(([, state]) => state === "active") || steps.find(([, state]) => state === "pending");
+  return `<section class="content-flow-strip" aria-label="内容检索流程"><div class="content-flow-steps">${steps.map(([label, state, detail], index) => `<div class="content-flow-step ${state}"><b>${index + 1}</b><span>${label}</span><small>${detail}</small></div>`).join("")}</div>${next ? `<p class="content-flow-next"><span class="content-flow-next-label">下一步</span>${escapeHtml(next[2])}${selectedCount ? ` · 当前已选 ${selectedCount} 段` : ""}</p>` : ""}</section>`;
+}
+
+function formatSearchElapsed(milliseconds) {
+  const value = Math.max(0, Number(milliseconds) || 0);
+  if (value < 1000) return value > 0 ? "不到 1 秒" : "即时完成";
+  return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} 秒`;
+}
+
+function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { historicalExpanded = false } = {}) {
+  const isCurrentSearch = !search?.id || String(search.id) === String(job?.contentSearch?.id || "");
+  const historicalSearchClass = isCurrentSearch ? "" : ` historical${historicalExpanded ? "" : " collapsed"}`;
+  const historicalSearchToggle = isCurrentSearch
+    ? ""
+    : `<button type="button" class="content-history-toggle" data-content-search-history-toggle aria-expanded="false">展开历史检索详情</button>`;
+  const candidates = Array.isArray(search.candidates) ? search.candidates : [];
+  const reliableCandidates = candidates.filter((match) => String(match.confidenceTier || (match.requiresReview ? "possible" : "reliable")) === "reliable");
+  const possibleCandidates = candidates.filter((match) => String(match.confidenceTier || (match.requiresReview ? "possible" : "reliable")) !== "reliable");
+  const reliableCount = reliableCandidates.length;
+  const possibleCount = possibleCandidates.length;
+  const questionSourceCounts = candidates.reduce((counts, match) => {
+    const source = contentQuestionSourceKey(match);
+    if (source) counts[source] = (counts[source] || 0) + 1;
+    return counts;
+  }, {});
+  const hasQuestionSources = Object.keys(questionSourceCounts).length > 0;
+  const localFilterState = contentSearchFilterState.get(`${job?.id || ""}:${search?.id || ""}`) || {};
+  const questionSourceFilter = String(localFilterState.questionSource || "all");
+  const boundaryRetryIds = new Set((job.contentSearchFeedback?.boundaryRetryMatchIds || search.feedback?.boundaryRetryMatchIds || []).map(String));
+  const reviewDraft = search.reviewDraft && search.id && search.reviewDraft.searchId === search.id
+    ? search.reviewDraft : {};
+  const defaults = new Set((reviewDraft.selectedMatchIds || search.defaultSelectedIds || []).map(String));
+  const selectableCandidates = candidates.filter((match) => {
+    const status = String(match.reviewStatus || (match.requiresReview ? "pending" : "confirmed"));
+    return status !== "rejected";
+  });
+  const allSelectableSelected = selectableCandidates.length > 0
+    && selectableCandidates.every((match) => defaults.has(String(match.id)));
+  const bulkControlsMarkup = candidates.length ? `<div class="content-exhaustive-controls content-exhaustive-controls-bottom"><span>选择片段${candidates.length > 50 ? ` · 首屏显示 50 段，共 ${candidates.length} 段` : ""}</span><button type="button" data-content-select="toggle" aria-pressed="${allSelectableSelected ? "true" : "false"}">${allSelectableSelected ? "取消全部" : "选择全部"}</button></div>` : "";
+  const questionSourceControls = hasQuestionSources ? `<label class="content-question-source-filter"><span>问题来源</span><select data-content-question-source><option value="all" ${questionSourceFilter === "all" ? "selected" : ""}>全部（${Object.values(questionSourceCounts).reduce((sum, value) => sum + value, 0)}）</option><option value="spoken" ${questionSourceFilter === "spoken" ? "selected" : ""}>口头提问（${questionSourceCounts.spoken || 0}）</option><option value="screen" ${questionSourceFilter === "screen" ? "selected" : ""}>画面问题（${questionSourceCounts.screen || 0}）</option><option value="both" ${questionSourceFilter === "both" ? "selected" : ""}>口头 + 画面（${questionSourceCounts.both || 0}）</option></select></label>` : "";
+  const draftOutputMode = String(reviewDraft.outputMode || "single_reel");
+  const draftOrderMode = String(reviewDraft.orderMode || "source");
+  const stats = search.retrievalStats || {};
+  const exhaustive = String(search.resultMode || search.queryPlan?.result?.mode || "top_k") === "exhaustive";
+  const coverageComplete = Boolean(search.coverageComplete ?? stats.coverageComplete);
+  const completeness = search.completeness && typeof search.completeness === "object" ? search.completeness : {};
+  const completenessStatus = String(completeness.status || (coverageComplete ? "complete" : "incomplete"));
+  const strictComplete = !exhaustive || completenessStatus === "complete";
+  const pendingCount = Number(completeness.pendingCount || 0);
+  const scanProgress = search.scanProgress || stats.scanProgress || {};
+  const legacyVisualProgress = Number(stats.strictVisualExpectedFrames || 0) > 0
+    ? Number(stats.strictVisualVerifiedFrames || 0) / Number(stats.strictVisualExpectedFrames || 1) * 100
+    : 0;
+  const coveredPercent = Math.max(0, Math.min(100, Number(scanProgress.coveredPercent ?? (coverageComplete ? 100 : legacyVisualProgress))));
+  const occurrenceCount = Number(completeness.occurrenceCount ?? candidates.length);
+  const clipCount = Number(completeness.clipCount ?? candidates.length);
+  const exhaustiveTitle = completenessStatus === "complete"
+    ? `检索覆盖完成 · 找到 ${occurrenceCount} 处证据，整理为 ${clipCount} 段`
+    : `全范围扫描未完成 · 当前覆盖 ${coveredPercent.toFixed(1)}%`;
+  const completenessRows = [
+    ...(Array.isArray(completeness.channels) ? completeness.channels : []),
+    ...(possibleCount ? [{ id: "possible_results", label: "可能相关（可选）", complete: true, detail: `${possibleCount} 个内容段已折叠，不影响继续生成` }] : []),
+    ...(completeness.expectedOccurrenceCount == null ? [] : [{
+      id: "expected_count", label: `明确预期至少 ${Number(completeness.expectedOccurrenceCount)} 处`,
+      complete: Boolean(completeness.expectedCountSatisfied), detail: `当前检出 ${occurrenceCount} 处`,
+    }]),
+  ];
+  const completenessMarkup = exhaustive ? `<section class="content-completeness ${escapeHtml(completenessStatus)}"><div><strong>完整性报告</strong><span>“处”是检出的独立证据，“段”是合并相邻证据后的输出片段。</span></div><ul>${completenessRows.map((item) => `<li class="${item.complete ? "complete" : "incomplete"}"><b>${item.complete ? "✓" : "!"}</b><span><strong>${escapeHtml(item.label || "检查项")}</strong><small>${escapeHtml(item.detail || "")}</small></span></li>`).join("")}</ul>${(completeness.warnings || []).length ? `<p>${completeness.warnings.map(escapeHtml).join(" ")}</p>` : ""}</section>` : "";
+  const evidenceHitCount = Number(stats.evidenceHitCount ?? stats.localRecallCount ?? 0);
+  const semanticBatchText = Number(stats.semanticBatchCount || 0) > 1
+    ? ` · 语义复核 ${Number(stats.semanticBatchesCompleted || 0)}/${Number(stats.semanticBatchCount || 0)} 批`
+    : "";
+  const statsText = stats.cacheHit
+    ? `已复用上次检索结果 · ${formatSearchElapsed(stats.totalMilliseconds)}`
+    : `已引用 ${evidenceHitCount} 条索引证据${semanticBatchText} · ${formatSearchElapsed(stats.totalMilliseconds)}`;
+  const calls = stats.callBreakdown || {};
+  const callRows = [
+    ["意图理解", calls.intent], ["文本语义复核", calls.textRerank], ["候选画面复核", calls.visionVerify],
+  ].filter(([, value]) => value && Number(value.used || 0) > 0);
+  const modelTraceMarkup = `<details class="content-model-trace"><summary>本次模型调用 ${callRows.reduce((sum, [, value]) => sum + Number(value.used || 0), 0)} 次</summary><div>${callRows.length ? callRows.map(([label, value]) => `<span><b>${escapeHtml(label)}</b><small>${Number(value.used || 0)}/${Number(value.limit || 0)} · ${escapeHtml(value.reason || "按需调用")}</small></span>`).join("") : "<span><b>未调用远程模型</b><small>复用状态或本地索引完成</small></span>"}</div></details>`;
+  const scope = search.intent?.searchScope || stats.searchScope || {};
+  const scopeMarkup = Number(scope.end) > Number(scope.start)
+    ? `<p class="content-search-scope">检索范围 ${formatTime(scope.start)} → ${formatTime(scope.end)}，范围长度 ${formatTime(Number(scope.end) - Number(scope.start))}${scope.source === "intersection" ? "，已取时间条件交集" : ""}</p>`
+    : "";
+  const historyMarkup = "";
+  const recognition = job.recognition || {};
+  const counts = recognition.counts || {};
+  const coverage = recognition.modalityCoverage || {};
+  const coverageLabels = [["speech", "对白"], ["visual", "画面"], ["ocr", "屏幕文字"], ["audio", "声音"], ["person", "匿名人物"]]
+    .filter(([key]) => coverage[key]).map(([, label]) => label);
+  const degradedCount = Array.isArray(recognition.degradedReasons) ? recognition.degradedReasons.length : 0;
+  const recognitionMarkup = Number(recognition.schemaVersion || 0) >= 4 ? `<div class="recognition-coverage"><span>识别范围</span>${coverageLabels.map((label) => `<b>${label}</b>`).join("")}<small>${Number(counts.shots || 0)} 个镜头 · ${Number(counts.ocr || 0)} 条屏幕文字 · ${Number(counts.persons || 0)} 个匿名人物${degradedCount ? ` · ${degradedCount} 项能力未启用` : ""}</small></div>` : "";
+  const execution = search.executionPlan || search.intent?.executionPlan || {};
+  const queryPredicates = search.queryPlan?.predicates || search.intent?.queryPlan?.predicates || search.intent?.predicates || [];
+  const questionPredicate = queryPredicates.find((predicate) => String(predicate?.kind || "") === "question.evidence");
+  const dialoguePredicate = questionPredicate
+    ? null
+    : queryPredicates.find((predicate) => String(predicate?.kind || "") === "speech.dialogue_role");
+  const questionOnlyQuery = Boolean(questionPredicate);
+  const capabilityLabels = questionOnlyQuery
+    ? { speech: "口头问题", visual: "画面", ocr: "画面问题", audio: "声音", person: "人物轨迹" }
+    : { speech: "对白", visual: "画面", ocr: "屏幕文字", audio: "声音", person: "人物轨迹" };
+  const personCapabilityRequested = queryPredicates.some((predicate) =>
+    ["person.speaking", "person.appearance"].includes(String(predicate?.kind || ""))
+    || String(predicate?.subjectPersonRef || predicate?.subjectPersonId || predicate?.personRef || "").trim(),
+  ) || ["person_target", "active_speaker_link"].includes(String(search.clarification?.kind || ""));
+  const allowedCapabilities = Array.isArray(execution.allowedCapabilities) ? execution.allowedCapabilities : [];
+  const executionWarnings = Array.isArray(execution.warnings) ? execution.warnings.filter(Boolean) : [];
+  const warningMarkup = executionWarnings.length ? `<div class="content-coverage-warning"><strong>覆盖提醒</strong><p>${executionWarnings.map(escapeHtml).join(" ")}</p></div>` : "";
+  const personOperation = execution.operations?.["person.track_face"] || {};
+  const personSampling = job.contentIndex?.personSampling || {};
+  const personCoverageMarkup = allowedCapabilities.includes("person") && personCapabilityRequested && (
+    Number(personSampling.requestedFrameCount || 0) > 0 || Number(personOperation.sampleCount || 0) > 0
+  ) ? `<small>人物扫描 ${Number(personSampling.extractedFrameCount || personOperation.sampleCount || 0)}/${Number(personSampling.requestedFrameCount || personOperation.sampleCount || 0)} 帧 · 最大间隔 ${formatTime(Number(personOperation.maximumSampleGapUs || 0) / 1000000)} · ${personOperation.coverageComplete ? "已覆盖全范围" : "仍有不确定区间"}</small>` : "";
+  const executionHint = !allowedCapabilities.length
+    ? "系统正在把描述编译为可执行的查找条件"
+    : personCapabilityRequested && allowedCapabilities.includes("person")
+      ? "已根据检索条件选择必要证据；本次人物检索使用连续轨迹扫描"
+      : questionOnlyQuery
+        ? "只检查本次问题检索需要的证据来源"
+        : "只运行上方列出的查找依据";
+  const executionMarkup = `<div class="recognition-coverage"><span>系统自动选择的查找依据</span>${allowedCapabilities.length ? allowedCapabilities.map((value) => `<b>${escapeHtml(capabilityLabels[value] || value)}</b>`).join("") : "<b>正在理解</b>"}<small>${executionHint}</small>${personCoverageMarkup}</div>${warningMarkup}`;
+  const questionInterpretation = questionPredicate
+    ? `<p class="content-search-scope">问题检索：${String(questionPredicate.source || questionPredicate.questionSource || "all") === "spoken" ? "只查口头提问" : String(questionPredicate.source || questionPredicate.questionSource || "all") === "screen" ? "只查画面问题" : "口头提问 + 画面问题"}；只输出问题片段，不包含回答</p>`
+    : "";
+  const dialogueMode = String(search.dialogueMode || dialoguePredicate?.dialogueMode || (dialoguePredicate?.includePrompt ? "qa_pair" : dialoguePredicate?.role === "questioner" ? "question_only" : "answer_only"));
+  const dialogueInterpretation = dialoguePredicate
+    ? `<p class="content-search-scope">系统理解：${dialoguePredicate.role === "answerer" ? "回答者的完整回答" : "指定对话角色的发言"}${dialoguePredicate.includePrompt ? "，包含前置提问" : "，不包含前置提问"}${String(dialoguePredicate.interruptionPolicy || "") === "bridge_backchannel" ? "；短附和保持回答连续" : ""}</p>`
+    : "";
+  const dialogueModeMarkup = dialoguePredicate && isCurrentSearch ? `<label class="content-dialogue-mode"><span>问答结果</span><select data-content-dialogue-mode><option value="qa_pair" ${dialogueMode === "qa_pair" ? "selected" : ""}>完整问答</option><option value="question_only" ${dialogueMode === "question_only" ? "selected" : ""}>仅问题</option><option value="answer_only" ${dialogueMode === "answer_only" ? "selected" : ""}>仅回答</option><option value="qa_split" ${dialogueMode === "qa_split" ? "selected" : ""}>问题/回答拆分</option></select><small>切换只重新整理对话图，不重新扫描视频</small></label>` : "";
+  const searchClarification = search.clarification && typeof search.clarification === "object" ? search.clarification : null;
+  const plannedTarget = search.queryPlan?.personTarget || search.intent?.queryPlan?.personTarget || search.intent?.personTarget;
+  const persistedTarget = job.request?.contentSearchPersonTarget || job.contentSearchPersonTarget;
+  const legacyTargetPersonId = String(
+    (searchClarification?.options || []).find((option) => option?.personId)?.personId
+    || search.queryPlan?.predicates?.find((predicate) => predicate?.personId)?.personId
+    || search.intent?.queryPlan?.predicates?.find((predicate) => predicate?.personId)?.personId
+    || job.contentSearchTargetPersonId || job.request?.contentSearchTargetPersonId || "",
+  );
+  const targetState = plannedTarget || persistedTarget || {
+    personIds: legacyTargetPersonId ? [legacyTargetPersonId] : [], matchMode: legacyTargetPersonId ? "any" : "",
+  };
+  const clarificationPersonId = String(
+    (searchClarification?.options || []).find((option) => option?.personId)?.personId || "",
+  );
+  const targetPersonId = String(
+    (searchClarification?.kind === "active_speaker_link" ? clarificationPersonId : "")
+    || (targetState.personIds || [])[0] || legacyTargetPersonId || "",
+  );
+  const personPredicates = [
+    ...(search.queryPlan?.predicates || []),
+    ...(search.intent?.queryPlan?.predicates || []),
+    ...(search.intent?.predicates || []),
+  ];
+  const personRequested = personPredicates.some((predicate) => ["person.speaking", "person.appearance"].includes(String(predicate?.kind || ""))
+      || String(predicate?.subjectPersonRef || predicate?.subjectPersonId || predicate?.personRef || "").trim())
+    || (Array.isArray(search.intent?.personRefs) && search.intent.personRefs.length > 0)
+    || Boolean((searchClarification?.kind || "") === "person_target")
+    || Boolean((searchClarification?.kind || "") === "active_speaker_link");
+  const personMarkup = contentPersonLabelingMarkup(job, targetState, personRequested);
+  if (!candidates.length) {
+    const clarification = searchClarification;
+    const scanState = String(search.scanProgress?.state || "");
+    const activelyScanning = ["indexing", "scanning"].includes(String(search.status || "")) || scanState === "scanning";
+    const activeScanPercent = Math.max(0, Math.min(100, Number(search.scanProgress?.coveredPercent || 0)));
+    const indexedPersons = Array.isArray(job?.contentIndex?.persons) ? job.contentIndex.persons : [];
+    const planPredicates = search.queryPlan?.predicates || search.intent?.queryPlan?.predicates || search.intent?.predicates || [];
+    const needsPersonConfirmation = personRequested && indexedPersons.length > 0
+      && !indexedPersons.some((person) => person?.userLabeled)
+      && planPredicates.some((predicate) => String(predicate?.kind || "").startsWith("person.") && !predicate?.personId);
+    const targetPerson = indexedPersons.find((person) => String(person?.id || "") === targetPersonId);
+    const speakerLinkGuidance = clarification?.kind === "active_speaker_link" && targetPerson
+      ? `本次目标是“${targetPerson.label || targetPerson.defaultLabel || targetPerson.id}”。${targetPerson.userLabeled ? "项目内标签已经生效" : "当前使用匿名人物编号，无需先修改名称"}。系统已先尝试音画口型匹配，但证据仍不足；下面的人工关联仅是兜底步骤。请预览音画后确认对应的音频 Speaker。`
+      : "";
+    const guidance = activelyScanning
+      ? "可靠结果会在证据验证完成后出现。扫描期间可以离开当前页面，任务进度会保留。"
+      : speakerLinkGuidance || clarification?.message || search.clarification || (needsPersonConfirmation
+      ? "人物、对白和画面索引已经完成，但系统还不能可靠判断哪些人物卡是目标。请选择一个或多个人物、确认匹配方式后开始检索；添加项目内标签是可选操作。"
+      : scope.isNarrow ? "当前范围内没有可靠匹配。可以修改描述，或扩大范围后重新查找。" : "当前已授权的证据中没有可靠匹配。可以换一个更具体的描述重新查找。");
+    const clarificationOptions = Array.isArray(clarification?.options) ? clarification.options : [];
+    const speakerCount = new Set(clarificationOptions.map((option) => String(option?.speakerRef || "")).filter(Boolean)).size;
+    const targetPersonLabel = targetPerson?.label || targetPerson?.defaultLabel || targetPerson?.id || "目标人物";
+    const speakerExplanation = clarification?.kind === "active_speaker_link"
+      ? `<div class="content-speaker-explanation"><div><b>画面人物簇 ${indexedPersons.length} 个</b><span>逐字稿 Speaker ${speakerCount} 组</span></div><p>这两种分组不等于真实人数。画面簇包含未说话和背景人物；Speaker 只是逐字稿中的发言分组，也可能把同一个人拆开。请以预览的音画内容为准。</p></div>`
+      : "";
+    const clarificationButtons = clarification?.kind === "active_speaker_link"
+      ? `${speakerExplanation}${clarificationOptions.map((option) => `<article class="content-speaker-option"><div><strong>音频 ${escapeHtml(option.speakerRef || "Speaker")}</strong><small>${formatTime(option.start)} → ${formatTime(option.end)}</small><p>${escapeHtml(option.transcript || "该时间段没有可展示的对白")}</p></div><div><button type="button" data-content-speaker-preview="${escapeHtml(option.id || "")}" data-content-preview-start="${escapeHtml(option.start ?? 0)}" data-content-preview-end="${escapeHtml(option.end ?? option.start ?? 0)}" data-content-preview-speaker="${escapeHtml(option.speakerRef || "Speaker")}">预览音画</button><button type="button" class="primary" data-content-speaker-confirm="${escapeHtml(option.speakerRef || "")}" data-content-person-id="${escapeHtml(option.personId || "")}">确认 ${escapeHtml(targetPersonLabel)} 对应 ${escapeHtml(option.speakerRef || "Speaker")}</button></div></article>`).join("")}`
+      : clarificationOptions.map((option) => `<button type="button" class="content-evidence-option${option.recommended ? " primary" : ""}${option.disabled ? " unavailable" : ""}" ${option.disabled ? "disabled aria-disabled=\"true\"" : `data-content-evidence-choice="${escapeHtml(option.id || "")}" data-content-evidence-mode="${escapeHtml(option.evidenceMode || option.id || "")}" data-content-capabilities="${escapeHtml((option.capabilities || []).join(","))}" data-content-instruction="${escapeHtml(option.instruction || "")}"`} title="${escapeHtml(option.disabledReason || "")}"><span>${escapeHtml(option.label || "继续")}</span>${option.disabledReason ? `<small>${escapeHtml(option.disabledReason)}</small>` : ""}</button>`).join("");
+    const capabilityAlternativeHint = clarification?.kind === "evidence_type" && clarification?.alternativeHint
+      ? `<p class="content-capability-alternative">${escapeHtml(clarification.alternativeHint)}</p>`
+      : "";
+    const expansionButtons = (search.expansionOptions || []).map((option) => `<button type="button" data-content-expansion="${escapeHtml(option.id || "")}">${escapeHtml(option.label || "继续检索")}</button>`).join("");
+    const denseButton = allowedCapabilities.includes("visual") && search.status !== "needs_clarification" ? '<button type="button" data-content-feedback="missed_content">加密画面采样</button>' : "";
+    return `<article class="chat-message assistant content-search-message" data-conversation-key="search:${escapeHtml(search.id || "")}"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="content-search-review empty${historicalSearchClass}" data-content-search-id="${escapeHtml(search.id || "")}">${isCurrentSearch ? contentFlowMarkup({ search, candidates, personRequested, targetState, reviewDraft }) : ""}<header><div><small>${isCurrentSearch ? "内容探索" : "历史检索"}</small><strong>${activelyScanning ? `全范围扫描中 · ${activeScanPercent.toFixed(1)}%` : search.status === "needs_clarification" ? escapeHtml(clarification?.question || "需要确认查找依据") : needsPersonConfirmation ? "请确认目标人物" : "没有可靠匹配"}</strong><p>${escapeHtml(statsText)}</p>${dialogueInterpretation}${scopeMarkup}${executionMarkup}${modelTraceMarkup}${historicalSearchToggle}</div></header>${isCurrentSearch ? personMarkup : ""}<p>${escapeHtml(guidance)}</p>${isCurrentSearch && !activelyScanning ? `<div class="content-search-secondary">${search.status === "needs_clarification" ? clarificationButtons : `${expansionButtons}${denseButton}`}</div>${capabilityAlternativeHint}` : !isCurrentSearch ? `<footer class="content-history-actions"><button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>` : ""}${historyMarkup}</section></div></article>`;
+  }
+  const recoveryMarkup = allowedCapabilities.includes("visual") && (!exhaustive || !coverageComplete)
+    ? `<details class="content-search-recovery"${exhaustive && !coverageComplete ? " open" : ""}><summary>${exhaustive ? "扫描尚未完整，继续查找" : "还没找到想要的画面？"}</summary><div><p>${exhaustive ? "当前结果尚未覆盖完整检索范围，可以提高相关时间区域的画面采样密度。" : "仅在你认为结果确有遗漏时使用；系统会对最相关的时间区域重新进行密集画面分析。"}</p><button type="button" data-content-feedback="missed_content">加密补检可能遗漏的画面</button></div></details>`
+    : "";
+  const possibleToggleMarkup = possibleCount
+    ? `<button type="button" class="content-possible-toggle" data-content-show-possible aria-expanded="true"><span>收起可能相关</span><b>${possibleCount} 个内容段</b><small>证据较弱，默认展示但不会自动选中</small></button>`
+    : "";
+  return `<article class="chat-message assistant content-search-message" data-conversation-key="search:${escapeHtml(search.id || "")}"><span class="avatar">AI</span><div class="recommendation-wrap">
+    <section class="content-search-review${historicalSearchClass}" data-content-search-id="${escapeHtml(search.id || "")}">
+      ${isCurrentSearch ? contentFlowMarkup({ search, candidates, personRequested, targetState, reviewDraft }) : ""}
+      <header><div><small>${isCurrentSearch ? "内容探索 · 选择片段" : "历史检索 · 选择片段"}</small><strong>${exhaustive ? exhaustiveTitle : "相关片段检索完成"} · ${reliableCount} 个可靠内容段${possibleCount ? `，${possibleCount} 个可能相关` : ""}</strong><p>${escapeHtml(search.intent?.query || search.instruction || "")}</p><p class="content-search-stats">${escapeHtml(statsText)}${exhaustive ? ` · ${strictComplete ? "检索覆盖已完成" : "当前为部分覆盖结果"}` : ""}</p>${questionInterpretation}${dialogueInterpretation}${dialogueModeMarkup}${scopeMarkup}${executionMarkup}${modelTraceMarkup}${historicalSearchToggle}</div><b>选择后生成</b></header>
+      ${isCurrentSearch ? personMarkup : ""}
+      ${completenessMarkup}
+      ${questionSourceControls}
+      ${possibleToggleMarkup}
+      <div class="content-match-list">${candidates.map((match, index) => {
+        const reviewStatus = String(match.reviewStatus || (match.requiresReview ? "pending" : "confirmed"));
+        const pending = reviewStatus === "pending";
+        const rejected = reviewStatus === "rejected";
+        const checked = !pending && !rejected
+          && (defaults.has(String(match.id)) || (!exhaustive && !defaults.size && index < 3));
+        const evidence = match.transcriptExcerpt || match.matchedEvidence || match.reason || "画面索引匹配";
+        const type = contentMatchTypeLabel(match);
+        const matchScore = Math.round(Number.isFinite(Number(match.score)) ? Number(match.score) : Number(match.confidence || 0) * 100);
+        const methodLabel = contentMatchMethodLabel(match);
+        const boundaryLabel = contentBoundarySourceLabel(match.boundarySource);
+        const evidenceKinds = [...new Set((match.matchedModalities || [match.evidenceType]).filter(Boolean))];
+        const evidenceCount = Array.isArray(match.evidenceRefs) ? match.evidenceRefs.length : 0;
+        const matchedPeople = [...new Set((match.matchedPersonLabels || match.matchedPersonIds || []).filter(Boolean))];
+        const questionSource = contentQuestionSourceKey(match);
+        const questionSourceChip = questionSource ? `<i class="question-source">${escapeHtml(contentQuestionSourceLabel(questionSource))}</i>` : "";
+        const subjectStatusLabels = { verified: "对象已验证", contextual: "对象语境支持", unverified: "对象未验证", ignored: "未使用对象约束" };
+        const subjectChip = match.subjectDescription
+          ? `<i class="subject-${escapeHtml(String(match.subjectStatus || "unverified"))}" title="${escapeHtml((subjectStatusLabels[String(match.subjectStatus || "unverified")] || "对象证据") + "：" + String(match.subjectDescription))}">${escapeHtml(subjectStatusLabels[String(match.subjectStatus || "unverified")] || "对象证据")}</i>`
+          : "";
+        const evidenceChips = `<span class="content-evidence-chips">${questionSourceChip}${subjectChip}${matchedPeople.map((value) => `<i class="person">${escapeHtml(value)}</i>`).join("")}${evidenceKinds.map((value) => `<i>${escapeHtml(({speech:"对白",visual:"画面",ocr:"屏幕文字",audio:"声音",person:"匿名人物"})[String(value).toLowerCase()] || value)}</i>`).join("")}<button type="button" class="content-evidence-count" data-content-evidence="${escapeHtml(match.id)}">${evidenceCount ? `查看证据（${evidenceCount}）` : "查看相关证据"}</button></span>`;
+        const inputId = `content-match-${String(search.id || "search").replace(/[^a-zA-Z0-9_-]/g, "-")}-${index}`;
+        const reviewReasons = (Array.isArray(match.reviewReasons) ? match.reviewReasons : []).filter(Boolean);
+        const transcriptIsContext = (match.speechUnits || []).some((unit) => Number(unit.start) < Number(match.start) - .5 || Number(unit.end) > Number(match.end) + .5);
+        const evidenceLabel = transcriptIsContext && match.transcriptExcerpt ? "相邻对白上下文" : "匹配证据";
+        const boundaryQueued = boundaryRetryIds.has(String(match.id));
+        const canAdjustBoundary = isCurrentSearch && !rejected;
+        const adjustBoundaryButton = canAdjustBoundary
+          ? `<button type="button" data-content-boundary-open="${escapeHtml(match.id)}">调整边界</button>`
+          : "";
+        const reviewButtons = !isCurrentSearch ? "" : boundaryQueued
+          ? `<span class="content-feedback-pending">自动重新识别中</span>`
+          : pending
+          ? `${adjustBoundaryButton}<button type="button" data-content-feedback="review_reject" data-content-match-id="${escapeHtml(match.id)}">排除此片段</button>`
+          : rejected
+            ? `<button type="button" data-content-feedback="review_keep" data-content-match-id="${escapeHtml(match.id)}">恢复并保留</button>`
+            : `<button type="button" data-content-feedback="not_relevant" data-content-match-id="${escapeHtml(match.id)}">不相关</button>${adjustBoundaryButton}`;
+        const boundaryEditor = canAdjustBoundary ? `<section class="content-boundary-editor hidden" data-content-boundary-editor="${escapeHtml(match.id)}" data-boundary-start="${Number(match.start) || 0}" data-boundary-end="${Number(match.end) || 0}"><header><div><strong>手动调整片段边界</strong><small>逐帧微调，保存后立即用于生成，不会重新扫描视频。</small></div><b data-boundary-summary>${formatTime(match.start)} → ${formatTime(match.end)}</b></header><div class="content-boundary-edges"><fieldset><legend>开头 <span data-boundary-start-label>${formatTime(match.start)}</span></legend><div class="content-boundary-nudges"><button type="button" data-boundary-adjust="start:-frame">多保留 1 帧</button><button type="button" data-boundary-adjust="start:frame">少保留 1 帧</button><button type="button" data-boundary-adjust="start:-0.1">往前 0.1 秒</button><button type="button" data-boundary-adjust="start:0.1">往后 0.1 秒</button></div><button type="button" class="content-boundary-playhead" data-boundary-playhead="start">把当前播放位置设为开头</button></fieldset><fieldset><legend>结尾 <span data-boundary-end-label>${formatTime(match.end)}</span></legend><div class="content-boundary-nudges"><button type="button" data-boundary-adjust="end:-frame">少保留 1 帧</button><button type="button" data-boundary-adjust="end:frame">多保留 1 帧</button><button type="button" data-boundary-adjust="end:-0.1">往前 0.1 秒</button><button type="button" data-boundary-adjust="end:0.1">往后 0.1 秒</button></div><button type="button" class="content-boundary-playhead" data-boundary-playhead="end">把当前播放位置设为结尾</button></fieldset></div><footer><span data-boundary-frame-rate>正在读取源视频帧率…</span><div><button type="button" data-boundary-preview>预览调整结果</button><button type="button" data-boundary-auto>自动重新识别</button>${match.manualBoundary ? `<button type="button" data-boundary-reset>恢复自动边界</button>` : ""}<button type="button" data-boundary-cancel>取消</button><button type="button" class="primary" data-boundary-save>保存边界</button></div></footer></section>` : "";
+        const confidenceTier = String(match.confidenceTier || (pending ? "possible" : "reliable"));
+        const highConfidence = confidenceTier === "reliable" && !rejected;
+        return `<article class="content-match-row${pending ? " review-pending" : ""}${rejected ? " review-rejected" : ""}${confidenceTier === "possible" ? " content-candidate-possible" : ""}${index >= 50 ? " content-candidate-overflow hidden" : ""}" data-content-match-row="${escapeHtml(match.id)}" data-content-question-source="${escapeHtml(questionSource || "other")}" data-content-reliable="${highConfidence ? "true" : "false"}"><div class="content-match-main"><input id="${inputId}" type="checkbox" data-content-match data-content-review-status="${escapeHtml(reviewStatus)}" value="${escapeHtml(match.id)}" ${checked ? "checked" : ""} ${rejected ? "disabled" : ""} aria-label="选择${escapeHtml(match.title || `匹配片段 ${index + 1}`)}"><div class="content-match-copy"><div class="content-match-title"><label for="${inputId}"><strong>${escapeHtml(match.title || `匹配片段 ${index + 1}`)}</strong>${rejected ? `<i>已排除</i>` : ""}</label><b class="confidence-${escapeHtml(confidenceTier)}" title="按可定位证据强度分层，不是统计概率">${confidenceTier === "reliable" ? "可靠" : "可能相关"}</b></div><p class="content-match-meta">${formatTime(match.start)} → ${formatTime(match.end)}<span>·</span>${Number(match.duration || 0).toFixed(1)} 秒<span>·</span>${type}${match.speaker ? `<span>·</span>${escapeHtml(match.speaker)}` : ""}</p>${evidenceChips}<p class="content-match-diagnostics">${escapeHtml(methodLabel)}<span>·</span>边界：${escapeHtml(boundaryLabel)}</p>${reviewReasons.length ? `<p class="content-match-review-reasons">判断依据：${reviewReasons.map(escapeHtml).join("；")}</p>` : ""}<p class="content-match-evidence"><small>${evidenceLabel}</small>${escapeHtml(evidence)}</p></div></div><div class="content-match-buttons" aria-label="片段操作"><button type="button" class="content-match-preview" data-content-preview="${escapeHtml(match.id)}">预览</button>${reviewButtons}</div>${boundaryEditor}</article>`;
+      }).join("")}</div>${candidates.length > 50 ? `<button type="button" class="content-show-more" data-content-show-more>再显示 50 段</button>` : ""}
+      ${bulkControlsMarkup}
+      ${historyMarkup}
+      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><div class="content-output-controls"><label><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label><div class="content-search-submit-actions"><button type="button" data-content-basket-add>加入合并生成</button><button type="button" class="primary" data-confirm-content>仅生成本次检索</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入待合并片段</span><button type="button" data-content-basket-add>加入合并生成</button><button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>`}
+      <p class="content-search-safety">人物仅使用画面描述或匿名 Speaker 标签，不进行实名识别。也可以直接在对话中输入新要求继续检索。</p>
+    </section></div></article>`;
+}
+
+function contentOutputResultMarkup(job, selectedVersions = null, { historical = false } = {}) {
+  if (taskModePresentation(job).key !== "content_extract") return "";
+  const versions = (selectedVersions || jobOutputVersions(job)).filter((version) => (version.outputs || []).length);
+  if (!versions.length) return "";
+  const buttons = versions.flatMap((version) => (version.outputs || []).map((output, outputIndex) => {
+    const versionLabel = `V${Number(version.number || 1)}`;
+    const separate = String(version.outputMode || job.outputMode || "single_reel") !== "single_reel" || (version.outputs || []).length > 1;
+    const label = separate ? `${versionLabel} · 内容片段 ${outputIndex + 1}` : `${versionLabel} · 内容视频`;
+    const segmentCount = Number(output.segmentCount || output.segments?.length || 0);
+    const sourceQuery = String(version.contentSearchInstruction || version.sourceLabel || "").trim();
+    return `<button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}"><span>${escapeHtml(label)} <em>人工确认</em></span><small>${sourceQuery ? `${escapeHtml(sourceQuery)} · ` : ""}${segmentCount ? `${segmentCount} 个已确认片段 · ` : ""}${Number(output.duration || 0).toFixed(1)} 秒 · 点击预览</small></button>`;
+  }));
+  return `<section class="auto-compose-result-card content-output-result-card${historical ? " historical" : ""}"><strong>${historical ? "以前生成的内容视频" : "内容视频已生成"} · ${versions.length} 个版本</strong><p>${historical ? "这些版本来自之前确认的片段，不会随本次新检索自动改变。" : "视频只包含你审核确认的时间范围。"} 点击版本即可在播放器中预览，也可以下载高清 MP4。</p><div>${buttons.join("")}</div></section>`;
+}
+
+function contentOutputVersionsForSearch(job, searchId) {
+  return jobOutputVersions(job).filter((version) => String(version.contentSearchId || version.searchId || "") === String(searchId || "") && (version.outputs || []).length);
+}
+
+function contentSearchRecordsForJob(job = currentJob) {
+  const records = Array.isArray(job?.contentSearchRecords) ? job.contentSearchRecords : [];
+  const source = records.length ? records : (job?.contentSearch ? [job.contentSearch] : []);
+  return source.map((record) => {
+    const cached = contentSearchDetailCache.get(`${job?.id || ""}:${record?.id || ""}`);
+    return cached ? { ...record, ...cached, candidateDetailsLoaded: true } : record;
+  });
+}
+
+function contentSearchHistorySummaryMarkup(search) {
+  const count = Number(search?.candidateCount ?? search?.candidates?.length ?? 0);
+  const created = search?.createdAt ? new Date(search.createdAt) : null;
+  const time = created && Number.isFinite(created.getTime())
+    ? created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "早期记录";
+  const status = String(search?.status || "");
+  const statusLabel = status === "needs_clarification" ? "等待确认"
+    : status === "confirmed" ? "已生成过"
+      : status === "queued" || status === "indexing" ? "未完成"
+        : count ? `${count} 段` : "无匹配";
+  return `<article class="chat-message assistant content-search-message content-search-history-message" data-conversation-key="search:${escapeHtml(search?.id || "")}"><div class="recommendation-wrap"><section class="content-search-history-summary" data-content-search-id="${escapeHtml(search?.id || "")}"><button type="button" data-content-history-open="${escapeHtml(search?.id || "")}" aria-expanded="false"><span><small>${escapeHtml(time)} · 历史检索</small><strong>${escapeHtml(search?.intent?.query || search?.instruction || "未命名检索")}</strong></span><b>${escapeHtml(statusLabel)}</b><em>展开</em></button></section></div></article>`;
+}
+
+function contentBasketItems(job = currentJob) {
+  const basket = job?.contentSelectionBasket;
+  if (basket?.entryMode !== "explicit") return [];
+  return Array.isArray(basket.items) ? basket.items : [];
+}
+
+function contentBasketHas(job, searchId, matchId) {
+  return contentBasketItems(job).some((item) => String(item.searchId) === String(searchId) && String(item.matchId) === String(matchId));
+}
+
+function setContentBasketLocal(job, searchId, matchId, selected, candidate = null) {
+  const items = [...contentBasketItems(job)];
+  const index = items.findIndex((item) => String(item.searchId) === String(searchId) && String(item.matchId) === String(matchId));
+  if (selected && index < 0) items.push({
+    searchId: String(searchId), matchId: String(matchId), title: candidate?.title || "匹配片段",
+    start: Number(candidate?.start) || 0, end: Number(candidate?.end) || 0,
+    duration: Math.max(0, Number(candidate?.end) - Number(candidate?.start)),
+    sourceQuery: contentSearchRecordsForJob(job).find((item) => String(item.id) === String(searchId))?.instruction || "检索",
+  });
+  if (!selected && index >= 0) items.splice(index, 1);
+  job.contentSelectionBasket = {
+    ...(job.contentSelectionBasket || {}),
+    schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true, items,
+  };
+  renderContentSelectionBasket(job);
+  syncVisibleContentBasketAddButtons(job);
+  scheduleContentBasketSave(job);
+}
+
+function syncContentBasketAddButton(root, job = currentJob, searchId = "") {
+  const button = root?.querySelector?.("[data-content-basket-add]");
+  if (!button) return;
+  const selectedIds = [...root.querySelectorAll("[data-content-match]:checked:not(:disabled)")].map((input) => String(input.value));
+  const newCount = selectedIds.filter((matchId) => !contentBasketHas(job, searchId, matchId)).length;
+  button.disabled = !selectedIds.length || !newCount;
+  button.textContent = !selectedIds.length
+    ? "选择片段后加入合并生成"
+    : newCount
+      ? `加入合并生成 · ${newCount} 段`
+      : "所选已加入待合并片段";
+}
+
+function syncVisibleContentBasketAddButtons(job = currentJob) {
+  document.querySelectorAll(".content-search-review[data-content-search-id]").forEach((root) => {
+    syncContentBasketAddButton(root, job, String(root.dataset.contentSearchId || ""));
+  });
+}
+
+function addSelectedContentToBasket(root, job, searchId, findMatch) {
+  const selectedInputs = [...root.querySelectorAll("[data-content-match]:checked:not(:disabled)")];
+  if (!selectedInputs.length) {
+    showToast("请先选择要加入合并生成的片段");
+    return;
+  }
+  const items = [...contentBasketItems(job)];
+  let added = 0;
+  selectedInputs.forEach((input) => {
+    const matchId = String(input.value || "");
+    if (!matchId || items.some((item) => String(item.searchId) === String(searchId) && String(item.matchId) === matchId)) return;
+    const candidate = findMatch(matchId);
+    if (!candidate) return;
+    items.push({
+      searchId: String(searchId), matchId, title: candidate.title || "匹配片段",
+      start: Number(candidate.start) || 0, end: Number(candidate.end) || 0,
+      duration: Math.max(0, Number(candidate.end) - Number(candidate.start)),
+      sourceQuery: contentSearchRecordsForJob(job).find((item) => String(item.id) === String(searchId))?.instruction || "检索",
+    });
+    added += 1;
+  });
+  if (!added) {
+    showToast("所选片段已在待合并片段中");
+    syncContentBasketAddButton(root, job, searchId);
+    return;
+  }
+  job.contentSelectionBasket = {
+    ...(job.contentSelectionBasket || {}),
+    schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true, items,
+  };
+  renderContentSelectionBasket(job);
+  syncVisibleContentBasketAddButtons(job);
+  scheduleContentBasketSave(job);
+  showToast(`已明确加入 ${added} 段；普通勾选不会自动进入待合并片段`);
+}
+
+function scheduleContentBasketSave(job = currentJob) {
+  window.clearTimeout(contentBasketSaveTimer);
+  const generation = ++contentBasketSaveGeneration;
+  contentBasketSaveTimer = window.setTimeout(async () => {
+    if (!job?.id || generation !== contentBasketSaveGeneration) return;
+    const basket = job.contentSelectionBasket || {};
+    try {
+      const response = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/basket`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          revision: Number.isFinite(Number(basket.revision)) ? Number(basket.revision) : null,
+          items: (basket.items || []).map(({ searchId, matchId }) => ({ searchId, matchId })),
+        }),
+      });
+      if (currentJob?.id !== job.id || generation !== contentBasketSaveGeneration) return;
+      currentJob.contentSelectionBasket = response.basket;
+      renderContentSelectionBasket(currentJob);
+      syncVisibleContentBasketAddButtons(currentJob);
+    } catch (error) {
+      if (generation === contentBasketSaveGeneration) showToast(`待合并片段保存失败：${error.message}`);
+    }
+  }, 180);
+}
+
+function renderContentSelectionBasket(job = currentJob) {
+  const root = $("#contentSelectionBasket");
+  if (!root) return;
+  const visible = taskModePresentation(job || {}).key === "content_extract";
+  const items = visible ? contentBasketItems(job) : [];
+  root.classList.toggle("hidden", !visible || !items.length);
+  if (!visible || !items.length) { root.innerHTML = ""; return; }
+  const duration = items.reduce((sum, item) => sum + Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0), 0);
+  const sources = new Set(items.map((item) => String(item.sourceQuery || "")).filter(Boolean)).size;
+  root.innerHTML = `<details class="content-basket-details"><summary><span class="content-basket-copy"><small>待合并片段</small><strong>${items.length} 段 · ${duration.toFixed(1)} 秒</strong><span>手动加入 · 来自 ${sources || 1} 次检索 · 生成成功后清空</span></span><em>查看明细</em></summary><ol>${items.map((item) => `<li><span><small>${escapeHtml(item.sourceQuery || "检索")}</small><strong>${escapeHtml(item.title || "匹配片段")}</strong><em>${formatTime(item.start)} → ${formatTime(item.end)} · ${Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0).toFixed(1)} 秒</em></span><button type="button" data-content-basket-remove data-search-id="${escapeHtml(item.searchId || "")}" data-match-id="${escapeHtml(item.matchId || "")}">移出</button></li>`).join("")}</ol></details><div class="content-basket-actions"><button type="button" data-content-basket-clear>清空</button><button type="button" class="primary" data-content-basket-confirm>生成合并视频</button></div>`;
+  const details = root.querySelector(".content-basket-details");
+  details?.addEventListener("toggle", () => {
+    const label = details.querySelector("summary > em");
+    if (label) label.textContent = details.open ? "收起明细" : "查看明细";
+  });
+  root.querySelectorAll("[data-content-basket-remove]").forEach((button) => button.addEventListener("click", () => {
+    setContentBasketLocal(job, button.dataset.searchId, button.dataset.matchId, false);
+  }));
+  root.querySelector("[data-content-basket-clear]")?.addEventListener("click", () => {
+    job.contentSelectionBasket = {
+      ...(job.contentSelectionBasket || {}),
+      schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true, items: [],
+    };
+    renderContentSelectionBasket(job);
+    syncVisibleContentBasketAddButtons(job);
+    scheduleContentBasketSave(job);
+  });
+  root.querySelector("[data-content-basket-confirm]")?.addEventListener("click", () => confirmContentSelectionBasket(job));
+}
+
+function conversationMessageMarkup(message, assistantRoleLabel) {
+  const role = message.role === "user" ? "user" : message.kind === "error" ? "error" : "assistant";
+  const repeatLabel = Number(message.repeatCount || 1) > 1 ? `<em class="message-repeat">重复 ${message.repeatCount} 次</em>` : "";
+  return `<article class="chat-message ${role}" data-conversation-key="message:${escapeHtml(message.id || "")}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small>${role === "user" ? "你" : assistantRoleLabel}${repeatLabel}</small><p>${escapeHtml(message.text)}</p></div></article>`;
+}
+
+function normalizedConversationInstruction(value) {
+  return String(value || "").toLowerCase().replace(/[\s，。！？：；、“”‘’]/g, "");
+}
+
+function contentSearchPlacement(messages, records) {
+  const placements = new Map();
+  const unresolved = [];
+  const usedUsers = new Set();
+  const add = (index, search) => placements.set(index, [...(placements.get(index) || []), search]);
+  [...records].sort((left, right) => String(left?.createdAt || "").localeCompare(String(right?.createdAt || ""))).forEach((search) => {
+    const linkedIndices = messages.map((message, index) => String(message.contentSearchId || "") === String(search?.id || "") ? index : -1).filter((index) => index >= 0);
+    const resultIndex = [...linkedIndices].reverse().find((index) => messages[index]?.role !== "user" && messages[index]?.kind === "content-search");
+    let anchor = resultIndex ?? linkedIndices[linkedIndices.length - 1] ?? -1;
+    if (anchor < 0 && search?.conversationTurnId) {
+      anchor = messages.map((message) => String(message.conversationTurnId || "")).lastIndexOf(String(search.conversationTurnId));
+    }
+    if (anchor < 0 && search?.createdAt) {
+      const searchTime = Date.parse(String(search.createdAt));
+      const wanted = normalizedConversationInstruction(search?.instruction);
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.role !== "user" || usedUsers.has(index)) continue;
+        const messageTime = Date.parse(String(message.createdAt || ""));
+        const text = normalizedConversationInstruction(message.text);
+        if (Number.isFinite(searchTime) && Number.isFinite(messageTime) && messageTime > searchTime) continue;
+        if (wanted && !text.includes(wanted) && !wanted.includes(text)) continue;
+        anchor = index;
+        usedUsers.add(index);
+        while (anchor + 1 < messages.length && messages[anchor + 1].role !== "user") anchor += 1;
+        break;
+      }
+    }
+    if (anchor < 0) unresolved.push(search);
+    else add(anchor, search);
+  });
+  return { placements, unresolved };
+}
+
+function conversationTimelineMarkup(job, messages, assistantRoleLabel) {
+  const records = contentSearchRecordsForJob(job);
+  const { placements, unresolved } = contentSearchPlacement(messages, records);
+  const currentId = String(job?.contentSearch?.id || "");
+  const searchMarkup = (search) => {
+    const current = String(search?.id || "") === currentId;
+    const card = !current && !expandedContentSearchIds.has(String(search?.id || ""))
+      ? contentSearchHistorySummaryMarkup(search)
+      : contentSearchReviewMarkup(job, search, { historicalExpanded: !current });
+    const versions = contentOutputVersionsForSearch(job, search?.id);
+    return `${card}${versions.length ? contentOutputResultMarkup(job, versions, { historical: !current }) : ""}`;
+  };
+  const parts = [];
+  if (unresolved.length) {
+    parts.push(`<article class="chat-message assistant content-early-history" data-conversation-key="early-history"><div class="recommendation-wrap"><details><summary>早期历史 · ${unresolved.length} 条未能可靠归位的检索记录</summary><div>${unresolved.map(searchMarkup).join("")}</div></details></div></article>`);
+  }
+  messages.forEach((message, index) => {
+    parts.push(conversationMessageMarkup(message, assistantRoleLabel));
+    (placements.get(index) || []).forEach((search) => parts.push(searchMarkup(search)));
+  });
+  const placedIds = new Set([...placements.values()].flat().map((search) => String(search?.id || "")));
+  unresolved.forEach((search) => placedIds.add(String(search?.id || "")));
+  records.filter((search) => !placedIds.has(String(search?.id || ""))).forEach((search) => parts.push(searchMarkup(search)));
+  const legacyVersions = jobOutputVersions(job).filter((version) => !version.contentSearchId && !version.searchId && (version.outputs || []).length);
+  if (legacyVersions.length) parts.push(`<article class="chat-message assistant content-search-message" data-conversation-key="legacy-content-outputs"><div class="recommendation-wrap">${contentOutputResultMarkup(job, legacyVersions, { historical: true })}</div></article>`);
+  return parts.join("");
+}
+
+function contentSearchForRoot(root, job = currentJob) {
+  const searchId = String(root?.dataset?.contentSearchId || "");
+  return contentSearchRecordsForJob(job).find((item) => String(item?.id || "") === searchId)
+    || (searchId && String(job?.contentSearch?.id || "") === searchId ? job.contentSearch : null)
+    || job?.contentSearch
+    || {};
+}
+
+function contentSearchJobForRoot(root, job = currentJob) {
+  return { ...job, contentSearch: contentSearchForRoot(root, job) };
+}
+
+async function ensureContentSearchDetails(searchId, job = currentJob) {
+  const record = contentSearchRecordsForJob(job).find((item) => String(item?.id || "") === String(searchId));
+  if (!record || record.candidateDetailsLoaded !== false) return record;
+  const payload = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/history/${encodeURIComponent(searchId)}`);
+  const detail = payload.search || {};
+  const target = contentSearchRecordsForJob(currentJob).find((item) => String(item?.id || "") === String(searchId));
+  if (target) Object.assign(target, detail, { candidateDetailsLoaded: true });
+  return target || detail;
+}
+
+function collectContentReviewDraft(root, job = currentJob, overrides = {}) {
+  const search = job?.contentSearch || {};
+  const previous = search.reviewDraft?.searchId === search.id ? search.reviewDraft : {};
+  const selectedMatchIds = [...root.querySelectorAll("[data-content-match]:checked")].map((input) => String(input.value));
+  const selectedSet = new Set(selectedMatchIds);
+  let orderedMatchIds = Array.isArray(overrides.orderedMatchIds)
+    ? overrides.orderedMatchIds.map(String).filter((id) => selectedSet.has(id))
+    : (previous.orderedMatchIds || []).map(String).filter((id) => selectedSet.has(id));
+  orderedMatchIds = [...new Set([...orderedMatchIds, ...selectedMatchIds])];
+  return {
+    searchId: String(search.id || ""), selectedMatchIds, orderedMatchIds,
+    outputMode: String(overrides.outputMode || root.querySelector("[data-content-output-mode]")?.value || previous.outputMode || "single_reel"),
+    orderMode: String(overrides.orderMode || root.querySelector("[data-content-order-mode]")?.value || previous.orderMode || "source"),
+    subtitleEnabled: Boolean(root.querySelector("[data-content-subtitle]")?.checked),
+    subtitleStyle: String(previous.subtitleStyle || "clean"),
+  };
+}
+
+async function saveContentReviewDraft(root, job = currentJob, overrides = {}) {
+  if (!root || !job?.id || !job.contentSearch?.id) return false;
+  const draft = collectContentReviewDraft(root, job, overrides);
+  const generation = ++contentReviewDraftGeneration;
+  try {
+    const response = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/review-draft`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(draft),
+    });
+    if (generation !== contentReviewDraftGeneration || currentJob?.id !== job.id) return false;
+    const target = contentSearchRecordsForJob(currentJob).find((item) => String(item?.id || "") === draft.searchId);
+    if (target) {
+      target.reviewDraft = response.reviewDraft;
+      target.defaultSelectedIds = [...response.reviewDraft.selectedMatchIds];
+    }
+    return true;
+  } catch (error) {
+    if (generation === contentReviewDraftGeneration && currentJob?.id === job.id) showToast(`选择草稿保存失败：${error.message}`);
+    return false;
+  }
+}
+
+function scheduleContentReviewDraftSave(root, job = currentJob, overrides = {}) {
+  window.clearTimeout(contentReviewDraftTimer);
+  contentReviewDraftTimer = window.setTimeout(() => saveContentReviewDraft(root, job, overrides), 220);
+}
+
+function syncContentSearchSelectionSummary(root, job = currentJob) {
+  if (!root) return;
+  const selected = [...root.querySelectorAll("[data-content-match]:checked")];
+  const ids = new Set(selected.map((input) => String(input.value)));
+  const matches = (job?.contentSearch?.candidates || []).filter((item) => ids.has(String(item.id)));
+  const duration = matches.reduce((sum, item) => sum + Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0), 0);
+  const summary = root.querySelector("[data-content-selection-summary]");
+  const exhaustive = String(job?.contentSearch?.resultMode || "top_k") === "exhaustive";
+  const completeness = job?.contentSearch?.completeness || {};
+  const strictComplete = !exhaustive || completeness.status === "complete";
+  const pendingCount = Number(completeness.pendingCount || 0);
+  const gateMessage = !strictComplete
+    ? pendingCount
+      ? ` · 还有 ${pendingCount} 项需复核`
+      : " · 尚未证明找全，可确认风险后生成"
+    : selected.length ? " · 确认后才会生成" : " · 请至少选择一段";
+  if (summary) summary.innerHTML = `<strong>已选 ${selected.length} 段</strong><span>预计 ${duration.toFixed(1)} 秒${gateMessage}</span>`;
+  const confirm = root.querySelector("[data-confirm-content]");
+  if (confirm && !actionBusy) {
+    confirm.disabled = selected.length === 0;
+    confirm.title = pendingCount
+      ? `点击查看尚未处理的 ${pendingCount} 个候选`
+      : strictComplete ? "" : "点击后可确认接受可能遗漏，并按当前已选片段生成";
+  }
+}
+
+function syncContentSearchOutputControls(root) {
+  const output = root.querySelector("[data-content-output-mode]");
+  const order = root.querySelector("[data-content-order-mode]");
+  const wrap = root.querySelector("[data-content-order-wrap]");
+  const hint = root.querySelector("[data-content-order-hint]");
+  if (!output || !order || !wrap || !hint) return;
+  const separate = output.value === "separate_events";
+  wrap.classList.toggle("hidden", separate);
+  order.disabled = separate;
+  const hints = {
+    source: "保持源视频中的时间先后，适合过程记录和访谈。",
+    selection: "确认时可逐项上移或下移，系统严格采用你的排列。",
+    llm_recommend: "LLM 只推荐顺序，不会增删片段或修改任何起止点；推荐后还需再次确认。",
+  };
+  hint.textContent = separate ? "每个片段独立输出，不涉及合成顺序。" : hints[order.value] || hints.source;
+  syncContentSearchSelectionSummary(root, currentJob);
+}
+
+function contentSearchSubtitleAvailability(root, job = currentJob) {
+  const selectedIds = new Set(
+    [...root.querySelectorAll("[data-content-match]:checked")].map((input) => String(input.value)),
+  );
+  const candidates = (job?.contentSearch?.candidates || []).filter((item) => selectedIds.has(String(item.id)));
+  const ranges = candidates.map((item) => ({ start: Number(item.start) || 0, end: Number(item.end) || 0 }));
+  if (job?.videoInfo?.has_audio === false) {
+    return { available: false, count: 0, message: "源视频没有音轨，无需添加字幕。" };
+  }
+  const directSegments = Array.isArray(job?.speechAnalysis?.segments) ? job.speechAnalysis.segments : [];
+  const loadedSegments = timelineTranscriptJobId === job?.id && Array.isArray(timelineTranscript) ? timelineTranscript : [];
+  const candidateSegments = candidates.flatMap((item) => Array.isArray(item.speechUnits) ? item.speechUnits : []);
+  const transcript = [...directSegments, ...loadedSegments, ...candidateSegments];
+  const seen = new Set();
+  const matching = transcript.filter((segment) => {
+    const text = String(segment?.text || "").trim();
+    const start = Number(segment?.start);
+    const end = Number(segment?.end);
+    const key = `${start}:${end}:${text}`;
+    if (seen.has(key) || !/[\p{L}\p{N}]/u.test(text) || !Number.isFinite(start) || !Number.isFinite(end)) return false;
+    seen.add(key);
+    return ranges.some((range) => Math.min(range.end, end) - Math.max(range.start, start) >= .08);
+  });
+  if (matching.length) {
+    return { available: true, count: matching.length, message: `所选片段检测到 ${matching.length} 段可转写对白。` };
+  }
+  const speechAnalyzed = Array.isArray(job?.speechAnalysis?.segments)
+    || Boolean(job?.speechAnalysis?.status)
+    || (job?.recognition?.attemptedModalities || []).includes("speech")
+    || (job?.recognition?.completedModalities || []).includes("speech");
+  return {
+    available: false,
+    count: 0,
+    message: speechAnalyzed || transcript.length
+      ? "所选片段没有可转写对白，无需添加字幕。"
+      : "当前检索没有对白转写，无法添加 AI 字幕。",
+  };
+}
+
+function syncContentSearchSubtitleControls(root, job = currentJob) {
+  const input = root?.querySelector("[data-content-subtitle]");
+  const status = root?.querySelector("[data-content-subtitle-status]");
+  const label = input?.closest(".content-subtitle-toggle");
+  if (!input || !status || !label) return;
+  const availability = contentSearchSubtitleAvailability(root, job);
+  input.disabled = !availability.available;
+  if (!availability.available) input.checked = false;
+  label.classList.toggle("unavailable", !availability.available);
+  status.textContent = availability.message;
+  label.title = availability.message;
+}
+
+function chatUiContextEntries() {
+  if (!currentJob) return [];
+  const contentMode = taskModePresentation(currentJob).key === "content_extract";
+  const chatRoot = $("#chatMessages");
+  const contentMatchRefs = contentMode ? contentBasketItems(currentJob).map(({ searchId, matchId }) => ({ searchId, matchId })) : [];
+  const eventGroupIds = [...(chatRoot?.querySelectorAll(".event-group-check:checked") || [])].map((input) => String(input.value));
+  const eventSegmentIds = [...(chatRoot?.querySelectorAll(".rail-segment-check:checked") || [])].map((input) => ({
+    groupId: String(input.dataset.groupId || input.closest("[data-event-group]")?.dataset.eventGroup || ""),
+    segmentId: String(input.value || input.dataset.segmentId || ""),
+  })).filter((item) => item.segmentId);
+  const viewer = {
+    kind: viewerMediaKind,
+    ...(currentCandidate?.index != null ? { candidateIndex: Number(currentCandidate.index) } : {}),
+    ...(currentEventGroup?.id ? { groupId: String(currentEventGroup.id) } : {}),
+    ...(currentEventSegment?.id ? { segmentId: String(currentEventSegment.id) } : {}),
+    ...(currentOutput?.filename ? { outputFilename: String(currentOutput.filename) } : {}),
+  };
+  const viewerLabels = {
+    source: "正在看源视频", candidate: "正在预览高光候选", event: "正在预览事件",
+    segment: "正在预览镜头", output: contentMode ? "正在预览内容视频" : "正在预览成片", content: "正在预览检索片段",
+  };
+  const selection = currentJob.manualSelection || pendingTimelineSelection;
+  return [
+    contentMode ? null : { key: "playhead", label: `播放头 ${formatTime(timelineAbsoluteTime())}`, value: { playheadSeconds: timelineAbsoluteTime() } },
+    contentMode ? null : { key: "viewer", label: viewerLabels[viewerMediaKind] || "当前预览对象", value: { viewer } },
+    contentMatchRefs.length ? { key: "contentMatches", label: `待合并片段已有 ${contentMatchRefs.length} 段`, value: { selected: { contentMatchRefs, contentMatchIds: contentMatchRefs.map((item) => item.matchId) } } } : null,
+    eventGroupIds.length ? { key: "eventGroups", label: `已勾选 ${eventGroupIds.length} 个事件`, value: { selected: { eventGroupIds } } } : null,
+    eventSegmentIds.length ? { key: "eventSegments", label: `已勾选 ${eventSegmentIds.length} 个镜头`, value: { selected: { eventSegmentIds } } } : null,
+    selection ? { key: "timelineSelection", label: `时间选区 ${formatTime(selection.start)}–${formatTime(selection.end)}`, value: { timelineSelection: { start: Number(selection.start), end: Number(selection.end) } } } : null,
+    timelineChatSelections.length ? { key: "timelineSelections", label: `待发送 ${timelineChatSelections.length} 个时间段`, value: { timelineSelections: timelineChatSelections.map((item) => ({ ...item })) } } : null,
+    contentMode ? null : { key: "composition", label: outputAssemblyMode === "separate_events" ? "分别导出" : "合成一条", value: { composition: { outputMode: outputAssemblyMode, orderMode: "selection" } } },
+  ].filter(Boolean);
+}
+
+function collectChatUiContext() {
+  const result = {};
+  chatUiContextEntries().forEach((entry) => {
+    if (ignoredChatContextKeys.has(entry.key)) return;
+    Object.entries(entry.value).forEach(([key, value]) => {
+      if (key === "selected") result.selected = { ...(result.selected || {}), ...value };
+      else result[key] = value;
+    });
+  });
+  return result;
+}
+
+function renderChatContextBar() {
+  const bar = $("#chatContextBar");
+  if (!bar) return;
+  const entries = chatUiContextEntries().filter((entry) => !ignoredChatContextKeys.has(entry.key));
+  bar.classList.toggle("hidden", !currentJob || !entries.length);
+  bar.innerHTML = entries.length
+    ? `<small>本次会附带</small>${entries.map((entry) => `<button type="button" data-remove-chat-context="${escapeHtml(entry.key)}" title="不在下一条消息中附带这项">${escapeHtml(entry.label)}<span aria-hidden="true">×</span></button>`).join("")}`
+    : "";
+  bar.querySelectorAll("[data-remove-chat-context]").forEach((button) => button.addEventListener("click", () => {
+    ignoredChatContextKeys.add(button.dataset.removeChatContext);
+    renderChatContextBar();
+  }));
+}
+
+function editProposalMarkup(proposal) {
+  if (!proposal || proposal.status !== "pending") return "";
+  const preview = proposal.preview || {};
+  const before = Number(preview.durationBefore || 0);
+  const after = Number(preview.durationAfter || 0);
+  const durationFact = before || after
+    ? `<span>预计时长 ${before.toFixed(1)}s → ${after.toFixed(1)}s</span>`
+    : "";
+  const changes = (proposal.changes || []).slice(0, 8);
+  return `<article class="chat-message assistant edit-proposal-message"><span class="avatar">AI</span><section class="edit-proposal-card" data-edit-proposal="${escapeHtml(proposal.id || "")}">
+    <header><div><small>AI 剪辑提案 · 尚未应用</small><strong>${escapeHtml(proposal.title || "剪辑修改")}</strong></div><b>预览</b></header>
+    <p>${escapeHtml(proposal.summary || "请检查这些修改，确认后才会写入正式时间轴。")}</p>
+    <div class="edit-proposal-facts">${durationFact}<span>${changes.length} 项修改</span></div>
+    ${changes.length ? `<ul>${changes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+    <p class="edit-proposal-warning">虚线范围是临时时间线预览；取消不会改变现有剪辑。</p>
+    <footer><button type="button" class="primary" data-apply-edit-proposal>确认应用</button><button type="button" data-modify-edit-proposal>继续修改</button><button type="button" data-cancel-edit-proposal>取消提案</button></footer>
+  </section></article>`;
+}
+
+async function resolveEditProposal(action) {
+  const proposal = currentJob?.pendingEditProposal;
+  if (!proposal?.id || actionBusy) return;
+  if (action === "modify") {
+    chatInput.value = `修改这个提案：`;
+    chatInput.focus();
+    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+    return;
+  }
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const endpoint = `/api/jobs/${encodeURIComponent(actionToken.jobId)}/edit-proposals/${encodeURIComponent(proposal.id)}${action === "apply" ? "/apply" : ""}`;
+    const { job } = await api(endpoint, { method: action === "apply" ? "POST" : "DELETE" });
+    if (!commitJobAction(job, actionToken)) return;
+    if (jobNeedsPolling(job)) pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
 function renderConversation(job) {
   const messagesEl = ensureChatMessages();
   // Scope event binding to the DOM root that was just rendered. Opening a
   // home task can overlap with a conversation refresh; querying the global
   // selector again during that handoff could return null and abort rendering.
   const chatRoot = messagesEl;
+  const hadConversation = Boolean(chatRoot.querySelector("[data-conversation-key], .chat-message, .content-search-review"));
+  const distanceFromBottom = chatRoot.scrollHeight - chatRoot.scrollTop - chatRoot.clientHeight;
+  const keepPinnedToBottom = !hadConversation || distanceFromBottom < 56;
+  const anchorNode = [...chatRoot.querySelectorAll("[data-conversation-key]")]
+    .find((node) => node.getBoundingClientRect().bottom >= chatRoot.getBoundingClientRect().top + 1);
+  const scrollAnchor = anchorNode
+    ? { key: anchorNode.dataset.conversationKey, offset: anchorNode.getBoundingClientRect().top - chatRoot.getBoundingClientRect().top }
+    : null;
+  const previousScrollTop = chatRoot.scrollTop;
   let stageHost = $("#chatStageHost");
   if (!stageHost) {
     stageHost = document.createElement("div");
@@ -3830,6 +6023,8 @@ function renderConversation(job) {
   // find #jobStatus.
   const preservedAnalysisConsole = document.getElementById("jobStatus");
   const messages = compactConversationMessages(job.messages || []);
+  const assistantRoleLabel = taskModePresentation(job).key === "content_extract" ? "内容探索助手" : "高光发现助手";
+  const contentMode = taskModePresentation(job).key === "content_extract";
   // Older jobs were created before pendingSelectionGroupIds was persisted.
   // Infer the latest manual timeline group from the confirmation notice so a
   // refresh still shows only the clips the user just selected.
@@ -3841,15 +6036,14 @@ function renderConversation(job) {
       ? [String(manualGroups[manualGroups.length - 1].id)]
       : []);
   let eventTimelineSummary = null;
-  let html = messages.map((message) => {
-    const role = message.role === "user" ? "user" : message.kind === "error" ? "error" : "assistant";
-    const repeatLabel = Number(message.repeatCount || 1) > 1 ? `<em class="message-repeat">重复 ${message.repeatCount} 次</em>` : "";
-    return `<article class="chat-message ${role}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small>${role === "user" ? "你" : "高光导演"}${repeatLabel}</small><p>${escapeHtml(message.text)}</p></div></article>`;
-  }).join("");
+  let html = contentMode
+    ? conversationTimelineMarkup(job, messages, assistantRoleLabel)
+    : messages.map((message) => conversationMessageMarkup(message, assistantRoleLabel)).join("");
+  html += editProposalMarkup(job.pendingEditProposal);
   if (job.status === "brief_confirmation") {
     const brief = job.brief || {};
     html += `<article class="chat-message assistant brief-confirmation-message"><span class="avatar">AI</span><div class="brief-wrap"><div class="bubble"><small>高光导演 · 需求简报待确认</small><p>我先把你的要求整理成了下面这份简报。现在还没有开始视觉分析，请先检查并修改；确认后才会调用 VLM。</p></div>${briefEditorMarkup(brief, "chat")}</div></article>`;
-  } else if (job.status === "awaiting_confirmation" && job.eventGroups?.length) {
+  } else if (!contentMode && job.status === "awaiting_confirmation" && job.eventGroups?.length) {
     const pendingSelection = inferredPendingSelectionGroupIds.length > 0;
     const eventGroupsForReview = pendingSelection
       ? job.eventGroups.filter((group) => inferredPendingSelectionGroupIds.includes(String(group.id)))
@@ -3928,21 +6122,26 @@ function renderConversation(job) {
     const facts = autoCompositionVersionFacts(job);
     html += `<article class="chat-message assistant auto-compose-partial-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="auto-compose-partial"><small>AI 自动成片 · 部分完成</small><strong>已生成 ${facts.completed} 个可播放版本</strong><p>其他剪辑版本生成失败，已有成片仍可正常预览和下载。${job.autoComposition.error ? ` 原因：${escapeHtml(job.autoComposition.error)}` : ""}</p></section></div></article>`;
   }
+  if (contentMode && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !contentSearchRecordsForJob(job).length) html += contentOutputResultMarkup(job);
   if (["completed", "awaiting_confirmation"].includes(job.status) && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !autoCompositionComplete) {
     const rerunCount = String(job.request?.count).toLowerCase() === "auto"
       ? (job.confirmedGroupIds?.length || job.recommendedCount || jobOutputCount(job))
       : job.request.count;
     const quickActions = [
-      autoCompositionRunning ? "" : `<button type="button" data-reedit-job>返回事件审核</button>`,
-      job.status === "completed" ? `<button type="button" data-prompt="尝试避开刚才的区间，再生成 ${rerunCount} 条">尝试生成不同片段</button>` : "",
+      autoCompositionRunning || contentMode ? "" : `<button type="button" data-reedit-job>返回事件审核</button>`,
+      job.status === "completed" ? (contentMode
+        ? '<button type="button" data-content-edit-query>修改查找条件</button>'
+        : `<button type="button" data-prompt="尝试避开刚才的区间，再生成 ${rerunCount} 条">尝试生成不同片段</button>`)
+        : "",
     ].filter(Boolean).join("");
     html += quickActions ? `<div class="quick-actions">${quickActions}</div>` : "";
     if (job.status === "completed") {
-      html += `<section class="completed-dialog-actions"><strong>需要调整这条成片？</strong><p>返回事件审核重新选择镜头后，可以生成一个新的成片版本。</p><div><button type="button" data-reedit-job>返回事件审核</button></div></section>`;
+      html += `<section class="completed-dialog-actions"><strong>${contentMode ? "需要调整这条内容视频？" : "需要调整这条成片？"}</strong><p>${contentMode ? "重新选择已检索到的内容片段后，可以生成一个新版本。" : "返回事件审核重新选择镜头后，可以生成一个新的成片版本。"}</p><div><button type="button" data-reedit-job>${contentMode ? "重新选择内容片段" : "返回事件审核"}</button></div></section>`;
     }
   }
   if (autoCompositionComplete && hasGeneratedOutputs) {
     const fallbackAutoMeta = (index, label = "") => {
+      if (/审片优化|review_repair/i.test(String(label))) return { displayName: "AI 审片优化版", sourceLabel: "成片审片", strategyDescription: "观看实际成片后完成局部返修" };
       if (index === 0 || /VLM/i.test(String(label))) return { displayName: "完整事件版", sourceLabel: "视觉推荐", strategyDescription: "保留事件完整过程" };
       if (/情绪/.test(String(label))) return { displayName: "情绪集中版", sourceLabel: "剪辑规划", strategyDescription: "优先保留情绪高点" };
       if (/信息|密度/.test(String(label))) return { displayName: "信息精简版", sourceLabel: "剪辑规划", strategyDescription: "优先保留关键信息" };
@@ -3952,14 +6151,22 @@ function renderConversation(job) {
       const raw = typeof item === "string" ? fallbackAutoMeta(index, item) : item;
       return { ...fallbackAutoMeta(index, raw?.label || raw?.displayName || ""), ...(raw || {}) };
     });
-    const generatedVersions = jobOutputVersions(job)
-      .filter((version) => (version.outputs || []).length)
+    const automaticKeys = new Set(["vlm", "narrative", "emotion", "information", "review_repair"]);
+    const allGeneratedVersions = jobOutputVersions(job).filter((version) => (version.outputs || []).length);
+    const automaticGeneratedVersions = allGeneratedVersions.filter((version) =>
+      version.previewOnly || automaticKeys.has(String(version.strategyKey || ""))
+    );
+    const generatedVersions = (automaticGeneratedVersions.length ? automaticGeneratedVersions : allGeneratedVersions)
       .sort((left, right) => Number(left.number || 0) - Number(right.number || 0));
     const versionButtons = autoVersions.map((meta, index) => {
       const version = generatedVersions[index];
       const output = version?.outputs?.[0];
+      const review = version?.reviewReport || output?.reviewReport || {};
+      const reviewFact = review.status === "completed"
+        ? ` · 审片 ${Number(review.overallScore || 0).toFixed(0)} 分${review.reviewDepth === "screened" ? "（快速筛查）" : ""}`
+        : "";
       return output
-        ? `<button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename)}" data-auto-version="${escapeHtml(version.id || `v${index + 1}`)}"><span>${escapeHtml(meta.displayName)} <em>${escapeHtml(meta.sourceLabel)}</em></span><small>${escapeHtml(meta.strategyDescription)} · ${Number(output.duration || 0).toFixed(1)} 秒 · 点击预览</small></button>`
+        ? `<button type="button" class="auto-version-button${version.recommended ? " recommended" : ""}" data-auto-output="${escapeHtml(output.filename)}" data-auto-version="${escapeHtml(version.id || `v${index + 1}`)}"><span>${escapeHtml(meta.displayName)} <em>${escapeHtml(meta.sourceLabel)}</em>${version.recommended ? " <b>AI 推荐</b>" : ""}</span><small>${escapeHtml(version.recommendationReason || meta.strategyDescription)} · ${Number(output.duration || 0).toFixed(1)} 秒${reviewFact} · 点击预览</small></button>`
         : `<span class="auto-version-unavailable">${escapeHtml(meta.displayName)} <em>${escapeHtml(meta.sourceLabel)}</em></span>`;
     });
     generatedVersions.slice(autoVersions.length).forEach((version) => {
@@ -3976,18 +6183,23 @@ function renderConversation(job) {
       : duplicatePlansSkipped
         ? `AI 原计划生成 ${generatedVersions.length + duplicatePlansSkipped} 个版本，其中 ${duplicatePlansSkipped} 个与已有成片重复，已自动合并；当前保留 ${generatedVersions.length} 个不同版本。`
       : "";
+    const previewVersionCount = generatedVersions.filter((version) => version.previewOnly || version.outputs?.some((output) => output.previewOnly)).length;
     const resultTitle = hasUnrenderedTimeline
-      ? `已有成片 · ${generatedVersions.length} 个版本`
-      : `成片已生成 · ${generatedVersions.length} 个不同版本`;
+      ? `已有 AI 样片 · ${generatedVersions.length} 个版本`
+      : previewVersionCount
+        ? `AI 可审核样片 · ${previewVersionCount} 个不同版本`
+        : `成片已生成 · ${generatedVersions.length} 个不同版本`;
     const resultDescription = hasUnrenderedTimeline
       ? (eventTimelineSummary?.timelineEditedSinceOutput
         ? `这些版本基于修改前的时间轴，不包含当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒调整；请先生成当前时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""}`
         : `这些版本均不对应上方 ${eventTimelineSummary.allocated.toFixed(1)} 秒推荐时间轴；请先生成推荐时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""}`)
-      : `${dedupeDescription || "AI 已根据画面、声音、对白和情绪线索生成多种剪辑版本。"} 点击版本即可预览比较。`;
+      : `${dedupeDescription || "AI 已根据画面、声音、对白和情绪线索生成多种剪辑版本。"} 点击版本预览比较；审核样片可直接下载，选定后也可按源分辨率导出高清成片。`;
     html += `<section class="auto-compose-result-card${hasUnrenderedTimeline ? " timeline-stale" : ""}"><strong>${resultTitle}</strong><p>${resultDescription}</p><div>${versionButtons.join("")}</div></section>`;
   }
   if (["cancelled", "failed"].includes(job.status)) {
-    html += `<section class="retry-analysis-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.52" data-beam-duration="2.5" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="14" data-beam-radius="10"><strong>${job.status === "cancelled" ? "任务已取消" : "任务分析失败"}</strong><p>可以沿用当前已确认的剪辑要求重新分析，不需要重新上传视频。</p><button type="button" class="reanalyze-job">↻ 重新分析</button></section>`;
+    const sourceIncomplete = job.failureCode === "source_incomplete";
+    const contentFailure = taskModePresentation(job).key === "content_extract";
+    html += `<section class="retry-analysis-card" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.52" data-beam-duration="2.5" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="14" data-beam-radius="10"><strong>${sourceIncomplete ? "源视频文件不完整" : job.status === "cancelled" ? "任务已取消" : contentFailure ? "内容检索未完成" : "任务分析失败"}</strong><p>${sourceIncomplete ? "当前文件无法覆盖完整时间轴，不能继续复用。请返回全部任务并重新上传完整的原始视频。" : contentFailure ? "将保留当前检索条件、人物选择和可复用索引，从内容检索阶段继续。" : "可以沿用当前已确认的剪辑要求重新分析，不需要重新上传视频。"}</p><button type="button" class="${sourceIncomplete ? "return-home-from-failure" : "reanalyze-job"}">${sourceIncomplete ? "返回并重新上传" : contentFailure ? "↻ 恢复内容检索" : "↻ 重新分析"}</button></section>`;
   }
   if (analysisConsoleVisible(job)) html += inlineAnalysisProgressMarkup(job);
   // The inline progress card already communicates the current stage while a
@@ -4008,7 +6220,290 @@ function renderConversation(job) {
   syncOutputVersionBeams(job, messagesEl);
   syncBorderBeams(messagesEl);
   messagesEl.querySelector("[data-inline-cancel]")?.addEventListener("click", cancelCurrentJob);
+  messagesEl.querySelector("[data-apply-edit-proposal]")?.addEventListener("click", () => resolveEditProposal("apply"));
+  messagesEl.querySelector("[data-modify-edit-proposal]")?.addEventListener("click", () => resolveEditProposal("modify"));
+  messagesEl.querySelector("[data-cancel-edit-proposal]")?.addEventListener("click", () => resolveEditProposal("cancel"));
   updateInlineAnalysisProgress(job);
+  messagesEl.querySelectorAll(".content-search-review").forEach((contentSearchRoot) => {
+    const scopedJob = contentSearchJobForRoot(contentSearchRoot, job);
+    const searchId = String(scopedJob.contentSearch?.id || "");
+    const findMatch = (id) => (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === String(id));
+    contentSearchRoot.querySelectorAll("[data-content-preview]").forEach((button) => button.addEventListener("click", async () => {
+      const detailed = await ensureContentSearchDetails(searchId, job).catch((error) => {
+        showToast(`读取历史检索详情失败：${error.message}`);
+        return scopedJob.contentSearch;
+      });
+      previewContentMatch((detailed?.candidates || []).find((item) => String(item.id) === String(button.dataset.contentPreview)));
+    }));
+    contentSearchRoot.querySelectorAll("[data-content-evidence]").forEach((button) => {
+      const openEvidence = async (event) => {
+        if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const detailed = await ensureContentSearchDetails(searchId, job).catch((error) => {
+          showToast(`读取历史检索详情失败：${error.message}`);
+          return scopedJob.contentSearch;
+        });
+        previewContentMatch((detailed?.candidates || []).find((item) => String(item.id) === String(button.dataset.contentEvidence)), { autoplay: false });
+      };
+      button.addEventListener("click", openEvidence);
+      button.addEventListener("keydown", openEvidence);
+    });
+    wireContentBoundaryEditors(contentSearchRoot, scopedJob);
+    contentSearchRoot.querySelector("[data-content-output-mode]")?.addEventListener("change", () => {
+      syncContentSearchOutputControls(contentSearchRoot);
+      scheduleContentReviewDraftSave(contentSearchRoot, scopedJob);
+    });
+    const questionSourceSelect = contentSearchRoot.querySelector("[data-content-question-source]");
+    const applyQuestionSourceFilter = () => {
+      const source = String(questionSourceSelect?.value || "all");
+      contentSearchFilterState.set(`${job?.id || ""}:${searchId}`, { questionSource: source });
+      contentSearchRoot.querySelectorAll("[data-content-match-row]").forEach((row) => {
+        row.hidden = source !== "all" && String(row.dataset.contentQuestionSource || "other") !== source;
+      });
+    };
+    questionSourceSelect?.addEventListener("change", applyQuestionSourceFilter);
+    if (questionSourceSelect) applyQuestionSourceFilter();
+    contentSearchRoot.querySelector("[data-content-dialogue-mode]")?.addEventListener("change", async (event) => {
+      const select = event.currentTarget;
+      const previous = select.dataset.previousValue || select.value;
+      select.dataset.previousValue = select.value;
+      select.disabled = true;
+      try {
+        const response = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/dialogue-mode`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ searchId, dialogueMode: select.value }),
+        });
+        if (response?.job) {
+          currentJob = response.job;
+          renderJob(currentJob);
+        }
+      } catch (error) {
+        select.value = previous;
+        showToast(`问答模式切换失败：${error.message}`);
+      } finally {
+        select.disabled = false;
+      }
+    });
+    contentSearchRoot.querySelector("[data-content-order-mode]")?.addEventListener("change", () => {
+      syncContentSearchOutputControls(contentSearchRoot);
+      scheduleContentReviewDraftSave(contentSearchRoot, scopedJob);
+    });
+    contentSearchRoot.querySelector("[data-content-subtitle]")?.addEventListener("change", () => {
+      syncContentSearchSubtitleControls(contentSearchRoot, scopedJob);
+      scheduleContentReviewDraftSave(contentSearchRoot, scopedJob);
+    });
+    contentSearchRoot.querySelectorAll("[data-content-match]").forEach((input) => input.addEventListener("change", async () => {
+      if (input.dataset.contentReviewStatus === "pending") {
+        if (!input.checked) return;
+        input.disabled = true;
+        const saved = await sendContentSearchFeedback("review_keep", input.value, findMatch(input.value), { skipConfirmation: true, searchId });
+        if (!saved && input.isConnected) {
+          input.checked = false;
+          input.disabled = false;
+        }
+        if (saved) syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
+        return;
+      }
+      syncContentSearchSubtitleControls(contentSearchRoot, scopedJob);
+      syncContentSearchSelectionSummary(contentSearchRoot, scopedJob);
+      syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
+      renderChatContextBar();
+      if (String(searchId) === String(currentJob?.contentSearch?.id || "")) scheduleContentReviewDraftSave(contentSearchRoot, scopedJob);
+    }));
+    syncContentSearchOutputControls(contentSearchRoot);
+    syncContentSearchSubtitleControls(contentSearchRoot, scopedJob);
+    syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
+    contentSearchRoot.querySelectorAll("[data-content-select]").forEach((button) => button.addEventListener("click", async () => {
+      if (button.dataset.contentSelect === "toggle") {
+        const next = button.getAttribute("aria-pressed") !== "true";
+        const inputs = [...contentSearchRoot.querySelectorAll("[data-content-match]")]
+          .filter((input) => !input.disabled);
+        inputs.forEach((input) => { input.checked = next; });
+        button.setAttribute("aria-pressed", String(next));
+        button.textContent = next ? "取消全部" : "选择全部";
+        if (next) {
+          button.disabled = true;
+          try {
+            const response = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/bulk-keep`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ searchId, matchIds: inputs.map((input) => input.value) }),
+            });
+            const liveSearch = contentSearchForRoot(contentSearchRoot, currentJob);
+            scopedJob.contentSearch = liveSearch;
+            const keptIds = new Set(inputs.map((input) => String(input.value)));
+            (liveSearch.candidates || []).forEach((match) => {
+              if (!keptIds.has(String(match.id))) return;
+              match.reviewStatus = "kept";
+              match.requiresReview = false;
+              match.selected = true;
+            });
+            inputs.forEach((input) => {
+              if (input.dataset.contentReviewStatus !== "pending") return;
+              input.dataset.contentReviewStatus = "kept";
+              input.setAttribute("aria-label", `选择${input.getAttribute("aria-label")?.replace(/^勾选并保留/, "") || "片段"}`);
+              const row = input.closest("[data-content-match-row]");
+              row?.classList.remove("review-pending");
+              row?.querySelector(".content-match-title label i")?.remove();
+            });
+            syncContentSearchSubtitleControls(contentSearchRoot, scopedJob);
+            syncContentSearchSelectionSummary(contentSearchRoot, scopedJob);
+            syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
+            renderChatContextBar();
+          } catch (error) {
+            inputs.forEach((input) => { input.checked = false; });
+            button.setAttribute("aria-pressed", "false");
+            button.textContent = "选择全部";
+            showToast(`批量选择失败：${error.message || "服务暂时不可用"}`);
+          } finally {
+            if (button.isConnected) button.disabled = false;
+          }
+          return;
+        }
+      }
+      syncContentSearchSubtitleControls(contentSearchRoot, scopedJob);
+      syncContentSearchSelectionSummary(contentSearchRoot, scopedJob);
+      syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
+      renderChatContextBar();
+      if (String(searchId) === String(currentJob?.contentSearch?.id || "")) scheduleContentReviewDraftSave(contentSearchRoot, scopedJob);
+    }));
+    contentSearchRoot.querySelector("[data-content-show-more]")?.addEventListener("click", (event) => {
+      const hidden = [...contentSearchRoot.querySelectorAll(".content-candidate-overflow.hidden")];
+      hidden.slice(0, 50).forEach((row) => row.classList.remove("hidden"));
+      if (hidden.length <= 50) event.currentTarget.remove();
+    });
+    contentSearchRoot.querySelector("[data-content-show-possible]")?.addEventListener("click", (event) => {
+      const button = event.currentTarget;
+      const expanded = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(expanded));
+      contentSearchRoot.querySelectorAll(".content-candidate-possible").forEach((row) => {
+        row.classList.toggle("hidden", !expanded);
+      });
+      const label = button.querySelector("span");
+      if (label) label.textContent = expanded ? "收起可能相关" : "可能相关";
+    });
+    contentSearchRoot.querySelector("[data-content-basket-add]")?.addEventListener("click", () => {
+      addSelectedContentToBasket(contentSearchRoot, currentJob, searchId, findMatch);
+    });
+    contentSearchRoot.querySelector("[data-confirm-content]")?.addEventListener("click", () => confirmContentSearch(contentSearchRoot, scopedJob));
+  });
+  messagesEl.querySelectorAll("[data-content-feedback]").forEach((button) => button.addEventListener("click", () => {
+    const matchId = button.dataset.contentMatchId || null;
+    const root = button.closest(".content-search-review");
+    const scopedJob = contentSearchJobForRoot(root, job);
+    const match = scopedJob.contentSearch?.candidates?.find((item) => String(item.id) === String(matchId));
+    sendContentSearchFeedback(button.dataset.contentFeedback, matchId, match, { searchId: scopedJob.contentSearch?.id });
+  }));
+  messagesEl.querySelectorAll("[data-content-history-open]").forEach((button) => button.addEventListener("click", async () => {
+    const searchId = String(button.dataset.contentHistoryOpen || "");
+    if (!searchId) return;
+    button.disabled = true;
+    try {
+      const detail = await ensureContentSearchDetails(searchId, job);
+      contentSearchDetailCache.set(`${job.id}:${searchId}`, { ...detail, candidateDetailsLoaded: true });
+      expandedContentSearchIds.add(searchId);
+      renderConversation(currentJob || job);
+    } catch (error) {
+      button.disabled = false;
+      showToast(`读取历史检索详情失败：${error.message}`);
+    }
+  }));
+  messagesEl.querySelectorAll("[data-content-search-history-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const card = button.closest(".content-search-review");
+    const searchId = String(card?.dataset?.contentSearchId || "");
+    if (!searchId) return;
+    expandedContentSearchIds.delete(searchId);
+    renderConversation(currentJob || job);
+  }));
+  messagesEl.querySelectorAll("[data-content-search-restore]").forEach((button) => button.addEventListener("click", () => restoreContentSearch(button.dataset.contentSearchRestore)));
+  messagesEl.querySelectorAll("[data-person-label]").forEach((button) => button.addEventListener("click", () => {
+    updateContentPersonLabel(button.dataset.personLabel, button.dataset.personCurrentLabel || "");
+  }));
+  messagesEl.querySelectorAll("[data-person-target]").forEach((input) => input.addEventListener("change", () => {
+    syncContentPersonTargetControls(input.closest("[data-person-target-panel]"));
+  }));
+  messagesEl.querySelectorAll("[data-person-match-mode]").forEach((input) => input.addEventListener("change", () => {
+    syncContentPersonTargetControls(input.closest("[data-person-target-panel]"));
+  }));
+  messagesEl.querySelector("[data-person-target-confirm]")?.addEventListener("click", (event) => {
+    const panel = event.currentTarget.closest("[data-person-target-panel]");
+    const personIds = [...panel.querySelectorAll("[data-person-target]:checked")].map((input) => input.value);
+    const matchMode = panel.querySelector("[data-person-match-mode]:checked")?.value || (personIds.length === 1 ? "any" : "");
+    if (!personIds.length) return void showToast("请至少选择一个人物");
+    if (!matchMode) return void showToast("请选择多人匹配方式");
+    selectContentPersonTarget(personIds, matchMode, event.currentTarget);
+  });
+  messagesEl.querySelectorAll("[data-person-target-panel]").forEach((panel) => syncContentPersonTargetControls(panel, { initial: true }));
+  messagesEl.querySelectorAll("[data-person-history-target]").forEach((button) => button.addEventListener("click", () => {
+    const personIds = String(button.dataset.personHistoryTarget || "").split(",").filter(Boolean);
+    selectContentPersonTarget(personIds, button.dataset.personHistoryMode || "any", button);
+  }));
+  messagesEl.querySelectorAll("[data-person-preview]").forEach((button) => button.addEventListener("click", () => {
+    const person = job.contentIndex?.persons?.find((item) => String(item.id) === String(button.dataset.personPreview));
+    const time = Number(button.dataset.personPreviewTime || person?.representativeTime || 0);
+    showSource({ autoplay: false });
+    viewerMediaKind = "source";
+    seekSourceTime(time);
+    showToast(`已定位到${person?.label || person?.defaultLabel || "人物"}的代表画面`);
+  }));
+  messagesEl.querySelectorAll(".content-person-preview img").forEach((image) => image.addEventListener("error", () => {
+    image.closest(".content-person-preview")?.classList.add("thumbnail-unavailable");
+    image.remove();
+  }, { once: true }));
+  messagesEl.querySelectorAll("[data-content-evidence-choice]").forEach((button) => button.addEventListener("click", () => {
+    const instruction = String(button.dataset.contentInstruction || job.contentSearch?.instruction || job.request?.contentInstruction || "继续当前检索");
+    const capabilities = String(button.dataset.contentCapabilities || "").split(",").filter(Boolean);
+    sendChat(instruction, {
+      evidenceMode: button.dataset.contentEvidenceMode || button.dataset.contentEvidenceChoice,
+      allowedCapabilities: capabilities,
+    });
+  }));
+  messagesEl.querySelectorAll("[data-content-speaker-preview]").forEach((button) => button.addEventListener("click", () => {
+    showToast(`正在预览 ${button.dataset.contentPreviewSpeaker || "Speaker 候选"}`);
+    previewContentMatch({
+      id: button.dataset.contentSpeakerPreview,
+      title: button.dataset.contentPreviewSpeaker || "Speaker 候选",
+      start: Number(button.dataset.contentPreviewStart || 0),
+      end: Number(button.dataset.contentPreviewEnd || button.dataset.contentPreviewStart || 0),
+      evidenceType: "speech",
+    });
+  }));
+  messagesEl.querySelectorAll("[data-content-speaker-confirm]").forEach((button) => button.addEventListener("click", () => {
+    confirmContentPersonSpeaker(button.dataset.personId, button.dataset.contentSpeakerConfirm, button);
+  }));
+  messagesEl.querySelectorAll("[data-content-expansion]").forEach((button) => button.addEventListener("click", () => {
+    const option = job.contentSearch?.expansionOptions?.find((item) => String(item.id) === String(button.dataset.contentExpansion));
+    if (!option) return;
+    const instruction = String(job.contentSearch?.instruction || job.request?.contentInstruction || "继续当前检索");
+    const currentCapabilities = job.contentSearch?.executionPlan?.allowedCapabilities || job.request?.contentAllowedCapabilities || [];
+    const capabilities = [...new Set([...currentCapabilities, ...(option.addCapabilities || [])])];
+    const payload = {
+      evidenceMode: capabilities.length > 1 ? "mixed" : (job.contentSearch?.executionPlan?.evidenceMode || job.request?.contentEvidenceMode),
+      allowedCapabilities: capabilities,
+    };
+    if (option.scopeKind === "all") Object.assign(payload, {
+      searchScopeKind: "all", searchScopeStart: 0,
+      searchScopeEnd: Number(job.videoInfo?.duration || 0) || null,
+    });
+    sendChat(instruction, payload);
+  }));
+  messagesEl.querySelector("[data-content-expand]")?.addEventListener("click", () => {
+    const instruction = String(job.contentSearch?.instruction || job.request?.contentInstruction || "重新查找相关内容");
+    sendChat(instruction, {
+      searchScopeKind: "all", searchScopeStart: 0,
+      searchScopeEnd: Number(job.videoInfo?.duration || 0) || null,
+      evidenceMode: job.contentSearch?.executionPlan?.evidenceMode || job.request?.contentEvidenceMode,
+      allowedCapabilities: job.contentSearch?.executionPlan?.allowedCapabilities || job.request?.contentAllowedCapabilities,
+    });
+  });
+  messagesEl.querySelector("[data-content-continue]")?.addEventListener("click", () => {
+    sendChat(String(job.contentSearch?.instruction || job.request?.contentInstruction || "继续当前检索"), {
+      evidenceMode: job.contentSearch?.executionPlan?.evidenceMode || job.request?.contentEvidenceMode,
+      allowedCapabilities: job.contentSearch?.executionPlan?.allowedCapabilities || job.request?.contentAllowedCapabilities,
+    });
+  });
   messagesEl.querySelectorAll("[data-auto-output]").forEach((button) => button.addEventListener("click", () => {
     const filename = button.dataset.autoOutput;
     if (!filename) return;
@@ -4075,6 +6570,11 @@ function renderConversation(job) {
   // frame after the conversation render.
   requestAnimationFrame(() => syncThinkingOrbs(chatRoot));
   chatRoot.querySelectorAll("[data-prompt]").forEach((button) => button.addEventListener("click", () => sendChat(button.dataset.prompt)));
+  chatRoot.querySelectorAll("[data-content-edit-query]").forEach((button) => button.addEventListener("click", () => {
+    chatInput.value = "";
+    chatInput.placeholder = "输入新的查找条件，例如：找到蓝色衣服的人说话的片段";
+    chatInput.focus();
+  }));
   chatRoot.querySelectorAll("[data-candidate-sort]").forEach((button) => button.addEventListener("click", () => {
     candidateReviewSort = button.dataset.candidateSort || "score";
     renderConversation(currentJob);
@@ -4130,7 +6630,7 @@ function renderConversation(job) {
       segmentRow.querySelector(".move-segment-group")?.addEventListener("click", () => moveEventSegment(group, segment));
     });
   });
-  chatRoot.querySelectorAll(".event-group-check").forEach((input) => input.addEventListener("change", () => { recordEventGroupSelection(input.value, input.checked); updateReviewSelectionSummary(chatRoot); }));
+  chatRoot.querySelectorAll(".event-group-check").forEach((input) => input.addEventListener("change", () => { recordEventGroupSelection(input.value, input.checked); updateReviewSelectionSummary(chatRoot); renderChatContextBar(); }));
   updateReviewSelectionSummary(chatRoot);
   chatRoot.querySelector(".confirm-selected")?.addEventListener("click", () => {
     const indices = [...chatRoot.querySelectorAll(".candidate-list input:checked")].map((input) => Number(input.value));
@@ -4159,7 +6659,18 @@ function renderConversation(job) {
     else if (/移动到第\s*[一二两三四五六七八\d]+\s*条/.test(action)) sendChat(`把第 ${index + 1} 条${action}`);
     else window.alert("支持：删除、复制、拆分、移动到第 N 条；合并两个候选可直接在对话中输入。 ");
   }));
-  chatRoot.scrollTop = chatRoot.scrollHeight;
+  if (keepPinnedToBottom) {
+    chatRoot.scrollTop = chatRoot.scrollHeight;
+  } else if (scrollAnchor) {
+    const restored = [...chatRoot.querySelectorAll("[data-conversation-key]")]
+      .find((node) => node.dataset.conversationKey === scrollAnchor.key);
+    if (restored) chatRoot.scrollTop += restored.getBoundingClientRect().top - chatRoot.getBoundingClientRect().top - scrollAnchor.offset;
+    else chatRoot.scrollTop = Math.min(previousScrollTop, Math.max(0, chatRoot.scrollHeight - chatRoot.clientHeight));
+  } else {
+    chatRoot.scrollTop = Math.min(previousScrollTop, Math.max(0, chatRoot.scrollHeight - chatRoot.clientHeight));
+  }
+  renderChatContextBar();
+  renderContentSelectionBasket(job);
 }
 
 async function reanalyzeJob(job) {
@@ -4222,13 +6733,17 @@ function renderEvidencePlaceholder({ time, title, reason } = {}) {
   }
   if ($("#clipEvidenceMeta")) $("#clipEvidenceMeta").innerHTML = "";
   if ($("#clipEvidence")) $("#clipEvidence").innerHTML = "";
+  if ($("#outputExplanation")) {
+    $("#outputExplanation").innerHTML = "";
+    $("#outputExplanation").classList.add("hidden");
+  }
   $("#addToChatButton")?.classList.add("hidden");
   $("#keepButton")?.classList.add("hidden");
   $("#replaceButton")?.classList.add("hidden");
   syncEvidencePlacement();
 }
 
-function showSource() {
+function showSource({ autoplay = true } = {}) {
   if (!currentJob) return;
   sourcePreviewRetryToken = 0;
   candidatePreviewToken += 1;
@@ -4247,7 +6762,7 @@ function showSource() {
     showPlayerNotice("当前任务暂时没有可用的源视频地址");
   } else {
     setMainVideoSource(sourceUrl);
-    requestMainVideoAutoplay();
+    if (autoplay) requestMainVideoAutoplay();
   }
   beginSourcePreviewPolling();
   $("#viewerBadge").textContent = "源视频";
@@ -4255,6 +6770,8 @@ function showSource() {
   $("#reviewKicker").textContent = "SOURCE VIDEO";
   $("#reviewTitle").textContent = currentJob.filename;
   $("#downloadButton")?.classList.add("hidden");
+  $("#finalizePreviewButton")?.classList.add("hidden");
+  syncOneOffFinalizeAction(currentJob);
   $("#subtitleButton")?.classList.add("hidden");
   $("#keepButton")?.classList.add("hidden");
   $("#replaceButton")?.classList.add("hidden");
@@ -4284,6 +6801,21 @@ function jobOutputCount(job = currentJob) {
 }
 
 function autoVersionPresentation(job, version) {
+  if (version?.displayName) {
+    return {
+      displayName: version.displayName,
+      sourceLabel: version.sourceLabel || (version.masterReady ? "高清成片" : "AI 样片"),
+      strategyDescription: version.strategyDescription || "保留该版本已确认的剪辑方案",
+    };
+  }
+  const legacyFormalTitle = String(version?.outputs?.[0]?.title || "");
+  if (/正式导出/.test(legacyFormalTitle)) {
+    return {
+      displayName: legacyFormalTitle.replace(/\s*[·｜|]\s*正式导出.*$/, "").trim() || "高清成片",
+      sourceLabel: "高清导出",
+      strategyDescription: "按已确认样片的镜头与顺序进行高清渲染",
+    };
+  }
   const index = Math.max(0, Number(version?.number || 1) - 1);
   const automaticVersions = Array.isArray(job?.autoComposition?.versions) ? job.autoComposition.versions : [];
   const raw = automaticVersions[index];
@@ -4426,10 +6958,85 @@ function renderClipTranscript(item, kind = "candidate") {
   }));
 }
 
+function fallbackOutputEditingExplanation(item = {}, version = null) {
+  const segments = Array.isArray(item.segments) ? item.segments : [];
+  const target = Number(item.targetSeconds);
+  const actual = Number(item.duration || item.effectiveDuration || 0);
+  const sourceOrdered = segments.every((segment, index) => !index || Number(segments[index - 1].start || 0) <= Number(segment.start || 0));
+  const storyPath = [...new Set(segments.map((segment) => segment.storyFunction || segment.role || "精彩镜头"))];
+  const review = version?.reviewReport || item.reviewReport || {};
+  const quality = item.qualityReport || {};
+  return {
+    title: "为什么这样剪",
+    summary: item.editorialNarrative || item.reason || `本版由 ${segments.length} 个不重复镜头组成，优先保证事件和表达完整。`,
+    strategy: {
+      name: item.displayName || version?.displayName || item.title || "高光成片",
+      description: item.strategyDescription || version?.strategyDescription || "保留真实精彩内容",
+    },
+    intent: { focus: currentJob?.brief?.focus || [], include: currentJob?.brief?.includeRules || [], exclude: currentJob?.brief?.excludeRules || [] },
+    selection: { eventCount: Number(item.eventCount || item.chapterCount || 0), shotCount: segments.length, eventTitles: [], reason: "优先保留与用户重点匹配、且可以形成完整表达的镜头。" },
+    ordering: { label: sourceOrdered ? "按源视频时间顺序" : "按 AI 叙事顺序", reason: sourceOrdered ? "保持原视频的因果与时间关系。" : "依据事件职责和情绪递进重新排列。", storyPath },
+    boundaries: { adjustmentCount: Number(item.boundaryAdjustments?.length || 0), reason: item.boundaryAdjustments?.length ? "已按完整对白、动作或自然停顿校正边界。" : "使用模型精修并经本地验证的自然边界。" },
+    techniques: { summary: "根据镜头内容决定原速、硬切、转场和声音衔接；完整对白与高潮默认保持原速。" },
+    duration: { targetSeconds: Number.isFinite(target) && target > 0 ? target : null, actualSeconds: actual, statusLabel: item.durationStatus === "under_target" ? "短于目标" : item.durationStatus === "over_target" ? "长于目标" : "已进入目标区间", reason: item.durationDeviationReason || "优先保证表达完整。" },
+    omissions: item.eventReductionReason ? [item.eventReductionReason] : ["没有使用重复或低价值拖尾强行凑时长。"],
+    quality: { score: review.overallScore ?? quality.score, summary: review.summary || (quality.passed === false ? "仍有需要复核的项目。" : "已通过剪辑时间线与渲染文件检查。"), recommended: Boolean(version?.recommended), recommendationReason: version?.recommendationReason || "" },
+  };
+}
+
+function renderOutputEditingExplanation(item, version = null) {
+  const root = $("#outputExplanation");
+  if (!root) return;
+  if (!item) {
+    root.innerHTML = "";
+    root.classList.add("hidden");
+    return;
+  }
+  const explanation = item.editingExplanation || fallbackOutputEditingExplanation(item, version);
+  const selection = explanation.selection || {};
+  const ordering = explanation.ordering || {};
+  const timing = explanation.duration || {};
+  const boundaries = explanation.boundaries || {};
+  const quality = explanation.quality || {};
+  const intent = explanation.intent || {};
+  const eventNames = (selection.eventTitles || []).filter(Boolean);
+  const focus = (intent.focus || []).filter(Boolean);
+  const requirements = [
+    ...(intent.include || []).map((value) => `保留 ${value}`),
+    ...(intent.exclude || []).map((value) => `排除 ${value}`),
+  ];
+  const qualityScore = Number(quality.score);
+  const qualityLabel = Number.isFinite(qualityScore) ? `${Math.round(qualityScore)}/100` : "已检查";
+  const targetLabel = timing.targetSeconds
+    ? `${Number(timing.actualSeconds || 0).toFixed(1)} 秒 / 目标 ${Number(timing.targetSeconds).toFixed(1)} 秒`
+    : `${Number(timing.actualSeconds || 0).toFixed(1)} 秒 / 自动时长`;
+  const omissions = (explanation.omissions || []).filter(Boolean);
+  root.innerHTML = `
+    <header class="output-explanation-head">
+      <div><small>AI EDIT DECISION</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></div>
+      <span>${quality.recommended ? "AI 推荐 · " : ""}依据可追溯</span>
+    </header>
+    <p class="output-explanation-summary">${escapeHtml(explanation.summary || "根据已验证的画面、声音和用户要求生成。")}</p>
+    <div class="output-decision-ledger">
+      <section><small>选片</small><strong>${Number(selection.eventCount || 0)} 个事件 · ${Number(selection.shotCount || 0)} 个镜头</strong><p>${escapeHtml(eventNames.length ? eventNames.slice(0, 3).join("、") : selection.reason || "保留高价值且不重复的镜头")}</p></section>
+      <section><small>顺序</small><strong>${escapeHtml(ordering.label || "按当前剪辑顺序")}</strong><p>${escapeHtml((ordering.storyPath || []).length ? ordering.storyPath.join(" → ") : ordering.reason || "保持叙事关系")}</p></section>
+      <section><small>时长</small><strong>${escapeHtml(targetLabel)}</strong><p>${escapeHtml(`${timing.statusLabel || "已校验"}。${timing.reason || "优先保证表达完整。"}`)}</p></section>
+      <section><small>边界与手法</small><strong>${Number(boundaries.adjustmentCount || 0)} 处安全校正</strong><p>${escapeHtml(explanation.techniques?.summary || boundaries.reason || "使用自然切点")}</p></section>
+    </div>
+    ${(focus.length || requirements.length) ? `<div class="output-intent-line"><small>对应需求</small><span>${[...focus.map((value) => `重点 ${value}`), ...requirements].slice(0, 8).map((value) => `<b>${escapeHtml(value)}</b>`).join("")}</span></div>` : ""}
+    <details class="output-explanation-audit">
+      <summary><span>取舍与质检</span><b>${escapeHtml(qualityLabel)}</b><em>展开查看</em></summary>
+      <div><p>${escapeHtml(quality.recommendationReason || quality.summary || "已完成成片检查。")}</p>${omissions.length ? `<ul>${omissions.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul>` : ""}</div>
+    </details>
+    <p class="output-explanation-footnote">下方逐镜头列表会说明每段的职责与保留原因；点击镜头可直接定位成片，点击“源片段”可回看原视频。</p>`;
+  root.classList.remove("hidden");
+}
+
 function renderClipEvidence(item, kind = "candidate", version = null) {
   const meta = $("#clipEvidenceMeta");
   const list = $("#clipEvidence");
   if (!meta || !list) return;
+  renderOutputEditingExplanation(kind === "output" ? item : null, version);
   renderClipTranscript(item, kind);
   const evidence = item?.audioEvidence || {};
   const chips = [];
@@ -4440,6 +7047,8 @@ function renderClipEvidence(item, kind = "candidate", version = null) {
   (evidence.audioEvents || []).slice(0, 2).forEach((event) => chips.push(`声音 ${event}`));
   if (kind === "candidate" || kind === "event" || kind === "segment") chips.push("尚未写入成片");
   if (kind === "output" && version) chips.push(`版本 V${Number(version.number || 1)}`);
+  if (kind === "output" && item?.sourceDuration) chips.push(`源片段 ${Number(item.sourceDuration).toFixed(1)} 秒 → 成片 ${Number(item.effectiveDuration || item.duration || 0).toFixed(1)} 秒`);
+  if (kind === "output" && item?.cutaways?.length) chips.push(`插入镜头 ${item.cutaways.length} 个`);
   meta.innerHTML = chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join("");
   if ((kind === "event" || kind === "output") && item.segments?.length) {
     const timePrefix = kind === "output" ? "成片 " : "组合 ";
@@ -4447,7 +7056,10 @@ function renderClipEvidence(item, kind = "candidate", version = null) {
     list.innerHTML = schedule.map((entry, index) => {
       const segment = entry.segment;
       const sourceRange = `${formatTime(entry.sourceStart)} → ${formatTime(entry.sourceEnd)}`;
-      return `<li class="evidence-item-row"><button type="button" class="evidence-main-button" data-composed-segment="${index}" data-composed-source-time="${entry.sourceStart}"><span class="evidence-item-index">${String(index + 1).padStart(2, "0")}</span><span class="evidence-item-content"><strong>${escapeHtml(segment.role || "精彩镜头")}</strong><small>${timePrefix}${formatTime(entry.outputStart)} → ${formatTime(entry.outputEnd)}</small></span></button><button type="button" class="clip-source-link" data-source-segment="${index}" data-source-time="${entry.sourceStart}" title="在源视频中查看 ${sourceRange}" aria-label="在源视频中查看${escapeHtml(segment.role || `镜头 ${index + 1}`)}">源片段</button></li>`;
+      const rate = Number(segment.playbackRate || 1);
+      const transition = segment.transitionIn?.type === "fade_black" ? "淡黑" : segment.transitionIn?.type === "dissolve" ? "叠化" : "硬切";
+      const bridge = segment.audioBridge?.type === "j_cut" ? "J-cut" : segment.audioBridge?.type === "l_cut" ? "L-cut" : "同步音画";
+      return `<li class="evidence-item-row"><button type="button" class="evidence-main-button" data-composed-segment="${index}" data-composed-source-time="${entry.sourceStart}"><span class="evidence-item-index">${String(index + 1).padStart(2, "0")}</span><span class="evidence-item-content"><strong>${escapeHtml(segment.storyFunction || segment.role || "精彩镜头")}</strong><small>${timePrefix}${formatTime(entry.outputStart)} → ${formatTime(entry.outputEnd)} · ${rate.toFixed(rate === 1 ? 0 : 2)}× · ${transition} · ${bridge}</small>${segment.reason ? `<em>${escapeHtml(segment.reason)}</em>` : ""}</span></button><button type="button" class="clip-source-link" data-source-segment="${index}" data-source-time="${entry.sourceStart}" title="在源视频中查看 ${sourceRange}" aria-label="在源视频中查看${escapeHtml(segment.role || `镜头 ${index + 1}`)}">源片段</button></li>`;
     }).join("");
   } else {
     list.innerHTML = (item?.evidence || []).map((text, index) => `<li><button type="button" class="evidence-main-button" data-evidence-seek="${Number(item.start) || 0}"><small class="evidence-source-label">画面证据 ${String(index + 1).padStart(2, "0")}</small><span class="evidence-item-copy">${escapeHtml(text)}</span></button></li>`).join("");
@@ -4507,6 +7119,81 @@ function downloadCurrentFragment() {
   downloadVideoAsset(url, `${title}.mp4`);
 }
 
+function oneOffOutputEntries(job = currentJob) {
+  return orderedJobOutputs(job).map(({ item, version }, index) => {
+    const presentation = autoVersionPresentation(job, version);
+    const previewOnly = Boolean(item.previewOnly || version.previewOnly);
+    return {
+      item,
+      version,
+      previewOnly,
+      label: item.displayTitle || presentation.displayName || item.title || `成片 ${index + 1}`,
+    };
+  });
+}
+
+function syncOneOffFinalizeAction(job = currentJob) {
+  const button = $("#finalizeOneOffButton");
+  if (!button) return;
+  const entries = job ? oneOffOutputEntries(job) : [];
+  const visible = job?.storageMode === "one_off" && entries.length > 0 && !isActiveJobStatus(job.status);
+  button.classList.toggle("hidden", !visible);
+  if (visible) {
+    const formalCount = entries.filter((entry) => !entry.previewOnly).length;
+    button.textContent = formalCount ? "保存成片并清理素材" : "成片需先导出高清";
+    button.title = formalCount ? "选择要保存的正式成片，然后清理一次性工程" : "审核样片不能作为最终文件，请先导出高清成片";
+    button.onclick = finalizeOneOffTask;
+  } else {
+    button.onclick = null;
+  }
+}
+
+async function finalizeOneOffTask() {
+  if (!currentJob || currentJob.storageMode !== "one_off" || actionBusy) return;
+  const entries = oneOffOutputEntries();
+  if (!entries.length) return void showToast("当前还没有可保留的成片");
+  const currentFilename = String(currentOutput?.filename || "");
+  const formalEntries = entries.filter((entry) => !entry.previewOnly);
+  const defaultFilename = formalEntries.some((entry) => entry.item.filename === currentFilename)
+    ? currentFilename
+    : String(formalEntries[0]?.item.filename || "");
+  const confirmation = await requestActionConfirmation({
+    title: "保存正式成片并清理一次性任务",
+    summary: "勾选要保存的高清 MP4。成片副本保存成功后，源视频、时间线、分析结果和其他输出将被删除。",
+    details: ["保存的 MP4 不依赖原工程", "字幕草稿不会单独保存", "清理后任务无法继续编辑"],
+    warning: formalEntries.length ? "这是不可恢复的工程清理操作。" : "当前只有审核样片，请先导出高清成片。",
+    confirmLabel: "保存并清理",
+    selectionItems: entries.map((entry) => ({
+      value: entry.item.filename,
+      label: entry.label,
+      meta: entry.previewOnly
+        ? "审核样片不可保留 · 请先选择该版本并导出高清成片"
+        : `${Number(entry.item.duration || 0).toFixed(1)} 秒 · 高清 MP4`,
+      disabled: entry.previewOnly,
+      checked: entry.item.filename === defaultFilename,
+    })),
+  });
+  if (!confirmation?.confirmed || !confirmation.selectedValues?.length) return;
+  const jobId = String(currentJob.id);
+  actionBusy = true;
+  syncOneOffFinalizeAction();
+  try {
+    const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/finalize-one-off`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: confirmation.selectedValues }),
+    });
+    resetWorkspace();
+    await loadHomeTasks();
+    showToast(`已保存 ${result.keptOutputs?.length || confirmation.selectedValues.length} 条正式成片，并清理一次性工程`, "success");
+  } catch (error) {
+    window.alert(error.message || "一次性任务清理失败");
+  } finally {
+    actionBusy = false;
+    syncOneOffFinalizeAction();
+  }
+}
+
 function selectOutput(filename, autoplay = false, seekTime = null) {
   if (!currentJob) return;
   const located = locateJobOutput(filename);
@@ -4519,6 +7206,12 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   currentEventSegment = null;
   candidatePreviewEnd = null;
   viewerMediaKind = "output";
+  timelineCoordinateSpace = "output";
+  timelineViewStart = 0;
+  timelineViewEnd = timelineOutputDurationValue(output);
+  timelineReviewFollow = false;
+  timelineMediaRenderKey = "";
+  waveformRenderKey = "";
   stopSourcePreviewPolling();
   const cacheKey = encodeURIComponent(output.versionCreatedAt || version.createdAt || output.filename || "output");
   clearPlayerNotice();
@@ -4536,13 +7229,24 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   const displayTitle = output.displayTitle || (currentJob.autoComposition?.status === "completed" && presentation.displayName
     ? `${presentation.displayName} · ${presentation.sourceLabel || "AI"}`
     : output.title);
-  $("#viewerBadge").textContent = outputNumber > 0 ? `成片 ${outputNumber}` : "成片";
+  const contentMode = taskModePresentation(currentJob).key === "content_extract";
+  $("#viewerBadge").textContent = contentMode ? (outputNumber > 0 ? `内容视频 ${outputNumber}` : "内容视频") : (outputNumber > 0 ? `成片 ${outputNumber}` : "成片");
   renderOutputPreviewSelector(currentJob);
-  $("#reviewKicker").textContent = "HIGHLIGHT PREVIEW";
+  $("#reviewKicker").textContent = contentMode ? "CONTENT PREVIEW" : "HIGHLIGHT PREVIEW";
   $("#reviewTitle").textContent = displayTitle;
   const download = $("#downloadButton");
+  const previewOnly = Boolean(output.previewOnly || version.previewOnly);
   download.href = output.downloadUrl;
   download.classList.remove("hidden");
+  download.textContent = previewOnly ? "下载审核样片" : "下载高清 MP4";
+  download.title = previewOnly ? "直接下载当前低分辨率审核样片" : "下载当前版本的高清成片";
+  const finalize = $("#finalizePreviewButton");
+  finalize?.classList.toggle("hidden", !previewOnly);
+  if (finalize) {
+    finalize.onclick = () => finalizePreviewVersion(version, output);
+    finalize.textContent = "导出高清成片";
+  }
+  syncOneOffFinalizeAction(currentJob);
   const subtitle = $("#subtitleButton");
   subtitle.dataset.subtitleUrl = `/api/jobs/${currentJob.id}/outputs/${encodeURIComponent(output.filename)}/subtitles?format=srt`;
   // Keep the subtitle download independent from the MP4 link.  Some browsers
@@ -4584,10 +7288,16 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   $("#evidencePanel")?.classList.toggle("montage-mode", Boolean(output.segments?.length));
   $("#evidencePanel")?.classList.add("output-mode");
   $("#clipTime").textContent = output.segments?.length
-    ? `${output.segments.length} 个镜头 · 成片 ${Number(output.duration).toFixed(1)} 秒`
+    ? `${output.segments.length} 个${contentMode ? "内容片段" : "镜头"} · ${contentMode ? "视频" : "成片"} ${Number(output.duration).toFixed(1)} 秒`
     : `${formatTime(output.start)} → ${formatTime(output.end)} · ${Number(output.duration).toFixed(1)} 秒`;
-  $("#clipTitle").textContent = output.segments?.length ? "成片结构" : displayTitle;
-  $("#clipScore").textContent = `${Math.round(output.score)}/100`;
+  $("#clipTitle").textContent = output.segments?.length ? (contentMode ? "内容视频结构" : "成片结构") : displayTitle;
+  const qualityScore = Number(
+    version?.reviewReport?.overallScore
+      ?? output.reviewReport?.overallScore
+      ?? output.qualityReport?.score
+      ?? output.score,
+  );
+  $("#clipScore").textContent = Number.isFinite(qualityScore) ? `${Math.round(qualityScore)}/100` : "已质检";
   $("#clipReason").textContent = output.reason;
   renderClipEvidence(output, "output", version);
   // Versioning and archival are separate concepts.  A rendered output is
@@ -4617,6 +7327,34 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   else if (autoplay) safePlay();
 }
 
+async function finalizePreviewVersion(version, output = null) {
+  if (!currentJob || !version?.id || actionBusy) return;
+  const subtitleMode = $("#subtitleMode")?.value || (output?.subtitleMode === "burn" ? "burn" : "none");
+  const subtitleStyle = $("#subtitleStyle")?.value || output?.subtitleStyle || "clean";
+  if (!await requestActionConfirmation({ title: "导出当前版本的高清成片", summary: "将锁定当前样片的镜头、顺序、变速、转场和声音衔接，并按源分辨率重新渲染。", details: ["仍属于当前版本，不会新增“当前时间轴版本”", "审核样片仍可保留和下载", "不会重新调用 VLM 或 LLM"] })) return;
+  let subtitleDraftId = null;
+  if (subtitleMode === "burn") {
+    if (!output?.segments?.length) return void showToast("当前样片缺少可校对的时间线");
+    const draft = await reviewSubtitlesBeforeRender([{ segments: output.segments }], subtitleStyle);
+    if (!draft) return;
+    subtitleDraftId = draft.id;
+  }
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/output-versions/${encodeURIComponent(version.id)}/finalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subtitleMode, subtitleStyle, subtitleDraftId }),
+    });
+    if (!commitJobAction(job, actionToken)) return;
+    clearTimeout(pollTimer);
+    pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
 function previewCandidate(index, { showEvidence = true } = {}) {
   if (!currentJob || !["awaiting_confirmation", "completed"].includes(currentJob.status)) return;
   const candidate = currentJob.candidates?.find((item) => item.index === index);
@@ -4636,6 +7374,8 @@ function previewCandidate(index, { showEvidence = true } = {}) {
   $("#reviewKicker").textContent = "CANDIDATE PREVIEW";
   $("#reviewTitle").textContent = candidate.title;
   $("#downloadButton")?.classList.add("hidden");
+  $("#finalizePreviewButton")?.classList.add("hidden");
+  syncOneOffFinalizeAction(currentJob);
   $("#subtitleButton")?.classList.add("hidden");
   if (showEvidence) {
     $("#evidencePanel")?.classList.remove("hidden", "evidence-placeholder");
@@ -4701,6 +7441,7 @@ function previewEventGroup(group, { seekTime = null, autoplay = true } = {}) {
   $("#reviewKicker").textContent = "COMPOSED EVENT PREVIEW";
   $("#reviewTitle").textContent = group.title;
   $("#downloadButton")?.classList.add("hidden");
+  $("#finalizePreviewButton")?.classList.add("hidden");
   $("#evidencePanel")?.classList.remove("hidden");
   $("#evidencePanel")?.classList.remove("evidence-placeholder");
   $("#evidencePanel")?.classList.add("candidate-mode");
@@ -4723,6 +7464,7 @@ function previewEventGroup(group, { seekTime = null, autoplay = true } = {}) {
 
 function previewEventSegment(group, segment, { seekTime = null } = {}) {
   if (!currentJob || !segment) return;
+  const contentMode = String(currentJob.taskMode || "") === "content_extract";
   sourcePreviewRetryToken = 0;
   currentEventGroup = group;
   currentEventSegment = segment;
@@ -4741,21 +7483,22 @@ function previewEventSegment(group, segment, { seekTime = null } = {}) {
   seekCurrentMediaTime(Math.max(Number(segment.start) || 0, Math.min(Number(segment.end) || target, target)));
   const groupTitle = group?.title || segment.chapterTitle || "成片镜头";
   $("#viewerBadge").textContent = `${groupTitle} · 源片段`;
-  $("#reviewKicker").textContent = "SOURCE EVENT SHOT";
-  $("#reviewTitle").textContent = segment.role || segment.title || "源片段";
+  $("#reviewKicker").textContent = contentMode ? "CONTENT SOURCE MATCH" : "SOURCE EVENT SHOT";
+  $("#reviewTitle").textContent = contentMode ? groupTitle : segment.role || segment.title || "源片段";
   $("#evidencePanel")?.classList.remove("hidden");
   $("#evidencePanel")?.classList.remove("evidence-placeholder");
   $("#evidencePanel")?.classList.add("candidate-mode");
   $("#evidencePanel")?.classList.remove("montage-mode", "output-mode");
   $("#addToChatButton")?.classList.add("hidden");
+  $("#finalizePreviewButton")?.classList.add("hidden");
   const segmentDuration = Math.max(0, Number(segment.duration) || Number(segment.end) - Number(segment.start));
   $("#clipTime").textContent = `源视频 ${formatTime(segment.start)} → ${formatTime(segment.end)} · ${segmentDuration.toFixed(1)} 秒`;
-  $("#clipTitle").textContent = segment.role || segment.title || "源片段";
+  $("#clipTitle").textContent = contentMode ? groupTitle : segment.role || segment.title || "源片段";
   $("#clipScore").textContent = `${Math.round(segment.score || 0)}/100`;
-  $("#clipReason").textContent = segment.reason || "事件组中的精彩镜头";
+  $("#clipReason").textContent = segment.reason || (contentMode ? "当前内容视频采用的源片段" : "事件组中的精彩镜头");
   $("#keepButton")?.classList.remove("hidden");
   $("#keepButton").textContent = "下载该片段";
-  $("#replaceButton")?.classList.toggle("hidden", !group);
+  $("#replaceButton")?.classList.toggle("hidden", !group || contentMode);
   $("#replaceButton").textContent = "删除片段";
   renderClipEvidence(segment, "segment");
   refreshTimelineAfterReviewSelection();
@@ -5282,6 +8025,11 @@ function renderCandidateDrawer(job) {
 }
 
 function openCandidateDrawer() {
+  if (String(currentJob?.taskMode || "") === "content_extract") {
+    setDirectorStage("events");
+    $("#chatMessages .content-search-message")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   if (!currentJob?.candidates?.length) return;
   renderCandidateDrawer(currentJob);
   $("#drawerBackdrop")?.classList.remove("hidden");
@@ -5363,6 +8111,22 @@ function selectedGroupsWithSegments(job) {
   })).filter((group) => group.segments.length);
 }
 
+async function saveSegmentTechnique(group, segment, values) {
+  if (!currentJob || actionBusy) return;
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/event-groups/${encodeURIComponent(group.id)}/segments/${encodeURIComponent(segment.id)}/technique`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+    });
+    if (!commitJobAction(job, actionToken)) return;
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
 function bindRailEventActions(job) {
   const railBody = $("#railBody");
   if (!railBody) return;
@@ -5380,6 +8144,9 @@ function bindRailEventActions(job) {
       segmentRow.querySelector(".move-segment-up")?.addEventListener("click", () => reorderEventSegment(group, segmentIndex, segmentIndex - 1));
       segmentRow.querySelector(".move-segment-down")?.addEventListener("click", () => reorderEventSegment(group, segmentIndex, segmentIndex + 1));
       segmentRow.querySelector(".move-segment-group")?.addEventListener("click", () => moveEventSegment(group, segment));
+      segmentRow.querySelector(".segment-speed")?.addEventListener("change", (event) => saveSegmentTechnique(group, segment, { playbackRate: Number(event.target.value), speedLocked: true }));
+      segmentRow.querySelector(".segment-transition")?.addEventListener("change", (event) => saveSegmentTechnique(group, segment, { transitionType: event.target.value, transitionLocked: true }));
+      segmentRow.querySelector(".segment-bridge")?.addEventListener("change", (event) => saveSegmentTechnique(group, segment, { audioBridgeType: event.target.value, audioBridgeLocked: true }));
     });
   });
   const refreshEventReviewCta = () => {
@@ -5470,7 +8237,7 @@ async function requestAutoPlans(job, scope = "selected_only", variantCount = 3, 
   setDirectorStage("compose");
   actionBusy = true;
   try {
-    const { job: updated } = await api(`/api/jobs/${job.id}/auto-plans`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope, groupIds, segmentIds, targetSeconds: Number(job.totalTargetSeconds || job.request?.totalTargetSeconds || 0) || null, structure: job.brief?.structure || job.request?.structure || "auto", variantCount: Math.max(1, Math.min(5, Number(variantCount) || 3)) }) });
+    const { job: updated } = await api(`/api/jobs/${job.id}/auto-plans`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope, groupIds, segmentIds, targetSeconds: Number(job.totalTargetSeconds || job.request?.totalTargetSeconds || 0) || null, structure: job.brief?.structure || job.request?.structure || "auto", variantCount: Math.max(1, Math.min(5, Number(variantCount) || 3)), techniquePolicy: job.brief?.techniquePolicy || job.request?.techniquePolicy || { preset: "auto" } }) });
     if (!jobActionStillCurrent(actionToken)) return;
     currentEventGroup = null;
     currentEventSegment = null;
@@ -5501,12 +8268,20 @@ async function renderAutoPlan(job, planId) {
   const subtitleMode = $("#subtitleMode")?.value || "none";
   const subtitleStyle = $("#subtitleStyle")?.value || "clean";
   if (!await requestActionConfirmation({ title: "确认生成此剪辑方案", summary: "系统将按照方案中的局部起止点和镜头顺序渲染成片。", details: ["不会重新分析视频", "原有成片版本不会被覆盖", "生成后可继续重新规划"] })) return;
+  let subtitleDraftId = null;
+  if (subtitleMode === "burn") {
+    const plan = (job.autoPlans || []).find((item) => String(item.id) === String(planId));
+    if (!plan?.sequence?.length) return void showToast("当前方案没有可校对的剪辑时间线");
+    const draft = await reviewSubtitlesBeforeRender([{ segments: plan.sequence }], subtitleStyle);
+    if (!draft) return;
+    subtitleDraftId = draft.id;
+  }
   const actionToken = captureJobAction(job);
   if (!jobActionStillCurrent(actionToken)) return;
   setDirectorStage("compose");
   actionBusy = true;
   try {
-    const { job: updated } = await api(`/api/jobs/${job.id}/auto-plans/${encodeURIComponent(planId)}/render`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ planId, subtitleMode, subtitleStyle }) });
+    const { job: updated } = await api(`/api/jobs/${job.id}/auto-plans/${encodeURIComponent(planId)}/render`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ planId, subtitleMode, subtitleStyle, subtitleDraftId }) });
     if (!commitJobAction(updated, actionToken)) return;
     clearTimeout(pollTimer);
     pollJob();
@@ -5519,8 +8294,11 @@ function renderReviewRail(job) {
   const openCandidates = $("#openCandidateDrawer");
   if (!body || !openCandidates) return;
   const railTitle = $("#railTitle");
+  const contentMode = taskModePresentation(job).key === "content_extract";
   const setRailTitle = (value) => { if (railTitle) railTitle.textContent = value; };
-  openCandidates.disabled = !(job.candidates?.length);
+  const contentCandidates = Array.isArray(job.contentSearch?.candidates) ? job.contentSearch.candidates : [];
+  openCandidates.disabled = !(job.candidates?.length || contentCandidates.length);
+  openCandidates.textContent = contentMode ? "查看匹配片段" : "镜头候选";
   const hasGeneratedOutputs = Boolean(
     (job.outputs || []).length
     || (job.outputVersions || []).some((version) => (version.outputs || []).length),
@@ -5550,10 +8328,22 @@ function renderReviewRail(job) {
     return;
   }
   if (["queued", "running", "cancelling"].includes(job.status)) {
-    setRailTitle("实时分析");
-    body.innerHTML = `<div class="rail-section-title"><strong>候选审核区</strong><b>分析后显示</b></div>
-      <p class="rail-summary">候选镜头与高光事件整理完成后将在这里出现。</p>
+    setRailTitle(contentMode ? "内容检索" : "实时分析");
+    body.innerHTML = `<div class="rail-section-title"><strong>${contentMode ? "正在检索内容" : "候选审核区"}</strong><b>${contentMode ? "完成后确认" : "分析后显示"}</b></div>
+      <p class="rail-summary">${contentMode ? `新的匹配片段会在检索完成后显示。${hasGeneratedOutputs ? "已有内容视频仍可在对话框中点击预览。" : ""}` : "候选镜头与高光事件整理完成后将在这里出现。"}</p>
       <div class="rail-skeleton-list" aria-hidden="true">${Array.from({ length: 4 }, () => `<i><span></span><b></b><em></em></i>`).join("")}</div>`;
+    $("#railOutput")?.classList.add("hidden");
+    return;
+  }
+  if (contentMode && job.status === "awaiting_content_confirmation") {
+    const warning = job.workflow?.actionRequired;
+    const selectedCount = Number(job.contentSearch?.defaultSelectedIds?.length || 0);
+    setRailTitle("片段确认");
+    body.innerHTML = `<div class="rail-section-title"><strong>${contentCandidates.length ? "检索结果 · 选择片段" : escapeHtml(warning?.title || "需要补充确认")}</strong><b>${contentCandidates.length} 个匹配片段</b></div><p class="rail-summary">${contentCandidates.length ? `请在对话框中逐段预览并选择；当前默认选中 ${selectedCount} 段。选择完成后即可生成新视频。` : escapeHtml(warning?.message || "请在对话框中确认人物、Speaker 或查找依据后继续。")} ${hasGeneratedOutputs ? "以前生成的内容视频仍可预览和下载。" : ""}</p><button type="button" class="focus-content-review">${contentCandidates.length ? "前往片段选择" : "前往处理"}</button>`;
+    body.querySelector(".focus-content-review")?.addEventListener("click", () => {
+      setDirectorStage("events");
+      $("#chatMessages .content-search-message")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
     $("#railOutput")?.classList.add("hidden");
     return;
   }
@@ -5563,7 +8353,9 @@ function renderReviewRail(job) {
   if (hasGeneratedOutputs && job.status === "awaiting_confirmation") {
     setRailTitle("生成结果");
     const autoVersionCount = Number(job.autoComposition?.versions?.length || 0);
-    body.innerHTML = `<div class="rail-section-title"><strong>高光成片已生成</strong><b>${job.autoComposition?.status === "completed" ? `${autoVersionCount} 个自动版本` : "可继续调整"}</b></div><p class="rail-summary">当前成片版本已记录在任务中，源视频保持不变。${job.autoComposition?.status === "completed" ? `已生成 ${autoVersionCount} 个自动版本，请在播放器顶部的预览菜单中比较。` : "需要更换镜头时，可返回事件审核继续调整。"}</p>${job.autoComposition?.status === "completed" ? "" : '<button type="button" class="reedit-job-button">返回事件审核</button>'}`;
+    body.innerHTML = contentMode
+      ? `<div class="rail-section-title"><strong>内容视频已生成</strong><b>可继续调整</b></div><p class="rail-summary">当前内容视频版本已记录在任务中，源视频保持不变。可在对话框中点击版本预览；需要调整时返回内容片段确认。</p><button type="button" class="reedit-job-button">返回片段确认</button>`
+      : `<div class="rail-section-title"><strong>高光成片已生成</strong><b>${job.autoComposition?.status === "completed" ? `${autoVersionCount} 个自动版本` : "可继续调整"}</b></div><p class="rail-summary">当前成片版本已记录在任务中，源视频保持不变。${job.autoComposition?.status === "completed" ? `已生成 ${autoVersionCount} 个自动版本，请在播放器顶部的预览菜单中比较。` : "需要更换镜头时，可返回事件审核继续调整。"}</p>${job.autoComposition?.status === "completed" ? "" : '<button type="button" class="reedit-job-button">返回事件审核</button>'}`;
     body.querySelector(".reedit-job-button")?.addEventListener("click", reopenCurrentJobForEditing);
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -5583,7 +8375,7 @@ function renderReviewRail(job) {
       <div class="event-group-list">${job.eventGroups.map((group, groupIndex) => `<article class="event-group-row${recommended.has(group.id) ? " recommended" : ""}${currentEventGroup?.id === group.id ? " active" : ""}" data-event-group="${escapeHtml(group.id)}">
         <header><input class="rail-event-check" type="checkbox" value="${escapeHtml(group.id)}" ${recommended.has(group.id) ? "checked" : ""}><span><strong>${escapeHtml(group.title)}</strong><small>${group.segments.length} 个镜头 · ${Number(group.actualDuration).toFixed(1)} 秒</small></span><b>${Math.round(group.score)}</b></header>
         <p>${escapeHtml(group.summary)}</p><div class="event-group-actions"><button class="preview-event" type="button">组合预览</button><button class="rename-event" type="button">命名</button><button class="add-selection-event" type="button" ${job.manualSelection ? "" : "disabled"}>加入选区</button></div>
-        <details ${currentEventGroup?.id === group.id || groupIndex === 0 ? "open" : ""}><summary>事件镜头 · ${selectedSegmentIdsForGroup(group).length}/${group.segments.length} 个已选</summary><div class="event-segments">${group.segments.map((segment, segmentIndex) => `<div class="event-segment${currentEventSegment?.id === segment.id ? " active" : ""}" data-segment-id="${escapeHtml(segment.id)}"><input class="rail-segment-check" data-group-id="${escapeHtml(group.id)}" type="checkbox" value="${escapeHtml(segment.id)}" ${selectedSegmentIdsForGroup(group).includes(String(segment.id)) ? "checked" : ""} aria-label="选择${escapeHtml(segment.role || "镜头")}"><span><b>${segmentIndex + 1}. ${escapeHtml(segment.role)}</b><small>${formatTime(segment.start)} → ${formatTime(segment.end)} · ${segment.transitionIn?.type === "dissolve" ? "短叠化" : "硬切"}</small>${audioEvidenceMarkup(segment.audioEvidence)}</span><button class="preview-segment" type="button">看</button><button class="move-segment-up" type="button" ${segmentIndex === 0 ? "disabled" : ""}>↑</button><button class="move-segment-down" type="button" ${segmentIndex === group.segments.length - 1 ? "disabled" : ""}>↓</button><button class="move-segment-group" type="button">移</button><button class="delete-segment" type="button">删</button></div>`).join("")}</div></details>
+        <details ${currentEventGroup?.id === group.id || groupIndex === 0 ? "open" : ""}><summary>事件镜头 · ${selectedSegmentIdsForGroup(group).length}/${group.segments.length} 个已选</summary><div class="event-segments">${group.segments.map((segment, segmentIndex) => `<div class="event-segment${currentEventSegment?.id === segment.id ? " active" : ""}" data-segment-id="${escapeHtml(segment.id)}"><input class="rail-segment-check" data-group-id="${escapeHtml(group.id)}" type="checkbox" value="${escapeHtml(segment.id)}" ${selectedSegmentIdsForGroup(group).includes(String(segment.id)) ? "checked" : ""} aria-label="选择${escapeHtml(segment.role || "镜头")}"><span><b>${segmentIndex + 1}. ${escapeHtml(segment.role)}</b><small>${formatTime(segment.start)} → ${formatTime(segment.end)} · 输出约 ${Number(segment.effectiveDuration || segment.duration || (Number(segment.end) - Number(segment.start))).toFixed(1)} 秒</small>${audioEvidenceMarkup(segment.audioEvidence)}<span class="segment-technique-controls"><label>速度<select class="segment-speed"><option value="1" ${Number(segment.playbackRate || 1) === 1 ? "selected" : ""}>1×</option><option value="1.1" ${Number(segment.playbackRate) === 1.1 ? "selected" : ""}>1.1×</option><option value="1.25" ${Number(segment.playbackRate) === 1.25 ? "selected" : ""}>1.25×</option><option value="1.5" ${Number(segment.playbackRate) === 1.5 ? "selected" : ""}>1.5×</option></select></label><label>转场<select class="segment-transition"><option value="cut" ${(segment.transitionIn?.type || "cut") === "cut" ? "selected" : ""}>硬切</option><option value="dissolve" ${segment.transitionIn?.type === "dissolve" ? "selected" : ""}>短叠化</option><option value="fade_black" ${segment.transitionIn?.type === "fade_black" ? "selected" : ""}>淡黑</option></select></label><label>声音<select class="segment-bridge"><option value="none" ${(segment.audioBridge?.type || "none") === "none" ? "selected" : ""}>同步</option><option value="j_cut" ${segment.audioBridge?.type === "j_cut" ? "selected" : ""}>J-cut</option><option value="l_cut" ${segment.audioBridge?.type === "l_cut" ? "selected" : ""}>L-cut</option></select></label></span></span><button class="preview-segment" type="button">看</button><button class="move-segment-up" type="button" ${segmentIndex === 0 ? "disabled" : ""}>↑</button><button class="move-segment-down" type="button" ${segmentIndex === group.segments.length - 1 ? "disabled" : ""}>↓</button><button class="move-segment-group" type="button">移</button><button class="delete-segment" type="button">删</button></div>`).join("")}</div></details>
       </article>`).join("")}</div>
       <section class="analysis-tags"><strong>本次分析依据${job.directorDegraded ? " · 事件归组已降级" : ""}${job.speechAnalysis?.degraded ? " · 语音已降级" : ""}</strong><div><span>${job.request?.analysisMode === "audiovisual" ? "视听综合" : "纯视觉"}</span>${job.speechAnalysis?.status === "ready" ? `<span>SenseVoice · ${Number(job.speechAnalysis.segments || 0)} 段</span>` : ""}${job.speechAnalysis?.diarization ? `<span>说话人分段</span>` : ""}${profile.primaryType ? `<span>${escapeHtml(profile.primaryType)}</span>` : ""}${profile.narrativeMode ? `<span>${escapeHtml(profile.narrativeMode)}</span>` : ""}${(theme.length ? theme : ["综合判断"]).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></section>
       <footer class="event-review-next"><span><b data-selected-event-count>${recommended.size}</b> 个事件已选 · 可继续调整镜头</span><button type="button" class="open-compose-stage" ${recommended.size ? "" : "disabled"}>继续生成成片</button></footer>`;
@@ -5619,7 +8411,7 @@ function renderReviewRail(job) {
     setRailTitle(`生成结果（${job.outputs?.length || 0}）`);
     const autoDone = job.autoComposition?.status === "completed";
     const autoVersionCount = Number(job.autoComposition?.versions?.length || 0);
-    body.innerHTML = `<div class="rail-section-title"><strong>渲染与技术检查完成</strong><b>${autoDone ? `${autoVersionCount} 个版本已完成` : "已完成"}</b></div><p class="rail-summary">${autoDone ? `已生成 ${autoVersionCount} 个自动版本，源视频保持不变。` : "如需调整，可以返回现有候选，重新选择事件和镜头后再次合成；不会重复调用视觉模型。"}</p>${autoDone ? "" : '<button type="button" class="reedit-job-button">返回事件审核</button>'}`;
+    body.innerHTML = `<div class="rail-section-title"><strong>${contentMode ? "内容视频与技术检查完成" : "渲染与技术检查完成"}</strong><b>${autoDone ? `${autoVersionCount} 个版本已完成` : "已完成"}</b></div><p class="rail-summary">${autoDone ? `已生成 ${autoVersionCount} 个自动版本，源视频保持不变。` : contentMode ? "视频仅包含已确认的内容片段。需要调整时，可以返回片段确认并生成新版本。" : "如需调整，可以返回现有候选，重新选择事件和镜头后再次合成；不会重复调用视觉模型。"}</p>${autoDone ? "" : `<button type="button" class="reedit-job-button">${contentMode ? "返回片段确认" : "返回事件审核"}</button>`}`;
     body.querySelector(".reedit-job-button")?.addEventListener("click", reopenCurrentJobForEditing);
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -5673,10 +8465,12 @@ function jobRenderRevision(job) {
     candidateCount: job?.candidates?.length || 0,
     eventGroupCount: job?.eventGroups?.length || 0,
     pendingSelectionGroupIds: job?.pendingSelectionGroupIds || [],
+    editProposal: [job?.pendingEditProposal?.id || "", job?.pendingEditProposal?.status || ""],
     outputVersionId: job?.currentOutputVersionId,
     autoComposition: [job?.autoComposition?.status, job?.autoComposition?.phase, job?.autoComposition?.versions?.length || 0],
     outputs: outputs.map((item) => [item.filename, item.previewReady, item.kept]),
     messageCount: job?.messages?.length || 0,
+    contentUiRevision: job?.contentUiRevision || "",
   });
 }
 
@@ -5723,6 +8517,7 @@ function renderJob(job) {
   const revision = jobRenderRevision(job);
   if (previousId === job?.id && currentJobRevision === revision) {
     currentJob = job;
+    syncOneOffFinalizeAction(job);
     renderReviewStatus(job);
     renderDirectorTaskSummary(job);
     // Progress updates can arrive without a DOM revision (for example while
@@ -5732,7 +8527,7 @@ function renderJob(job) {
     const live = isPipelineRunningStatus(job.status);
     const decision = job.status === "awaiting_model_decision";
     const progressVisible = analysisConsoleVisible(job);
-    const cancellable = isActiveJobStatus(job.status) || ["brief_confirmation", "awaiting_confirmation"].includes(String(job.status || ""));
+    const cancellable = isActiveJobStatus(job.status) || ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation"].includes(String(job.status || ""));
     updateDirectorState(job);
     updateDirectorThinkingOrb(job);
     updateDirectorFlow(job);
@@ -5752,7 +8547,7 @@ function renderJob(job) {
     // itself does not need to be rebuilt.
     loadWaveform(job);
     loadTimelineAssets(job);
-    const reviewReady = ["brief_confirmation", "awaiting_confirmation", "awaiting_model_decision", "completed"].includes(job.status);
+    const reviewReady = ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation", "awaiting_model_decision", "completed"].includes(job.status);
     const transcriptPendingStages = new Set(["queued", "starting", "probing", "audio_analysis", "speech_recognition"]);
     const transcriptMayBeReady = reviewReady || !transcriptPendingStages.has(String(job.stage || ""));
     if (transcriptMayBeReady && waveformData?.hasAudio !== false) loadTimelineTranscript(job);
@@ -5764,6 +8559,7 @@ function renderJob(job) {
   const activeSegmentId = currentEventSegment?.id;
   const activeCandidateIndex = currentCandidate?.index;
   currentJob = job;
+  syncOneOffFinalizeAction(job);
   updatePlayerChrome();
   renderReviewStatus(job);
   renderDirectorTaskSummary(job);
@@ -5775,6 +8571,9 @@ function renderJob(job) {
     : null;
   currentCandidate = activeCandidateIndex === undefined ? currentCandidate : (job.candidates || []).find((item) => Number(item.index) === Number(activeCandidateIndex)) || null;
   if (previousId !== job.id) {
+    expandedContentSearchIds.clear();
+    contentSearchDetailCache.clear();
+    contentSearchFilterState.clear();
     cancelTimelinePan(null);
     cancelTimelineOverview(null);
     currentJobRevision = revision;
@@ -5792,8 +8591,11 @@ function renderJob(job) {
     pendingSegmentSelections = new Map();
     timelineChatSelections = [];
     eventGroupSelectionOrder = [];
+    ignoredChatContextKeys = new Set();
+    activeProposalSourceRange = null;
     timelineViewStart = 0;
     timelineViewEnd = Number(job.videoInfo?.duration || 0);
+    timelineCoordinateSpace = "output";
     timelineReviewFollow = false;
     timelineAssetsJobId = null;
     timelineAssetsLoadingJobId = null;
@@ -5817,7 +8619,7 @@ function renderJob(job) {
     }, { once: true });
     setMainVideoSource(sourcePreviewUrl(job));
   }
-  const reviewReady = ["brief_confirmation", "awaiting_confirmation", "awaiting_model_decision", "completed"].includes(job.status);
+  const reviewReady = ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation", "awaiting_model_decision", "completed"].includes(job.status);
   // Waveform and frame thumbnails describe the source, so they are useful while
   // analysis is still running. Candidate overlays remain unavailable until the
   // model has produced them, but the base timeline should never stay blank.
@@ -5833,6 +8635,13 @@ function renderJob(job) {
   // so the media canvas can never remain at its empty intrinsic size (0×0).
   scheduleMediaFrameFit(true);
   chatInput.disabled = false;
+  const interactionKind = String(job.contentSearch?.interactionState?.kind || "");
+  chatInput.placeholder = taskModePresentation(job).key === "content_extract"
+    ? interactionKind === "person_target" ? "回复人物 A、人物 B，或输入新的查找条件"
+      : interactionKind === "speaker_link" ? "回复 Speaker 编号，或点击上方选项确认"
+        : interactionKind === "capability_confirmation" ? "回复“确认”启用新增分析，或修改查找条件"
+          : "描述要找的内容，或和 AI 讨论如何剪辑……"
+    : "请输入指令或补充需求……";
   $("#sendButton").disabled = false;
   updateComposerBeam();
   const running = isPipelineRunningStatus(job.status);
@@ -5846,7 +8655,7 @@ function renderJob(job) {
   // Failed/interrupted jobs must keep the review rail visible so the user can
   // access recovery actions such as “从中断处恢复分析”. Only active pipeline
   // work and explicit model decisions take over the rail.
-  const cancellable = isActiveJobStatus(job.status) || ["brief_confirmation", "awaiting_confirmation"].includes(job.status);
+  const cancellable = isActiveJobStatus(job.status) || ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation"].includes(job.status);
   const pipelineVisible = running || awaitingDecision;
   const progressVisible = analysisConsoleVisible(job);
   const compositionRunning = running && ["rendering", "edit_planning", "auto_composition"].includes(String(job.stage || "")) && directorStage === "compose";
@@ -5854,7 +8663,7 @@ function renderJob(job) {
   else if (awaitingDecision) setDirectorStage("analysis");
   else if (compositionRunning) setDirectorStage("compose");
   else if (running) setDirectorStage("analysis");
-  else if (job.status === "awaiting_confirmation") setDirectorStage("conversation");
+  else if (["awaiting_confirmation", "awaiting_content_confirmation"].includes(job.status)) setDirectorStage("conversation");
   else if (job.status === "completed") setDirectorStage("compose");
   else if (["cancelled", "failed"].includes(job.status)) setDirectorStage("conversation");
   placeAnalysisConsole(progressVisible);
@@ -5909,6 +8718,7 @@ async function pollJob() {
     const needsFullRefresh = Number(snapshot.candidateCount || 0) !== Number(currentJob.candidates?.length || 0)
       || Number(snapshot.eventGroupCount || 0) !== Number(currentJob.eventGroups?.length || 0)
       || Number(snapshot.outputVersionCount || 0) !== Number(currentJob.outputVersions?.length || 0)
+      || String(snapshot.contentUiRevision || "") !== String(currentJob.contentUiRevision || "")
       || Boolean(snapshot.pendingDecision) !== Boolean(currentJob.pendingDecision)
       || (!["briefing", "queued", "running", "cancelling"].includes(String(snapshot.status || ""))
         && String(snapshot.status || "") !== String(currentJob.status || ""));
@@ -5954,6 +8764,30 @@ async function confirmCandidates(indices, outputMode = "single_reel") {
     setDirectorStage("compose");
     return;
   }
+  let subtitleDraftId = null;
+  if (subtitleMode === "burn") {
+    try {
+      let outputs = [];
+      if (outputMode === "single_reel") {
+        const response = await api(`/api/jobs/${currentJob.id}/technique-plan`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ groupIds, segmentIds, targetSeconds: target || null, orderMode, techniquePolicy, manualSelection: true }),
+        });
+        outputs = [{ segments: response.plan?.segments || [] }];
+      } else {
+        for (const groupId of groupIds) {
+          const response = await api(`/api/jobs/${currentJob.id}/technique-plan`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ groupIds: [groupId], segmentIds: segmentIds?.[groupId] ? { [groupId]: segmentIds[groupId] } : null, targetSeconds: target || null, orderMode: "selection", techniquePolicy, manualSelection: true }),
+          });
+          outputs.push({ segments: response.plan?.segments || [] });
+        }
+      }
+      const draft = await reviewSubtitlesBeforeRender(outputs, subtitleStyle);
+      if (!draft) return;
+      subtitleDraftId = draft.id;
+    } catch (error) { return void showToast(error.message); }
+  }
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
   setDirectorStage("compose");
@@ -5969,6 +8803,609 @@ async function confirmCandidates(indices, outputMode = "single_reel") {
     pollJob();
   } catch (error) {
     if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+function recognitionEvidenceKind(item = {}) {
+  const value = String(item.modality || item.evidenceKind || "visual").toLowerCase();
+  const labels = {
+    speech: "对白", speechunits: "对白", visual: "画面", visualunits: "画面",
+    ocr: "屏幕文字", ocrunits: "屏幕文字", audio: "声音", audiounits: "声音",
+    person: "匿名人物", persons: "匿名人物", track: "人物轨迹", persontracks: "人物轨迹",
+    shot: "镜头", shots: "镜头",
+  };
+  return labels[value] || "内容证据";
+}
+
+function recognitionEvidenceCopy(item = {}) {
+  const values = [
+    item.text, item.summary, item.title, item.label,
+    ...(item.visibleText || []), ...(item.entities || []), ...(item.actions || []),
+    ...(item.labels || []), ...(item.personLabels || []), ...(item.audioEvents || []),
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  return [...new Set(values)].join(" · ") || `${recognitionEvidenceKind(item)}已在该时间范围内检出`;
+}
+
+function contentMatchEvidenceShell(match) {
+  $("#evidencePanel")?.classList.remove("hidden", "evidence-placeholder", "output-mode", "montage-mode");
+  $("#evidencePanel")?.classList.add("candidate-mode");
+  $("#clipTime").textContent = `${formatTime(match.start)} → ${formatTime(match.end)} · ${Number(match.duration || 0).toFixed(1)} 秒`;
+  $("#clipTitle").textContent = match.title || "匹配内容";
+  $("#clipScore").textContent = `${Math.round(Number(match.score || 0))}/100`;
+  $("#clipReason").textContent = match.reason || match.matchedEvidence || "内容索引匹配";
+  $("#outputExplanation")?.classList.add("hidden");
+  const transcript = $("#clipTranscript");
+  const excerpt = String(match.transcriptExcerpt || "").trim();
+  const transcriptIsContext = (match.speechUnits || []).some((unit) => Number(unit.start) < Number(match.start) - .5 || Number(unit.end) > Number(match.end) + .5);
+  if (transcript) {
+    transcript.innerHTML = excerpt ? `<small>${transcriptIsContext ? "相邻对白上下文" : "对白证据"}</small><p>${escapeHtml(excerpt)}</p>` : "";
+    transcript.classList.toggle("hidden", !excerpt);
+  }
+  const modalities = [...new Set((match.matchedModalities || [match.evidenceType]).filter(Boolean))];
+  if ($("#clipEvidenceMeta")) $("#clipEvidenceMeta").innerHTML = [
+    `<span>类型 ${escapeHtml(contentMatchTypeLabel(match))}</span>`,
+    ...modalities.map((value) => `<span>${escapeHtml(({ speech: "对白", visual: "画面", ocr: "屏幕文字", audio: "声音", person: "匿名人物" })[value] || value)}</span>`),
+  ].join("");
+  if ($("#clipEvidence")) $("#clipEvidence").innerHTML = `<li class="content-evidence-loading"><span>正在读取该片段的识别证据…</span></li>`;
+  $("#addToChatButton")?.classList.add("hidden");
+  $("#keepButton")?.classList.add("hidden");
+  $("#replaceButton")?.classList.add("hidden");
+}
+
+async function loadContentMatchEvidence(match) {
+  if (!currentJob || !match) return;
+  const requestToken = ++contentEvidenceRequestToken;
+  const jobId = String(currentJob.id);
+  const params = new URLSearchParams({
+    start: String(Math.max(0, Number(match.start) || 0)),
+    end: String(Math.max(Number(match.start) || 0, Number(match.end) || 0)),
+    limit: "200",
+  });
+  try {
+    const payload = await api(`/api/jobs/${encodeURIComponent(jobId)}/recognition?${params}`);
+    if (requestToken !== contentEvidenceRequestToken || String(currentJob?.id || "") !== jobId) return;
+    const allEvidence = Array.isArray(payload.evidence) ? payload.evidence : [];
+    const referenced = new Set((match.evidenceRefs || []).map((item) => String(item?.id || item)).filter(Boolean));
+    const evidence = (referenced.size
+      ? allEvidence.filter((item) => referenced.has(String(item.id)))
+      : allEvidence).slice(0, referenced.size ? Math.max(1, referenced.size) : 40);
+    const kindCounts = evidence.reduce((counts, item) => {
+      const label = recognitionEvidenceKind(item);
+      counts[label] = Number(counts[label] || 0) + 1;
+      return counts;
+    }, {});
+    const meta = $("#clipEvidenceMeta");
+    if (meta) meta.innerHTML = [
+      `<span>检索类型 ${escapeHtml(contentMatchTypeLabel(match))}</span>`,
+      referenced.size ? `<span>候选引用 ${referenced.size} 条</span>` : "",
+      ...Object.entries(kindCounts).map(([label, count]) => `<span>${escapeHtml(label)} ${count}</span>`),
+      payload.truncated ? `<span>仅显示前 ${evidence.length} 条</span>` : "",
+    ].join("");
+    const list = $("#clipEvidence");
+    if (!list) return;
+    list.innerHTML = evidence.length ? evidence.map((item, index) => {
+      const start = Number(item.start ?? item.time ?? match.start) || 0;
+      const end = Number(item.end ?? item.time ?? start) || start;
+      const range = end > start + .01 ? `${formatTime(start)} → ${formatTime(end)}` : formatTime(start);
+      return `<li><button type="button" class="evidence-main-button" data-content-evidence-time="${start}"><small class="evidence-source-label">${escapeHtml(recognitionEvidenceKind(item))} ${String(index + 1).padStart(2, "0")} · ${range}</small><span class="evidence-item-copy">${escapeHtml(recognitionEvidenceCopy(item))}</span></button></li>`;
+    }).join("") : `<li class="content-evidence-empty"><span>这个片段有检索匹配，但当前识别范围内没有更多可展开的明细。</span></li>`;
+    list.querySelectorAll("[data-content-evidence-time]").forEach((button) => button.addEventListener("click", () => seekSourceTime(Number(button.dataset.contentEvidenceTime))));
+  } catch (error) {
+    if (requestToken !== contentEvidenceRequestToken || String(currentJob?.id || "") !== jobId) return;
+    if ($("#clipEvidence")) $("#clipEvidence").innerHTML = `<li class="content-evidence-empty"><span>${escapeHtml(error.message || "详细证据读取失败")}</span></li>`;
+  }
+}
+
+function previewContentMatch(match, { autoplay = true, loadEvidence = true } = {}) {
+  if (!currentJob || !match) return;
+  showSource({ autoplay });
+  currentOutput = null;
+  currentEventGroup = null;
+  currentEventSegment = null;
+  currentCandidate = match;
+  const start = Math.max(0, Number(match.start) || 0);
+  const end = Math.max(start, Number(match.end) || start);
+  candidatePreviewEnd = Math.max(start, end - 0.008);
+  viewerMediaKind = "segment";
+  $("#viewerBadge").textContent = "内容匹配预览";
+  $("#reviewKicker").textContent = "CONTENT MATCH";
+  $("#reviewTitle").textContent = match.title || "匹配内容";
+  contentMatchEvidenceShell(match);
+  if (loadEvidence) loadContentMatchEvidence(match);
+  if (autoplay) mainVideo.addEventListener("seeked", () => safePlay(), { once: true });
+  else mainVideo.pause();
+  seekSourceTime(start);
+  refreshTimelineAfterReviewSelection();
+  syncReviewSelectionClasses();
+}
+
+function contentBoundaryFrameRate(job = currentJob) {
+  const value = Number(job?.videoInfo?.frame_rate || job?.videoInfo?.frameRate || 0);
+  return Number.isFinite(value) && value >= 1 && value <= 240 ? value : 30;
+}
+
+function contentBoundaryDraft(editor, match) {
+  const fallbackStart = Number(match?.start) || 0;
+  const fallbackEnd = Number(match?.end) || fallbackStart;
+  return {
+    ...match,
+    start: Number.isFinite(Number(editor?.dataset.boundaryStart)) ? Number(editor.dataset.boundaryStart) : fallbackStart,
+    end: Number.isFinite(Number(editor?.dataset.boundaryEnd)) ? Number(editor.dataset.boundaryEnd) : fallbackEnd,
+  };
+}
+
+function syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge = "" } = {}) {
+  if (!editor || !match) return;
+  const fps = contentBoundaryFrameRate(scopedJob);
+  const frame = 1 / fps;
+  const duration = Number(scopedJob?.videoInfo?.duration || currentJob?.videoInfo?.duration || 0);
+  let start = Math.max(0, Number(editor.dataset.boundaryStart) || 0);
+  let end = Math.max(start + frame, Number(editor.dataset.boundaryEnd) || start + frame);
+  if (duration > 0) {
+    end = Math.min(duration, end);
+    start = Math.min(start, Math.max(0, end - frame));
+  }
+  start = Math.round(start * 1e6) / 1e6;
+  end = Math.round(end * 1e6) / 1e6;
+  editor.dataset.boundaryStart = String(start);
+  editor.dataset.boundaryEnd = String(end);
+  editor.querySelector("[data-boundary-start-label]").textContent = formatTime(start);
+  editor.querySelector("[data-boundary-end-label]").textContent = formatTime(end);
+  editor.querySelector("[data-boundary-summary]").textContent = `${formatTime(start)} → ${formatTime(end)} · ${(end - start).toFixed(2)} 秒`;
+  editor.querySelector("[data-boundary-frame-rate]").textContent = `${fps.toFixed(Math.abs(fps - Math.round(fps)) < .001 ? 0 : 2)} fps · 1 帧约 ${(frame * 1000).toFixed(1)} ms`;
+  const draft = { ...match, start, end, duration: end - start, title: `${match.title || "匹配内容"} · 边界预览` };
+  previewContentMatch(draft, { autoplay: false, loadEvidence: false });
+  if (seekEdge === "end") seekSourceTime(Math.max(start, end - frame));
+}
+
+async function saveContentBoundary(scopedJob, match, editor, operation = "save") {
+  if (!currentJob || !scopedJob?.contentSearch?.id || actionBusy) return;
+  const draft = contentBoundaryDraft(editor, match);
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  editor.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  try {
+    const { job } = await api(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/content-search/boundary`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searchId: scopedJob.contentSearch.id,
+        matchId: match.id,
+        operation,
+        ...(operation === "save" ? { start: draft.start, end: draft.end } : {}),
+      }),
+    });
+    if (!commitJobAction(job, actionToken)) return;
+    showToast(operation === "reset" ? "已恢复系统识别的原始边界" : "片段边界已保存", "success");
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) showToast(`边界保存失败：${error.message}`);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+function wireContentBoundaryEditors(root, scopedJob) {
+  root.querySelectorAll("[data-content-boundary-open]").forEach((button) => button.addEventListener("click", () => {
+    const matchId = String(button.dataset.contentBoundaryOpen || "");
+    const match = (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
+    const editor = root.querySelector(`[data-content-boundary-editor="${CSS.escape(matchId)}"]`);
+    if (!match || !editor) return;
+    root.querySelectorAll("[data-content-boundary-editor]").forEach((item) => item.classList.add("hidden"));
+    editor.dataset.boundaryStart = String(Number(match.start) || 0);
+    editor.dataset.boundaryEnd = String(Number(match.end) || Number(match.start) || 0);
+    editor.classList.remove("hidden");
+    syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge: "start" });
+  }));
+  root.querySelectorAll("[data-content-boundary-editor]").forEach((editor) => {
+    const matchId = String(editor.dataset.contentBoundaryEditor || "");
+    const match = (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
+    if (!match) return;
+    editor.querySelectorAll("[data-boundary-adjust]").forEach((button) => button.addEventListener("click", () => {
+      const [edge, amountText] = String(button.dataset.boundaryAdjust || "").split(":");
+      const frame = 1 / contentBoundaryFrameRate(scopedJob);
+      const amount = amountText === "frame" ? frame : amountText === "-frame" ? -frame : Number(amountText);
+      if (!Number.isFinite(amount) || !["start", "end"].includes(edge)) return;
+      editor.dataset[edge === "start" ? "boundaryStart" : "boundaryEnd"] = String(
+        Number(editor.dataset[edge === "start" ? "boundaryStart" : "boundaryEnd"]) + amount,
+      );
+      syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge: edge });
+    }));
+    editor.querySelectorAll("[data-boundary-playhead]").forEach((button) => button.addEventListener("click", () => {
+      const edge = String(button.dataset.boundaryPlayhead || "");
+      if (!["start", "end"].includes(edge)) return;
+      editor.dataset[edge === "start" ? "boundaryStart" : "boundaryEnd"] = String(timelineAbsoluteTime());
+      syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge: edge });
+    }));
+    editor.querySelector("[data-boundary-preview]")?.addEventListener("click", () => {
+      const draft = contentBoundaryDraft(editor, match);
+      previewContentMatch({ ...draft, duration: draft.end - draft.start }, { autoplay: true });
+    });
+    editor.querySelector("[data-boundary-cancel]")?.addEventListener("click", () => {
+      editor.classList.add("hidden");
+      previewContentMatch(match, { autoplay: false });
+    });
+    editor.querySelector("[data-boundary-save]")?.addEventListener("click", () => saveContentBoundary(scopedJob, match, editor));
+    editor.querySelector("[data-boundary-reset]")?.addEventListener("click", () => saveContentBoundary(scopedJob, match, editor, "reset"));
+    editor.querySelector("[data-boundary-auto]")?.addEventListener("click", () => {
+      sendContentSearchFeedback("boundary_incorrect", match.id, match, { searchId: scopedJob.contentSearch.id });
+    });
+  });
+}
+
+async function sendContentSearchFeedback(verdict, matchId = null, match = null, { skipConfirmation = false, searchId = null } = {}) {
+  if (!currentJob || actionBusy) return false;
+  const labels = {
+    not_relevant: "确认将这条标记为不相关，并从当前候选移除？",
+    boundary_incorrect: "确认让系统自动重新识别这个片段的边界？这可能需要较长时间；如果只需前后移动几帧，请使用“调整边界”。",
+    missed_content: "确认在当前检索最相关的两个时间区域提高画面采样密度？这会重新运行局部视觉分析。",
+    review_keep: "确认保留这个不确定候选？它会计入最终结果。",
+    review_reject: "确认排除这个不确定候选？它会保留在完整性记录中，但不会生成。",
+  };
+  if (!skipConfirmation && !await requestActionConfirmation({ title: "内容检索反馈", summary: labels[verdict] || "提交反馈？", details: [] })) return false;
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/content-search/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searchId, verdict, matchId,
+        evidenceIds: (match?.evidenceRefs || []).map((item) => item.id).filter(Boolean),
+      }),
+    });
+    if (!commitJobAction(job, actionToken)) return;
+    if (jobNeedsPolling(job)) pollJob();
+    return true;
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+  return false;
+}
+
+async function restoreContentSearch(searchId) {
+  if (!currentJob || !searchId || actionBusy) return;
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/content-search/history/${encodeURIComponent(searchId)}/restore`, { method: "POST" });
+    commitJobAction(job, actionToken);
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+async function updateContentPersonLabel(personId, currentLabel = "") {
+  if (!currentJob || !personId || actionBusy) return;
+  const label = window.prompt(
+    "为这个匿名人物添加项目内标签（例如：男主持人、女嘉宾、黑衣讲解员）",
+    currentLabel,
+  );
+  if (label === null) return;
+  const normalized = String(label).trim().replace(/\s+/g, " ");
+  if (!normalized) return void window.alert("人物标签不能为空");
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const response = await api(
+      `/api/jobs/${actionToken.jobId}/content-search/persons/${encodeURIComponent(personId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: normalized }),
+      },
+    );
+    commitJobAction(response.job, actionToken);
+    showToast(`已保存人物标签“${normalized}”`);
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+function syncContentPersonTargetControls(panel, { initial = false } = {}) {
+  if (!panel) return;
+  const controls = panel.querySelector("[data-person-target-controls]");
+  if (!controls) return;
+  const selected = [...panel.querySelectorAll("[data-person-target]:checked")];
+  const previousCount = Number(controls.dataset.selectionCount || 0);
+  const modes = [...panel.querySelectorAll("[data-person-match-mode]")];
+  if (selected.length === 1) {
+    const any = modes.find((input) => input.value === "any");
+    if (any && !modes.some((input) => input.checked)) {
+      any.checked = true;
+      controls.dataset.autoSingleMode = "true";
+    }
+  } else if (!initial && selected.length > 1 && previousCount < 2 && controls.dataset.autoSingleMode === "true") {
+    modes.forEach((input) => { input.checked = false; });
+    delete controls.dataset.autoSingleMode;
+  }
+  controls.dataset.selectionCount = String(selected.length);
+  panel.querySelectorAll(".content-person-card").forEach((card) => {
+    const input = card.querySelector("[data-person-target]");
+    card.classList.toggle("target", Boolean(input?.checked));
+    const choiceText = card.querySelector(".content-person-choice span");
+    if (choiceText) choiceText.textContent = input?.checked ? "已选择" : "选择人物";
+  });
+  const summary = controls.querySelector("[data-person-selection-summary]");
+  if (summary) summary.textContent = `已选 ${selected.length} 人`;
+  const confirm = controls.querySelector("[data-person-target-confirm]");
+  const hasMode = selected.length === 1 || modes.some((input) => input.checked);
+  if (confirm) confirm.disabled = !selected.length || !hasMode || actionBusy;
+}
+
+async function selectContentPersonTarget(personIds, matchMode = "any", triggerButton = null) {
+  const normalizedIds = Array.isArray(personIds) ? personIds.map(String).filter(Boolean) : [String(personIds || "")].filter(Boolean);
+  if (!currentJob || !normalizedIds.length || actionBusy) return;
+  const actionToken = captureJobAction();
+  const messagesEl = ensureChatMessages();
+  const targetButtons = [...messagesEl.querySelectorAll("[data-person-target], [data-person-target-confirm]")];
+  const previousLabels = new Map(targetButtons.map((button) => [button, button.textContent]));
+  actionBusy = true;
+  targetButtons.forEach((button) => { button.disabled = true; });
+  if (triggerButton) {
+    triggerButton.setAttribute("aria-busy", "true");
+    triggerButton.textContent = "正在确认…";
+  }
+  try {
+    const response = await api(`/api/jobs/${actionToken.jobId}/content-search/target-person`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ personIds: normalizedIds, matchMode }),
+    });
+    if (!commitJobAction(response.job, actionToken)) return;
+    showToast(`已确认 ${normalizedIds.length} 个目标人物，正在执行原检索条件`);
+    if (jobNeedsPolling(response.job)) pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    targetButtons.forEach((button) => {
+      if (!button.isConnected) return;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = previousLabels.get(button) || button.textContent;
+    });
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+async function confirmContentPersonSpeaker(personId, speakerRef, triggerButton = null) {
+  if (!currentJob || !personId || !speakerRef) {
+    showToast("缺少人物或 Speaker 信息，请刷新后重试");
+    return;
+  }
+  if (speakerConfirmationBusy) {
+    showToast("正在处理上一次 Speaker 确认，请稍候");
+    return;
+  }
+  const actionToken = captureJobAction();
+  const messagesEl = ensureChatMessages();
+  speakerConfirmationBusy = true;
+  const confirmationButtons = [...messagesEl.querySelectorAll("[data-content-speaker-confirm]")];
+  const previousLabels = new Map(confirmationButtons.map((button) => [button, button.textContent]));
+  confirmationButtons.forEach((button) => { button.disabled = true; });
+  if (triggerButton) {
+    triggerButton.setAttribute("aria-busy", "true");
+    triggerButton.textContent = `正在确认 ${speakerRef}…`;
+  }
+  try {
+    showToast(`正在提交人物与 ${speakerRef} 的关联…`);
+    const response = await api(`/api/jobs/${actionToken.jobId}/content-search/confirm-speaker`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ personId, speakerRef }),
+    });
+    if (!commitJobAction(response.job, actionToken)) {
+      showToast("任务状态已经更新，请在最新结果中重新确认");
+      return;
+    }
+    showToast(`已关联 ${speakerRef}，正在按完整对白时间轴检索`);
+    if (jobNeedsPolling(response.job)) pollJob();
+  } catch (error) {
+    showToast(`Speaker 确认失败：${error.message}`);
+  } finally {
+    speakerConfirmationBusy = false;
+    confirmationButtons.forEach((button) => {
+      if (!button.isConnected) return;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = previousLabels.get(button) || button.textContent;
+    });
+  }
+}
+
+async function confirmContentSearch(root, reviewJob = currentJob) {
+  if (!currentJob || ["running", "rendering", "cancelling"].includes(String(currentJob.status || "")) || actionBusy) return;
+  const search = reviewJob?.contentSearch || {};
+  const completeness = search.completeness || {};
+  const exhaustiveIncomplete = String(search.resultMode || "") === "exhaustive"
+    && completeness.status !== "complete";
+  const pending = Number(completeness.pendingCount || 0);
+  if (exhaustiveIncomplete && pending) return void window.alert(
+    `还有 ${pending} 个不确定候选需要逐项“保留”或“排除”。处理完后即可生成。`,
+  );
+  const matchIds = [...root.querySelectorAll("[data-content-match]:checked")].map((input) => input.value);
+  if (!matchIds.length) return void window.alert("请至少选择一个匹配片段");
+  const outputMode = root.querySelector("[data-content-output-mode]")?.value || "single_reel";
+  const requestedOrderMode = outputMode === "single_reel"
+    ? root.querySelector("[data-content-order-mode]")?.value || "source"
+    : "source";
+  const selectedLookup = new Map(
+    (search.candidates || [])
+      .filter((item) => matchIds.includes(String(item.id)))
+      .map((item) => [String(item.id), item]),
+  );
+  const savedOrder = (search.reviewDraft?.orderedMatchIds || []).map(String);
+  const initialOrder = [...savedOrder.filter((id) => selectedLookup.has(id)), ...matchIds.filter((id) => !savedOrder.includes(id))];
+  const matches = initialOrder.map((id) => selectedLookup.get(id)).filter(Boolean);
+  const total = matches.reduce((sum, item) => sum + Number(item.duration || 0), 0);
+  const orderItems = matches.map((item, index) => ({
+    id: String(item.id),
+    label: item.title || `匹配片段 ${index + 1}`,
+    meta: `${formatTime(item.start)}→${formatTime(item.end)} · ${Number(item.duration || 0).toFixed(1)} 秒`,
+  }));
+  const orderLabels = {
+    source: "按源视频时间排列",
+    selection: "由你自定义排列",
+    llm_recommend: "先由 LLM 推荐，再由你确认",
+  };
+  const confirmation = await requestActionConfirmation({
+    title: outputMode === "single_reel" ? "确认生成内容合集" : "确认分别导出内容",
+    summary: outputMode === "single_reel"
+      ? `将把 ${matches.length} 个已审核片段合成一条，约 ${total.toFixed(1)} 秒；${orderLabels[requestedOrderMode] || orderLabels.source}。`
+      : `将把 ${matches.length} 个已审核片段分别导出。`,
+    details: matches.map((item, index) => `${index + 1}. ${formatTime(item.start)}→${formatTime(item.end)} · ${item.title || "匹配内容"}`),
+    orderMode: outputMode === "single_reel" ? requestedOrderMode : null,
+    orderItems: outputMode === "single_reel" ? orderItems : [],
+    showOrderOptions: outputMode === "single_reel",
+    warning: exhaustiveIncomplete
+      ? "完整性检查尚未通过：全范围覆盖或独立语义复核未完成，当前选择可能遗漏其他符合条件的片段。继续只会生成你现在勾选的内容，不会标记为“已找全”。"
+      : "",
+    confirmLabel: exhaustiveIncomplete ? "接受可能遗漏并生成" : "确认并生成",
+    onDraftChange: ({ orderMode: nextOrderMode, orderedItems }) => scheduleContentReviewDraftSave(root, reviewJob, {
+      orderMode: nextOrderMode,
+      orderedMatchIds: orderedItems.map((item) => String(item.id)),
+    }),
+  });
+  if (!confirmation) return;
+  let orderMode = outputMode === "single_reel" && typeof confirmation === "object"
+    ? confirmation.orderMode
+    : "source";
+  let orderedMatchIds = typeof confirmation === "object" && confirmation.orderedItems?.length
+    ? confirmation.orderedItems.map((item) => String(item.id))
+    : matchIds;
+  let orderReason = "";
+  await saveContentReviewDraft(root, reviewJob, { orderMode, orderedMatchIds });
+
+  if (orderMode === "llm_recommend") {
+    const recommendationToken = captureJobAction();
+    const confirmButton = root.querySelector("[data-confirm-content]");
+    const previousLabel = confirmButton?.textContent || "确认所选并生成";
+    actionBusy = true;
+    if (confirmButton) {
+      confirmButton.disabled = true;
+      confirmButton.textContent = "LLM 正在推荐顺序…";
+    }
+    try {
+      const recommendation = await api(`/api/jobs/${recommendationToken.jobId}/content-search/order-recommendation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          searchId: search.id,
+          matchIds: orderedMatchIds,
+        }),
+      });
+      if (!jobActionStillCurrent(recommendationToken)) return;
+      orderedMatchIds = Array.isArray(recommendation.orderedMatchIds)
+        ? recommendation.orderedMatchIds.map(String)
+        : orderedMatchIds;
+      orderReason = String(recommendation.reason || "");
+      const matchLookup = new Map(matches.map((item) => [String(item.id), item]));
+      const recommendationConfirmed = await requestActionConfirmation({
+        title: "确认 LLM 推荐顺序",
+        summary: "LLM 只调整片段排列，不会增删片段，也不会修改任何起止点。",
+        details: orderedMatchIds.map((id, index) => {
+          const item = matchLookup.get(id);
+          return `${index + 1}. ${item?.title || "匹配内容"} · ${formatTime(item?.start)}→${formatTime(item?.end)}`;
+        }),
+        warning: orderReason ? `推荐理由：${orderReason}` : "",
+        confirmLabel: "按此顺序生成",
+      });
+      if (!recommendationConfirmed) return;
+      orderMode = "ai_plan";
+    } catch (error) {
+      if (jobActionStillCurrent(recommendationToken)) showToast(error.message);
+      return;
+    } finally {
+      actionBusy = false;
+      if (confirmButton && jobActionStillCurrent(recommendationToken)) {
+        confirmButton.disabled = false;
+        confirmButton.textContent = previousLabel;
+      }
+    }
+  }
+
+  const subtitleMode = root.querySelector("[data-content-subtitle]")?.checked ? "burn" : "none";
+  let subtitleDraftId = null;
+  if (subtitleMode === "burn") {
+    const matchLookup = new Map(matches.map((item) => [String(item.id), item]));
+    const orderedMatches = orderedMatchIds.map((id) => matchLookup.get(String(id))).filter(Boolean);
+    const subtitleSegments = orderedMatches.map((item) => ({ start: Number(item.start), end: Number(item.end), playbackRate: 1, transitionIn: { type: "cut", duration: 0 } }));
+    const outputs = outputMode === "single_reel"
+      ? [{ segments: subtitleSegments }]
+      : subtitleSegments.map((segment) => ({ segments: [segment] }));
+    const draft = await reviewSubtitlesBeforeRender(outputs, "clean");
+    if (!draft) return;
+    subtitleDraftId = draft.id;
+  }
+
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  try {
+    const { job } = await api(`/api/jobs/${actionToken.jobId}/content-search/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searchId: search.id,
+        matchIds: orderedMatchIds,
+        outputMode,
+        orderMode,
+        orderReason,
+        subtitleMode,
+        subtitleStyle: "clean",
+        subtitleDraftId,
+        acknowledgeIncomplete: exhaustiveIncomplete,
+      }),
+    });
+    if (!commitJobAction(job, actionToken)) return;
+    clearTimeout(pollTimer);
+    pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) window.alert(error.message);
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+async function confirmContentSelectionBasket(job = currentJob, acknowledgements = {}) {
+  const items = contentBasketItems(job);
+  if (!job?.id || !items.length || actionBusy) return;
+  const duration = items.reduce((sum, item) => sum + Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0), 0);
+  const confirmed = await requestActionConfirmation({
+    title: "生成合并视频",
+    summary: `将待合并片段中的 ${items.length} 段按源视频时间合成一条视频，约 ${duration.toFixed(1)} 秒。生成成功后会清空；如果生成失败，选择会继续保留。`,
+    details: items.map((item, index) => `${index + 1}. ${item.sourceQuery || "检索"} · ${formatTime(item.start)}→${formatTime(item.end)} · ${item.title || "匹配片段"}`),
+    confirmLabel: "确认生成合并视频",
+  });
+  if (!confirmed) return;
+  const actionToken = captureJobAction(job);
+  actionBusy = true;
+  try {
+    const { job: updated } = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/basket/confirm`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outputMode: "single_reel", orderMode: "source", subtitleMode: "none", ...acknowledgements }),
+    });
+    if (!commitJobAction(updated, actionToken)) return;
+    clearTimeout(pollTimer);
+    pollJob();
+  } catch (error) {
+    if (!jobActionStillCurrent(actionToken)) return;
+    const message = String(error.message || "");
+    if (/时间重叠/.test(message) && !acknowledgements.acknowledgeOverlap) {
+      const allow = await requestActionConfirmation({ title: "片段时间存在重叠", summary: message, details: ["系统不会静默合并或删除任何已选片段。"], confirmLabel: "保留重叠并生成" });
+      if (allow) { actionBusy = false; return confirmContentSelectionBasket(job, { ...acknowledgements, acknowledgeOverlap: true }); }
+    }
+    if (/尚未证明找全|可能遗漏/.test(message) && !acknowledgements.acknowledgeIncomplete) {
+      const allow = await requestActionConfirmation({ title: "检索完整性未确认", summary: message, details: ["只生成已经明确加入待合并片段的内容。"], confirmLabel: "接受可能遗漏并生成" });
+      if (allow) { actionBusy = false; return confirmContentSelectionBasket(job, { ...acknowledgements, acknowledgeIncomplete: true }); }
+    }
+    window.alert(message);
   } finally {
     if (jobActionStillCurrent(actionToken)) actionBusy = false;
   }
@@ -6024,15 +9461,33 @@ async function confirmEventGroups(groupIds, outputMode = "single_reel", segmentI
   if (selected.length !== groupIds.length) return void window.alert("每个已选事件至少需要保留一个镜头");
   const total = selected.reduce((sum, group) => sum + group.segments.reduce((inner, segment) => inner + Number(segment.duration || (Number(segment.end) - Number(segment.start)) || 0), 0), 0);
   const target = Number(currentJob.totalTargetSeconds || currentJob.request?.totalTargetSeconds || 0);
-  const outside = target && Math.abs(total - target) > target * Number(currentJob.durationTolerance || .1);
-  const warning = outside ? `\n\n当前 ${total.toFixed(1)} 秒，超出目标 ${target.toFixed(1)} 秒的 ±10% 范围。` : "";
+  const techniquePolicy = currentJob.brief?.techniquePolicy || currentJob.request?.techniquePolicy || { preset: "auto" };
+  let techniquePlan = null;
+  try {
+    const response = await api(`/api/jobs/${currentJob.id}/technique-plan`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ groupIds, segmentIds, targetSeconds: target || null, orderMode: "selection", techniquePolicy, manualSelection: true }),
+    });
+    techniquePlan = response.plan;
+  } catch (error) {
+    return void window.alert(`剪辑手法预检失败：${error.message}`);
+  }
+  const effectiveTotal = Number(techniquePlan?.effectiveDuration ?? total);
+  const outside = techniquePlan?.durationStatus === "over_target" || (target && Math.abs(effectiveTotal - target) > Math.max(4, target * Number(currentJob.durationTolerance || .1)));
+  const warning = outside ? `安全精剪后仍为 ${effectiveTotal.toFixed(1)} 秒，超过目标 ${target.toFixed(1)} 秒。系统不会擅自删除你选中的镜头；继续即表示接受本次超时。` : "";
   const segmentCount = selected.reduce((sum, group) => sum + group.segments.length, 0);
   const description = outputMode === "single_reel"
-    ? `将把 ${selected.length} 个高光事件、${segmentCount} 个镜头按当前顺序合成为 1 条视频，预计 ${total.toFixed(1)} 秒。`
+    ? `将把 ${selected.length} 个高光事件、${segmentCount} 个镜头按当前顺序合成为 1 条视频：源片段 ${total.toFixed(1)} 秒，精剪后约 ${effectiveTotal.toFixed(1)} 秒。`
     : `将把 ${selected.length} 个已选事件分别导出为 ${selected.length} 条视频，共 ${segmentCount} 个镜头。`;
   const orderPreview = selected.flatMap((group) => (group.segments || []).map((segment) => `${formatTime(segment.start)}→${formatTime(segment.end)}`)).join("、");
   const orderItems = selected.flatMap((group) => group.segments.map((segment, index) => ({ id: `${group.id}::${segment.id}`, label: `${group.title || "未命名事件"} · 镜头 ${index + 1}`, meta: `${formatTime(segment.start)}→${formatTime(segment.end)}` })));
-  const confirmation = await requestActionConfirmation({ title: outputMode === "single_reel" ? "合成一条高光成片" : "分别导出事件片段", summary: description, details: [`来源：${currentJob.filename || "当前视频"}`, `事件版本：V${Number((jobOutputVersions(currentJob)[0]?.number || 0) + 1)}`, `当前排列预览：${orderPreview || "暂无镜头"}`], warning: warning.trim(), orderMode: outputMode === "single_reel" ? "selection" : null, orderItems });
+  const techniqueFacts = (techniquePlan?.segments || []).map((segment, index) => {
+    const rate = Number(segment.playbackRate || 1);
+    const transition = segment.transitionIn?.type === "fade_black" ? "淡黑" : segment.transitionIn?.type === "dissolve" ? "叠化" : "硬切";
+    const bridge = segment.audioBridge?.type === "j_cut" ? "J-cut" : segment.audioBridge?.type === "l_cut" ? "L-cut" : "同步音画";
+    return `镜头 ${index + 1} · ${rate.toFixed(rate === 1 ? 0 : 2)}× · ${transition} · ${bridge}`;
+  });
+  const confirmation = await requestActionConfirmation({ title: outputMode === "single_reel" ? "确认精剪并合成" : "分别导出事件片段", summary: description, details: [`来源：${currentJob.filename || "当前视频"}`, `剪辑策略：${({ auto: "AI 自适应", natural: "自然连贯", tight: "紧凑高光", attraction: "吸引力优先" })[techniquePlan?.techniquePolicy?.preset] || "AI 自适应"}`, `当前排列：${orderPreview || "暂无镜头"}`, ...techniqueFacts.slice(0, 8), ...(techniquePlan?.cutaways?.length ? [`插入镜头：${techniquePlan.cutaways.length} 个（保留主音轨）`] : [])], warning: warning.trim(), orderMode: outputMode === "single_reel" ? "selection" : null, orderItems });
   if (!confirmation) return;
   const orderMode = typeof confirmation === "object" ? confirmation.orderMode : "selection";
   if (typeof confirmation === "object" && confirmation.orderedItems?.length) {
@@ -6062,7 +9517,7 @@ async function confirmEventGroups(groupIds, outputMode = "single_reel", segmentI
   actionBusy = true;
   try {
     const { job } = await api(`/api/jobs/${actionToken.jobId}/confirm`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ groupIds, segmentIds, outputMode, subtitleMode, subtitleStyle, orderMode }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ groupIds, segmentIds, outputMode, subtitleMode, subtitleStyle, subtitleDraftId, orderMode, techniquePolicy, acceptOvertime: Boolean(outside) }),
     });
     currentEventGroup = null;
     currentEventSegment = null;
@@ -6073,7 +9528,7 @@ async function confirmEventGroups(groupIds, outputMode = "single_reel", segmentI
   finally { if (jobActionStillCurrent(actionToken)) actionBusy = false; }
 }
 
-async function sendChat(text) {
+async function sendChat(text, contentOptions = null) {
   const value = String(text || chatInput.value).trim();
   if (!currentJob || !value || actionBusy) return;
   const actionToken = captureJobAction();
@@ -6082,14 +9537,14 @@ async function sendChat(text) {
   const timelineCompose = chatInput.dataset.timelineCompose === "true";
   const subtitleMode = timelineCompose ? ($("#chatComposeSubtitleMode")?.value || "none") : null;
   const selectedTimelineSelections = timelineChatSelections.map((entry) => ({ ...entry }));
-  const commandPreview = describeEditCommand(value);
-  if (commandPreview && !await requestActionConfirmation({ title: "确认修改时间轴", summary: commandPreview, details: ["会基于当前候选池重新编排", "原有输出版本会保留，不会被覆盖"] })) return;
+  const uiContext = collectChatUiContext();
   actionBusy = true;
   setComposerSending(true);
   chatInput.value = "";
   timelineChatSelections = [];
   delete chatInput.dataset.timelineCompose;
-  delete chatInput.dataset.timelineCompose;
+  ignoredChatContextKeys = new Set();
+  renderChatContextBar();
   $("#sendButton").disabled = true;
   activeChatController?.abort();
   const chatController = new AbortController();
@@ -6105,9 +9560,11 @@ async function sendChat(text) {
       signal: chatController.signal,
       body: JSON.stringify({
         text: value,
+        uiContext,
         ...(subtitleMode ? { subtitleMode } : {}),
         ...(timelineCompose && selectedTimelineSelections.length ? { selections: selectedTimelineSelections } : {}),
         ...(timelineCompose && selectedTimelineSelections.length ? { orderMode: "selection" } : {}),
+        ...(contentOptions || {}),
       }),
     });
     if (!response.ok) {
@@ -6130,7 +9587,8 @@ async function sendChat(text) {
         if (!streamNode) {
           transientNodes.forEach((node) => node.remove());
           transientNodes = [];
-          $("#chatMessages").insertAdjacentHTML("beforeend", '<article class="chat-message assistant streaming-answer"><span class="avatar">AI</span><div class="bubble"><small>高光导演</small><p><span class="stream-text-loader" data-generative-loader="text" data-loader-variant="cascade" data-loader-speed="1.15" data-loader-label="AI 正在输出回答"></span></p></div></article>');
+          const streamingRole = taskModePresentation(currentJob).key === "content_extract" ? "内容探索助手" : "高光发现助手";
+          $("#chatMessages").insertAdjacentHTML("beforeend", `<article class="chat-message assistant streaming-answer"><span class="avatar">AI</span><div class="bubble"><small>${streamingRole}</small><p><span class="stream-text-loader" data-generative-loader="text" data-loader-variant="cascade" data-loader-speed="1.15" data-loader-label="AI 正在输出回答"></span></p></div></article>`);
           streamMessage = $("#chatMessages .streaming-answer:last-child");
           streamNode = streamMessage?.querySelector(".stream-text-loader");
         }
@@ -6244,6 +9702,7 @@ function briefEditorMarkup(brief = {}, context = "chat") {
       <label><span>排除内容</span><input data-brief-field="excludeRules" id="${field("exclude")}" value="${escapeHtml(list(brief.excludeRules))}" placeholder="重复镜头、片头广告"></label>
       <label><span>剪辑节奏</span><select data-brief-field="pace" id="${field("pace")}"><option value="natural" ${style.pace === "natural" ? "selected" : ""}>自然纪实</option><option value="tight" ${style.pace === "tight" ? "selected" : ""}>紧凑</option><option value="fast" ${style.pace === "fast" ? "selected" : ""}>快节奏</option></select></label>
       <label><span>视觉风格</span><select data-brief-field="tone" id="${field("tone")}"><option value="documentary" ${style.tone === "documentary" ? "selected" : ""}>纪实自然</option><option value="cinematic" ${style.tone === "cinematic" ? "selected" : ""}>电影感</option><option value="emotional" ${style.tone === "emotional" ? "selected" : ""}>情绪优先</option></select></label>
+      <label class="brief-editor-wide"><span>剪辑策略</span><select data-brief-field="techniquePreset" id="${field("technique")}"><option value="auto" ${!brief.techniquePolicy?.preset || brief.techniquePolicy?.preset === "auto" ? "selected" : ""}>AI 自适应</option><option value="natural" ${brief.techniquePolicy?.preset === "natural" ? "selected" : ""}>自然连贯</option><option value="tight" ${brief.techniquePolicy?.preset === "tight" ? "selected" : ""}>紧凑高光</option><option value="attraction" ${brief.techniquePolicy?.preset === "attraction" ? "selected" : ""}>吸引力优先</option></select><small>只调整节奏和衔接；不会擅自删除你手动选择的镜头。</small></label>
       <label class="brief-advanced-hidden"><span>字幕策略</span><select data-brief-field="subtitlePreference" id="${field("subtitle")}"><option value="none" ${!brief.subtitlePreference || brief.subtitlePreference === "none" ? "selected" : ""}>不添加字幕</option><option value="ask" ${brief.subtitlePreference === "ask" ? "selected" : ""}>稍后确认</option><option value="burn" ${brief.subtitlePreference === "burn" ? "selected" : ""}>添加字幕</option><option value="custom" ${brief.subtitlePreference && !["ask", "burn", "none"].includes(brief.subtitlePreference) ? "selected" : ""}>自定义</option></select><input class="brief-custom-input ${brief.subtitlePreference && !["ask", "burn", "none"].includes(brief.subtitlePreference) ? "" : "hidden"}" data-brief-custom="subtitlePreference" value="${brief.subtitlePreference && !["ask", "burn", "none"].includes(brief.subtitlePreference) ? escapeHtml(brief.subtitlePreference) : ""}" placeholder="例如：只添加重点对白"></label>
       <label class="brief-advanced-hidden"><span>剪辑方式</span><select data-brief-field="editMode" id="${field("edit")}"><option value="ai_plan" ${!brief.editMode || brief.editMode === "ai_plan" ? "selected" : ""}>AI 智能规划</option><option value="recommend_review" ${brief.editMode === "recommend_review" ? "selected" : ""}>AI 推荐后我审核</option><option value="manual" ${brief.editMode === "manual" ? "selected" : ""}>我手动选择镜头</option><option value="custom" ${brief.editMode && !["ai_plan", "recommend_review", "manual"].includes(brief.editMode) ? "selected" : ""}>自定义</option></select><input class="brief-custom-input ${brief.editMode && !["ai_plan", "recommend_review", "manual"].includes(brief.editMode) ? "" : "hidden"}" data-brief-custom="editMode" value="${brief.editMode && !["ai_plan", "recommend_review", "manual"].includes(brief.editMode) ? escapeHtml(brief.editMode) : ""}" placeholder="例如：先生成 3 个版本"></label>
       <label class="brief-editor-wide brief-advanced-hidden"><span>成片结构</span><select data-brief-field="structure" id="${field("structure")}"><option value="auto" ${!brief.structure || brief.structure === "auto" ? "selected" : ""}>由 AI 根据事件完整性决定</option><option value="hook_story_result" ${brief.structure === "hook_story_result" ? "selected" : ""}>开场 → 发展 → 高潮 → 结尾</option><option value="montage" ${brief.structure === "montage" ? "selected" : ""}>节奏蒙太奇，优先连续精彩瞬间</option><option value="custom" ${brief.structure && !["auto", "hook_story_result", "montage"].includes(brief.structure) ? "selected" : ""}>自定义</option></select><input class="brief-custom-input ${brief.structure && !["auto", "hook_story_result", "montage"].includes(brief.structure) ? "" : "hidden"}" data-brief-custom="structure" value="${brief.structure && !["auto", "hook_story_result", "montage"].includes(brief.structure) ? escapeHtml(brief.structure) : ""}" placeholder="例如：先冲突后解释，最后用人物反应结束"></label>
@@ -6260,7 +9719,7 @@ function collectBriefFromEditor(root, fallback = {}) {
   const subtitlePreference = customValue("subtitlePreference", value("subtitlePreference", fallback.subtitlePreference || "none"));
   const editMode = customValue("editMode", value("editMode", fallback.editMode || "ai_plan"));
   const structure = customValue("structure", value("structure", fallback.structure || "auto"));
-  return { ...fallback, objective: value("objective", fallback.objective || "事件高光合集").trim(), narrativeGoal: value("narrativeGoal", fallback.narrativeGoal || "").trim(), targetDurationSeconds: Number(value("targetDurationSeconds")) || null, focus: split("focus"), includeRules: split("includeRules"), excludeRules: split("excludeRules"), subtitlePreference, editMode, structure, style: { ...(fallback.style || {}), pace: value("pace", fallback.style?.pace || "natural"), tone: value("tone", fallback.style?.tone || "documentary") } };
+  return { ...fallback, objective: value("objective", fallback.objective || "事件高光合集").trim(), narrativeGoal: value("narrativeGoal", fallback.narrativeGoal || "").trim(), targetDurationSeconds: Number(value("targetDurationSeconds")) || null, focus: split("focus"), includeRules: split("includeRules"), excludeRules: split("excludeRules"), subtitlePreference, editMode, structure, techniquePolicy: { ...(fallback.techniquePolicy || {}), preset: value("techniquePreset", fallback.techniquePolicy?.preset || "auto") }, style: { ...(fallback.style || {}), pace: value("pace", fallback.style?.pace || "natural"), tone: value("tone", fallback.style?.tone || "documentary") } };
 }
 
 function bindBriefEditor(job, root) {
@@ -6283,7 +9742,7 @@ function bindBriefEditor(job, root) {
 }
 
 async function cancelCurrentJob() {
-  if (!currentJob || !(isActiveJobStatus(currentJob.status) || ["brief_confirmation", "awaiting_confirmation"].includes(currentJob.status))) return;
+  if (!currentJob || !(isActiveJobStatus(currentJob.status) || ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation"].includes(currentJob.status))) return;
   const actionToken = captureJobAction();
   const buttons = [...document.querySelectorAll("[data-inline-cancel], #cancelButton")];
   buttons.forEach((button) => { button.disabled = true; button.textContent = "正在停止…"; });
@@ -6298,15 +9757,7 @@ async function cancelCurrentJob() {
 }
 
 function historyJobStatusText(job) {
-  const status = String(job?.status || "");
-  if (status === "completed") return `${job.actualCount || jobOutputCount(job)} 条`;
-  if (status === "awaiting_confirmation") return "待确认";
-  if (status === "awaiting_model_decision") return "待处理";
-  if (status === "cancelled") return "已取消";
-  if (status === "cancelling") return "取消中";
-  if (status === "failed") return "失败";
-  if (status === "briefing" || status === "brief_confirmation") return "待开始";
-  return `${Math.round((Number(job?.progress) || 0) * 100)}%`;
+  return displayStatusForJob(job).text;
 }
 
 async function loadHistory() {
@@ -6326,7 +9777,7 @@ async function loadHistory() {
       const requestedJobId = routedJobId || savedJobId;
       let activeJob = requestedJobId
         ? jobs.find((item) => String(item.id) === String(requestedJobId))
-        : jobs.find((item) => ["briefing", "brief_confirmation", "queued", "running", "cancelling", "awaiting_model_decision", "awaiting_confirmation"].includes(item.status));
+        : jobs.find((item) => ["briefing", "brief_confirmation", "queued", "running", "cancelling", "awaiting_model_decision", "awaiting_confirmation", "awaiting_content_confirmation"].includes(item.status));
       // The history endpoint intentionally returns a bounded list. If the
       // requested task is older than that list, verify it directly instead of
       // silently falling back to another unfinished task.
@@ -6372,7 +9823,7 @@ async function loadHistory() {
       <strong>${escapeHtml(item.title)}</strong>
       <small>${escapeHtml(item.sourceFilename || "原任务已删除")} · ${Number(item.duration || 0).toFixed(1)} 秒 · ${(Number(item.sizeBytes || 0) / 1024 / 1024).toFixed(1)} MB</small>
       <div><a href="${escapeHtml(item.videoUrl)}" target="_blank" rel="noopener">播放</a><a class="download" href="${escapeHtml(item.downloadUrl)}">下载</a><button type="button" data-delete-kept data-job-id="${escapeHtml(item.jobId)}" data-filename="${escapeHtml(item.filename)}">删除</button></div>
-    </article>`).join("") : '<p class="empty">暂无永久保留的成片</p>';
+    </article>`).join("") : '<p class="empty">暂无独立成片副本</p>';
     $("#keptList")?.querySelectorAll("[data-delete-kept]").forEach((button) => button.addEventListener("click", async () => {
       if (!window.confirm(`确定从保留库移除“${button.dataset.filename}”吗？`)) return;
       await api(`/api/kept/${encodeURIComponent(button.dataset.jobId)}/${encodeURIComponent(button.dataset.filename)}`, { method: "DELETE" });
@@ -6392,9 +9843,14 @@ async function deleteHistoryJob(jobId) {
   if (!job?.job) return;
   const status = job.job.status;
   if (isActiveJobStatus(status)) return void window.alert("任务正在运行，请先取消任务后再删除。");
-  if (!await requestActionConfirmation({ title: "删除任务历史", summary: `将删除“${job.job.filename || "当前任务"}”及其源文件、分析缓存和未保留成片。`, details: ["永久保留库中的独立副本不会被删除", "删除后无法恢复"] , confirmLabel: "确认删除" })) return;
+  if (!await requestActionConfirmation({ title: "删除任务历史", summary: `将删除“${job.job.filename || "当前任务"}”及其源文件、分析缓存和任务内成片。`, details: ["此前另存的独立 MP4 副本不会被删除", "删除后无法恢复"] , confirmLabel: "确认删除" })) return;
   try {
-    await api(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+    const intent = await api(`/api/jobs/${encodeURIComponent(jobId)}/delete-intent`, { method: "POST" });
+    await api(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: intent.revision, deleteIntent: intent.deleteIntent }),
+    });
     if (currentJob?.id === jobId) resetWorkspace();
     loadHistory();
   } catch (error) { window.alert(error.message); }
@@ -6534,22 +9990,26 @@ function excludeCurrentCandidate() {
 }
 
 function renderHomeTaskCard(job) {
-  const statusLabels = { briefing: "需求确认", brief_confirmation: "待确认", queued: "排队中", running: "分析中", cancelling: "停止中", awaiting_confirmation: "待审核", awaiting_model_decision: "待处理", completed: "已完成", failed: "分析失败", cancelled: "已取消" };
   const outputCount = jobOutputCount(job);
   const hasGeneratedOutputs = outputCount > 0;
-  const status = hasGeneratedOutputs ? `已生成 ${outputCount} 版` : statusLabels[job.status] || job.status || "任务";
-  const statusClass = hasGeneratedOutputs ? "generated" : job.status || "";
+  const displayStatus = displayStatusForJob(job);
+  const status = displayStatus.text;
+  const statusClass = `${displayStatus.className}${hasGeneratedOutputs ? " generated" : ""}`;
   const explicitEventCount = Number(job.eventGroupCount || 0);
   const explicitCandidateCount = Number(job.candidateCount || 0);
-  const isEventJob = explicitEventCount > 0 || (Array.isArray(job.eventGroups) && job.eventGroups.length > 0);
-  const candidateCount = isEventJob ? (explicitEventCount || job.eventGroups.length) : (explicitCandidateCount || (Array.isArray(job.candidates) ? job.candidates.length : 0));
-  const candidateLabel = isEventJob ? "个事件" : "个候选";
+  const contentMode = String(job.taskMode || "") === "content_extract";
+  const isEventJob = !contentMode && (explicitEventCount > 0 || (Array.isArray(job.eventGroups) && job.eventGroups.length > 0));
+  const candidateCount = contentMode ? explicitCandidateCount : isEventJob ? (explicitEventCount || job.eventGroups.length) : (explicitCandidateCount || (Array.isArray(job.candidates) ? job.candidates.length : 0));
+  const candidateLabel = contentMode ? "个匹配片段" : isEventJob ? "个事件" : "个候选";
   const updated = job.updatedAt ? new Date(job.updatedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "刚刚";
   const width = Number(job.videoInfo?.width || 0);
   const height = Number(job.videoInfo?.height || 0);
   const orientation = width > 0 && height > 0 ? width / height : 16 / 9;
   const orientationClass = orientation > 1.25 ? " landscape" : orientation < .82 ? " portrait" : " square";
-  return `<article class="home-task-card" data-home-task="${escapeHtml(job.id)}" tabindex="0" role="link" aria-label="打开任务 ${escapeHtml(job.filename || "未命名任务")}，${escapeHtml(status)}"><div class="home-task-cover${orientationClass}"><span class="home-cover-loader" data-generative-loader="image" data-loader-variant="resolution" data-loader-size="100%" data-loader-radius="10" data-loader-label="正在生成视频首帧"></span><img data-task-thumbnail src="${escapeHtml(job.thumbnailUrl || `/api/jobs/${encodeURIComponent(job.id)}/thumbnail`)}" alt="${escapeHtml(job.filename || "视频首帧")}" loading="lazy"><span class="home-task-status ${escapeHtml(statusClass)}">${escapeHtml(status)}</span></div><div class="home-task-body"><strong title="${escapeHtml(job.filename || "未命名任务")}">${escapeHtml(job.filename || "未命名任务")}</strong><small>${hasGeneratedOutputs ? "已有成片 · 可继续调整" : `最近编辑于 ${escapeHtml(updated)}`}</small><div class="home-task-meta"><span>${candidateCount} ${candidateLabel}</span><span>${outputCount} 条成片</span></div><div class="home-task-actions"><button type="button" class="home-task-delete" data-home-delete="${escapeHtml(job.id)}" title="删除任务">删除任务</button></div></div></article>`;
+  const thumbnailState = String(job.thumbnailStatus || (job.thumbnailReady ? "ready" : "pending"));
+  const thumbnailLabel = thumbnailState === "ready" ? "视频封面" : thumbnailState === "failed" ? "封面需要重新生成" : "正在准备视频封面";
+  const thumbnailUrl = job.thumbnailUrl || `/api/jobs/${encodeURIComponent(job.id)}/thumbnail`;
+  return `<article class="home-task-card" data-home-task="${escapeHtml(job.id)}" tabindex="0" role="link" aria-label="打开任务 ${escapeHtml(job.filename || "未命名任务")}，${escapeHtml(status)}"><div class="home-task-cover${orientationClass}" data-thumbnail-state="${escapeHtml(thumbnailState)}"><span class="home-cover-loader" data-generative-loader="image" data-loader-variant="resolution" data-loader-size="100%" data-loader-radius="10" data-loader-label="${escapeHtml(thumbnailLabel)}"></span><img data-task-thumbnail data-thumbnail-url="${escapeHtml(thumbnailUrl)}" data-thumbnail-status="${escapeHtml(thumbnailState)}" alt="${escapeHtml(job.filename || "视频封面")}" loading="lazy"><button type="button" class="home-thumbnail-retry hidden" data-thumbnail-retry>重新生成</button><span class="home-task-status ${escapeHtml(statusClass)}">${escapeHtml(status)}</span></div><div class="home-task-body"><strong title="${escapeHtml(job.filename || "未命名任务")}">${escapeHtml(job.filename || "未命名任务")}</strong><small>${hasGeneratedOutputs ? `已有${contentMode ? "内容视频" : "成片"} · 可继续调整` : `最近编辑于 ${escapeHtml(updated)}`}</small><div class="home-task-meta"><span>${candidateCount} ${candidateLabel}</span><span>${outputCount} 条${contentMode ? "内容视频" : "输出视频"}</span></div><div class="home-task-actions"><button type="button" class="home-task-delete" data-home-delete="${escapeHtml(job.id)}" title="删除任务">删除任务</button></div></div></article>`;
 }
 
 function openNewTaskFromHome() {
@@ -6614,6 +10074,119 @@ document.addEventListener("click", (event) => {
   }
 });
 
+let staleHomeTasksRefreshTimer = null;
+
+function setHomeThumbnailState(image, state, message = "", retryable = false) {
+  const cover = image?.parentElement;
+  if (!cover) return;
+  const loader = cover.querySelector(".home-cover-loader");
+  const retry = cover.querySelector("[data-thumbnail-retry]");
+  const loading = state === "pending";
+  cover.dataset.thumbnailState = state;
+  cover.dataset.thumbnailMessage = message;
+  cover.classList.toggle("thumbnail-unavailable", ["failed", "source_missing", "auth_failed", "network_failed"].includes(state));
+  image.classList.toggle("ready", state === "ready");
+  if (loader) {
+    loader.dataset.loaderActive = String(loading);
+    loader.classList.toggle("hidden", !loading);
+    if (!loading) clearGenerativeLoader(loader);
+  }
+  if (retry) {
+    retry.classList.toggle("hidden", !retryable);
+    retry.textContent = state === "failed" ? "重新生成" : "重新检查";
+  }
+  if (message) cover.setAttribute("title", message);
+  else cover.removeAttribute("title");
+}
+
+function refreshAfterStaleHomeTask() {
+  window.clearTimeout(staleHomeTasksRefreshTimer);
+  staleHomeTasksRefreshTimer = window.setTimeout(() => loadHomeTasks(), 300);
+}
+
+async function loadHomeTaskThumbnail(image, { forceRetry = false } = {}) {
+  const card = image?.closest("[data-home-task]");
+  const jobId = card?.dataset.homeTask;
+  const url = image?.dataset.thumbnailUrl;
+  if (!jobId || !url) return;
+  if (image.dataset.thumbnailLoading === "true") return;
+  image.dataset.thumbnailLoading = "true";
+  const retry = image.parentElement?.querySelector("[data-thumbnail-retry]");
+  if (retry) retry.onclick = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    image.dataset.thumbnailLoading = "false";
+    try {
+      setHomeThumbnailState(image, "pending", "正在重新生成视频封面");
+      await api(`/api/jobs/${encodeURIComponent(jobId)}/thumbnail/retry`, { method: "POST" });
+      await loadHomeTaskThumbnail(image, { forceRetry: true });
+    } catch (error) {
+      setHomeThumbnailState(image, error?.code === "thumbnail_source_missing" ? "source_missing" : "failed", error?.message || "封面重新生成失败", error?.code !== "thumbnail_source_missing");
+    }
+  };
+
+  const initialStatus = forceRetry ? "pending" : String(image.dataset.thumbnailStatus || "pending");
+  if (initialStatus === "source_missing") {
+    setHomeThumbnailState(image, "source_missing", "源视频已丢失，无法生成封面");
+    image.dataset.thumbnailLoading = "false";
+    return;
+  }
+  if (initialStatus === "failed") {
+    setHomeThumbnailState(image, "failed", "视频开头没有可解码的非黑画面", true);
+    image.dataset.thumbnailLoading = "false";
+    return;
+  }
+
+  setHomeThumbnailState(image, "pending", "正在查找首个可用画面");
+  const delays = [0, 1000, 3000, 10000];
+  let lastError = null;
+  for (const delay of delays) {
+    if (!image.isConnected) break;
+    if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+    try {
+      const blob = await apiBlob(url);
+      if (!blob.size || !String(blob.type || "").startsWith("image/")) {
+        const invalid = new Error("服务未返回有效的封面图像");
+        invalid.code = "thumbnail_invalid_response";
+        throw invalid;
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("封面图像无法显示"));
+        image.src = objectUrl;
+      });
+      URL.revokeObjectURL(objectUrl);
+      setHomeThumbnailState(image, "ready");
+      image.dataset.thumbnailLoading = "false";
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error?.code === "job_not_found") {
+        card.remove();
+        refreshAfterStaleHomeTask();
+        image.dataset.thumbnailLoading = "false";
+        return;
+      }
+      if (!["thumbnail_pending", "thumbnail_temporary_failure", "network_error"].includes(error?.code)) break;
+    }
+  }
+
+  const code = lastError?.code || "thumbnail_temporary_failure";
+  if (code === "thumbnail_source_missing") {
+    setHomeThumbnailState(image, "source_missing", "源视频已丢失，无法生成封面");
+  } else if (code === "thumbnail_decode_failed") {
+    setHomeThumbnailState(image, "failed", lastError?.message || "视频开头没有可用画面", true);
+  } else if (lastError?.status === 401) {
+    setHomeThumbnailState(image, "auth_failed", "访问令牌无效，无法读取封面", true);
+  } else if (code === "network_error") {
+    setHomeThumbnailState(image, "network_failed", "网络暂不可用，封面会在重试后恢复", true);
+  } else {
+    setHomeThumbnailState(image, "failed", lastError?.message || "封面仍在生成，可稍后重新检查", true);
+  }
+  image.dataset.thumbnailLoading = "false";
+}
+
 async function loadHomeTasks() {
   const grid = $("#homeTaskGrid");
   if (!grid) return;
@@ -6638,25 +10211,7 @@ async function loadHomeTasks() {
       event.stopPropagation();
       openNewTaskFromHome();
     });
-    grid.querySelectorAll("[data-task-thumbnail]").forEach((image) => {
-      const settleCover = (failed = false) => {
-        const cover = image.parentElement;
-        const loader = cover?.querySelector(".home-cover-loader");
-        if (loader) {
-          loader.dataset.loaderActive = "false";
-          loader.classList.add("hidden");
-          clearGenerativeLoader(loader);
-        }
-        image.classList.toggle("ready", !failed);
-        if (failed) {
-          image.removeAttribute("src");
-          cover?.classList.add("thumbnail-unavailable");
-        }
-      };
-      image.addEventListener("load", () => settleCover(false), { once: true });
-      image.addEventListener("error", () => settleCover(true), { once: true });
-      if (image.complete) settleCover(!image.naturalWidth);
-    });
+    grid.querySelectorAll("[data-task-thumbnail]").forEach((image) => loadHomeTaskThumbnail(image));
     syncGenerativeLoaders(grid);
     grid.querySelectorAll("[data-home-task]").forEach((card) => {
       const open = async () => {
@@ -6696,6 +10251,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   initialConversation();
   stopSourcePreviewPolling();
   currentJob = null;
+  syncOneOffFinalizeAction(null);
   currentJobRevision = "";
   renderReviewStatus(null);
   renderDirectorTaskSummary(null);
@@ -6725,6 +10281,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   browserFallbackAttempts = new Set();
   timelineViewStart = 0;
   timelineViewEnd = 0;
+  timelineCoordinateSpace = "output";
   timelineReviewFollow = false;
   boundaryDrag = null;
   timelineRangeDrag = null;
@@ -6791,7 +10348,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   $("#clipSection")?.classList.add("hidden");
   $("#railOutput")?.classList.add("hidden");
   const railTitle = $("#railTitle");
-  if (railTitle) railTitle.textContent = "事件审核";
+  if (railTitle) railTitle.textContent = "审核结果";
   const railBody = $("#railBody");
   if (railBody) {
     railBody.innerHTML = '<div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="shaping" data-orb-size="64" data-orb-theme="light" data-orb-label="等待分析任务"></span><strong>等待分析任务</strong><p>上传素材后，这里会显示事件高光、内部镜头与输出状态。</p></div>';
@@ -6830,6 +10387,7 @@ videoInput.addEventListener("change", () => {
 
 $("#localPreviewVideo").addEventListener("loadedmetadata", (event) => {
   applyMediaAspect(localPreviewPanel, event.currentTarget.videoWidth, event.currentTarget.videoHeight);
+  syncContentSearchPreflight({ resetRange: true });
 });
 [
   [["dragenter", "dragover"], true],
@@ -6848,7 +10406,7 @@ mainVideo.addEventListener("timeupdate", () => {
   updatePlayerChrome();
   if (candidatePreviewEnd !== null && mainVideo.currentTime >= candidatePreviewEnd) {
     mainVideo.pause();
-    mainVideo.currentTime = candidatePreviewEnd;
+    mainVideo.currentTime = Math.max(0, candidatePreviewEnd);
     if (autoAdvanceCandidates && currentCandidate && viewerMediaKind === "candidate") {
       const finishedIndex = Number(currentCandidate.index);
       const next = adjacentCandidate(1);
@@ -7117,9 +10675,13 @@ if (timelineViewport && window.ResizeObserver) {
 }
 $("#timelineZoomIn")?.addEventListener("click", () => zoomTimeline(.5));
 $("#timelineZoomOut")?.addEventListener("click", () => zoomTimeline(2));
+$("#timelineZoomInReview")?.addEventListener("click", () => zoomTimeline(.5));
+$("#timelineZoomOutReview")?.addEventListener("click", () => zoomTimeline(2));
 $("#timelineFit")?.addEventListener("click", () => setTimelineView(0, timelineDurationValue()));
 $("#timelineFitReview")?.addEventListener("click", () => setTimelineView(0, timelineDurationValue()));
 $("#timelineFocusReview")?.addEventListener("click", focusCurrentTimelineReview);
+$("#timelineOutputAxis")?.addEventListener("click", () => setTimelineCoordinateSpace("output"));
+$("#timelineSourceAxis")?.addEventListener("click", () => setTimelineCoordinateSpace("source"));
 $("#timelineLocatePlayhead")?.addEventListener("click", () => {
   const duration = timelineDurationValue();
   if (duration <= 0) return;
@@ -7741,8 +11303,12 @@ loadHealth();
 setInterval(loadHealth, 15000);
 clearInterval(elapsedTicker);
 elapsedTicker = setInterval(() => {
-  if (currentJob && isActiveJobStatus(currentJob.status)) {
+  if (currentJob) {
     updateJobElapsedClock(currentJob);
+    const inlineElapsed = document.querySelector("[data-inline-elapsed]");
+    if (inlineElapsed) {
+      inlineElapsed.textContent = processingElapsedLabel(currentJob);
+    }
     const etaText = progressEtaText(currentJob, !stageProgressIsDeterminate(currentJob));
     const consoleEta = $("#jobEta");
     const inlineEta = document.querySelector("[data-inline-eta]");

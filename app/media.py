@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
 import re
 import shutil
@@ -16,6 +17,16 @@ from typing import Any, Callable, Iterable
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
+from .editing_techniques import (
+    composition_effective_duration,
+    composition_schedule,
+    normalize_audio_bridge,
+    normalize_playback_rate,
+    normalize_transition,
+    source_pieces,
+    source_duration_meets_minimum,
+)
+
 
 class MediaError(RuntimeError):
     pass
@@ -27,12 +38,28 @@ class VideoInfo:
     width: int
     height: int
     has_audio: bool
+    video_duration: float = 0.0
+    audio_duration: float = 0.0
+    container_duration: float = 0.0
+    frame_rate: float = 0.0
 
 
 @dataclass(frozen=True)
 class SampledFrame:
     path: Path
     time: float
+
+
+CONTENT_RENDER_FPS = 30.0
+CONTENT_BOUNDARY_EPSILON = min(1.0 / CONTENT_RENDER_FPS / 4.0, 0.008)
+
+
+def exclusive_render_duration(duration: float, *, strict: bool = False) -> float:
+    """Return a duration whose final frame stays inside a right-open range."""
+    value = max(0.0, float(duration or 0.0))
+    if not strict:
+        return value
+    return max(0.001, value - CONTENT_BOUNDARY_EPSILON)
 
 
 _uniform_frame_locks_guard = threading.Lock()
@@ -96,10 +123,41 @@ def probe_video(path: Path, ffprobe: str) -> VideoInfo:
         ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path),
     ], timeout=60)
     try:
+        def parsed_duration(value: Any) -> float:
+            try:
+                number = float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+            return number if math.isfinite(number) and number > 0 else 0.0
+
         data = json.loads(result.stdout)
         streams = data.get("streams", [])
         video = next(item for item in streams if item.get("codec_type") == "video")
-        duration = float(data.get("format", {}).get("duration") or video.get("duration"))
+        container_duration = parsed_duration(data.get("format", {}).get("duration"))
+        video_duration = parsed_duration(video.get("duration"))
+        audio_durations = [
+            parsed_duration(item.get("duration"))
+            for item in streams if item.get("codec_type") == "audio"
+        ]
+        audio_duration = max(audio_durations, default=0.0)
+        # Editing and visual coverage must use the video stream's own length.
+        # Container duration is often inherited from a slightly longer audio
+        # track or an MP4 edit list and is not proof that visual frames exist.
+        duration = video_duration if math.isfinite(video_duration) and video_duration > 0 else container_duration
+
+        def parsed_frame_rate(value: Any) -> float:
+            text = str(value or "").strip()
+            try:
+                if "/" in text:
+                    numerator, denominator = text.split("/", 1)
+                    rate = float(numerator) / float(denominator)
+                else:
+                    rate = float(text)
+            except (TypeError, ValueError, ZeroDivisionError):
+                return 0.0
+            return rate if math.isfinite(rate) and 1.0 <= rate <= 240.0 else 0.0
+
+        frame_rate = parsed_frame_rate(video.get("avg_frame_rate")) or parsed_frame_rate(video.get("r_frame_rate"))
     except (ValueError, TypeError, StopIteration, json.JSONDecodeError) as error:
         raise MediaError("无法读取有效的视频流和时长") from error
     if not math.isfinite(duration) or duration <= 0:
@@ -109,7 +167,174 @@ def probe_video(path: Path, ffprobe: str) -> VideoInfo:
         width=int(video.get("width") or 0),
         height=int(video.get("height") or 0),
         has_audio=any(item.get("codec_type") == "audio" for item in streams),
+        video_duration=video_duration if math.isfinite(video_duration) else 0.0,
+        audio_duration=audio_duration if math.isfinite(audio_duration) else 0.0,
+        container_duration=container_duration if math.isfinite(container_duration) else duration,
+        frame_rate=frame_rate,
     )
+
+
+def _clock_text(seconds: float) -> str:
+    total = max(0, round(float(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
+def validate_video_decodable_coverage(
+    path: Path,
+    *,
+    duration: float,
+    ffmpeg: str,
+    container_duration: float | None = None,
+) -> dict[str, Any]:
+    """Validate tail coverage using several points instead of one hard probe.
+
+    MP4 metadata can remain readable after a file has been truncated. ffprobe
+    then reports the original duration even though later packets do not exist.
+    A single seek can fail on long GOPs, VFR media and MP4 edit lists.  The
+    validator therefore walks backwards through a bounded tail window.  A
+    deeper successful probe becomes a warning.  If the whole tail window is
+    unreadable while the beginning still decodes, the file is rejected instead
+    of silently shortening the timeline: a shortened timeline makes a partial
+    upload look like a valid short recording.
+    """
+    duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise MediaError("视频时长无效")
+    if duration < 60:
+        margins = [max(.15, duration * .02), max(.5, duration * .08), max(1.0, duration * .2)]
+    else:
+        hard_window = min(180.0, max(60.0, duration * .01))
+        margins = [2.0, 10.0, 30.0, hard_window]
+    probe_points: list[float] = []
+    for margin in margins:
+        second = round(max(0.0, duration - min(margin, duration * .8)), 3)
+        if not probe_points or abs(second - probe_points[-1]) > .05:
+            probe_points.append(second)
+    attempts: list[dict[str, Any]] = []
+
+    def decode_probe(probe_at: float) -> bool:
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-ss", f"{probe_at:.3f}", "-i", str(path),
+            "-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn",
+            "-f", "framehash", "-",
+        ]
+        try:
+            result = subprocess.run(
+                command, text=True, capture_output=True, timeout=45, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            attempts.append({"time": probe_at, "decoded": False, "error": str(error)[:300]})
+            return False
+        decoded = result.returncode == 0 and any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in (result.stdout or "").splitlines()
+        )
+        attempts.append({"time": probe_at, "decoded": decoded})
+        return decoded
+
+    successful_index: int | None = None
+    for index, probe_at in enumerate(probe_points):
+        decoded = decode_probe(probe_at)
+        if decoded:
+            successful_index = index
+            break
+    if successful_index is None:
+        # Locate the last readable area only to produce a useful diagnostic.
+        # Do not use it as a replacement duration: this exact pattern is what a
+        # fast-start MP4 with a truncated media payload looks like.
+        first_probe = min(.25, max(.05, duration * .001))
+        if not decode_probe(first_probe):
+            raise MediaError("源视频没有可解码画面，无法进行视觉分析。请重新选择可正常播放的视频文件。")
+        low, high = first_probe, probe_points[-1] if probe_points else duration
+        for _ in range(14):
+            if high - low <= 1.0:
+                break
+            middle = round((low + high) / 2.0, 3)
+            if decode_probe(middle):
+                low = middle
+            else:
+                high = middle
+        last_decodable = max(first_probe, low)
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            file_size = 0
+        size_text = f"（当前文件 {file_size / 1_000_000:.1f} MB）" if file_size > 0 else ""
+        raise MediaError(
+            "当前选择的源视频内容不完整："
+            f"轨道元数据标记时长为 {_clock_text(duration)}，"
+            f"但画面数据只能读取到约 {_clock_text(last_decodable)}{size_text}。"
+            "播放器可能仍会显示元数据中的完整时长，但后段并没有可解码画面。"
+            "已停止分析，避免把局部内容误当成全片；请重新选择完整的原始视频。"
+        )
+    warnings: list[str] = []
+    if successful_index >= 2:
+        latest_failed = attempts[successful_index - 1]["time"] if successful_index else duration
+        warnings.append(
+            f"视频尾部 {_clock_text(latest_failed)} 之后未能稳定快速定位画面；"
+            "可能是长 GOP、可变帧率或尾部仅有音频。系统将继续分析，并以实际可解码画面为准。"
+        )
+    container = float(container_duration or 0)
+    if math.isfinite(container) and container - duration > max(2.0, duration * .0005):
+        warnings.append(
+            f"容器总时长比视频画面长 {container - duration:.1f} 秒；尾部可能只有声音，已按视频流时长分析。"
+        )
+    return {
+        "status": "warning" if warnings else "ok",
+        "videoDuration": round(duration, 3),
+        "effectiveDuration": round(duration, 3),
+        "containerDuration": round(container, 3) if container > 0 else None,
+        "lastDecodedProbe": round(attempts[successful_index]["time"], 3),
+        "attempts": attempts,
+        "warnings": warnings,
+    }
+
+
+def validate_uniform_frame_coverage(
+    frames: list[SampledFrame],
+    *,
+    duration: float,
+    maximum_frames: int,
+) -> None:
+    """Ensure uniform samples represent the whole declared video timeline."""
+    duration = max(0.0, float(duration))
+    interval = max(2.0, duration / max(12, int(maximum_frames)))
+    expected = max(1, min(int(maximum_frames), math.ceil(duration / interval)))
+    minimum_count = max(2, math.ceil(expected * .85))
+    latest = max((float(frame.time) for frame in frames), default=0.0)
+    required_latest = max(0.0, duration - max(2.5, interval * 2.5))
+    if len(frames) < minimum_count or latest + .05 < required_latest:
+        raise MediaError(
+            "源视频文件不完整："
+            f"全片抽帧预计获得约 {expected} 帧，实际仅获得 {len(frames)} 帧，"
+            f"画面只覆盖到 {_clock_text(latest)} / {_clock_text(duration)}。"
+            "已停止视觉分析，避免把视频开头的局部结果误当成全片结果；请重新上传完整视频。"
+        )
+
+
+def snapshot_sampled_frames(
+    frames: list[SampledFrame], output_directory: Path,
+) -> list[SampledFrame]:
+    """Freeze analysis inputs so background cache refreshes cannot remove them."""
+    output_directory.mkdir(parents=True, exist_ok=True)
+    snapshots: list[SampledFrame] = []
+    for index, frame in enumerate(frames):
+        target = output_directory / f"analysis-{index:05d}{frame.path.suffix.lower() or '.jpg'}"
+        if not target.is_file() or target.stat().st_size <= 0:
+            if not frame.path.is_file() or frame.path.stat().st_size <= 0:
+                raise MediaError(f"分析画面缓存缺失：{frame.path.name}，请重新抽取该画面")
+            temporary = target.with_name(f".{target.name}.tmp")
+            temporary.unlink(missing_ok=True)
+            try:
+                os.link(frame.path, temporary)
+            except OSError:
+                shutil.copy2(frame.path, temporary)
+            temporary.replace(target)
+        snapshots.append(SampledFrame(path=target, time=frame.time))
+    return snapshots
 
 
 def extract_uniform_frames(
@@ -141,6 +366,9 @@ def extract_uniform_frames(
                 for item in manifest.get("items") or []
             ]
             if cached_frames and all(frame.path.is_file() and frame.path.stat().st_size > 0 for frame in cached_frames):
+                validate_uniform_frame_coverage(
+                    cached_frames, duration=duration, maximum_frames=maximum_frames,
+                )
                 if progress_callback is not None:
                     progress_callback(cached_frames)
                 return cached_frames
@@ -157,6 +385,9 @@ def extract_uniform_frames(
             progress_batch_size=progress_batch_size,
             progress_first_batch_size=progress_first_batch_size,
             cancelled=cancelled,
+        )
+        validate_uniform_frame_coverage(
+            frames, duration=duration, maximum_frames=maximum_frames,
         )
         temporary_manifest = manifest_path.with_suffix(".tmp")
         temporary_manifest.write_text(json.dumps({
@@ -332,22 +563,58 @@ def extract_frames_at_times(
     return frames
 
 
+def _thumbnail_is_black(path: Path) -> bool:
+    """Return true only for frames that are effectively solid black."""
+    try:
+        with Image.open(path) as image:
+            grayscale = ImageOps.grayscale(image)
+            grayscale.thumbnail((180, 180))
+            histogram = grayscale.histogram()
+            pixels = max(1, sum(histogram))
+            dark_pixels = sum(histogram[:19])
+            mean = ImageStat.Stat(grayscale).mean[0]
+            return dark_pixels / pixels >= .985 and mean <= 12
+    except (OSError, ValueError) as error:
+        raise MediaError(f"封面图像无法读取：{error}") from error
+
+
 def extract_first_frame(source: Path, output: Path, *, ffmpeg: str) -> Path:
-    """Extract and cache the first decodable video frame for task covers."""
+    """Extract the first decodable, non-black frame in the opening seconds."""
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.is_file() and output.stat().st_size > 0:
         return output
-    temporary = output.with_name(f".{output.stem}.tmp{output.suffix}")
-    temporary.unlink(missing_ok=True)
-    _run([
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(source),
-        "-frames:v", "1", "-vf", "scale=720:-2:force_original_aspect_ratio=decrease",
-        "-q:v", "3", "-y", str(temporary),
-    ], timeout=60)
-    if not temporary.is_file() or temporary.stat().st_size == 0:
-        raise MediaError("无法提取视频首帧")
-    temporary.replace(output)
-    return output
+    errors: list[str] = []
+    decoded_black_frame = False
+    for index, second in enumerate((0.0, 0.5, 1.0, 2.0, 3.0)):
+        temporary = output.with_name(f".{output.stem}.{index}.tmp{output.suffix}")
+        temporary.unlink(missing_ok=True)
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+        if second > 0:
+            command.extend(["-ss", f"{second:.3f}"])
+        command.extend([
+            "-i", str(source), "-map", "0:v:0", "-frames:v", "1", "-an",
+            "-vf", "scale=720:-2:force_original_aspect_ratio=decrease",
+            "-q:v", "3", "-y", str(temporary),
+        ])
+        try:
+            _run(command, timeout=60)
+            if not temporary.is_file() or temporary.stat().st_size == 0:
+                errors.append(f"{second:g} 秒未输出画面")
+                continue
+            if _thumbnail_is_black(temporary):
+                decoded_black_frame = True
+                errors.append(f"{second:g} 秒为纯黑画面")
+                continue
+            temporary.replace(output)
+            return output
+        except MediaError as error:
+            errors.append(f"{second:g} 秒：{str(error)[:240]}")
+        finally:
+            temporary.unlink(missing_ok=True)
+    if decoded_black_frame:
+        raise MediaError("视频前 3 秒只有纯黑画面")
+    detail = errors[-1] if errors else "没有可解码的视频画面"
+    raise MediaError(f"无法提取视频封面：{detail}")
 
 
 def extract_audio_waveform(
@@ -784,6 +1051,41 @@ def create_director_contact_sheet(
     return output
 
 
+def create_labeled_contact_sheet(
+    frames: list[SampledFrame],
+    labels: list[str],
+    output: Path,
+    *,
+    columns: int = 4,
+) -> Path:
+    """Create a readable contact sheet for reviewing a rendered composition.
+
+    Unlike the source-discovery contact sheet, labels describe positions on the
+    *rendered* timeline (including cut-side context).  This makes the sheet a
+    faithful review artifact instead of another source-video sample.
+    """
+    if not frames:
+        raise MediaError("没有可用于成片审片的画面")
+    columns = max(2, min(5, int(columns)))
+    tile_width, tile_height, label_height = 320, 180, 42
+    rows = math.ceil(len(frames) / columns)
+    sheet = Image.new("RGB", (columns * tile_width, rows * (tile_height + label_height)), "#09131d")
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default()
+    for index, frame in enumerate(frames):
+        with Image.open(frame.path) as source:
+            tile = ImageOps.fit(source.convert("RGB"), (tile_width, tile_height), method=Image.Resampling.LANCZOS)
+        x = index % columns * tile_width
+        y = index // columns * (tile_height + label_height)
+        sheet.paste(tile, (x, y))
+        draw.rectangle((x, y + tile_height, x + tile_width, y + tile_height + label_height), fill="#09131d")
+        label = str(labels[index] if index < len(labels) else f"OUT {format_time(frame.time)}")[:78]
+        draw.text((x + 8, y + tile_height + 7), label, fill="#e7f1ff", font=font)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output, "JPEG", quality=89, optimize=True)
+    return output
+
+
 def render_clip(
     source: Path,
     output: Path,
@@ -837,47 +1139,148 @@ def render_composition(
     subtitle_path: Path | None = None,
     subtitle_cues: list[dict[str, Any]] | None = None,
     subtitle_style: str = "clean",
+    subtitle_layout: dict[str, Any] | None = None,
+    subtitle_cue_styles: dict[str, dict[str, Any]] | None = None,
+    cutaways: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    strict_source_boundaries: bool = False,
 ) -> float:
-    """Render one event highlight from an ordered list of source ranges."""
-    valid = [item for item in segments if float(item.get("end", 0)) - float(item.get("start", 0)) >= .2]
+    """Render an editorial sequence, including timing and continuity techniques.
+
+    The caller supplies logical shots.  Silence compression expands a logical
+    shot into source pieces, while playback speed and transitions define the
+    output schedule.  Audio is mixed on that schedule so a J/L bridge can cross
+    a picture cut without changing any selected source boundary.
+    """
+    valid = [
+        item for item in segments
+        if source_duration_meets_minimum(item.get("start", 0), item.get("end", 0))
+    ]
     if not valid:
         raise MediaError("事件高光没有可渲染的镜头")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp.mp4")
-    count = len(valid)
+    cutaways = [
+        item for item in (cutaways or [])
+        if source_duration_meets_minimum(item.get("sourceStart", 0), item.get("sourceEnd", 0))
+    ]
+
+    # Expand silence-compressed shots into executable pieces.  The first piece
+    # keeps the logical transition; later pieces are direct cuts.
+    expanded: list[dict[str, Any]] = []
+    logical_first: dict[str, int] = {}
+    logical_last: dict[str, int] = {}
+    for logical_index, segment in enumerate(valid):
+        segment_id = str(segment.get("id") or f"segment_{logical_index}")
+        rate = normalize_playback_rate(segment.get("playbackRate"))
+        pieces = source_pieces(segment)
+        for piece_index, piece in enumerate(pieces):
+            item = {
+                **segment,
+                "id": f"{segment_id}_piece_{piece_index}",
+                "logicalId": segment_id,
+                "logicalIndex": logical_index,
+                "start": piece["start"],
+                "end": piece["end"],
+                "playbackRate": rate,
+                "transitionIn": (
+                    normalize_transition(segment.get("transitionIn"), first=logical_index == 0)
+                    if piece_index == 0 else {"type": "cut", "duration": 0.0}
+                ),
+            }
+            logical_first.setdefault(segment_id, len(expanded))
+            logical_last[segment_id] = len(expanded)
+            expanded.append(item)
+    if not expanded:
+        raise MediaError("事件高光没有可渲染的有效镜头")
+
+    count = len(expanded)
+    schedule_segments = [
+        {
+            **item,
+            "end": float(item.get("start") or 0.0) + exclusive_render_duration(
+                float(item.get("end") or 0.0) - float(item.get("start") or 0.0),
+                strict=strict_source_boundaries,
+            ),
+        }
+        for item in expanded
+    ]
+    schedule = composition_schedule(schedule_segments)
+    composed_duration = composition_effective_duration(expanded)
     filters: list[str] = []
     input_arguments: list[str] = []
     durations: list[float] = []
-    for index, segment in enumerate(valid):
+    # L-cut extends the previous source audio past its picture end.  Track that
+    # separately so the corresponding video stays at its original duration.
+    audio_extensions = [0.0 for _ in expanded]
+    audio_pre_extensions = [0.0 for _ in expanded]
+    for logical_index in range(1, len(valid)):
+        bridge = normalize_audio_bridge(valid[logical_index].get("audioBridge"))
+        if bridge["type"] == "l_cut":
+            previous_id = str(valid[logical_index - 1].get("id") or f"segment_{logical_index - 1}")
+            previous_piece = logical_last.get(previous_id)
+            if previous_piece is not None:
+                audio_extensions[previous_piece] = bridge["duration"] * normalize_playback_rate(expanded[previous_piece].get("playbackRate"))
+        elif bridge["type"] == "j_cut":
+            current_id = str(valid[logical_index].get("id") or f"segment_{logical_index}")
+            current_piece = logical_first.get(current_id)
+            if current_piece is not None:
+                rate = normalize_playback_rate(expanded[current_piece].get("playbackRate"))
+                audio_pre_extensions[current_piece] = min(
+                    float(expanded[current_piece]["start"]), bridge["duration"] * rate,
+                )
+
+    for index, segment in enumerate(expanded):
         start = max(0.0, float(segment["start"]))
         end = max(start + .2, float(segment["end"]))
-        duration = end - start
+        source_duration = end - start
+        render_source_duration = exclusive_render_duration(
+            source_duration, strict=strict_source_boundaries,
+        )
+        rate = normalize_playback_rate(segment.get("playbackRate"))
+        duration = render_source_duration / rate
         durations.append(duration)
-        input_arguments.extend(["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
+        input_start = max(0.0, start - audio_pre_extensions[index])
+        video_trim_start = start - input_start
+        input_duration = audio_pre_extensions[index] + render_source_duration + audio_extensions[index]
+        input_arguments.extend(["-ss", f"{input_start:.3f}", "-t", f"{input_duration:.3f}", "-i", str(source)])
         video_source = f"[{index}:v]"
-        scale = f",scale='min({int(preview_width)},iw)':-2:force_original_aspect_ratio=decrease" if preview_width else ""
+        scale = (
+            f",scale='if(gte(iw,ih),min({int(preview_width)},iw),-2)':"
+            f"'if(gte(iw,ih),-2,min({int(preview_width)},ih))'"
+            if preview_width else ""
+        )
         filters.append(
-            f"{video_source}setpts=PTS-STARTPTS"
-            f"{scale},fps=30,settb=AVTB,format=yuv420p[v{index}]"
+            f"{video_source}trim=start={video_trim_start:.3f}:duration={render_source_duration:.3f},setpts=(PTS-STARTPTS)/{rate:.3f}"
+            f"{scale},fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[v{index}]"
         )
         if has_audio:
             audio_source = f"[{index}:a]"
-            fade = min(.08, duration / 5)
-            contiguous_before = index > 0 and abs(float(valid[index - 1].get("end", 0)) - start) <= .03
-            contiguous_after = index + 1 < count and abs(end - float(valid[index + 1].get("start", 0))) <= .03
-            audio_filters = ["asetpts=PTS-STARTPTS", "aresample=async=1:first_pts=0"]
-            if not contiguous_before:
-                audio_filters.append(f"afade=t=in:st=0:d={fade:.3f}")
-            if not contiguous_after:
-                audio_filters.append(f"afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}")
-            filters.append(f"{audio_source}{','.join(audio_filters)}[a{index}]")
+            output_start = float(schedule[index]["outputStart"])
+            logical_index = int(segment.get("logicalIndex") or 0)
+            bridge = normalize_audio_bridge(valid[logical_index].get("audioBridge"), first=logical_index == 0)
+            is_first_piece = logical_first.get(str(segment.get("logicalId"))) == index
+            if is_first_piece and bridge["type"] == "j_cut":
+                output_start = max(0.0, output_start - audio_pre_extensions[index] / rate)
+            elif is_first_piece and bridge["type"] == "l_cut":
+                # Let the previous voice finish before this shot's synchronous
+                # sound enters.  Video is already visible during this interval.
+                output_start += bridge["duration"]
+            audio_duration = input_duration / rate
+            fade = min(.06, audio_duration / 6)
+            delay_ms = max(0, round(output_start * 1000))
+            filters.append(
+                f"{audio_source}atrim=duration={input_duration:.3f},asetpts=PTS-STARTPTS,"
+                f"atempo={rate:.3f},aresample=async=1:first_pts=0,"
+                f"afade=t=in:st=0:d={fade:.3f},"
+                f"afade=t=out:st={max(0.0, audio_duration - fade):.3f}:d={fade:.3f},"
+                f"adelay={delay_ms}|{delay_ms}[a{index}]"
+            )
     video_current = "v0"
-    audio_current = "a0"
     composed_duration = durations[0]
     for index in range(1, count):
-        transition = valid[index].get("transitionIn") or {}
-        dissolve = transition.get("type") == "dissolve"
+        transition = normalize_transition(expanded[index].get("transitionIn"))
+        dissolve = transition.get("type") in {"dissolve", "fade_black"}
         transition_duration = min(
             .4,
             max(.08, float(transition.get("duration") or .18)),
@@ -885,35 +1288,74 @@ def render_composition(
             durations[index] / 3,
         ) if dissolve else 0.0
         next_video = f"vc{index}"
-        next_audio = f"ac{index}"
         temporary_video = f"vtmp{index}"
-        temporary_audio = f"atmp{index}"
         if dissolve and transition_duration >= .08:
             offset = max(.01, composed_duration - transition_duration)
+            xfade_name = "fadeblack" if transition.get("type") == "fade_black" else "fade"
             filters.append(
-                f"[{video_current}][v{index}]xfade=transition=fade:duration={transition_duration:.3f}:"
+                f"[{video_current}][v{index}]xfade=transition={xfade_name}:duration={transition_duration:.3f}:"
                 f"offset={offset:.3f}[{temporary_video}]"
             )
             filters.append(f"[{temporary_video}]setpts=PTS-STARTPTS[{next_video}]")
-            if has_audio:
-                filters.append(
-                    f"[{audio_current}][a{index}]acrossfade=d={transition_duration:.3f}:c1=tri:c2=tri[{temporary_audio}]"
-                )
-                filters.append(f"[{temporary_audio}]asetpts=PTS-STARTPTS[{next_audio}]")
             composed_duration += durations[index] - transition_duration
         else:
             filters.append(f"[{video_current}][v{index}]concat=n=2:v=1:a=0[{temporary_video}]")
             filters.append(f"[{temporary_video}]setpts=PTS-STARTPTS[{next_video}]")
-            if has_audio:
-                filters.append(f"[{audio_current}][a{index}]concat=n=2:v=0:a=1[{temporary_audio}]")
-                filters.append(f"[{temporary_audio}]asetpts=PTS-STARTPTS[{next_audio}]")
             composed_duration += durations[index]
         video_current = next_video
-        audio_current = next_audio
     output_video_label = video_current if count > 1 else "v0"
-    if subtitle_path and subtitle_cues and not preview_width:
+
+    # Muted cutaways cover a jump cut while the primary soundtrack continues.
+    cutaway_input_count = 0
+    for cutaway_index, cutaway in enumerate(cutaways):
+        primary_id = str(cutaway.get("primarySegmentId") or "")
+        logical_position = next((i for i, item in enumerate(valid) if str(item.get("id") or f"segment_{i}") == primary_id), None)
+        if logical_position is None:
+            continue
+        primary_schedule = composition_schedule(valid)[logical_position]
+        cutaway_start = max(0.0, float(primary_schedule["outputStart"]) + float(cutaway.get("outputOffset") or 0))
+        source_start = max(0.0, float(cutaway.get("sourceStart") or 0))
+        source_end = max(source_start + .2, float(cutaway.get("sourceEnd") or source_start))
+        duration = min(source_end - source_start, max(.2, composed_duration - cutaway_start))
+        if duration < .2:
+            continue
+        input_index = count + cutaway_input_count
+        cutaway_input_count += 1
+        input_arguments.extend(["-ss", f"{source_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
+        scale = (
+            f",scale='if(gte(iw,ih),min({int(preview_width)},iw),-2)':"
+            f"'if(gte(iw,ih),-2,min({int(preview_width)},ih))'"
+            if preview_width else ""
+        )
+        cutaway_label = f"broll{cutaway_index}"
+        filters.append(
+            f"[{input_index}:v]setpts=PTS-STARTPTS+{cutaway_start:.3f}/TB{scale},"
+            f"fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[{cutaway_label}]"
+        )
+        next_label = f"voverlay{cutaway_index}"
+        filters.append(
+            f"[{output_video_label}][{cutaway_label}]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:"
+            f"eof_action=pass:enable='between(t,{cutaway_start:.3f},{cutaway_start + duration:.3f})'[{next_label}]"
+        )
+        output_video_label = next_label
+
+    audio_output_label: str | None = None
+    if has_audio:
+        audio_inputs = "".join(f"[a{index}]" for index in range(count))
+        filters.append(
+            f"{audio_inputs}amix=inputs={count}:duration=longest:dropout_transition=0:normalize=0,"
+            f"apad=pad_dur={composed_duration:.3f},atrim=duration={composed_duration:.3f},"
+            "loudnorm=I=-16:LRA=11:TP=-1.5,alimiter=limit=0.95,asetpts=PTS-STARTPTS[aout]"
+        )
+        audio_output_label = "aout"
+    if subtitle_path and subtitle_cues:
         subtitle_style = normalize_subtitle_style(subtitle_style)
-        style = SUBTITLE_STYLES[subtitle_style]
+        visual_style = {
+            key: value for key, value in SUBTITLE_STYLES[subtitle_style].items()
+            if key not in {"fontsize", "x", "y"}
+        }
+        default_layout = subtitle_layout if isinstance(subtitle_layout, dict) else {}
+        cue_style_lookup = subtitle_cue_styles if isinstance(subtitle_cue_styles, dict) else {}
         subtitle_dir = subtitle_path.with_suffix(".cues")
         subtitle_dir.mkdir(parents=True, exist_ok=True)
         for cue_index, cue in enumerate(subtitle_cues):
@@ -922,6 +1364,25 @@ def render_composition(
             escaped_text_path = str(text_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             escaped_font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc".replace(":", "\\:")
             next_label = f"vsub{cue_index}"
+            layout = cue_style_lookup.get(str(cue.get("id") or "")) or default_layout
+            try:
+                size_ratio = max(.012, min(.080, float(layout.get("fontSizeRatio") or .040)))
+                offset_x = max(-.40, min(.40, float(layout.get("offsetXRatio") or 0)))
+                offset_y = max(-.40, min(.40, float(layout.get("offsetYRatio") or 0)))
+            except (AttributeError, TypeError, ValueError):
+                size_ratio, offset_x, offset_y = .040, 0.0, 0.0
+            horizontal = str(layout.get("horizontal") or "center")
+            vertical = str(layout.get("vertical") or "bottom")
+            x_anchor = {"left": "w*0.05", "right": "w-text_w-w*0.05"}.get(horizontal, "(w-text_w)/2")
+            y_anchor = {"top": "h*0.05", "middle": "(h-text_h)/2"}.get(vertical, "h-text_h-h*0.05")
+            x_expression = f"max(w*0.05\\,min(w-text_w-w*0.05\\,{x_anchor}+w*{offset_x:.5f}))"
+            y_expression = f"max(h*0.05\\,min(h-text_h-h*0.05\\,{y_anchor}+h*{offset_y:.5f}))"
+            style = {
+                **visual_style,
+                "fontsize": f"h*{size_ratio:.5f}",
+                "x": x_expression,
+                "y": y_expression,
+            }
             style_options = ":".join(f"{key}={value}" for key, value in style.items())
             filters.append(
                 f"[{output_video_label}]drawtext=fontfile='{escaped_font_path}':textfile='{escaped_text_path}':"
@@ -933,8 +1394,8 @@ def render_composition(
         ffmpeg, "-hide_banner", "-loglevel", "error", *input_arguments,
         "-filter_complex", ";".join(filters), "-map", f"[{output_video_label}]",
     ]
-    if has_audio:
-        command.extend(["-map", f"[{audio_current if count > 1 else 'a0'}]"])
+    if audio_output_label:
+        command.extend(["-map", f"[{audio_output_label}]"])
     command.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "25" if preview_width else "20", "-pix_fmt", "yuv420p"])
     if has_audio:
         command.extend(["-c:a", "aac", "-b:a", "96k" if preview_width else "160k"])
@@ -1064,6 +1525,7 @@ def create_preview_proxy(
     has_audio: bool,
     ffmpeg: str,
     maximum_dimension: int = 1280,
+    maximum_duration: float | None = None,
 ) -> None:
     maximum_dimension = max(360, min(1280, int(maximum_dimension)))
     if maximum_dimension % 2:
@@ -1080,6 +1542,8 @@ def create_preview_proxy(
     ]
     if has_audio:
         command.extend(["-map", "0:a?", "-c:a", "aac", "-b:a", "96k"])
+    if maximum_duration is not None and math.isfinite(float(maximum_duration)) and float(maximum_duration) > 0:
+        command.extend(["-t", f"{float(maximum_duration):.3f}"])
     command.extend(["-movflags", "+faststart", "-y", str(temporary)])
     _run(command, timeout=3600)
     temporary.replace(output)

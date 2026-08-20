@@ -35,7 +35,10 @@ EVENTS = {
     "breath": "breath", "music": "bgm",
 }
 TAG_PATTERN = re.compile(r"<\|([^|>]+)\|>")
-SPEECH_SCHEMA_VERSION = 6
+SPEECH_SCHEMA_VERSION = 7
+SPEECH_WORKER_RUNTIME_VERSION = "7.2"
+SPEECH_REQUEST_LEASE_SECONDS = 30.0
+SPEECH_REQUEST_TIMEOUT_SECONDS = 4 * 60 * 60
 MAX_SPEECH_SEGMENT_SECONDS = 90.0
 REPAIRED_SPEECH_SEGMENT_SECONDS = 60.0
 
@@ -229,7 +232,7 @@ def launch_sensevoice_worker(*, worker_directory: Path, **options: Any) -> None:
         # A persistent worker survives web-service restarts. Tie it to the
         # speech payload schema so code changes cannot leave an old worker
         # serving stale normalisation logic.
-        "runtime_version": SPEECH_SCHEMA_VERSION,
+        "runtime_version": SPEECH_WORKER_RUNTIME_VERSION,
     }
     # A long-lived worker survives web-service reloads. Reuse it only when its
     # model/device/diarization configuration still matches the current
@@ -306,40 +309,86 @@ def _sensevoice_via_worker(
     request_id = uuid.uuid4().hex
     request_path = requests / f"{request_id}.json"
     result_path = results / f"{request_id}.json"
+    lease_path = requests / f"{request_id}.lease"
+    cancel_path = requests / f"{request_id}.cancel"
+    created_at = time.time()
+    deadline_at = created_at + SPEECH_REQUEST_TIMEOUT_SECONDS
+
+    def refresh_lease() -> None:
+        lease_temporary = lease_path.with_suffix(".lease.tmp")
+        lease_temporary.write_text(json.dumps({
+            "requestId": request_id, "ownerPid": os.getpid(),
+            "heartbeatAt": time.time(), "deadlineAt": deadline_at,
+        }, ensure_ascii=False), encoding="utf-8")
+        lease_temporary.replace(lease_path)
+
+    refresh_lease()
     temporary = request_path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"id": request_id, "source": str(source)}, ensure_ascii=False), encoding="utf-8")
+    temporary.write_text(json.dumps({
+        "id": request_id, "source": str(source), "ownerPid": os.getpid(),
+        "createdAt": created_at, "deadlineAt": deadline_at,
+    }, ensure_ascii=False), encoding="utf-8")
     temporary.replace(request_path)
     status_path = worker_directory / "status.json"
-    while not result_path.is_file():
-        if cancelled and cancelled():
-            request_path.unlink(missing_ok=True)
-            (requests / f"{request_id}.cancel").touch()
-            raise RuntimeError("任务已取消")
-        status = sensevoice_status(status_path)
-        if progress_callback and status.get("status") == "running":
-            try:
-                progress_callback(
-                    status.get("progress"), status.get("processed"), status.get("total"), status.get("phase"),
-                )
-            except TypeError:
-                try:
-                    progress_callback(status.get("progress"), status.get("processed"), status.get("total"))
-                except TypeError:
-                    progress_callback(status.get("progress"))
-        if status.get("status") == "failed":
-            request_path.unlink(missing_ok=True)
-            raise RuntimeError(str(status.get("error") or "SenseVoice 工作进程启动失败"))
-        try:
-            pid = int((worker_directory / "worker.pid").read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-        except (OSError, ValueError):
-            request_path.unlink(missing_ok=True)
-            raise RuntimeError("SenseVoice 工作进程未运行")
-        time.sleep(.2)
+    last_lease_refresh = 0.0
     try:
+        while not result_path.is_file():
+            now = time.time()
+            if cancelled and cancelled():
+                request_path.unlink(missing_ok=True)
+                cancel_path.touch()
+                raise RuntimeError("任务已取消")
+            if now >= deadline_at:
+                request_path.unlink(missing_ok=True)
+                cancel_path.touch()
+                raise RuntimeError("SenseVoice 识别超过 4 小时，已终止本次请求")
+            if now - last_lease_refresh >= 2.0:
+                refresh_lease()
+                last_lease_refresh = now
+            status = sensevoice_status(status_path)
+            status_request_id = str(status.get("requestId") or "")
+            if progress_callback and status.get("status") == "running" and status_request_id == request_id:
+                try:
+                    progress_callback(
+                        status.get("progress"), status.get("processed"), status.get("total"), status.get("phase"),
+                    )
+                except TypeError:
+                    try:
+                        progress_callback(status.get("progress"), status.get("processed"), status.get("total"))
+                    except TypeError:
+                        progress_callback(status.get("progress"))
+            elif progress_callback:
+                live_requests = []
+                for candidate in requests.glob("*.json"):
+                    candidate_lease = requests / f"{candidate.stem}.lease"
+                    try:
+                        if now - candidate_lease.stat().st_mtime <= SPEECH_REQUEST_LEASE_SECONDS:
+                            live_requests.append(candidate)
+                    except OSError:
+                        continue
+                live_requests.sort(key=lambda path: path.stat().st_mtime)
+                queued_ids = [path.stem for path in live_requests]
+                position = queued_ids.index(request_id) + 1 if request_id in queued_ids else len(queued_ids) + 1
+                phase = f"queued:{position}:{max(position, len(queued_ids))}"
+                try:
+                    progress_callback(None, None, None, phase)
+                except TypeError:
+                    progress_callback(None)
+            if status.get("status") == "failed":
+                request_path.unlink(missing_ok=True)
+                raise RuntimeError(str(status.get("error") or "SenseVoice 工作进程启动失败"))
+            try:
+                pid = int((worker_directory / "worker.pid").read_text(encoding="utf-8").strip())
+                os.kill(pid, 0)
+            except (OSError, ValueError):
+                request_path.unlink(missing_ok=True)
+                raise RuntimeError("SenseVoice 工作进程未运行")
+            time.sleep(.2)
         value = json.loads(result_path.read_text(encoding="utf-8"))
     finally:
         result_path.unlink(missing_ok=True)
+        lease_path.unlink(missing_ok=True)
+        cancel_path.unlink(missing_ok=True)
     if value.get("error"):
         raise RuntimeError(str(value["error"])[:1000])
     payload = value.get("payload")

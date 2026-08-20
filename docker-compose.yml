@@ -4,16 +4,14 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - ${CLIPTALK_ENV_FILE:-.env.example}
+      - .env
     ports:
-      - "${CLIPTALK_BIND_ADDRESS:-127.0.0.1}:${CLIPTALK_PORT:-5180}:5180"
+      - "127.0.0.1:5180:5180"
     environment:
       HIGHLIGHT_HOST: 0.0.0.0
       HIGHLIGHT_PORT: 5180
       HIGHLIGHT_DATA_ROOT: /app/data
+      HIGHLIGHT_ACCESS_TOKEN: ${HIGHLIGHT_ACCESS_TOKEN:?请配置至少16字符的HIGHLIGHT_ACCESS_TOKEN}
     volumes:
-      - cliptalk-data:/app/data
+      - ./data:/app/data
     restart: unless-stopped
-
-volumes:
-  cliptalk-data:

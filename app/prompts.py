@@ -4,9 +4,10 @@ import json
 from typing import Any
 
 
-PROMPT_VERSION = "highlight-director-v9-semantic-boundaries-20260812"
-EDIT_PLAN_PROMPT_VERSION = "edit-plan-v4-semantic-boundaries-20260812"
+PROMPT_VERSION = "highlight-director-v12-evidence-graph-20260813"
+EDIT_PLAN_PROMPT_VERSION = "edit-plan-v8-quality-gate-20260813"
 BRIEF_PROMPT_VERSION = "brief-v1-20260806"
+COMPOSITION_REVIEW_PROMPT_VERSION = "composition-review-v4-multi-event-gate-20260813"
 
 COMMON_SYSTEM_PROMPT = """你是专业视频高光导演和纪录片剪辑师。
 所有判断必须来自输入中真实可见的画面、图片时间码，以及明确提供的音频或逐字稿。
@@ -136,6 +137,7 @@ def event_director_prompt(
 {'候选边界已参考逐字稿。' if transcript_available else '没有逐字稿，不得虚构对白。'}
 
 请把属于同一真实事件的候选组合为事件高光。每组只围绕一个事件，优先包含事件建立、发展、高潮、人物反应、结果和必要上下文等互补镜头。
+同时显式判断镜头故事关系：story_function 说明镜头在事件中的叙事职责；requires_candidate_indices 只列出理解本镜头前必须出现的候选；leads_to_candidate_indices 表示它自然推动到的后续；standalone 表示脱离上下文是否仍成立；emotion_direction 描述情绪变化方向。
 不得因为人物或地点相同就合并不同事件；主体镜头只能属于一个事件，只有栏目开场或地点建立等公共上下文可标 reusable_anchor=true。
 不重复镜头、不加入无关画面、不为目标时长破坏事件完整性。新闻、访谈和纪实默认保持因果与源时间顺序；纯视觉蒙太奇才可调整顺序。
 转场默认 cut，只有明显时间跳跃或情绪缓冲才可用短 dissolve；禁止漏光、双色调、闪白、强缩放等特效。
@@ -143,7 +145,7 @@ def event_director_prompt(
 如果用户给了事件数量上限，只返回达到质量门槛的事件；高质量事件不足时宁可少返回，也不要为了凑数加入弱事件。
 
 仅返回：
-{{"event_groups":[{{"title":"事件标题","summary":"完整事件概述","score":0到100,"priority":从1开始的整数,"reason":"归组依据","moments":[{{"candidate_index":整数,"role":"事件建立/发展/高潮/人物反应/结果/上下文","essential":true或false,"reusable_anchor":true或false,"transition_in":"cut或dissolve","order":从0开始的整数}}]}}]}}
+{{"event_groups":[{{"title":"事件标题","summary":"完整事件概述","score":0到100,"priority":从1开始的整数,"reason":"归组依据","story_arc":"事件如何建立、发展并落点","moments":[{{"candidate_index":整数,"role":"事件建立/发展/高潮/人物反应/结果/上下文","story_function":"建立/因果/升级/转折/反应/结果/收束","requires_candidate_indices":[整数],"leads_to_candidate_indices":[整数],"standalone":true或false,"emotion_direction":"平稳→紧张等","essential":true或false,"reusable_anchor":true或false,"transition_in":"cut或dissolve","order":从0开始的整数}}]}}]}}
     每个 candidate_index 必须来自候选数据，组内不得重复。"""
 
 
@@ -157,6 +159,8 @@ def llm_edit_plan_prompt(
     variants: list[str],
     candidates: list[dict[str, Any]],
     transcript_context: str,
+    technique_policy: dict[str, Any] | None = None,
+    editing_intent: dict[str, Any] | None = None,
 ) -> str:
     """Prompt for text-only editorial planning over already validated evidence.
 
@@ -173,18 +177,17 @@ def llm_edit_plan_prompt(
 候选范围模式：{'仅当前选择' if scope == 'selected_only' else '当前选择优先，必要时从全候选池补充'}
 当前选择的事件：{json.dumps(selected_group_ids, ensure_ascii=False)}
 已知语音证据：{transcript_context or '无可用逐字稿，不得虚构对白'}
+允许使用的剪辑手法：{json.dumps(technique_policy or {}, ensure_ascii=False)}
+用户剪辑约束（hardConstraints 必须满足，softGoals 用于排序）：
+{json.dumps(editing_intent or {}, ensure_ascii=False)}
 
 候选素材数据（时间码均为源视频真实时间，start/end 是允许使用的边界）：
 {json.dumps(candidates, ensure_ascii=False)}
 
-请分别设计以下版本：{json.dumps(variants, ensure_ascii=False)}
+请分别设计以下与当前内容类型匹配的版本：{json.dumps(variants, ensure_ascii=False)}
 
-版本必须是真正不同的剪辑策略，而不是同一组镜头只改变裁剪长度：
-- 叙事完整版：优先完整因果链，覆盖开场、过程和自然结尾。
-- 情绪高潮版：只把真实可见的情绪/动作变化作为高潮，不要把普通流程镜头强行命名为高潮。
-- 信息密度版：每个镜头只保留一个可辨识信息节点，减少重复和停顿。
-- 纪实自然版：尊重源时间顺序和动作完整性，保持自然节奏。
-- 节奏紧凑版：优先高分动作节点和明确转折，使用更短局部。
+版本名称本身就是策略约束。你必须先说明每个版本针对当前素材采用的取舍，再据此设计真实不同的镜头结构；不能把同一组镜头只改一点裁剪长度就伪装成新版本。
+候选中的 evidenceFacts 是 VLM/SenseVoice 的可追溯事实，evidenceScores 是多维价值分，relations 是镜头依赖关系，safeRanges 是可安全裁剪范围，uncertainty 表示尚未完全确认的内容。优先使用高价值、低不确定且有完整关系链的证据；不要把模型推断当成事实。
 如果候选池足够，每个版本至少更换一个候选或明显改变镜头结构；候选不足时如实说明，不要制造伪差异。
 
 编辑原则：
@@ -200,6 +203,17 @@ def llm_edit_plan_prompt(
 10. 如果目标时长无法自然达到，保留完整表达并在 warnings 说明“素材不足”，不要用重复镜头或无价值拖尾凑时长。
 11. 候选池充足时优先覆盖 3 个不同事件；但完整保留 3 个事件会超过“目标时长 + max(5秒, 目标时长的15%)”时，应减少为 2 个或 1 个事件，不得为了事件数量截断对白。
 12. minimumKeepSeconds 是硬下限；有对白的 candidate 必须在完整语句、停顿或说话人轮次边界切入切出。
+13. playback_rate 只能使用 1.0、1.1、1.25、1.5；完整对白、关键反应、情绪停顿和高潮落点必须保持 1.0。
+14. transition_in 只能为 cut、dissolve、fade_black。同一动作和连续对白用 cut；轻微时空跳跃才用短 dissolve；不同事件章节可用 fade_black。
+15. audio_bridge 只能为 none、j_cut、l_cut。仅在一侧是完整对白、另一侧是同事件无对白画面且关系明确时使用，持续 0.3 到 1.2 秒。
+16. 冷开场默认不重复正文源区间；严肃新闻和纪实不得用脱离上下文的金句制造悬念。
+17. 所有 hardConstraints 是硬约束：不得使用 contentExclusions，不得遗漏明确 includeRules，不得因追求事件数量而破坏完整表达。
+18. 时长不足时先补充对用户目标有贡献的上下文、反应或结果；时长过长时先移除完整的低优先级镜头，不得把每个事件都压缩成残句。
+19. 每个计划必须覆盖至少两个不同事件或明确解释为何素材只支持一个事件；镜头的因果依赖必须遵守 relations，不得把结果放在必要上下文之前。
+20. 如果使用 uncertainty.requiresDynamicReview=true 的镜头，必须在 warnings 中说明需复核的事实或边界；存在同等价值低不确定镜头时优先替换。
+21. 一条高光成片可以包含多个真实事件章节；同一章节内部只能属于一个事件，并保持动作、对白和因果完整。章节之间必须有主题、时间、因果或情绪关系，不能仅为凑时长拼接。
+22. 不同事件章节之间禁止 dissolve 和 j_cut/l_cut；大跨度章节可用短 fade_black，其他情况使用 cut。声音桥只允许发生在同一事件内部。
+23. 目标时长是硬质量约束：不得超过目标 15%；短于目标 20% 以上时，只有候选证据确实不足才可返回，并必须在 warnings 明确说明，不得作为推荐方案。
 
 仅返回以下 JSON：
 {{
@@ -215,7 +229,11 @@ def llm_edit_plan_prompt(
           "source_end": 0.0,
           "role": "hook/context/development/climax/reaction/result",
           "reason": "选择这段局部内容的理由",
-          "essential": true
+          "essential": true,
+          "playback_rate": 1.0,
+          "speed_reason": "保持原速或轻度变速的理由",
+          "transition_in": {{"type":"cut","duration":0.0,"reason":"衔接理由"}},
+          "audio_bridge": {{"type":"none","duration":0.0,"reason":"声音衔接理由"}}
         }}
       ],
       "added_by_ai": ["被补充候选 ID"],
@@ -229,6 +247,51 @@ def llm_edit_plan_prompt(
 
 def llm_order_prompt(*, content_profile: dict[str, Any], theme: str, candidates: list[dict[str, Any]], transcript_context: str) -> str:
     return f"""你是视频剪辑顺序编辑。只为已选镜头推荐排列顺序，不得改变、裁剪或合并任何镜头时间范围。\n\n内容画像：{json.dumps(content_profile, ensure_ascii=False)}\n用户重点：{theme.strip() or '综合判断'}\n语音证据：{transcript_context or '无'}\n已选镜头（每个 id 必须原样保留，start/end 只读）：\n{json.dumps(candidates, ensure_ascii=False)}\n\n请根据事件完整性、因果关系、情绪递进和源素材类型返回一个推荐顺序。新闻、访谈、纪实优先尊重源时间顺序；只有证据支持时才调整。不得新增、删除、修改任何镜头。\n仅返回 JSON：{{\"ordered_ids\":[\"镜头 id\"],\"reason\":\"排序理由\"}}"""
+
+
+def composition_visual_review_prompt(
+    *, timeline: dict[str, Any], user_goal: dict[str, Any], evidence_mode: str = "contact_sheet",
+) -> str:
+    evidence_note = (
+        "你看到的是已经完成剪辑的实际动态成片。请连续观看动作、表情、运动和所有切点，不要把它当成静态候选图。"
+        if evidence_mode == "dynamic_video" else
+        "你看到的是实际成片联系表；它包含全片周期采样和每个切点前后画面，OUT 是成片时间，CUT 表示相邻镜头切点。"
+    )
+    return f"""你是成片画面审片导演。{evidence_note}
+
+用户剪辑目标：{json.dumps(user_goal, ensure_ascii=False)}
+实际成片时间线：{json.dumps(timeline, ensure_ascii=False)}
+
+一条成片允许包含多个真实事件章节。请分别检查每个章节内部是否围绕同一事件、动作与表达是否完整，再检查章节之间是否存在主题、因果、时间或情绪联系。不要因为成片包含多个章节就判为“事件不完整”；只有把无关事件伪装成同一连续场景才是问题。
+请检查：开场是否快速建立主题、画面信息是否可理解、动作是否截断、切点是否跳跃、景别/主体/运动是否连续、是否出现视觉重复、高潮是否成立、结尾是否有自然落点。不同事件之间使用 dissolve 或声音桥属于关键连续性问题。
+如果时间线中存在 uncertainty.requiresDynamicReview=true，只选择对成片影响最大的最多 2 个镜头进行定向动态复核，判断画面事实、动作起止和高潮/结果落点是否真正成立。无法确认时 verdict 必须为 rejected，并在 issues 中给出 critical 问题；不要为普通低风险镜头增加复核项。
+只能引用联系表和时间线中的真实证据；不得猜测未显示的对白，不得创建时间码，不负责直接改片。
+
+仅返回 JSON：
+{{"summary":"画面审片结论","scores":{{"content":0到100,"narrative":0到100,"rhythm":0到100,"continuity":0到100,"audiovisual":0到100,"goalMatch":0到100}},"strengths":["优点"],"uncertaintyChecks":[{{"segmentId":"真实镜头ID","verdict":"verified/rejected","actionComplete":true或false,"boundaryComplete":true或false,"evidence":"动态画面证据"}}],"issues":[{{"id":"visual_1","severity":"critical/major/minor","category":"opening/action/continuity/repetition/climax/ending","segmentIds":["真实镜头ID"],"outputTime":成片秒数,"description":"问题","evidence":"联系表证据","fixable":true或false}}]}}"""
+
+
+def composition_editorial_review_prompt(
+    *, timeline: dict[str, Any], visual_review: dict[str, Any], user_goal: dict[str, Any],
+    candidates: list[dict[str, Any]], target_seconds: float | None,
+    media_evidence: dict[str, Any] | None = None,
+) -> str:
+    return f"""你是最终成片审片师。请评价已经渲染的实际成片，并在确有必要时给出最多 3 个可执行返修动作。
+
+用户剪辑目标：{json.dumps(user_goal, ensure_ascii=False)}
+目标时长：{target_seconds if target_seconds else '自动'}
+成片时间线（包含成片位置、源范围、逐字稿、声音证据和剪辑手法）：{json.dumps(timeline, ensure_ascii=False)}
+VLM 画面审片：{json.dumps(visual_review, ensure_ascii=False)}
+渲染后真实媒体检测（PCM 音轨、黑帧/冻结与切点，不是模型推测）：{json.dumps(media_evidence or {}, ensure_ascii=False)}
+可用候选池（所有边界均为硬边界）：{json.dumps(candidates, ensure_ascii=False)}
+
+重点检查内容完整性、因果和叙事、节奏、画面连续性、对白/声音连续性、用户目标匹配。成片可由多个事件章节组成：章节内部必须是同一事件，章节之间必须存在清楚的主题/因果/时间/情绪关系。不能仅因接近目标时长就给高分，也不能仅因包含多个事件章节就扣分。
+返修只能引用真实 segmentId/candidateId；禁止自由创造时间范围。adjust_bounds 必须位于候选 start/end 内，不能低于 minimumKeepSeconds，不能截断 speechUnits。
+remove_segment 不能删除唯一镜头；replace_segment 只能使用候选池；insert_segment 只用于补足必要上下文、故事结果或目标时长，并且只能插入候选池中尚未使用的高价值候选；afterSegmentId 为空表示放在开头。reorder_segments 必须完整保留当前镜头；完整对白、高潮、人物反应和结尾禁止变速。
+没有 major/critical 且可修复的问题时 repairActions 返回空数组。不要为了凑时长加入重复或无价值素材。
+
+仅返回 JSON：
+{{"summary":"综合审片结论","overallScore":0到100,"scores":{{"content":0到100,"narrative":0到100,"rhythm":0到100,"continuity":0到100,"audiovisual":0到100,"goalMatch":0到100}},"strengths":["优点"],"issues":[{{"id":"edit_1","severity":"critical/major/minor","category":"content/narrative/rhythm/continuity/audiovisual/goal","segmentIds":["真实镜头ID"],"outputTime":成片秒数,"description":"问题","evidence":"证据","fixable":true或false}}],"repairActions":[{{"type":"adjust_bounds/remove_segment/replace_segment/insert_segment/reorder_segments/set_transition/set_audio_bridge/set_speed","segmentId":"镜头ID","replacementCandidateId":"候选ID或空","afterSegmentId":"插入位置前一个镜头ID或空","start":数字或null,"end":数字或null,"orderedSegmentIds":["完整镜头顺序"],"playbackRate":1.0或1.1或1.25,"transitionIn":{{"type":"cut/dissolve/fade_black","duration":数字}},"audioBridge":{{"type":"none/j_cut/l_cut","duration":数字}},"reason":"返修依据"}}]}}"""
 
 
 def user_brief_prompt(*, filename: str, theme: str, count: str, target_seconds: str, analysis_mode: str, subtitle_mode: str = "ask", edit_mode: str = "ai_plan", structure: str = "auto") -> str:

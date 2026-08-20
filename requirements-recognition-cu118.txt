@@ -1,0 +1,7 @@
+-r requirements-recognition-common.txt
+
+# Install a CUDA-enabled PyTorch separately for the host's CUDA version.
+# Paddle's official cu118 runtime works with supported NVIDIA drivers even
+# when PyTorch uses a newer bundled CUDA runtime in the same environment.
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu118/
+paddlepaddle-gpu==3.3.0

@@ -405,6 +405,10 @@ class VisionConfigurationStore:
     ) -> dict[str, Any]:
         provider_id = provider.strip().lower().replace("-", "_")
         current = self.resolve(provider_id)
+        normalized_base_url = base_url.strip().rstrip("/")
+        current_base_url = str(current.get("baseUrl") or "").strip().rstrip("/")
+        if not api_key.strip() and current["apiKey"] and normalized_base_url != current_base_url:
+            raise VisionRequestError("接口地址已改变，请重新填写 API Key，不能复用旧地址的密钥")
         key = api_key.strip() or current["apiKey"]
         if not key:
             raise VisionRequestError("请填写 API Key")
@@ -433,7 +437,7 @@ class VisionConfigurationStore:
             state.setdefault("providers", {})[provider_id] = {
                 "apiKey": key,
                 "model": model.strip(),
-                "baseUrl": base_url.strip().rstrip("/"),
+                "baseUrl": normalized_base_url,
                 "thinkingType": thinking_type.strip().lower(),
                 "responseFormat": response_format.strip().lower() or "json_object",
                 "timeoutSeconds": current["timeoutSeconds"],
@@ -588,6 +592,10 @@ class LlmConfigurationStore:
                 return self.resolve()
         provider_id = provider.strip().lower().replace("-", "_")
         current = self.resolve(provider_id)
+        normalized_base_url = base_url.strip().rstrip("/")
+        current_base_url = str(current.get("baseUrl") or "").strip().rstrip("/")
+        if not api_key.strip() and current["apiKey"] and normalized_base_url != current_base_url:
+            raise VisionRequestError("接口地址已改变，请重新填写 API Key，不能复用旧地址的密钥")
         key = api_key.strip() or current["apiKey"]
         if not key:
             raise VisionRequestError("请填写 API Key")
@@ -617,7 +625,7 @@ class LlmConfigurationStore:
                 "protocol": definition["protocol"],
                 "apiKey": key,
                 "model": model.strip(),
-                "baseUrl": base_url.strip().rstrip("/"),
+                "baseUrl": normalized_base_url,
                 "thinkingType": thinking_type.strip().lower(),
                 "responseFormat": response_format.strip().lower() or definition["responseFormatDefault"],
                 "timeoutSeconds": current["timeoutSeconds"],

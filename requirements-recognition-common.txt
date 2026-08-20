@@ -1,0 +1,8 @@
+-r requirements-speech-common.txt
+
+# Optional v4 content-recognition stack. The application remains operational
+# when this file is not installed and reports each unavailable modality.
+transformers>=4.49,<5
+safetensors>=0.4,<1
+sentencepiece>=0.2,<1
+paddleocr>=3.2,<4
