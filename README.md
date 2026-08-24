@@ -204,12 +204,17 @@ For remote access, set `HIGHLIGHT_HOST=0.0.0.0` for a native install or `CLIPTAL
 
 ---
 
-## 🤝 Contributing
+💬 Contact
+
+For questions, feedback, collaboration, or other inquiries, feel free to contact us:
+
+Ma Fei — mafei@gml.ac.cn
+Xu Hongbo — xuhongbo@gml.ac.cn
 
 <div align="center">
 
 ⭐ If you find ClipTalk useful, please give us a star!
 
-Made with ❤️ by the ClipTalk Team
+Made with ❤️ by GML-MMGroup
 
 </div>

@@ -220,12 +220,17 @@ docker compose up --build
 
 ---
 
-## 🤝 参与贡献
+💬 联系我们
+
+如果你有任何问题、建议、合作意向或其他需求，欢迎通过邮件联系我们：
+
+马飞 — mafei@gml.ac.cn
+徐洪波 — xuhongbo@gml.ac.cn
 
 <div align="center">
 
-⭐ 如果 ClipTalk 对你有帮助，欢迎给项目点一个 Star！
+⭐ 如果 ClipTalk 对你有帮助，欢迎给我们一个 Star！
 
-Made with ❤️ by the ClipTalk Team
+Made with ❤️ by GML-MMGroup
 
 </div>
