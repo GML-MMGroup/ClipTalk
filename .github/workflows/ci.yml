@@ -8,8 +8,66 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    outputs:
+      heavy: ${{ steps.classify.outputs.heavy }}
+      base: ${{ steps.classify.outputs.base }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect documentation-only changes
+        id: classify
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          base="$EVENT_BASE_SHA"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-list --max-count=1 HEAD^)"
+          fi
+
+          heavy=false
+          while IFS= read -r path; do
+            case "$path" in
+              docs/*|*.md|LICENSE|LICENSE.*|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*) ;;
+              *) heavy=true; break ;;
+            esac
+          done < <(git diff --name-only "$base" "$GITHUB_SHA")
+
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
+
+  docs:
+    name: Documentation check
+    needs: changes
+    if: needs.changes.outputs.heavy != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check documentation changes
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base }}
+        run: |
+          git diff --check "$BASE_SHA" "$GITHUB_SHA"
+          python3 tools/check_repository.py
+
   test:
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -77,6 +135,8 @@ jobs:
         run: npm run benchmark:quality
 
   docker:
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
