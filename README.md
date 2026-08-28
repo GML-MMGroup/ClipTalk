@@ -103,50 +103,6 @@ You can also refine the result through follow-up instructions such as *“make i
 
 ---
 
-## 🏗️ How It Works
-
-ClipTalk turns natural-language editing requests into complete video-editing workflows.
-
-### 👤 Face-Matched Editing
-
-```text
-💬 "Cut out all scenes with Mr. Wang"
-        ↓
-🤖 Agent understands the target person
-        ↓
-👤 Face matching → Locate all matching on-screen segments
-        ↓
-✂️ Cut clips → 🎞️ Compose → ✅ Done
-```
-
-### ⚡ Highlight Editing
-
-```text
-💬 "Make a highlight from the best moments"
-        ↓
-🤖 Agent analyzes the footage
-        ↓
-🎬 Understand events → Identify highlight moments → Select key clips
-        ↓
-✂️ Cut & arrange clips → 🎞️ Compose → ✅ Done
-```
-
-### 🧭 Topic-Based Editing
-
-```text
-💬 "Cut out the parts where they explain Product X"
-        ↓
-🤖 Agent understands the target topic
-        ↓
-📝 Analyze dialogue → 🧭 Segment topics → Locate relevant sections
-        ↓
-✂️ Cut clips → 🎞️ Compose → ✅ Done
-```
-
-**One instruction in, finished clips out.**
-
----
-
 ## 🚀 Quick Start
 
 Requires Linux x86_64 (or WSL2), Python 3.10–3.11, FFmpeg/ffprobe, curl, and a CJK font. On Debian/Ubuntu:
