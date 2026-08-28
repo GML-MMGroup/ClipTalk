@@ -10,12 +10,7 @@
 
 **只需要说出来，视频就剪好了。**
 
-[![License](https://img.shields.io/badge/license-GPL%20v3-blue)](./LICENSE)
-[![Stars](https://img.shields.io/github/stars/GML-MMGroup/ClipTalk?style=social)](https://github.com/GML-MMGroup/ClipTalk)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/GML-MMGroup/ClipTalk/releases)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865f2)](https://discord.gg/yourlink)
-
-[English](./README.md) · **简体中文** · [在线体验](#) · [文档](#)
+[English](./README.md) · **简体中文** 
 
 </div>
 
@@ -219,8 +214,12 @@ docker compose up --build
 </details>
 
 ---
+## 🤝 贡献
 
-💬 联系我们
+欢迎提交 Pull Request，为 AdCraft 贡献代码、功能改进、Bug 修复或其他优化，并成为项目贡献者。
+
+
+## 💬 联系我们
 
 如果你有任何问题、建议、合作意向或其他需求，欢迎通过邮件联系我们：
 

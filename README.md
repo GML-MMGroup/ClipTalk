@@ -10,13 +10,8 @@
 
 **Just say it. It's edited.**
 
-[![License](https://img.shields.io/badge/license-GPL%20v3-blue)](./LICENSE)
-[![Stars](https://img.shields.io/github/stars/GML-MMGroup/ClipTalk?style=social)](https://github.com/GML-MMGroup/ClipTalk)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/GML-MMGroup/ClipTalk/releases)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865f2)](https://discord.gg/yourlink)
 
-**English** · [简体中文](./README_zh.md) · [Live Demo](#) · [Documentation](#)
-
+**English** · [简体中文](./README_zh.md) 
 </div>
 
 ---
@@ -203,8 +198,12 @@ For remote access, set `HIGHLIGHT_HOST=0.0.0.0` for a native install or `CLIPTAL
 </details>
 
 ---
+## 🤝 Contributing
 
-💬 Contact
+Pull Requests are always welcome. Contribute code, new features, bug fixes, or other improvements to AdCraft and become a project contributor.
+
+
+## 💬 Contact
 
 For questions, feedback, collaboration, or other inquiries, feel free to contact us:
 
