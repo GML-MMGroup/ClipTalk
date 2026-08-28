@@ -28,12 +28,7 @@ def requirement_names(path: Path) -> set[str]:
 
 def test_cpu_and_gpu_manifests_cover_direct_runtime_dependencies() -> None:
     manifests = sorted(path.name for path in ROOT.glob("requirements*.txt"))
-    assert manifests == [
-        "requirements-audiovisual-cu121.txt", "requirements-audiovisual.txt",
-        "requirements-cpu.txt", "requirements-gpu.txt",
-    ]
-    assert (ROOT / "requirements-audiovisual.txt").read_text(encoding="utf-8").splitlines()[-1] == "-r requirements-cpu.txt"
-    assert (ROOT / "requirements-audiovisual-cu121.txt").read_text(encoding="utf-8").splitlines()[-1] == "-r requirements-gpu.txt"
+    assert manifests == ["requirements-cpu.txt", "requirements-gpu.txt"]
     shared = {
         "fastapi", "uvicorn", "httpx", "python-multipart", "pydantic", "starlette",
         "pillow", "opencv-python-headless", "cryptography", "numpy", "scipy",

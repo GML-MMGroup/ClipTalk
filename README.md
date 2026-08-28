@@ -149,7 +149,14 @@ ClipTalk turns natural-language editing requests into complete video-editing wor
 
 ## 🚀 Quick Start
 
-Requires Linux x86_64 (or WSL2), Python 3.10/3.11, FFmpeg, and ffprobe.
+Requires Linux x86_64 (or WSL2), Python 3.10–3.11, FFmpeg/ffprobe, curl, and a CJK font. On Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg curl fonts-wqy-zenhei
+```
+
+Install the complete CPU runtime and start ClipTalk:
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -157,16 +164,23 @@ cd ClipTalk
 
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-audiovisual.txt
-bash start.sh
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements-cpu.txt
+
+# Recommended before the first person/content recognition task
+python3 tools/prepare_recognition_models.py --data-root data
+python3 tools/doctor.py --profile cpu
+
+./start.sh
 ```
+
+For an NVIDIA host with a compatible driver, install `requirements-gpu.txt` instead of `requirements-cpu.txt`, then run `python3 tools/doctor.py --profile cuda`.
 
 ### Models
 
 * **VLM · Required** — understands frames, finds events, and refines shot boundaries.
 * **LLM · Optional** — plans shot selection, ordering, and alternative edits; it can reuse the VLM.
-* **SenseVoice · Optional/local** — adds timestamped speech, emotion, and sound evidence; visual-only analysis remains available.
+* **Local multimodal stack · Included** — SenseVoice, OCR, visual/audio embeddings, and anonymous-person recognition; model weights are prepared locally or downloaded on first use.
 
 Open the URL printed in the terminal. In **Settings**, configure the VLM and optionally a separate LLM, then upload a video and describe the edit you want.
 
@@ -187,8 +201,8 @@ Open the URL printed in the terminal, then configure the vision and planning mod
 
 ### 🔧 Optional setup
 
-- **NVIDIA GPU:** install `requirements-audiovisual-cu121.txt` instead of the CPU requirements when the driver supports CUDA 12.1.
-- **SenseVoice:** optional local speech models download automatically on first use; visual-only analysis works without them.
+- **NVIDIA GPU:** install `requirements-gpu.txt` for a native environment. For Docker, use `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build` with NVIDIA Container Toolkit installed.
+- **Local models:** SenseVoice weights download on first use; run `python3 tools/prepare_recognition_models.py --data-root data` to prepare person/content recognition assets.
 - **Environment variables:** see [`.env.example`](./.env.example). Never commit `.env` or API keys.
 
 <details>

@@ -165,7 +165,14 @@ ClipTalk 会把自然语言剪辑指令转换成完整的视频剪辑流程。
 
 ## 🚀 快速开始
 
-需要 Linux x86_64（Windows 可使用 WSL2）、Python 3.10/3.11、FFmpeg 和 ffprobe。
+需要 Linux x86_64（Windows 可使用 WSL2）、Python 3.10–3.11、FFmpeg/ffprobe、curl 和中文字体。Debian/Ubuntu 可执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg curl fonts-wqy-zenhei
+```
+
+安装完整 CPU 运行环境并启动 ClipTalk：
 
 ```bash
 git clone https://github.com/GML-MMGroup/ClipTalk.git
@@ -173,16 +180,23 @@ cd ClipTalk
 
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-audiovisual.txt
-bash start.sh
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements-cpu.txt
+
+# 首次使用人物/内容识别前建议执行
+python3 tools/prepare_recognition_models.py --data-root data
+python3 tools/doctor.py --profile cpu
+
+./start.sh
 ```
+
+使用兼容驱动的 NVIDIA 主机时，将 `requirements-cpu.txt` 替换为 `requirements-gpu.txt`，安装后运行 `python3 tools/doctor.py --profile cuda`。
 
 ### 模型职责
 
 * **VLM · 必需** — 理解画面、发现事件并精修镜头边界。
 * **LLM · 可选** — 规划镜头取舍、顺序和不同成片方向；可以直接复用 VLM。
-* **SenseVoice · 可选/本地运行** — 补充带时间范围的对白、情绪和声音证据；不可用时仍可纯视觉分析。
+* **本地多模态能力 · 已包含** — SenseVoice、OCR、图文/声音向量和匿名人物识别；模型权重在本地准备或首次使用时下载。
 
 打开终端输出的访问地址，在 **Settings** 中配置 VLM，并按需配置独立 LLM；然后上传视频并描述剪辑要求。
 
@@ -203,8 +217,8 @@ docker compose up --build
 
 ### 🔧 可选配置
 
-- **NVIDIA GPU：** 显卡驱动支持 CUDA 12.1 时，使用 `requirements-audiovisual-cu121.txt` 代替 CPU 依赖。
-- **SenseVoice：** 可选的本地语音模型会在首次使用时自动下载；纯视觉分析不依赖它。
+- **NVIDIA GPU：** 原生环境安装 `requirements-gpu.txt`；Docker 环境安装 NVIDIA Container Toolkit 后，运行 `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build`。
+- **本地模型：** SenseVoice 权重会在首次使用时下载；运行 `python3 tools/prepare_recognition_models.py --data-root data` 可准备人物/内容识别资源。
 - **环境变量：** 查看 [`.env.example`](./.env.example)。请勿提交 `.env` 或 API Key。
 
 <details>

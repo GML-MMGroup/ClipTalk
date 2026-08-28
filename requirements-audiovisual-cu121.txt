@@ -1,2 +1,0 @@
-# Backward-compatible alias retained for the published README.
--r requirements-gpu.txt
