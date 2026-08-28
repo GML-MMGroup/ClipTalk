@@ -2,7 +2,7 @@
 
 <!-- 👇 在这里替换你的封面 Banner -->
 
-<img src="./assets/banner.png" alt="ClipTalk Banner" width="100%" />
+<img src="./assets/banner_zh.png" alt="ClipTalk Banner" width="100%" />
 
 # ClipTalk ✂️
 
