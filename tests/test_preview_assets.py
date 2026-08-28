@@ -39,6 +39,7 @@ def test_source_identity_distinguishes_truncated_duration_and_sanitizes_path(tmp
     identity = PreviewAssetPaths.source_identity(job)
     assert identity == "../same source-effective-12346"
     assert PreviewAssetPaths(tmp_path).source_proxy(identity).name == "proxy-samesource-effective-12346.mp4"
+    assert PreviewAssetPaths(tmp_path).analysis_proxy(identity).name == "analysis-samesource-effective-12346.mp4"
 
 
 def test_scheduler_deduplicates_and_applies_failure_cooldown() -> None:
@@ -87,6 +88,34 @@ def test_long_truncated_source_uses_effective_duration_for_proxy(tmp_path: Path)
     assert output.read_bytes() == b"proxy"
     assert create_mock.call_args.kwargs["maximum_dimension"] == 720
     assert create_mock.call_args.kwargs["maximum_duration"] == 4200
+
+
+def test_analysis_proxy_is_960p_timestamp_preserving_and_reused(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    job = {
+        "id": "job_4k",
+        "sourceHash": "source_4k",
+        "sourcePath": str(source),
+        "videoInfo": {"duration": 180},
+    }
+
+    def create(_source, output, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"analysis")
+
+    with (
+        patch("app.preview_assets.probe_video", return_value=SimpleNamespace(duration=180, has_audio=True)),
+        patch("app.preview_assets.create_preview_proxy", side_effect=create) as create_mock,
+    ):
+        service = make_service(tmp_path)
+        first = service.prepare_analysis(job)
+        second = service.prepare_analysis(job)
+
+    assert first == second == tmp_path / "cache" / "analysis-source_4k.mp4"
+    assert create_mock.call_count == 1
+    assert create_mock.call_args.kwargs["maximum_dimension"] == 960
+    assert create_mock.call_args.kwargs["has_audio"] is True
 
 
 def test_output_preview_reuses_cache_and_confines_filename(tmp_path: Path) -> None:

@@ -661,6 +661,78 @@ class ContentIndexTests(unittest.TestCase):
         self.assertTrue(operation["exhaustiveEligible"])
         self.assertEqual(operation["maximumSampleGapUs"], 500000)
 
+
+class ContentPerformanceTests(unittest.TestCase):
+    def test_cpu_visual_index_uses_balanced_profile_while_cuda_keeps_full(self) -> None:
+        from app import main as main_app
+
+        cpu_profile = main_app._content_recognition_profile(
+            {"request": {}}, {"visual"}, runtime={"device": "cpu"},
+        )
+        cuda_profile = main_app._content_recognition_profile(
+            {"request": {}}, {"visual"}, runtime={"device": "cuda"},
+        )
+
+        self.assertEqual(cpu_profile, ("balanced", "cpu"))
+        self.assertEqual(cuda_profile, ("full", "cuda"))
+
+    def test_high_resolution_content_source_prepares_analysis_proxy(self) -> None:
+        from app import main as main_app
+
+        proxy = Path("/tmp/analysis-source.mp4")
+        service = MagicMock()
+        service.prepare_analysis.return_value = proxy
+        job = {"id": "job_4k", "sourceHash": "source_4k", "sourcePath": "/tmp/source.mp4"}
+        info = SimpleNamespace(width=3840, height=2160)
+
+        with patch.object(main_app, "preview_asset_service", return_value=service), \
+                patch.object(main_app, "_content_analysis_proxy_path", return_value=Path("/tmp/missing-analysis.mp4")):
+            source, metadata = main_app._prepare_content_visual_source(job, info)
+
+        self.assertEqual(source, proxy)
+        self.assertEqual(metadata["kind"], "analysis_proxy")
+        self.assertEqual(metadata["maximumDimension"], 960)
+        self.assertFalse(metadata["cacheHit"])
+        service.prepare_analysis.assert_called_once_with(job)
+
+    def test_query_frame_extraction_reuses_index_samples_and_decodes_only_gaps(self) -> None:
+        from app import main as main_app
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(main_app.settings, data_root=root)
+            job = {
+                "id": "job_reuse", "sourceHash": "source_reuse",
+                "sourcePath": str(root / "source.mp4"), "request": {},
+            }
+            (root / "source.mp4").write_bytes(b"source")
+            with patch.object(main_app, "settings", settings):
+                frame_root = main_app.content_index_directory(job) / "recognition-frames"
+                frame_root.mkdir(parents=True)
+                items = []
+                for position, frame_time in enumerate((0.0, 1.0)):
+                    path = frame_root / f"detail-{position:03d}.jpg"
+                    path.write_bytes(b"frame")
+                    items.append({"filename": path.name, "time": frame_time})
+                (frame_root / ".detail-frames.json").write_text(
+                    __import__("json").dumps({"schemaVersion": 1, "items": items}),
+                    encoding="utf-8",
+                )
+
+                def extract(_source, _output, times, **_kwargs):
+                    return [SimpleNamespace(path=root / "fresh.jpg", time=value) for value in times]
+
+                stats: dict[str, object] = {}
+                with patch.object(main_app, "extract_frames_at_times", side_effect=extract) as decode:
+                    frames = main_app._extract_content_frames(
+                        job, root / "query", [0.0, .5, 1.0], retrieval_stats=stats,
+                    )
+
+            self.assertEqual([frame.time for frame in frames], [0.0, .5, 1.0])
+            self.assertEqual(list(decode.call_args.args[2]), [.5])
+            self.assertEqual(stats["reusedIndexFrameCount"], 2)
+            self.assertFalse(stats["analysisProxyUsed"])
+
     def test_coverage_manifest_separates_execution_from_exhaustive_coverage(self) -> None:
         from app import main as main_app
 

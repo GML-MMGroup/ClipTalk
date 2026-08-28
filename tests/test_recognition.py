@@ -87,6 +87,59 @@ class RecognitionContractTests(unittest.TestCase):
         self.assertEqual(result["ocrSampling"]["coverageMode"], "continuous_sampled")
         self.assertEqual(len(ocr_engine.recognize.call_args.args[0]), 21)
 
+    def test_balanced_ocr_enrichment_halves_cpu_sampling_density(self) -> None:
+        ocr_engine = MagicMock()
+        ocr_engine.recognize.return_value = []
+
+        def frames_at_times(_source, _root, times, **_kwargs):
+            return [SimpleNamespace(path=Path(f"frame-{position}.jpg"), time=value)
+                    for position, value in enumerate(times)]
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("app.recognition_pipeline.extract_frames_at_times", side_effect=frames_at_times), \
+                patch("app.recognition_models.PaddleOcrEngine", return_value=ocr_engine):
+            result = enrich_multimodal_index(
+                source=Path(directory) / "source.mp4",
+                root=Path(directory), duration=10, scene_cuts=[5],
+                transcript_segments=[], speech_units=[], settings=SimpleNamespace(
+                    recognition_ocr_enabled=True,
+                    recognition_model_cache=Path(directory),
+                ), recognition_profile="balanced", ffmpeg="ffmpeg",
+                requested_modalities={"ocr"}, speech_analysis_complete=False,
+            )
+
+        self.assertEqual(result["ocrSampling"]["intervalSeconds"], 1.0)
+        self.assertEqual(result["ocrSampling"]["requestedFrameCount"], 11)
+        self.assertEqual(result["ocrSampling"]["coverageMode"], "adaptive_sampled")
+
+    def test_balanced_visual_enrichment_uses_half_fps_cpu_recall(self) -> None:
+        encoder = MagicMock()
+
+        def frames_at_times(_source, _root, times, **_kwargs):
+            values = list(times)
+            return [SimpleNamespace(path=Path(f"frame-{position}.jpg"), time=value)
+                    for position, value in enumerate(values)]
+
+        encoder.encode_images.side_effect = lambda paths, **_kwargs: np.ones((len(paths), 4))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("app.recognition_pipeline.extract_frames_at_times", side_effect=frames_at_times), \
+                patch("app.recognition_models.SiglipEncoder", return_value=encoder), \
+                patch("torch.cuda.is_available", return_value=False):
+            result = enrich_multimodal_index(
+                source=Path(directory) / "source.mp4",
+                root=Path(directory), duration=10, scene_cuts=[5],
+                transcript_segments=[], speech_units=[], settings=SimpleNamespace(
+                    recognition_siglip_model="siglip-test",
+                    recognition_model_cache=Path(directory),
+                ), recognition_profile="balanced", ffmpeg="ffmpeg",
+                requested_modalities={"visual"}, speech_analysis_complete=False,
+            )
+
+        # 0.5 FPS baseline plus the explicit scene boundary at five seconds.
+        self.assertEqual(result["recognitionFrameCount"], 7)
+        self.assertEqual(len(result["embeddingVisualUnits"]), 7)
+        self.assertEqual(encoder.encode_images.call_args.kwargs["batch_size"], 4)
+
     def test_person_frame_extraction_stays_indeterminate_until_first_batch(self) -> None:
         progress: list[tuple[float, str]] = []
         face_engine = MagicMock()

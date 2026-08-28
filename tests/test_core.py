@@ -183,6 +183,7 @@ class ProgressEtaTests(unittest.TestCase):
             stage="speech_recognition",
             overall=.0798,
             detail="SenseVoice 正在整理识别结果",
+            facts={"finalizing": True},
         )
         self.assertIsNone(stage_progress_for("speech_recognition", .0798, "SenseVoice 正在整理识别结果"))
         self.assertIsNone(facts["stageCompleted"])
@@ -232,12 +233,15 @@ class ProgressEtaTests(unittest.TestCase):
             stage="coarse_vlm",
             overall=.12,
             detail="视觉大模型正在分析第 1/5 组画面",
+            facts={"completed": 0, "total": 5, "unit": "组", "currentItemIndex": 1, "fraction": 0},
         )
         self.assertIsNone(facts["etaSeconds"])
         self.assertEqual(facts["etaMode"], "waiting_first_sample")
         self.assertEqual(facts["stageObservedIndex"], 1)
         self.assertEqual(facts["stageCompleted"], 0)
-        self.assertEqual(stage_progress_for("coarse_vlm", .12, "视觉大模型正在分析第 1/5 组画面"), 0)
+        self.assertEqual(stage_progress_for(
+            "coarse_vlm", .12, "视觉大模型正在分析第 1/5 组画面", completed=0, total=5,
+        ), 0)
 
     def test_uses_completed_stage_unit_average_for_eta(self) -> None:
         now = datetime.now(timezone.utc)
@@ -254,6 +258,7 @@ class ProgressEtaTests(unittest.TestCase):
             stage="coarse_vlm",
             overall=.196,
             detail="视觉大模型正在分析第 2/5 组画面",
+            facts={"completed": 1, "total": 5, "unit": "组", "currentItemIndex": 2, "fraction": .2},
         )
         self.assertEqual(facts["etaMode"], "stage_average")
         self.assertEqual(facts["stageSampleCount"], 1)
@@ -283,12 +288,29 @@ class ProgressEtaTests(unittest.TestCase):
             stage="audio_analysis",
             overall=.05,
             detail="音频波形已处理 32/120 秒",
+            facts={"completed": 32, "total": 120, "unit": "秒", "fraction": 32 / 120},
         )
         self.assertEqual(facts["stageCompleted"], 32)
         self.assertEqual(facts["stageTotal"], 120)
         self.assertEqual(facts["stageUnit"], "秒")
         self.assertEqual(facts["progressMode"], "determinate")
-        self.assertAlmostEqual(stage_progress_for("audio_analysis", .05, "音频波形已处理 32/120 秒"), 32 / 120)
+        self.assertAlmostEqual(stage_progress_for(
+            "audio_analysis", .05, "音频波形已处理 32/120 秒", completed=32, total=120,
+        ), 32 / 120)
+
+    def test_progress_does_not_parse_presentation_prose(self) -> None:
+        facts = structured_progress(
+            {"stage": "coarse_vlm", "startedAt": datetime.now(timezone.utc).isoformat()},
+            stage="coarse_vlm",
+            overall=.3,
+            detail="视觉大模型已完成 3/4 组，当前 75%",
+        )
+        self.assertIsNone(facts["stageCompleted"])
+        self.assertIsNone(facts["stageTotal"])
+        self.assertEqual(facts["progressMode"], "indeterminate")
+        self.assertIsNone(stage_progress_for(
+            "coarse_vlm", .3, "视觉大模型已完成 3/4 组，当前 75%",
+        ))
 
 
 class JsonParsingTests(unittest.TestCase):

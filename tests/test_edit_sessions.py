@@ -414,3 +414,45 @@ def test_edit_session_rejects_stale_revision_and_invalid_source_range() -> None:
         apply_edit_operation(job, session, revision=1, operation={
             "type": "insert_clip", "sourceStart": 89.9, "sourceEnd": 91.0,
         })
+
+
+def test_independent_text_layers_support_update_delete_and_history() -> None:
+    job = _job()
+    session, _created = create_or_resume_edit_session(
+        job, version_id="version-1", output_filename="version-1.mp4",
+    )
+
+    result = apply_edit_operation(job, session, revision=0, operation={
+        "type": "add_text_layer",
+        "start": 2.0,
+        "end": 4.5,
+        "text": "章节标题",
+        "style": {"vertical": "middle", "fontSizeRatio": .05},
+    })
+    layer = result["session"]["textLayers"][0]
+    assert layer["text"] == "章节标题"
+    assert layer["style"]["vertical"] == "middle"
+    assert layer["style"]["fontSizeRatio"] == .05
+    assert session["subtitleDraftId"] is None
+
+    apply_edit_operation(job, session, revision=1, operation={
+        "type": "update_text_layer",
+        "layerId": layer["id"],
+        "text": "修改后的标题",
+        "start": 3.0,
+        "end": 6.0,
+        "style": {"offsetXRatio": .2, "fontSizeRatio": .06},
+    })
+    assert session["textLayers"][0]["text"] == "修改后的标题"
+    assert session["textLayers"][0]["start"] == 3.0
+    assert session["textLayers"][0]["style"]["offsetXRatio"] == .2
+
+    undo_edit_session(session, revision=2)
+    assert session["textLayers"][0]["text"] == "章节标题"
+    redo_edit_session(session, revision=3)
+    assert session["textLayers"][0]["text"] == "修改后的标题"
+
+    apply_edit_operation(job, session, revision=4, operation={
+        "type": "delete_text_layer", "layerId": layer["id"],
+    })
+    assert session["textLayers"] == []

@@ -42,6 +42,26 @@ async function startStubServer() {
       }));
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/settings/vision") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({
+        activeProvider: "ark",
+        providers: [
+          { id: "ark", name: "火山方舟", description: "豆包及方舟接入点", baseUrl: "https://ark.example/v3", baseUrlEditable: false, thinkingSupported: true, active: true, configured: true, keyConfigured: true, keyHint: "ark-****test", model: "doubao-vision", thinkingType: "disabled", responseFormat: "json_object", models: [{ id: "doubao-vision", recommended: true, supportsVideo: true }], verifiedAt: null },
+          { id: "openai", name: "OpenAI", description: "OpenAI 官方多模态模型", baseUrl: "https://api.openai.com/v1", baseUrlEditable: false, thinkingSupported: false, active: false, configured: false, keyConfigured: false, keyHint: "", model: "", thinkingType: "", responseFormat: "json_object", models: [], verifiedAt: null },
+          { id: "openai_compatible", name: "兼容接口", description: "其他兼容服务", baseUrl: "", baseUrlEditable: true, thinkingSupported: true, active: false, configured: false, keyConfigured: false, keyHint: "", model: "", thinkingType: "", responseFormat: "json_object", models: [], verifiedAt: null },
+        ],
+      }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/settings/llm") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({
+        mode: "reuse_vision", reuseVision: true, activeProvider: "ark",
+        providers: [{ id: "ark", name: "火山方舟", description: "豆包及方舟文本模型", protocol: "openai", baseUrl: "https://ark.example/v3", baseUrlEditable: false, thinkingSupported: true, active: true, configured: true, keyConfigured: true, keyHint: "ark-****test", model: "doubao-text", thinkingType: "disabled", responseFormat: "json_object", models: [{ id: "doubao-text", recommended: true, supportsJson: true }], verifiedAt: null }],
+      }));
+      return;
+    }
     if (url.pathname === "/api/jobs") {
       const token = String(request.headers["x-highlight-token"] || "");
       response.setHeader("Content-Type", "application/json");
@@ -477,14 +497,14 @@ test("unrouted follow-up thinking uses the generic video editing assistant", asy
       };
     });
     assert.equal(labels.generic, "视频剪辑助手");
-    assert.equal(labels.routed, "内容探索助手");
+    assert.equal(labels.routed, "视频剪辑助手");
   } finally {
     await browser.close();
     await stub.close();
   }
 });
 
-test("grouped home project cards expose delete for every workflow task", async () => {
+test("compact navigation rail opens a focused history drawer", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -502,28 +522,54 @@ test("grouped home project cards expose delete for every workflow task", async (
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [
         { ...base, id: "task-content", workflowKind: "content_search", updatedAt: "2026-08-25T01:00:00Z" },
         { ...base, id: "task-person", workflowKind: "person_edit", updatedAt: "2026-08-25T02:00:00Z" },
+        { ...base, id: "task-running", workflowKind: "highlight", status: "running", stage: "analysis", progress: .43, detail: "正在分析素材", updatedAt: "2026-08-25T03:00:00Z" },
       ] }) });
     });
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
     await page.locator("#accessTokenDialog[open]").waitFor({ state: "visible" });
     await page.locator("#accessTokenDialog input").fill("browser-test-token");
     await page.locator("#accessTokenDialog button[type=submit]").click();
-    await page.locator(".home-project-task-row").first().waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.querySelector("#homeView")?.dataset.homeState === "ready");
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#appSidebar").evaluate((node) => getComputedStyle(node).width), "72px");
+    assert.equal(await page.locator(".app-sidebar-primary .app-sidebar-action").count(), 4);
+    assert.equal(await page.locator("#sidebarCurrentTask").isDisabled(), true);
+    assert.equal(await page.locator(".app-sidebar-footer, #sidebarCollapse, #sidebarTaskRefresh").count(), 0);
+    await page.locator("#sidebarHistoryToggle").click();
+    await page.locator("#sidebarHistoryList .shell-task-card").first().waitFor({ state: "visible" });
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "false");
+    assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "true");
     assert.equal(await page.locator("#homeView").getAttribute("data-home-state"), "ready");
-    assert.equal(await page.locator(".home-summary").isVisible(), true);
+    assert.equal(await page.locator(".home-summary").isVisible(), false);
     assert.equal(await page.locator("#homeAssetCount").textContent(), "1");
-    assert.equal(await page.locator("#homeTaskCount").textContent(), "2");
+    assert.equal(await page.locator("#homeTaskCount").textContent(), "3");
     assert.equal(await page.locator("#homeOutputCount").textContent(), "0");
-    const rows = await page.locator(".home-project-task-row").evaluateAll((nodes) => nodes.map((node) => ({
-      openId: node.querySelector("[data-home-task]")?.dataset.homeTask || "",
-      deleteId: node.querySelector("[data-home-delete]")?.dataset.homeDelete || "",
-      deleteText: node.querySelector("[data-home-delete]")?.textContent || "",
-      label: node.querySelector(".home-workflow-label")?.textContent || "",
+    assert.equal(await page.locator("#homeTaskGrid .shell-task-card").count(), 1);
+    assert.equal(await page.locator("#sidebarAttentionCount").textContent(), "1");
+    const rows = await page.locator("#sidebarHistoryList .shell-task-card").evaluateAll((nodes) => nodes.map((node) => ({
+      openId: node.querySelector("[data-shell-open]")?.dataset.shellOpen || "",
+      deleteId: node.querySelector("[data-shell-delete]")?.dataset.shellDelete || "",
+      label: node.querySelector(".shell-task-open > small")?.textContent.split(" · ")[0] || "",
     })));
     assert.deepEqual(rows, [
-      { openId: "task-person", deleteId: "task-person", deleteText: "删除", label: "按人物剪辑" },
-      { openId: "task-content", deleteId: "task-content", deleteText: "删除", label: "内容探索" },
+      { openId: "task-running", deleteId: "", label: "智能高光" },
+      { openId: "task-person", deleteId: "task-person", label: "按人物剪辑" },
+      { openId: "task-content", deleteId: "task-content", label: "内容探索" },
     ]);
+    assert.equal(await page.locator("#sidebarHistoryList .task-stage-track, #sidebarHistoryList .shell-task-meta").count(), 0);
+    assert.deepEqual(await page.locator("#sidebarHistoryList .shell-task-state").allTextContents(), ["进行中", "已完成", "已完成"]);
+    assert.equal(await page.locator("#sidebarHistoryList .shell-task-progress").count(), 1);
+    assert.match(await page.locator("#sidebarHistoryList .shell-task-progress").getAttribute("aria-label"), /43%/);
+    await page.evaluate(() => {
+      window.ClipTalkCurrentJobId = () => "task-running";
+      window.ClipTalkAppShell.syncCurrentJob({ id: "task-running" });
+    });
+    assert.equal(await page.locator("#sidebarCurrentTask").isEnabled(), true);
+    assert.equal(await page.locator("#sidebarCurrentTask").getAttribute("title"), "返回当前任务");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "false");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "sidebarHistoryToggle");
   } finally {
     await browser.close();
     await stub.close();
@@ -1162,7 +1208,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.equal(audit.outputControlColumns.trim().split(/\s+/).length, 1);
     assert.ok(audit.confirmButtonWidth > 0);
     assert.equal(audit.contentEditEntryCount, 0);
-    assert.equal(audit.confirmButtonText, "直接生成本次结果");
+    assert.equal(audit.confirmButtonText, "生成当前检索视频");
     assert.deepEqual(audit.noDialogueSubtitleState, {
       disabled: true,
       checked: false,
@@ -1603,7 +1649,7 @@ test("review sample makes formal export primary and low-resolution download seco
     assert.equal(audit.preview.finalizeText, "确认版本并导出高清");
     assert.match(audit.preview.finalizeTitle, /源视频分辨率.*正式成片/);
     assert.equal(audit.preview.finalizeAria, "确认当前版本并导出高清正式成片");
-    assert.equal(audit.preview.finalizeBackground, "rgb(210, 160, 86)");
+    assert.equal(audit.preview.finalizeBackground, "rgb(168, 194, 105)");
     assert.equal(audit.preview.downloadText, "下载 V1 审核样片");
     assert.match(audit.preview.downloadTitle, /当前预览的 V1.*低分辨率审核样片.*不会创建正式高清成片/);
     assert.equal(audit.preview.downloadAria, "下载当前预览的 V1 低清审核样片，不导出高清版本");
@@ -2011,7 +2057,7 @@ test("anonymous person selector submits multiple ids and match mode", async () =
     assert.match(historyPresentation.text, /人物A、人物B任一人物出现查看这些片段/);
     assert.equal(historyPresentation.color, "rgb(184, 207, 206)");
     assert.equal(historyPresentation.background, "rgb(21, 38, 45)");
-    assert.equal(historyPresentation.border, "rgb(70, 96, 105)");
+    assert.equal(historyPresentation.border, "rgba(0, 0, 0, 0)");
     await page.evaluate(() => {
       const inputs = [...document.querySelectorAll("[data-person-target]")];
       inputs.forEach((input) => {
@@ -2734,6 +2780,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     outputVersions: [{
       id: "version_1", number: 1, outputs: [{
         filename: "version_1.mp4", duration: 15.08, segmentCount: 2,
+        downloadUrl: "/api/jobs/secondary-editor-job/outputs/version_1.mp4/download",
         segments: [
           { id: "source_1", start: 83.45, end: 92.53, role: "问题" },
           { id: "source_2", start: 100, end: 106, role: "回答" },
@@ -2746,13 +2793,14 @@ test("generated output versions open a persistent secondary editor", async () =>
     id: "edit_session_1", title: "基于 V1 精剪", status: "draft", revision: 0,
     baseVersionId: "version_1", baseVersionNumber: 1, baseOutputFilename: "version_1.mp4",
     workflowKind: "speaker_edit", duration: 15.08, clipCount: 2, canUndo: false, canRedo: false,
+    textLayers: [],
     subtitleEnabled: true, subtitleDraftId: "sub_test", subtitleStyle: "clean", schedule: [
       { clipId: "clip_1", outputStart: 0, outputEnd: 9.08 },
       { clipId: "clip_2", outputStart: 9.08, outputEnd: 15.08 },
     ],
     clips: [
-      { id: "clip_1", title: "问题", sourceStart: 83.45, sourceEnd: 92.53, duration: 9.08, playbackRate: 1, transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 } },
-      { id: "clip_2", title: "回答", sourceStart: 100, sourceEnd: 106, duration: 6, playbackRate: 1, transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 } },
+      { id: "clip_1", title: "问题", sourceRef: { kind: "output_segment", id: "source_1" }, sourceStart: 83.45, sourceEnd: 92.53, duration: 9.08, playbackRate: 1, transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 } },
+      { id: "clip_2", title: "回答", sourceRef: { kind: "output_segment", id: "source_2" }, sourceStart: 100, sourceEnd: 106, duration: 6, playbackRate: 1, transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 } },
     ],
   };
   const refreshSessionSchedule = () => {
@@ -2862,6 +2910,25 @@ test("generated output versions open a persistent secondary editor", async () =>
           const lookup = new Map(session.clips.map((clip) => [clip.id, clip]));
           session.clips = payload.operation.clipIds.map((id) => lookup.get(id));
           refreshSessionSchedule();
+        } else if (payload.operation.type === "add_text_layer") {
+          session.textLayers.push({
+            id: `edit_text_${session.textLayers.length + 1}`,
+            text: payload.operation.text,
+            start: payload.operation.start,
+            end: payload.operation.end,
+            style: payload.operation.style,
+          });
+          session = { ...session, revision: session.revision + 1, canUndo: true };
+        } else if (payload.operation.type === "update_text_layer") {
+          const layer = session.textLayers.find((item) => item.id === payload.operation.layerId);
+          if (payload.operation.text !== undefined) layer.text = payload.operation.text;
+          if (payload.operation.start !== undefined) layer.start = payload.operation.start;
+          if (payload.operation.end !== undefined) layer.end = payload.operation.end;
+          if (payload.operation.style !== undefined) layer.style = payload.operation.style;
+          session = { ...session, revision: session.revision + 1, canUndo: true };
+        } else if (payload.operation.type === "delete_text_layer") {
+          session.textLayers = session.textLayers.filter((item) => item.id !== payload.operation.layerId);
+          session = { ...session, revision: session.revision + 1, canUndo: true };
         }
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ summary: "已移除 1 个片段", session }) });
         return;
@@ -2869,6 +2936,7 @@ test("generated output versions open a persistent secondary editor", async () =>
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ detail: "not stubbed" }) });
     });
     await page.evaluate((value) => {
+      document.body.dataset.shellMode = "workspace";
       studio.classList.remove("home-mode");
       document.querySelector("#homeView")?.classList.add("hidden");
       document.querySelector("#reviewView")?.classList.remove("hidden");
@@ -2880,8 +2948,26 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.equal(await page.locator("#secondaryEditCurrentButton").getAttribute("data-secondary-edit-version"), "version_1");
     assert.equal(await page.locator("#secondaryEditCurrentButton").getAttribute("data-secondary-edit-output"), "version_1.mp4");
     assert.equal(await page.locator(".clip-version-edit").textContent(), "精剪此版本");
+    const outputActionColors = await page.evaluate(() => ({
+      selector: getComputedStyle(document.querySelector("#videoViewSelect")).backgroundColor,
+      edit: getComputedStyle(document.querySelector("#secondaryEditCurrentButton")).backgroundColor,
+      download: getComputedStyle(document.querySelector("#downloadButton")).backgroundColor,
+      downloadText: getComputedStyle(document.querySelector("#downloadButton")).color,
+      evidenceTitle: getComputedStyle(document.querySelector("#clipTitle")).color,
+      evidenceReason: getComputedStyle(document.querySelector("#clipReason")).color,
+      explanation: getComputedStyle(document.querySelector("#outputExplanation")).color,
+    }));
+    assert.match(outputActionColors.selector, /255, 255, 255/);
+    assert.equal(outputActionColors.edit, "rgb(255, 245, 239)");
+    assert.equal(outputActionColors.download, "rgb(237, 135, 84)");
+    assert.equal(outputActionColors.downloadText, "rgb(255, 255, 255)");
+    assert.equal(outputActionColors.evidenceTitle, "rgb(38, 49, 56)");
+    assert.equal(outputActionColors.evidenceReason, "rgb(86, 99, 107)");
+    assert.equal(outputActionColors.explanation, "rgb(62, 75, 82)");
     await page.locator("#secondaryEditCurrentButton").click();
     await page.locator("#secondaryEditor").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#secondarySubtitleAdd").isVisible(), true);
+    assert.equal(await page.locator("#secondarySubtitleAdd").textContent(), "＋ 文本");
     assert.equal(await page.locator('[data-secondary-inspector-tab="clip"]').getAttribute("aria-pressed"), "true");
     await page.locator('[data-secondary-inspector-tab="ai"]').click();
     assert.equal(await page.locator('[data-secondary-inspector-panel="ai"]').isVisible(), true);
@@ -2941,10 +3027,56 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.match(await page.locator("#secondaryInspectorStartMeta").textContent(), /83\.45 秒 · TC 00:01:23:11/);
     assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /源片长度9\.08 秒.*成片位置00:00\.00 → 00:09\.08.*片段播放时长9\.08 秒/s);
     assert.match(await page.locator("#secondaryEditorLibraryBody").textContent(), /源片 01:23\.45 → 01:32\.53/);
+    assert.deepEqual(await page.locator("#secondaryEditorLibraryBody [data-secondary-material-group] summary strong").allTextContents(), [
+      "当前成片素材", "推荐补充", "已保留素材", "待确认与已移除",
+    ]);
+    assert.match(await page.locator("#secondaryEditorLibraryContext").textContent(), /已继承说话人模式/);
+    assert.doesNotMatch(await page.locator("#secondaryEditorLibraryBody").textContent(), /version_1\.mp4/);
+    const modeAwareGroups = await page.evaluate(() => {
+      const summarize = (job, draft) => Object.fromEntries(
+        secondaryEditorMaterialGroups(job, draft).map((group) => [group.id, group.items.map((item) => item.title)]),
+      );
+      return {
+        highlight: summarize({
+          id: "highlight-materials", workflowKind: "highlight",
+          eventGroups: [{ id: "event-1", title: "倒水", segments: [{ id: "shot-1", start: 4, end: 7, title: "水流特写" }] }],
+          candidates: [], outputVersions: [],
+        }, { workflowKind: "highlight", clips: [] }),
+        content: summarize({
+          id: "content-materials", workflowKind: "content_search",
+          contentSearch: { id: "search-new" }, contentSearchSession: { activeSearchId: "search-new" },
+          contentSearchRecords: [
+            { id: "search-old", instruction: "找接水", timelineCandidates: [{ id: "old-1", start: 20, end: 22, title: "历史接水" }] },
+            { id: "search-new", instruction: "找切西瓜", candidates: [
+              { id: "new-1", start: 30, end: 32, title: "可靠结果", confidenceTier: "reliable" },
+              { id: "new-2", start: 40, end: 42, title: "待复核结果", confidenceTier: "possible", reviewStatus: "pending" },
+            ] },
+          ], outputVersions: [],
+        }, { workflowKind: "content_search", clips: [{ id: "current-1", title: "当前片段", sourceRef: { kind: "manual_range", id: "manual-1" }, sourceStart: 10, sourceEnd: 12 }] }),
+        person: summarize({
+          id: "person-materials", workflowKind: "person_edit", contentSearchRecords: [],
+          contentSearchPersonTarget: { personIds: ["person-1"], matchMode: "any", activity: "appearance" },
+          contentIndex: { persons: [{ id: "person-1", label: "人物 A", ranges: [{ start: 1, end: 2 }, { start: 6, end: 8 }] }] },
+          outputVersions: [],
+        }, { workflowKind: "person_edit", clips: [{ id: "person-current", title: "人物 A 出镜", sourceRef: { kind: "person_range", id: "person-1:0" }, sourceStart: 1, sourceEnd: 2 }] }),
+        speaker: summarize({
+          id: "speaker-materials", workflowKind: "speaker_edit",
+          contentSearch: { id: "voice-search" }, contentSearchRecords: [{ id: "voice-search", candidates: [{ id: "voice-1", start: 12, end: 15, title: "声音 A 发言", confidenceTier: "reliable" }] }],
+          outputVersions: [],
+        }, { workflowKind: "speaker_edit", clips: [] }),
+      };
+    });
+    assert.deepEqual(modeAwareGroups.highlight.recommended, ["水流特写"]);
+    assert.deepEqual(modeAwareGroups.content, {
+      timeline: ["当前片段"], recommended: ["可靠结果"], kept: ["历史接水"], review: ["待复核结果"],
+    });
+    assert.deepEqual(modeAwareGroups.person.timeline, ["人物 A 出镜"]);
+    assert.deepEqual(modeAwareGroups.person.recommended, ["人物 A 出镜 · 第 2 段"]);
+    assert.deepEqual(modeAwareGroups.speaker.recommended, ["声音 A 发言"]);
     assert.equal(await page.evaluate(() => secondaryEditorInsertionIndex()), 1);
     assert.match(await page.locator("#secondaryEditorLibraryInsertHint").textContent(), /第 1 段.*之后/);
     assert.equal(await page.locator("#secondaryEditorInsertTarget").inputValue(), "1");
-    assert.equal(await page.locator("#secondaryEditorLibraryBody [data-secondary-material-insert]").first().textContent(), "插入");
+    assert.equal(await page.locator("#secondaryEditorLibraryBody [data-secondary-material-insert]").first().textContent(), "再次插入");
     await page.locator("#secondaryEditorLibraryBody [data-secondary-material-preview]").last().click();
     assert.equal(await page.evaluate(() => secondaryEditView), "source");
     assert.match(await page.locator("#secondaryEditorVideoBadge").textContent(), /素材预览/);
@@ -3039,19 +3171,24 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.ok(Number(subtitleUpdates.at(-1).cueStyleOverrides.cue_2.offsetXRatio) < 0);
     assert.deepEqual(subtitleUpdates.at(-1).cueStyleOverrides.cue_1, firstClipSubtitleStyle);
     const updatesBeforeTextBox = subtitleUpdates.length;
-    await page.locator('[data-secondary-inspector-tab="subtitle"]').click();
     await page.locator("#secondarySubtitleAdd").click();
-    const previewTextEditor = page.locator("#secondaryEditorSubtitlePreview [data-secondary-subtitle-preview-text]");
+    const previewTextEditor = page.locator("#secondaryEditorTextLayerCanvas [data-secondary-text-content]");
+    await previewTextEditor.waitFor({ state: "visible" });
     await previewTextEditor.fill("第二段补充说明");
     await previewTextEditor.press("Enter");
-    await page.waitForFunction(() => document.querySelector("#secondaryEditorSubtitleStatus")?.textContent.includes("已保存"));
-    assert.ok(subtitleUpdates.length > updatesBeforeTextBox);
-    const savedTextBox = subtitleUpdates.at(-1).cues.find((cue) => cue.kind === "text_box");
+    await page.waitForFunction(() => secondaryEditSession?.textLayers?.[0]?.text === "第二段补充说明" && !secondaryEditBusy);
+    assert.equal(subtitleUpdates.length, updatesBeforeTextBox);
+    const savedTextBox = await page.evaluate(() => secondaryEditSession.textLayers[0]);
     assert.ok(savedTextBox);
     assert.equal(savedTextBox.text, "第二段补充说明");
     assert.ok(Number(savedTextBox.start) >= 9.08 && Number(savedTextBox.end) <= 15.08);
-    assert.equal(subtitleUpdates.at(-1).cueStyleOverrides[savedTextBox.id].vertical, "middle");
-    assert.equal(await page.locator(`[data-secondary-cue='${savedTextBox.id}']`).getAttribute("data-secondary-cue-kind"), "text_box");
+    assert.equal(savedTextBox.style.vertical, "middle");
+    assert.equal(await page.locator(`[data-secondary-text-block='${savedTextBox.id}']`).count(), 1);
+    assert.equal(await page.locator("#secondaryTextDelete").isVisible(), true);
+    await page.locator("#secondaryTextDelete").click();
+    await page.waitForFunction(() => secondaryEditSession.textLayers.length === 0);
+    assert.equal(operations.at(-1).type, "delete_text_layer");
+    operations.length = 0;
     await page.locator('[data-secondary-inspector-tab="clip"]').click();
     await page.locator("[data-secondary-clip='clip_1']").click();
     const originalFirstWidth = Number.parseFloat(await page.locator("[data-secondary-clip='clip_1']").evaluate((node) => node.style.width));
@@ -3120,7 +3257,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.match(await page.locator(".secondary-ai-editor").textContent(), /快捷批量编辑/);
     assert.match(await page.locator(".secondary-ai-editor").textContent(), /结构变化/);
     assert.match(await page.locator(".secondary-ai-editor").textContent(), /预览样片/);
-    assert.equal(await page.locator("#secondaryEditorAiForm button").textContent(), "生成修改预览");
+    assert.equal(await page.locator("#secondaryEditorAiForm button").textContent(), "预览时间线修改");
     assert.equal(await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-delete]").isVisible(), true);
     await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-delete]").click();
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline [data-secondary-clip]").length === 1);
@@ -3129,7 +3266,11 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.equal(await page.locator("#secondaryEditorUndo").isDisabled(), false);
     assert.equal(await page.locator("#secondaryEditorInsertTarget").inputValue(), "1");
     await page.locator("#secondaryEditorInsertTarget").selectOption("0");
-    await page.locator("#secondaryEditorLibraryBody [data-secondary-material-insert]").first().click();
+    const removedGroup = page.locator('[data-secondary-material-group="review"]');
+    await removedGroup.locator("summary").click();
+    assert.match(await removedGroup.textContent(), /问题.*已移除.*可重新插入恢复/s);
+    assert.equal(await removedGroup.locator("[data-secondary-material-insert]").first().textContent(), "恢复到时间线");
+    await removedGroup.locator("[data-secondary-material-insert]").first().click();
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline [data-secondary-clip]").length === 2);
     assert.equal(operations[2].type, "insert_clip");
     assert.equal(operations[2].targetIndex, 0);
@@ -3433,17 +3574,33 @@ test("highlight review reveals only settings relevant to the current selection",
       const player = document.querySelector("#reviewStage").getBoundingClientRect();
       const timeline = document.querySelector("#timelinePanel").getBoundingClientRect();
       const workbench = document.querySelector("#reviewWorkbench").getBoundingClientRect();
+      const timelineStyle = getComputedStyle(document.querySelector("#timelinePanel"));
+      const viewportStyle = getComputedStyle(document.querySelector("#timelineViewport"));
+      const trackStyle = getComputedStyle(document.querySelector("#timelineTrackContent"));
+      const switchStyle = getComputedStyle(document.querySelector("#reviewPanelSwitch"));
       return {
         gridRows: getComputedStyle(document.querySelector("#reviewView")).gridTemplateRows,
         view: { top: view.top, bottom: view.bottom, height: view.height },
         player: { top: player.top, bottom: player.bottom, height: player.height },
         workbench: { top: workbench.top, bottom: workbench.bottom, height: workbench.height },
         timeline: { top: timeline.top, bottom: timeline.bottom, height: timeline.height },
+        colors: {
+          timeline: timelineStyle.backgroundImage,
+          viewport: viewportStyle.backgroundImage,
+          track: trackStyle.backgroundImage,
+          switcher: switchStyle.backgroundImage,
+          trackLabel: getComputedStyle(document.querySelector("#timelineTrackLabels span")).color,
+        },
       };
     });
     assert.ok(precisionLayout.timeline.top - precisionLayout.player.bottom <= 50, JSON.stringify(precisionLayout));
     assert.ok(precisionLayout.timeline.height >= 250, JSON.stringify(precisionLayout));
     assert.ok(precisionLayout.timeline.bottom <= precisionLayout.view.bottom + 1, JSON.stringify(precisionLayout));
+    assert.match(precisionLayout.colors.timeline, /linear-gradient/);
+    assert.match(precisionLayout.colors.viewport, /linear-gradient/);
+    assert.match(precisionLayout.colors.track, /linear-gradient/);
+    assert.match(precisionLayout.colors.switcher, /linear-gradient/);
+    assert.equal(precisionLayout.colors.trackLabel, "rgb(83, 97, 105)");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-highlight.png"), fullPage: true });
     await page.evaluate(() => setTimelineExpanded(false));
   } finally {
@@ -4689,6 +4846,311 @@ test("evidence inspector width is draggable, keyboard adjustable, and resettable
     assert.ok(Math.abs(resetWidth - initialWidth) <= 3, `double-click did not restore default width: ${initialWidth} -> ${resetWidth}`);
     assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-evidence-panel-width-v1")), null);
     assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("long person and speaker timelines render progressively without losing selection", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const audit = await page.evaluate(() => {
+      const personRanges = Array.from({ length: 125 }, (_, index) => ({
+        id: `range_${index}`,
+        start: index * 2,
+        end: index * 2 + 1,
+      }));
+      currentJob = {
+        id: "job-long-person",
+        taskMode: "content_extract",
+        workflowKind: "person_edit",
+        request: { workflowKind: "person_edit" },
+        status: "awaiting_content_confirmation",
+        stage: "content_search_ready",
+        contentIndex: {
+          persons: [{
+            id: "person_a",
+            label: "人物 A",
+            confidence: .95,
+            ranges: personRanges,
+            trackCount: 125,
+          }],
+        },
+        contentSearch: {},
+      };
+      currentPersonJobId = "";
+      renderCurrentPersons();
+      const initialPersonRows = document.querySelectorAll("[data-current-person-range]").length;
+      const firstPersonMore = document.querySelector("[data-current-person-ranges-more]");
+      const firstPersonMoreText = firstPersonMore?.textContent || "";
+      firstPersonMore?.click();
+      const expandedPersonRows = document.querySelectorAll("[data-current-person-range]").length;
+
+      currentVoices = [{
+        speakerRef: "speaker_a",
+        label: "说话人 A",
+        speechSeconds: 175,
+        segmentCount: 175,
+      }];
+      currentVoiceTimeline = Array.from({ length: 175 }, (_, index) => ({
+        turnId: `turn_${index}`,
+        speakerRef: "speaker_a",
+        label: "说话人 A",
+        start: index * 2,
+        end: index * 2 + 1,
+        text: `发言 ${index + 1}`,
+      }));
+      currentVoiceTurnLimit = currentVoiceTurnPageSize;
+      renderCurrentVoiceTimeline();
+      const initialVoiceRows = document.querySelectorAll("[data-voice-turn-preview]").length;
+      const firstVoiceCheck = document.querySelector("[data-voice-turn-select]");
+      if (firstVoiceCheck) {
+        firstVoiceCheck.checked = true;
+        firstVoiceCheck.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      document.querySelector("[data-current-voice-turn-more]")?.click();
+      return {
+        initialPersonRows,
+        firstPersonMoreText,
+        expandedPersonRows,
+        initialVoiceRows,
+        expandedVoiceRows: document.querySelectorAll("[data-voice-turn-preview]").length,
+        voiceSelectionPreserved: Boolean(
+          document.querySelector('[data-voice-turn-select][value="turn_0"]')?.checked,
+        ),
+      };
+    });
+    assert.equal(audit.initialPersonRows, 40);
+    assert.match(audit.firstPersonMoreText, /再显示 40 段 · 尚有 85 段/);
+    assert.equal(audit.expandedPersonRows, 80);
+    assert.equal(audit.initialVoiceRows, 80);
+    assert.equal(audit.expandedVoiceRows, 160);
+    assert.equal(audit.voiceSelectionPreserved, true);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("settings workspace stays light, bounded, and reports unsaved changes", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => window.openSettings());
+    await page.waitForFunction(() => document.querySelectorAll("#visionProviderList button").length === 3);
+    const audit = await page.evaluate(() => {
+      const panel = document.querySelector("#settingsPanel");
+      const header = panel.querySelector(":scope > header").getBoundingClientRect();
+      const tabs = panel.querySelector(".model-role-tabs").getBoundingClientRect();
+      const form = document.querySelector("#visionSettingsForm");
+      const runtime = document.querySelector(".runtime-settings-summary");
+      return {
+        scrollTop: panel.scrollTop,
+        headerHeight: header.height,
+        tabsAfterHeader: tabs.top >= header.bottom,
+        formWidth: form.getBoundingClientRect().width,
+        formBackground: getComputedStyle(form).backgroundColor,
+        inputBackground: getComputedStyle(document.querySelector("#visionApiKey")).backgroundColor,
+        runtimeBackground: getComputedStyle(runtime).backgroundImage,
+        saveDisabled: document.querySelector("#saveVisionSettings").disabled,
+        dirtyLabel: document.querySelector("#visionDirtyState").textContent,
+      };
+    });
+    assert.equal(audit.scrollTop, 0);
+    assert.ok(audit.headerHeight >= 100);
+    assert.equal(audit.tabsAfterHeader, true);
+    assert.ok(audit.formWidth <= 1120);
+    assert.equal(audit.formBackground, "rgba(255, 255, 255, 0.78)");
+    assert.equal(audit.inputBackground, "rgba(255, 255, 255, 0.94)");
+    assert.match(audit.runtimeBackground, /linear-gradient/);
+    assert.equal(audit.saveDisabled, true);
+    assert.equal(audit.dirtyLabel, "所有修改已保存");
+
+    await page.locator("#visionApiKey").fill("temporary-unsaved-key");
+    assert.deepEqual(await page.evaluate(() => ({
+      dirty: document.querySelector("#visionSettingsForm").dataset.dirty,
+      label: document.querySelector("#visionDirtyState").textContent,
+      saveDisabled: document.querySelector("#saveVisionSettings").disabled,
+      discardDisabled: document.querySelector("#discardVisionSettings").disabled,
+    })), {
+      dirty: "true", label: "存在未保存修改", saveDisabled: false, discardDisabled: false,
+    });
+    await page.locator("#discardVisionSettings").click();
+    assert.deepEqual(await page.evaluate(() => ({
+      dirty: document.querySelector("#visionSettingsForm").dataset.dirty,
+      label: document.querySelector("#visionDirtyState").textContent,
+      saveDisabled: document.querySelector("#saveVisionSettings").disabled,
+      keyValue: document.querySelector("#visionApiKey").value,
+    })), {
+      dirty: "false", label: "所有修改已保存", saveDisabled: true, keyValue: "",
+    });
+
+    await page.locator('[data-model-role="llm"]').click();
+    await page.locator("#llmUseIndependent").click();
+    assert.deepEqual(await page.evaluate(() => ({
+      dirty: document.querySelector("#llmSettingsForm").dataset.dirty,
+      label: document.querySelector("#llmDirtyState").textContent,
+      saveDisabled: document.querySelector("#saveLlmSettings").disabled,
+    })), {
+      dirty: "true", label: "存在未保存修改", saveDisabled: false,
+    });
+    await page.locator("#discardLlmSettings").click();
+    assert.deepEqual(await page.evaluate(() => ({
+      dirty: document.querySelector("#llmSettingsForm").dataset.dirty,
+      label: document.querySelector("#llmDirtyState").textContent,
+      reuseSelected: document.querySelector("#llmReuseVision").getAttribute("aria-checked"),
+    })), {
+      dirty: "false", label: "所有修改已保存", reuseSelected: "true",
+    });
+
+    await page.evaluate(() => { document.querySelector("#settingsPanel").scrollTop = 420; });
+    await page.locator("#closeSettings").click();
+    await page.evaluate(() => window.openSettings());
+    assert.equal(await page.locator("#settingsPanel").evaluate((panel) => panel.scrollTop), 0);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("visual system assigns functional fonts and removes idle chrome", async () => {
+  const visualCss = await readFile(join(staticRoot, "visual-system.css"), "utf8");
+  assert.match(visualCss, /font-family:\s*"VP Editorial Song"/);
+  assert.match(visualCss, /font-family:\s*"VP Assistant WenKai"/);
+  assert.match(visualCss, /font-family:\s*"VP Metric Display"/);
+  for (const filename of [
+    "vp-editorial-song.woff2",
+    "vp-assistant-wenkai.woff2",
+    "vp-metric-display.woff2",
+  ]) {
+    assert.ok((await stat(join(staticRoot, "fonts", filename))).size > 1_000);
+  }
+
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(async () => {
+      await Promise.all([
+        document.fonts.load('700 40px "VP Editorial Song"', "开始剪辑"),
+        document.fonts.load('500 14px "VP Assistant WenKai"', "视频剪辑助手"),
+        document.fonts.load('800 italic 20px "VP Metric Display"', "41/100"),
+      ]);
+    });
+    const audit = await page.evaluate(() => {
+      const home = document.querySelector("#homeView");
+      const heading = document.querySelector(".home-heading h1");
+      const assistantCopy = document.querySelector(".chat-message.assistant .bubble p");
+      const metric = document.querySelector(".home-summary b");
+      const createSurface = document.querySelector(".home-create-surface");
+      const sidebar = document.querySelector(".app-sidebar");
+      const studio = document.querySelector(".studio.home-mode");
+      const root = getComputedStyle(document.documentElement);
+      return {
+        hasRedundantHomeButton: Boolean(document.querySelector("#homeButton")),
+        bodyBackground: getComputedStyle(document.body).backgroundImage,
+        homeBackground: getComputedStyle(home).backgroundColor,
+        sidebarBackground: getComputedStyle(sidebar).backgroundImage,
+        studioBackground: getComputedStyle(studio).backgroundImage,
+        headingFamily: getComputedStyle(heading).fontFamily,
+        assistantFamily: getComputedStyle(assistantCopy).fontFamily,
+        metricFamily: getComputedStyle(metric).fontFamily,
+        createBorderStyle: getComputedStyle(createSurface).borderTopStyle,
+        accent: root.getPropertyValue("--accent").trim(),
+        fontsReady: [
+          document.fonts.check('700 40px "VP Editorial Song"', "开始剪辑"),
+          document.fonts.check('500 14px "VP Assistant WenKai"', "视频剪辑助手"),
+          document.fonts.check('800 italic 20px "VP Metric Display"', "41/100"),
+        ],
+      };
+    });
+    assert.equal(audit.hasRedundantHomeButton, false);
+    assert.match(audit.bodyBackground, /linear-gradient/);
+    assert.match(audit.bodyBackground, /rgb\(7, 16, 23\)/);
+    assert.match(audit.bodyBackground, /rgb\(255, 255, 255\)/);
+    assert.equal(audit.homeBackground, "rgba(0, 0, 0, 0)");
+    assert.match(audit.sidebarBackground, /linear-gradient/);
+    assert.match(audit.sidebarBackground, /rgb\(7, 16, 23\)/);
+    assert.match(audit.studioBackground, /linear-gradient/);
+    assert.match(audit.studioBackground, /rgb\(255, 255, 255\)/);
+    assert.match(audit.headingFamily, /VP Editorial Song/);
+    assert.match(audit.assistantFamily, /VP Assistant WenKai/);
+    assert.match(audit.metricFamily, /VP Metric Display/);
+    assert.equal(audit.createBorderStyle, "solid");
+    assert.equal(audit.accent, "#a8c269");
+    assert.deepEqual(audit.fontsReady, [true, true, true]);
+
+    const workflowAudit = await page.evaluate(() => {
+      const nav = document.querySelector("#directorStageNav");
+      const mount = document.querySelector("#workspaceFlowMount");
+      const stages = Array.from(nav.children);
+      studio.classList.remove("home-mode");
+      mount.append(nav);
+      stages.forEach((stage, index) => {
+        stage.classList.remove("complete", "current", "upcoming");
+        if (index === 0) stage.classList.add("complete");
+        else if (index === 1) stage.classList.add("current");
+        else stage.classList.add("upcoming");
+      });
+      const segment = (index) => stages[index].querySelector(".stage-segment");
+      const fill = (index) => segment(index).querySelector("i");
+      return {
+        navBackground: getComputedStyle(nav).backgroundColor,
+        navBorder: getComputedStyle(nav).borderTopWidth,
+        navShadow: getComputedStyle(nav).boxShadow,
+        segmentHeight: getComputedStyle(segment(1)).height,
+        segmentRadius: getComputedStyle(segment(1)).borderRadius,
+        labelDisplay: getComputedStyle(stages[1].querySelector("strong")).display,
+        completeFill: getComputedStyle(fill(0)).backgroundColor,
+        currentFill: getComputedStyle(fill(1)).backgroundColor,
+        upcomingFill: getComputedStyle(fill(2)).backgroundColor,
+        currentSweep: getComputedStyle(segment(1), "::after").animationName,
+      };
+    });
+    assert.equal(workflowAudit.navBackground, "rgba(0, 0, 0, 0)");
+    assert.equal(workflowAudit.navBorder, "0px");
+    assert.equal(workflowAudit.navShadow, "none");
+    assert.equal(workflowAudit.segmentHeight, "4px");
+    assert.equal(workflowAudit.segmentRadius, "999px");
+    assert.equal(workflowAudit.labelDisplay, "block");
+    assert.equal(workflowAudit.completeFill, "rgb(104, 131, 106)");
+    assert.equal(workflowAudit.currentFill, "rgb(168, 194, 105)");
+    assert.equal(workflowAudit.upcomingFill, "rgba(168, 194, 105, 0.08)");
+    assert.equal(workflowAudit.currentSweep, "workflow-line-sweep");
+
+    const mediaAudit = await page.evaluate(() => {
+      document.body.dataset.shellMode = "workspace";
+      document.body.dataset.shellView = "workspace";
+      const shell = document.querySelector(".viewer-shell");
+      const frame = document.querySelector(".viewer-shell > .media-frame");
+      const video = document.querySelector("#mainVideo");
+      const controls = document.querySelector(".viewer-shell > .player-controls");
+      return {
+        shellBackground: getComputedStyle(shell).backgroundImage,
+        frameBackground: getComputedStyle(frame).backgroundImage,
+        videoBackground: getComputedStyle(video).backgroundColor,
+        controlsBackground: getComputedStyle(controls).backgroundColor,
+        controlsColor: getComputedStyle(controls).color,
+      };
+    });
+    assert.match(mediaAudit.shellBackground, /linear-gradient/);
+    assert.match(mediaAudit.frameBackground, /linear-gradient/);
+    assert.equal(mediaAudit.videoBackground, "rgba(0, 0, 0, 0)");
+    assert.equal(mediaAudit.controlsBackground, "rgba(250, 251, 252, 0.94)");
+    assert.equal(mediaAudit.controlsColor, "rgb(38, 49, 56)");
   } finally {
     await browser.close();
     await stub.close();

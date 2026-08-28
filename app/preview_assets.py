@@ -38,6 +38,10 @@ class PreviewAssetPaths:
     def source_proxy(self, identity: str) -> Path:
         return self.data_root / "cache" / f"proxy-{self.safe_identity(identity)}.mp4"
 
+    def analysis_proxy(self, identity: str) -> Path:
+        """Return the lower-resolution, source-timestamp-preserving analysis proxy."""
+        return self.data_root / "cache" / f"analysis-{self.safe_identity(identity)}.mp4"
+
     @staticmethod
     def output_preview(job: dict[str, Any], filename: str) -> Path:
         return Path(job["workDirectory"]) / "output-previews" / Path(filename).name
@@ -102,6 +106,42 @@ class PreviewAssetService:
                 has_audio=info.has_audio,
                 ffmpeg=self.ffmpeg,
                 maximum_dimension=maximum_dimension,
+                maximum_duration=effective_duration if truncated else None,
+            )
+        return output
+
+    def prepare_analysis(self, job: dict[str, Any]) -> Path:
+        """Decode a high-resolution source once for all visual-analysis passes.
+
+        Content recognition still keeps the original source for final rendering.
+        The proxy preserves duration, timestamps and audio so visual retrieval and
+        active-speaker checks can share one inexpensive 960p source.
+        """
+        source = Path(job["sourcePath"])
+        if not source.is_file():
+            raise FileNotFoundError("源视频不存在")
+        identity = self.paths.source_identity(job)
+        output = self.paths.analysis_proxy(identity)
+        if output.is_file():
+            return output
+        with self.source_lock:
+            if output.is_file():
+                return output
+            info = probe_video(source, self.ffprobe)
+            effective_duration = float((job.get("videoInfo") or {}).get("duration") or 0)
+            validation = job.get("sourceValidation")
+            truncated = (
+                isinstance(validation, dict)
+                and str(validation.get("status") or "") == "truncated"
+                and math.isfinite(effective_duration)
+                and effective_duration > 0
+            )
+            create_preview_proxy(
+                source,
+                output,
+                has_audio=info.has_audio,
+                ffmpeg=self.ffmpeg,
+                maximum_dimension=960,
                 maximum_duration=effective_duration if truncated else None,
             )
         return output

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import re
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,34 +9,45 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def stage_progress_for(stage: str, overall: float, detail: str = "") -> float | None:
-    """Return measured stage progress, never a percentage inferred from milestones."""
-    text = str(detail or "")
-    match = re.search(r"(\d+)\s*/\s*(\d+)", text)
-    if match:
-        total = max(1, int(match.group(2)))
-        current = int(match.group(1))
-        # VLM messages describe the item currently being processed. Starting
-        # the first request is 0/total completed, not an instant jump to 20%
-        # for a five-page analysis. Completed/rendered messages keep their
-        # ordinary x/total meaning.
-        if stage in {"coarse_vlm", "refine_vlm"} and "正在" in text:
-            current = max(0, current - 1)
-        return max(0.0, min(1.0, current / total))
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
-    if match:
-        return max(0.0, min(1.0, float(match.group(1)) / 100.0))
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def stage_progress_for(
+    stage: str,
+    overall: float,
+    detail: str = "",
+    *,
+    completed: Any = None,
+    total: Any = None,
+    fraction: Any = None,
+) -> float | None:
+    """Return measured stage progress from facts, never from presentation prose."""
+    del overall, detail
+    measured_fraction = _finite_number(fraction)
+    if measured_fraction is not None:
+        return max(0.0, min(1.0, measured_fraction))
+    measured_completed = _finite_number(completed)
+    measured_total = _finite_number(total)
+    if measured_completed is not None and measured_total is not None and measured_total > 0:
+        return max(0.0, min(1.0, measured_completed / measured_total))
     if stage in {"completed", "awaiting_confirmation", "content_search_ready", "edit_planning_complete"}:
         return 1.0
-    # Finalization is real work but SenseVoice does not expose its internal
-    # completion fraction. Returning a made-up 99% made a single callback look
-    # like measured progress, so this stage intentionally becomes indeterminate.
-    if stage in {"speech_recognition", "speech_analysis"} and "整理识别结果" in text:
-        return None
     return None
 
 
-def structured_progress(job: dict[str, Any], *, stage: str, overall: float, detail: str) -> dict[str, Any]:
+def structured_progress(
+    job: dict[str, Any],
+    *,
+    stage: str,
+    overall: float,
+    detail: str,
+    facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Normalize progress facts so the UI never has to parse status prose."""
     now = _now_iso()
     now_value = datetime.now(timezone.utc)
@@ -45,38 +56,19 @@ def structured_progress(job: dict[str, Any], *, stage: str, overall: float, deta
     if previous_stage != stage or not stage_started_at:
         stage_started_at = now
     text = str(detail or "")
-    speech_finalizing = stage in {"speech_recognition", "speech_analysis"} and "整理识别结果" in text
-    count_match = re.search(r"(?:第\s*)?(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
-    completed = total = None
-    unit = ""
-    current_item_index = None
-    if count_match:
-        completed, total = float(count_match.group(1)), max(1.0, float(count_match.group(2)))
-        if completed.is_integer():
-            completed = int(completed)
-        if total.is_integer():
-            total = int(total)
-        if stage in {"coarse_vlm", "refine_vlm"} and "正在" in text:
-            current_item_index = completed
-            completed = max(0, completed - 1)
-        if "候选" in text:
-            unit = "候选"
-        elif "组" in text:
-            unit = "组"
-        elif "方案" in text:
-            unit = "方案"
-        elif "镜头" in text or "片段" in text:
-            unit = "镜头" if "镜头" in text else "片段"
-        elif "帧" in text:
-            unit = "帧"
-        elif "秒" in text:
-            unit = "秒"
-    percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
-    if percent_match and stage in {"speech_recognition", "speech_analysis"}:
-        completed, total, unit = round(float(percent_match.group(1))), 100, "%"
-    elif speech_finalizing:
-        completed, total, unit = None, None, ""
-    progress_mode = "finalizing" if speech_finalizing else ("determinate" if completed is not None and total else "indeterminate")
+    measured = facts if isinstance(facts, dict) else {}
+    completed = _finite_number(measured.get("completed"))
+    total = _finite_number(measured.get("total"))
+    if completed is not None and completed.is_integer():
+        completed = int(completed)
+    if total is not None and total.is_integer():
+        total = int(total)
+    if total is None or total <= 0:
+        completed = total = None
+    unit = str(measured.get("unit") or "")
+    current_item_index = _finite_number(measured.get("currentItemIndex"))
+    finalizing = bool(measured.get("finalizing"))
+    progress_mode = "finalizing" if finalizing else ("determinate" if completed is not None and total else "indeterminate")
     model = {
         "speech_recognition": "SenseVoice", "speech_analysis": "SenseVoice",
         "content_recognition": "多模态识别",
@@ -126,7 +118,7 @@ def structured_progress(job: dict[str, Any], *, stage: str, overall: float, deta
 
     eta = None
     eta_mode = "collecting"
-    if speech_finalizing:
+    if finalizing:
         eta_mode = "finalizing"
     elif completed is not None and total and average_seconds > 0 and sample_count > 0:
         current_unit_elapsed = max(0.0, (now_value - unit_started_value).total_seconds())

@@ -1,0 +1,198 @@
+:root {
+  --z-base: 0;
+  --z-sticky: 20;
+  --z-popover: 40;
+  --z-drawer: 60;
+  --z-dialog: 100;
+  --z-toast: 120;
+}
+
+html,
+body {
+  min-width: 1024px;
+}
+
+.input-prompt {
+  position: fixed;
+  z-index: var(--z-dialog);
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 8, 12, .7);
+  backdrop-filter: blur(8px);
+}
+
+.input-prompt-card {
+  width: min(500px, 100%);
+  padding: 18px;
+  border: 1px solid #34454e;
+  border-radius: 13px;
+  color: #e9eff1;
+  background: #101920;
+  box-shadow: 0 24px 72px rgba(0, 0, 0, .42);
+}
+
+.input-prompt-card header,
+.input-prompt-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.input-prompt-card header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.input-prompt-card header small {
+  color: #c9974f;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .04em;
+}
+
+.input-prompt-card header strong {
+  font-size: 17px;
+}
+
+.input-prompt-card header button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #34454e;
+  border-radius: 7px;
+  color: #aebbc0;
+  background: #18242c;
+  font-size: 18px;
+}
+
+.input-prompt-card > p {
+  margin: 14px 0;
+  color: #91a0a7;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.input-prompt-card > label {
+  display: grid;
+  gap: 6px;
+  color: #b7c2c6;
+  font-size: 11px;
+}
+
+.input-prompt-card input,
+.input-prompt-card select {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 11px;
+  border: 1px solid #3a4c56;
+  border-radius: 7px;
+  color: #eef2f3;
+  background: #091218;
+  box-sizing: border-box;
+}
+
+.input-prompt-card label small {
+  min-height: 15px;
+  color: #758991;
+  line-height: 1.45;
+}
+
+.input-prompt-card footer {
+  justify-content: flex-end;
+  margin-top: 18px;
+  padding-top: 13px;
+  border-top: 1px solid #263740;
+}
+
+.input-prompt-card footer button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 7px;
+}
+
+.input-prompt-card footer .primary {
+  border-color: #b98136;
+  color: #fff;
+  background: #b98136;
+}
+
+.current-person-range-more,
+.current-voice-turn-more {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 6px;
+  border: 1px solid #34464f;
+  border-radius: 6px;
+  color: #cfb27f;
+  background: #101a20;
+  font-size: 10px;
+}
+
+.current-person-ranges > div,
+.current-voice-turns {
+  contain: content;
+}
+
+@media (max-width: 1366px) {
+  .studio.director-merged:not(.home-mode) {
+    --chat-panel-width: 280px;
+  }
+
+  .studio.director-merged:not(.home-mode) .chat-messages {
+    padding-inline: 10px !important;
+  }
+
+  .studio.director-merged:not(.home-mode) .review-view {
+    padding-inline: 10px !important;
+  }
+
+  .studio.director-merged:not(.home-mode) .review-stage {
+    min-height: 0;
+  }
+
+  .studio.director-merged:not(.home-mode) .evidence-panel {
+    min-width: 280px;
+  }
+
+  .secondary-editor-layout {
+    grid-template-columns: 220px minmax(430px, 1fr) 260px;
+  }
+
+  .secondary-editor-library > header,
+  .secondary-inspector-section {
+    padding-inline: 13px;
+  }
+
+  .secondary-editor-actions button {
+    padding-inline: 8px;
+  }
+}
+
+@media (max-height: 800px) {
+  .studio.director-merged:not(.home-mode) .review-header {
+    min-height: 50px;
+  }
+
+  .studio.director-merged:not(.home-mode) .review-view,
+  .studio.director-merged:not(.home-mode) .review-view:not(.timeline-hidden) {
+    grid-template-rows: auto minmax(220px, 1fr) auto 8px minmax(230px, 38%) !important;
+  }
+
+  .viewer-shell {
+    --player-control-height: 44px;
+  }
+
+  .secondary-editor-header {
+    min-height: 48px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input-prompt,
+  .input-prompt-card {
+    animation: none !important;
+    transition: none !important;
+  }
+}

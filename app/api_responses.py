@@ -28,6 +28,35 @@ class OutputVersionResponse(ExtensibleResponse):
     outputs: list[OutputItemResponse] = Field(default_factory=list)
 
 
+class WorkflowStepResponse(ExtensibleResponse):
+    id: str
+    label: str
+    state: str = "pending"
+
+
+class WorkflowActionResponse(ExtensibleResponse):
+    kind: str
+    title: str | None = None
+    message: str | None = None
+    label: str | None = None
+    blocking: bool = False
+
+
+class WorkflowPresentationResponse(ExtensibleResponse):
+    schemaVersion: int = 1
+    workflowKind: str = "highlight"
+    phase: str | None = None
+    state: str | None = None
+    currentStep: str | None = None
+    steps: list[WorkflowStepResponse] = Field(default_factory=list)
+    actionRequired: WorkflowActionResponse | None = None
+    primaryAction: WorkflowActionResponse | None = None
+    progress: dict = Field(default_factory=dict)
+    capabilities: dict = Field(default_factory=dict)
+    terminology: dict[str, str] = Field(default_factory=dict)
+    error: dict | None = None
+
+
 class JobDocumentResponse(ExtensibleResponse):
     """Stable workspace fields; domain payloads remain forward compatible."""
 
@@ -45,6 +74,7 @@ class JobDocumentResponse(ExtensibleResponse):
     request: JobRequestResponse = Field(default_factory=JobRequestResponse)
     outputs: list[OutputItemResponse] = Field(default_factory=list)
     outputVersions: list[OutputVersionResponse] = Field(default_factory=list)
+    presentation: WorkflowPresentationResponse | None = None
 
 
 class JobSummaryResponse(ExtensibleResponse):
@@ -63,10 +93,13 @@ class JobSummaryResponse(ExtensibleResponse):
     eventGroupCount: int = 0
     candidateCount: int = 0
     outputCount: int = 0
+    presentation: WorkflowPresentationResponse | None = None
 
 
 class JobsResponse(BaseModel):
     jobs: list[JobSummaryResponse] = Field(default_factory=list)
+    nextCursor: str | None = None
+    hasMore: bool = False
 
 
 class JobEnvelopeResponse(BaseModel):

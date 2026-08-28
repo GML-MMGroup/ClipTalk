@@ -214,6 +214,7 @@ const mediaFrame = $("#mediaFrame");
 const localPreviewPanel = $("#localPreviewPanel");
 let currentJob = null;
 window.ClipTalkCurrentJobId = () => String(currentJob?.id || "");
+window.ClipTalkCurrentJobSnapshot = () => currentJob;
 let currentOutput = null;
 let currentCandidate = null;
 let currentEventGroup = null;
@@ -242,6 +243,8 @@ let selectedCurrentPersonRanges = new Set();
 let selectedCurrentPersonRangeOwner = "";
 let currentPersonMatchMode = "any";
 let currentPersonActivity = "appearance";
+const currentPersonRangePageSize = 40;
+const currentPersonRangeLimits = new Map();
 const expandedContentSearchIds = new Set();
 const contentSearchDetailCache = new Map();
 const contentSearchFilterState = new Map();
@@ -322,11 +325,13 @@ let selectedVisionProvider = "";
 let visionDiscoveredModels = [];
 let visionVerifiedAt = null;
 let visionSettingsBusy = false;
+let visionSettingsDirty = false;
 let llmSettingsState = null;
 let selectedLlmProvider = "";
 let llmDiscoveredModels = [];
 let llmVerifiedAt = null;
 let llmSettingsBusy = false;
+let llmSettingsDirty = false;
 let selectedLlmMode = "reuse_vision";
 const studio = $(".studio");
 const panelLayoutStorageKey = "vlm-highlight-panel-layout-v2";
@@ -385,7 +390,9 @@ function syncTaskCreationLayout() {
 }
 
 function assistantPanelStorageKey(job = currentJob) {
-  return `cliptalk-assistant-expanded:${String(job?.id || "new-task")}`;
+  // v2 resets the old stage-based collapsed preference after the split-glass
+  // workspace redesign. Users can still collapse the assistant per task.
+  return `cliptalk-assistant-expanded:v2:${String(job?.id || "new-task")}`;
 }
 
 function storedAssistantPanelPreference(job = currentJob) {
@@ -418,8 +425,7 @@ function setAssistantPanelExpanded(expanded, { persist = false } = {}) {
 
 function syncAssistantPanelForStage() {
   const stored = storedAssistantPanelPreference();
-  const stageDefault = !currentJob || !["events", "compose"].includes(directorStage);
-  return setAssistantPanelExpanded(stored ?? stageDefault);
+  return setAssistantPanelExpanded(stored ?? true);
 }
 
 function syncStageNavigationPlacement() {
@@ -476,6 +482,13 @@ $("#assistantPanelToggle")?.addEventListener("click", () => {
 });
 
 function syncWorkspaceState(overrides = {}) {
+  if (overrides.home === false
+    && !["settings", "library"].includes(String(document.body.dataset.shellView || ""))) {
+    // Collapse the persistent history sidebar before any media/evidence panel
+    // measures its available width. Waiting for the class observer's next
+    // microtask made initial panel sizes depend on the previous page layout.
+    window.ClipTalkAppShell?.showView("workspace", { route: false });
+  }
   const next = workspaceStateMachine.update({
     job: currentJob,
     hasUpload: Boolean(videoInput?.files?.length),
@@ -896,11 +909,13 @@ function routeJobId() {
 function setRouteJobId(jobId = null) {
   try {
     const url = new URL(window.location.href);
+    const params = new URLSearchParams(String(url.hash || "").replace(/^#/, ""));
     if (jobId) {
-      url.hash = `job=${encodeURIComponent(String(jobId))}`;
-    } else if (routeJobId()) {
-      url.hash = "";
+      params.set("job", String(jobId));
+    } else {
+      params.delete("job");
     }
+    url.hash = params.toString();
     window.history.replaceState(window.history.state, "", url.href);
   } catch { /* URL/history may be unavailable in embedded previews */ }
 }
@@ -1178,26 +1193,26 @@ function reviewWorkbenchPresentation(job = currentJob) {
   const panelOpen = document.body.classList.contains("voice-workspace-open")
     ? "voice" : document.body.classList.contains("person-workspace-open") ? "person" : "";
   if (panelOpen === "voice") return timelineExpanded
-    ? { kicker: "SPEAKER TIMING", title: "说话人与发言时间", hint: "在下方轨道直接勾选声音；点击发言区间试听源片" }
+    ? { kicker: "发言时间", title: "说话人与发言时间", hint: "在下方轨道直接勾选声音；点击发言区间试听源片" }
     : voiceReviewMode === "correct"
-      ? { kicker: "SPEAKER CORRECTION", title: "第 1 步 · 校正声音分组", hint: `${currentVoices.length ? `${currentVoices.length} 个声音 · ` : ""}试听、合并或移动错误发言；不会改变最终剪辑选择` }
-      : { kicker: "SPEAKER TARGET", title: "第 2 步 · 选择剪辑目标", hint: "勾选要保留或排除的声音，再查看对应发言片段" };
+      ? { kicker: "声音校正", title: "第 1 步 · 校正声音分组", hint: `${currentVoices.length ? `${currentVoices.length} 个声音 · ` : ""}试听、合并或移动错误发言；不会改变最终剪辑选择` }
+      : { kicker: "剪辑目标", title: "第 2 步 · 选择剪辑目标", hint: "勾选要保留或排除的声音，再查看对应发言片段" };
   if (panelOpen === "person") return timelineExpanded
-    ? { kicker: "PERSON TIMING", title: "人物与出镜时间", hint: "在下方轨道直接勾选人物；点击出镜区间预览源画面" }
+    ? { kicker: "出镜时间", title: "人物与出镜时间", hint: "在下方轨道直接勾选人物；点击出镜区间预览源画面" }
     : personReviewMode === "correct"
-      ? { kicker: "PERSON CORRECTION", title: "第 1 步 · 校正人物分组", hint: `${currentPersonCatalog(job).length ? `${currentPersonCatalog(job).length} 个人物 · ` : ""}合并重复人物或修正错误出镜段` }
-      : { kicker: "PERSON TARGET", title: "第 2 步 · 选择剪辑目标", hint: "播放人物片段并勾选，确认后再提取出镜内容" };
+      ? { kicker: "人物校正", title: "第 1 步 · 校正人物分组", hint: `${currentPersonCatalog(job).length ? `${currentPersonCatalog(job).length} 个人物 · ` : ""}合并重复人物或修正错误出镜段` }
+      : { kicker: "剪辑目标", title: "第 2 步 · 选择剪辑目标", hint: "播放人物片段并勾选，确认后再提取出镜内容" };
   if (timelineExpanded && directorStage !== "compose") {
-    if (workflow === "speaker_edit") return { kicker: "SPEAKER TIMING", title: "核对发言来源时间", hint: "精细时间轴已展开；返回审核列表可调整全部发言" };
-    if (workflow === "person_edit") return { kicker: "PERSON TIMING", title: "核对人物来源时间", hint: "精细时间轴已展开；返回审核列表可调整全部出镜片段" };
-    if (workflow === "content_search") return { kicker: "CONTENT TIMING", title: "核对片段与边界", hint: "精细时间轴已展开；返回审核列表可调整全部匹配内容" };
-    return { kicker: "HIGHLIGHT TIMING", title: "核对事件与镜头时间", hint: "精细时间轴已展开；返回审核列表可调整全部推荐事件" };
+    if (workflow === "speaker_edit") return { kicker: "发言时间", title: "核对发言来源时间", hint: "精细时间轴已展开；返回审核列表可调整全部发言" };
+    if (workflow === "person_edit") return { kicker: "出镜时间", title: "核对人物来源时间", hint: "精细时间轴已展开；返回审核列表可调整全部出镜片段" };
+    if (workflow === "content_search") return { kicker: "片段边界", title: "核对片段与边界", hint: "精细时间轴已展开；返回审核列表可调整全部匹配内容" };
+    return { kicker: "镜头时间", title: "核对事件与镜头时间", hint: "精细时间轴已展开；返回审核列表可调整全部推荐事件" };
   }
-  if (directorStage === "compose") return { kicker: "OUTPUT VERSIONS", title: "生成结果", hint: "选择版本即可在上方播放器中比较" };
-  if (workflow === "speaker_edit") return { kicker: "SPEAKER SEGMENTS", title: "确认说话人发言片段", hint: "预览不会改变边界，确认后才会生成" };
-  if (workflow === "person_edit") return { kicker: "PERSON CLIPS", title: "第 2 步 · 核对出镜片段", hint: "勾选最终保留范围；下一步只负责合成，不会再改变片段" };
-  if (workflow === "content_search") return { kicker: "CONTENT MATCHES", title: "确认找到的内容", hint: "点击正文预览；需要修改时使用“调整边界”" };
-  return { kicker: "HIGHLIGHT EVENTS", title: "审核推荐事件", hint: "选择事件并预览镜头，确认后再生成成片" };
+  if (directorStage === "compose") return { kicker: "成片版本", title: "生成结果", hint: "选择版本即可在上方播放器中比较" };
+  if (workflow === "speaker_edit") return { kicker: "发言片段", title: "确认说话人发言片段", hint: "预览不会改变边界，确认后才会生成" };
+  if (workflow === "person_edit") return { kicker: "出镜片段", title: "第 2 步 · 核对出镜片段", hint: "勾选最终保留范围；下一步只负责合成，不会再改变片段" };
+  if (workflow === "content_search") return { kicker: "匹配片段", title: "确认找到的内容", hint: "点击正文预览；需要修改时使用“调整边界”" };
+  return { kicker: "高光事件", title: "审核推荐事件", hint: "选择事件并预览镜头，确认后再生成成片" };
 }
 
 function reviewPanelSwitchPresentation(job = currentJob) {
@@ -1950,9 +1965,13 @@ function directorFlowStage(job = currentJob) {
   const execution = executionForJob(job);
   // A failed content render keeps its confirmed candidates intact.
   if (contentGenerationFailed(job)) return "events";
-  if (String(job.taskMode || "") === "content_extract" && job.workflow?.phase) {
-    const contentPhases = { prepare: "brief", search: "analysis", review: "events", render: "compose", complete: "compose" };
-    return contentPhases[String(job.workflow.phase)] || "analysis";
+  const canonicalPhase = String(job.presentation?.phase || job.workflow?.phase || "");
+  if (canonicalPhase) {
+    const phases = {
+      prepare: "brief", analysis: "analysis", search: "analysis",
+      review: "events", render: "compose", complete: "compose",
+    };
+    if (phases[canonicalPhase]) return phases[canonicalPhase];
   }
   if (["briefing", "brief_confirmation"].includes(job.status)) return "brief";
   const compositionStage = ["render", "auto_composition", "quality_review"].includes(execution.operation)
@@ -2004,47 +2023,29 @@ function workflowKindForJob(job = currentJob) {
 
 function taskModePresentation(job = currentJob) {
   const workflowKey = workflowKindForJob(job);
-  const presentations = {
-    highlight: {
-      key: "highlight", label: "高光剪辑",
-      phaseLabels: { brief: "需求确认", analysis: "高光发现", events: "事件审核", compose: "生成版本" },
-      nav: [["准备", "确认要求并准备媒体"], ["高光发现", "发现并组织精彩事件"], ["事件审核", "确认事件与内部镜头"], ["生成版本", "合成、预览并下载"]],
-    },
-    content_search: {
-      key: "content_extract", label: "内容探索",
-      phaseLabels: { brief: "需求确认", analysis: "内容探索", events: "片段确认", compose: "确认生成" },
-      nav: [["准备", "描述要查找的内容"], ["内容探索", "识别并检索目标内容"], ["片段确认", "预览并选择匹配片段"], ["生成结果", "合成、预览并下载"]],
-    },
-    person_edit: {
-      key: "content_extract", label: "按人物剪辑",
-      phaseLabels: { brief: "准备画面", analysis: "选择人物", events: "核对出镜", compose: "合成视频" },
-      nav: [["准备画面", "解码画面并识别人物轨迹"], ["选择人物", "播放人物片段并选择目标"], ["核对出镜", "确认最终保留的时间范围"], ["合成视频", "按确认范围合成并下载"]],
-    },
-    speaker_edit: {
-      key: "content_extract", label: "按说话人剪辑",
-      phaseLabels: { brief: "人数设置", analysis: "说话人识别", events: "发言选择", compose: "确认生成" },
-      nav: [["准备声音", "确认人数与识别范围"], ["区分说话人", "整理声音与发言轮次"], ["选择发言", "试听并选择目标说话人"], ["生成结果", "合成、预览并下载"]],
-    },
+  const copy = window.ClipTalkCopy?.workflow(workflowKey);
+  return {
+    key: workflowKey === "highlight" ? "highlight" : "content_extract",
+    label: copy?.label || "视频剪辑",
+    phaseLabels: copy?.phases || {},
+    nav: copy?.navigation || [],
+    workflowKey,
   };
-  return { ...presentations[workflowKey], workflowKey };
 }
 
-function workflowAssistantLabel(job = currentJob) {
-  return {
-    content_search: "内容探索助手",
-    person_edit: "人物剪辑助手",
-    speaker_edit: "说话人剪辑助手",
-    highlight: "高光发现助手",
-  }[workflowKindForJob(job)] || "视频剪辑助手";
+function workflowAssistantLabel(_job = currentJob) {
+  return "视频剪辑助手";
 }
 
 function workflowVocabulary(job = currentJob) {
+  const copy = window.ClipTalkCopy?.workflow(workflowKindForJob(job));
   return {
-    highlight: { output: "高光成片", outputPlural: "高光版本", candidate: "事件镜头", candidatePlural: "事件镜头", timeline: "事件与镜头时间线" },
-    content_search: { output: "内容视频", outputPlural: "内容视频版本", candidate: "匹配片段", candidatePlural: "匹配片段", timeline: "匹配片段来源时间线" },
-    person_edit: { output: "人物剪辑", outputPlural: "人物剪辑版本", candidate: "出镜片段", candidatePlural: "出镜片段", timeline: "人物出镜时间线" },
-    speaker_edit: { output: "发言视频", outputPlural: "发言视频版本", candidate: "发言片段", candidatePlural: "发言片段", timeline: "说话人发言时间线" },
-  }[workflowKindForJob(job)];
+    output: copy?.output || "成片",
+    outputPlural: copy?.outputPlural || "成片版本",
+    candidate: copy?.candidate || "片段",
+    candidatePlural: copy?.candidatePlural || "片段",
+    timeline: copy?.timeline || "时间线",
+  };
 }
 
 function contentGenerationFailed(job = currentJob) {
@@ -2395,7 +2396,12 @@ function setEvidencePanelWidth(value, { persist = false } = {}) {
 function restoreEvidencePanelWidth() {
   const stage = $("#reviewStage");
   if (!stage || window.innerWidth <= 900) return 0;
-  const desired = Number(stage.dataset.evidencePanelWidth) || storedEvidencePanelWidth() || evidencePanelWidthLimits().fallback;
+  const stored = storedEvidencePanelWidth();
+  const fallback = Number(stage.dataset.evidencePanelDefaultWidth) || evidencePanelWidthLimits().fallback;
+  if (!stage.dataset.evidencePanelDefaultWidth && !stored && !stage.dataset.evidencePanelWidth) {
+    stage.dataset.evidencePanelDefaultWidth = String(Math.round(fallback));
+  }
+  const desired = Number(stage.dataset.evidencePanelWidth) || stored || fallback;
   return setEvidencePanelWidth(desired);
 }
 
@@ -2443,9 +2449,10 @@ function bindEvidencePanelResizer() {
   });
   handle.addEventListener("dblclick", () => {
     try { localStorage.removeItem(evidencePanelWidthStorageKey); } catch { /* storage may be disabled */ }
+    const defaultWidth = Number(stage.dataset.evidencePanelDefaultWidth) || evidencePanelWidthLimits().fallback;
     delete stage.dataset.evidencePanelWidth;
     stage.style.removeProperty("--evidence-panel-width");
-    requestAnimationFrame(restoreEvidencePanelWidth);
+    requestAnimationFrame(() => setEvidencePanelWidth(defaultWidth));
   });
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(() => {
@@ -3416,29 +3423,10 @@ function taskWorkflowForJob(job = currentJob) {
   const workflowKey = workflowKindForJob(job);
   const stage = String(job?.stage || "queued");
   const status = String(job?.status || "");
-  const publicSteps = contentMode && Array.isArray(job?.workflow?.steps) ? job.workflow.steps : [];
+  const publicSteps = Array.isArray(job?.presentation?.steps)
+    ? job.presentation.steps
+    : Array.isArray(job?.workflow?.steps) ? job.workflow.steps : [];
   if (publicSteps.length) {
-    const phaseSteps = workflowKey === "person_edit"
-      ? ["准备画面", "发现人物", "选择人物", "核对出镜", "合成视频"]
-      : workflowKey === "speaker_edit"
-        ? ["准备声音", "区分说话人", "选择发言", "生成结果"]
-        : ["准备素材", "查找内容", "确认片段", "生成视频"];
-    let phaseIndex = { prepare: 0, search: 1, review: 2, render: 3, complete: 4 }[String(job?.workflow?.phase || "prepare")] ?? 0;
-    if (workflowKey === "person_edit") {
-      const workflowPhase = String(job?.workflow?.phase || "prepare");
-      const hasPersonClips = Number(job?.contentSearch?.candidateCount ?? job?.contentSearch?.candidates?.length ?? 0) > 0;
-      phaseIndex = workflowPhase === "review" ? (hasPersonClips ? 3 : 2)
-        : workflowPhase === "render" ? 4
-          : workflowPhase === "complete" ? 5 : phaseIndex;
-      if (contentGenerationFailed(job)) phaseIndex = 3;
-    }
-    if (contentMode) return {
-      contentMode,
-      stepItems: phaseSteps.map((label, index) => ({ label, state: index < phaseIndex ? "complete" : index === phaseIndex ? "current" : "pending" })),
-      steps: phaseSteps,
-      currentIndex: Math.min(phaseIndex, phaseSteps.length),
-      complete: phaseIndex >= phaseSteps.length,
-    };
     const currentIndex = publicSteps.findIndex((item) => item.state === "current");
     const complete = publicSteps.every((item) => item.state === "complete");
     return {
@@ -3587,11 +3575,8 @@ function updateDirectorThinkingOrb(job = currentJob) {
 
 function updateAnalysisConsole(job) {
   const percent = Math.round((Number(job.progress) || 0) * 100);
-  const detailMatch = String(job.detail || "").match(/(\d+(?:\.\d+)?)\s*%/);
   const rawStageProgress = measuredStageProgress(job);
-  const stageFraction = rawStageProgress !== null
-    ? rawStageProgress
-    : detailMatch ? Number(detailMatch[1]) / 100 : 0;
+  const stageFraction = rawStageProgress !== null ? rawStageProgress : 0;
   const stagePercent = Math.round(Math.max(0, Math.min(1, stageFraction)) * 100);
   const rendering = job.status === "running" && ["rendering", "render"].includes(String(job.stage || ""));
   const activePipeline = isPipelineRunningStatus(job.status);
@@ -4186,7 +4171,7 @@ function updateTimelineSelection() {
     actions?.classList.toggle("selection-confirmed", !pendingTimelineSelection);
     if (confirmButton) {
       confirmButton.disabled = !pendingTimelineSelection;
-      confirmButton.textContent = contentManualRange ? "加入探索结果" : "确认选区";
+      confirmButton.textContent = contentManualRange ? "保存到当前探索结果" : "确认选区";
     }
     if (cancelButton) cancelButton.disabled = !pendingTimelineSelection;
     if (startInput) startInput.disabled = !pendingTimelineSelection;
@@ -5823,17 +5808,107 @@ async function loadWaveform(job) {
 }
 
 let activeActionConfirmationCancel = null;
+let activeInputPromptCancel = null;
 
 function dismissActionConfirmation() {
   if (activeActionConfirmationCancel) activeActionConfirmationCancel();
   else $("#actionConfirm")?.classList.add("hidden");
 }
 
+function dismissInputPrompt() {
+  if (activeInputPromptCancel) activeInputPromptCancel();
+  else $("#inputPrompt")?.classList.add("hidden");
+}
+
+function requestInputPrompt({
+  kicker = "填写信息",
+  title = "请输入",
+  summary = "",
+  label = "内容",
+  value = "",
+  placeholder = "",
+  hint = "",
+  confirmLabel = "保存",
+  required = false,
+  maxLength = 120,
+  options = [],
+  selectLabel = "选择目标",
+  selectHint = "",
+} = {}) {
+  dismissInputPrompt();
+  return new Promise((resolve) => {
+    const modal = $("#inputPrompt");
+    const form = $("#inputPromptForm");
+    const input = $("#inputPromptInput");
+    const select = $("#inputPromptSelect");
+    if (!modal || !form || !input || !select) return resolve(null);
+    const selecting = Array.isArray(options) && options.length > 0;
+    $("#inputPromptKicker").textContent = kicker;
+    $("#inputPromptTitle").textContent = title;
+    $("#inputPromptSummary").textContent = summary;
+    $("#inputPromptLabel").textContent = label;
+    $("#inputPromptHint").textContent = hint;
+    $("#inputPromptSelectLabel").textContent = selectLabel;
+    $("#inputPromptSelectHint").textContent = selectHint;
+    $("#inputPromptOk").textContent = confirmLabel;
+    $("#inputPromptField").classList.toggle("hidden", selecting);
+    $("#inputPromptSelectField").classList.toggle("hidden", !selecting);
+    input.value = String(value ?? "");
+    input.placeholder = placeholder;
+    input.required = Boolean(required);
+    input.maxLength = Math.max(1, Number(maxLength) || 120);
+    select.innerHTML = selecting
+      ? options.map((option) => `<option value="${escapeHtml(String(option.value))}">${escapeHtml(String(option.label))}</option>`).join("")
+      : "";
+    if (selecting && value != null && [...select.options].some((option) => option.value === String(value))) {
+      select.value = String(value);
+    }
+    modal.classList.remove("hidden");
+    const finish = (result) => {
+      modal.classList.add("hidden");
+      cleanup();
+      resolve(result);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      const result = selecting ? select.value : input.value.trim();
+      if (required && !result) {
+        input.focus();
+        return;
+      }
+      finish(result);
+    };
+    const onCancel = () => finish(null);
+    const onKey = (event) => { if (event.key === "Escape") onCancel(); };
+    const cleanup = () => {
+      form.removeEventListener("submit", onSubmit);
+      $("#inputPromptCancel").removeEventListener("click", onCancel);
+      $("#inputPromptClose").removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey);
+      if (activeInputPromptCancel === onCancel) activeInputPromptCancel = null;
+    };
+    activeInputPromptCancel = onCancel;
+    form.addEventListener("submit", onSubmit);
+    $("#inputPromptCancel").addEventListener("click", onCancel);
+    $("#inputPromptClose").addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+    window.requestAnimationFrame(() => (selecting ? select : input).focus());
+  });
+}
+
+function requestTextInput(options) {
+  return requestInputPrompt(options);
+}
+
+function requestChoice({ options, ...configuration }) {
+  return requestInputPrompt({ ...configuration, options });
+}
+
 function requestActionConfirmation({ title, summary, details = [], warning = "", confirmLabel = "确认执行", orderMode = null, orderItems = [], showOrderOptions = false, selectionItems = [], onDraftChange = null }) {
   dismissActionConfirmation();
   return new Promise((resolve) => {
     const modal = $("#actionConfirm");
-    if (!modal) return resolve(window.confirm(`${title}\n\n${summary}`));
+    if (!modal) return resolve(false);
     $("#actionConfirmTitle").textContent = title;
     $("#actionConfirmSummary").textContent = summary;
     $("#actionConfirmDetails").innerHTML = details.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
@@ -6046,7 +6121,7 @@ function analysisActivityLoader(job = {}) {
 function inlineAnalysisProgressMarkup(job) {
   const execution = executionForJob(job);
   const contract = progressContract(job);
-  const queued = job?.status === "queued";
+  const queued = execution.status === "queued";
   const percent = Math.round(workflowProgress(job) * 100);
   const detail = friendlyProgressDetail(queued
     ? "任务已提交，正在等待后台开始处理"
@@ -6292,7 +6367,8 @@ function updateInlineAnalysisProgress(job = currentJob) {
   const panel = $("#inlineAnalysisProgress");
   if (!panel || !job) return;
   const contract = progressContract(job);
-  const queued = job.status === "queued";
+  const execution = executionForJob(job);
+  const queued = execution.status === "queued";
   const percent = Math.round(workflowProgress(job) * 100);
   const detail = friendlyProgressDetail(queued
     ? "任务已提交，正在等待后台开始处理"
@@ -6320,7 +6396,6 @@ function updateInlineAnalysisProgress(job = currentJob) {
   if (workflowPercentNode) workflowPercentNode.textContent = workflowLabel;
   if (detailNode) detailNode.textContent = detail;
   if (stageLabelNode) stageLabelNode.textContent = `当前阶段 · ${queued ? "等待处理" : contract.stage.label || "处理中"}`;
-  const execution = executionForJob(job);
   const waiting = queued || execution.active
     && !["determinate", "completed"].includes(stageMode);
   panel.classList.toggle("queued", queued);
@@ -7600,7 +7675,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
       }).join("")}</div>${candidates.length > 50 ? `<button type="button" class="content-show-more" data-content-show-more>再显示 50 段</button>` : ""}
       ${bulkControlsMarkup}
       ${historyMarkup}
-      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "直接生成本次结果"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>`}
+      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "生成当前检索视频"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>`}
       <p class="content-search-safety">人物仅使用画面描述或匿名 Speaker 标签，不进行实名识别。也可以直接在对话中输入新要求继续检索。</p>
     </section></div></article>`;
 }
@@ -7899,13 +7974,16 @@ function renderContentSelectionBasket(job = currentJob) {
 function conversationMessageMarkup(message, assistantRoleLabel) {
   const role = message.role === "user" ? "user" : message.kind === "error" ? "error" : "assistant";
   const repeatLabel = Number(message.repeatCount || 1) > 1 ? `<em class="message-repeat">重复 ${message.repeatCount} 次</em>` : "";
-  const originLabel = {
-    highlight: "高光发现助手",
-    content_search: "内容探索助手",
-    person_edit: "人物剪辑助手",
-    speaker_edit: "说话人剪辑助手",
-  }[String(message.originWorkflowKind || "")] || assistantRoleLabel;
-  return `<article class="chat-message ${role}" data-conversation-key="message:${escapeHtml(message.id || "")}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small>${role === "user" ? "你" : originLabel}${message.inherited ? '<em class="message-origin">历史任务</em>' : ""}${repeatLabel}</small><p>${escapeHtml(message.text)}</p></div></article>`;
+  const originWorkflowLabel = {
+    highlight: "高光剪辑",
+    content_search: "内容探索",
+    person_edit: "按人物剪辑",
+    speaker_edit: "按说话人剪辑",
+  }[String(message.originWorkflowKind || "")] || "";
+  const originTag = message.inherited
+    ? `<em class="message-origin">${escapeHtml(originWorkflowLabel ? `${originWorkflowLabel} · 历史任务` : "历史任务")}</em>`
+    : "";
+  return `<article class="chat-message ${role}" data-conversation-key="message:${escapeHtml(message.id || "")}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small>${role === "user" ? "你" : assistantRoleLabel}${originTag}${repeatLabel}</small><p>${escapeHtml(message.text)}</p></div></article>`;
 }
 
 function normalizedConversationInstruction(value) {
@@ -9090,22 +9168,54 @@ function renderConversation(job) {
     confirmCandidates(indices);
   });
   chatRoot.querySelectorAll(".preview-candidate").forEach((button) => button.addEventListener("click", () => previewCandidate(Number(button.dataset.candidateIndex))));
-  chatRoot.querySelectorAll(".rename-candidate").forEach((button) => button.addEventListener("click", () => {
+  chatRoot.querySelectorAll(".rename-candidate").forEach((button) => button.addEventListener("click", async () => {
     const index = Number(button.dataset.candidateIndex);
     const candidate = job.candidates.find((item) => Number(item.index) === index);
-    const title = window.prompt("输入候选名称", candidate?.title || "");
+    const title = await requestTextInput({
+      kicker: "候选镜头",
+      title: "修改候选名称",
+      summary: "名称只用于当前任务，不会改变片段边界或分析结果。",
+      label: "候选名称",
+      value: candidate?.title || "",
+      required: true,
+      confirmLabel: "保存名称",
+    });
     if (title?.trim() && title.trim() !== candidate?.title) sendChat(`第 ${index + 1} 条改名为${title.trim()}`);
   }));
-  chatRoot.querySelectorAll(".candidate-menu").forEach((button) => button.addEventListener("click", () => {
+  chatRoot.querySelectorAll(".candidate-menu").forEach((button) => button.addEventListener("click", async () => {
     const index = Number(button.dataset.candidateIndex);
-    const choice = window.prompt("输入操作：删除、复制、拆分，或“移动到第 2 条”", "复制");
-    if (!choice?.trim()) return;
-    const action = choice.trim();
-    if (/^删除$/.test(action)) sendChat(`删除第 ${index + 1} 条`);
-    else if (/^复制$/.test(action)) sendChat(`复制第 ${index + 1} 条`);
-    else if (/^拆分$/.test(action)) sendChat(`把第 ${index + 1} 条拆成两段`);
-    else if (/移动到第\s*[一二两三四五六七八\d]+\s*条/.test(action)) sendChat(`把第 ${index + 1} 条${action}`);
-    else showToast("支持：删除、复制、拆分、移动到第 N 条；合并两个候选可直接在对话中输入。 ");
+    const action = await requestChoice({
+      kicker: "候选操作",
+      title: `处理第 ${index + 1} 条候选`,
+      summary: "所有修改都会先反映在审核列表中。",
+      selectLabel: "操作方式",
+      options: [
+        { value: "copy", label: "复制候选" },
+        { value: "split", label: "拆分为两段" },
+        { value: "move", label: "移动到其他位置" },
+        { value: "delete", label: "删除候选" },
+      ],
+      confirmLabel: "继续",
+    });
+    if (action === "delete") sendChat(`删除第 ${index + 1} 条`);
+    else if (action === "copy") sendChat(`复制第 ${index + 1} 条`);
+    else if (action === "split") sendChat(`把第 ${index + 1} 条拆成两段`);
+    else if (action === "move") {
+      const target = await requestTextInput({
+        kicker: "调整顺序",
+        title: "移动候选",
+        summary: `当前共有 ${job.candidates.length} 条候选。`,
+        label: "目标位置",
+        value: String(Math.min(job.candidates.length, index + 2)),
+        hint: `请输入 1–${job.candidates.length}。`,
+        required: true,
+        confirmLabel: "移动",
+      });
+      const position = Number(target);
+      if (Number.isInteger(position) && position >= 1 && position <= job.candidates.length) {
+        sendChat(`把第 ${index + 1} 条移动到第 ${position} 条`);
+      } else if (target !== null) showToast(`目标位置必须是 1–${job.candidates.length} 的整数。`);
+    }
   }));
   if (keepPinnedToBottom) {
     chatRoot.scrollTop = chatRoot.scrollHeight;
@@ -9254,7 +9364,7 @@ function showSource({ autoplay = true, preserveMappedTime = false, seekTime = nu
   beginSourcePreviewPolling();
   $("#viewerBadge").textContent = "源视频";
   renderOutputPreviewSelector(currentJob);
-  $("#reviewKicker").textContent = "SOURCE VIDEO";
+  $("#reviewKicker").textContent = "源视频";
   $("#reviewTitle").textContent = currentJob.filename;
   $("#downloadButton")?.classList.add("hidden");
   $("#finalizePreviewButton")?.classList.add("hidden");
@@ -10156,7 +10266,7 @@ function previewEventSegment(group, segment, { seekTime = null } = {}) {
   seekCurrentMediaTime(Math.max(Number(segment.start) || 0, Math.min(Number(segment.end) || target, target)));
   const groupTitle = group?.title || segment.chapterTitle || "成片镜头";
   $("#viewerBadge").textContent = `${groupTitle} · 源片段`;
-  $("#reviewKicker").textContent = contentMode ? "CONTENT SOURCE MATCH" : "SOURCE EVENT SHOT";
+  $("#reviewKicker").textContent = contentMode ? "内容来源片段" : "事件来源镜头";
   $("#reviewTitle").textContent = contentMode ? groupTitle : segment.role || segment.title || "源片段";
   $("#evidencePanel")?.classList.remove("hidden");
   $("#evidencePanel")?.classList.remove("evidence-placeholder");
@@ -10179,7 +10289,15 @@ function previewEventSegment(group, segment, { seekTime = null } = {}) {
 }
 
 async function renameEventGroup(group) {
-  const title = window.prompt("输入事件高光名称", group.title || "");
+  const title = await requestTextInput({
+    kicker: "事件编排",
+    title: "修改事件名称",
+    summary: "名称会显示在当前审核列表和生成版本中。",
+    label: "事件名称",
+    value: group.title || "",
+    required: true,
+    confirmLabel: "保存名称",
+  });
   if (!title?.trim() || title.trim() === group.title) return;
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
@@ -10210,7 +10328,15 @@ async function addSelectionToEventGroup(group) {
 async function createEventFromSelection() {
   const selection = currentJob?.manualSelection;
   if (!selection) return void showToast("请先在源视频时间轴上拖动选择一个范围");
-  const title = window.prompt("输入新事件名称", selection.title || "手动事件高光");
+  const title = await requestTextInput({
+    kicker: "建立事件",
+    title: "为当前选区命名",
+    summary: `${formatTime(selection.start)} → ${formatTime(selection.end)} 将成为新事件的第一个镜头。`,
+    label: "事件名称",
+    value: selection.title || "手动事件高光",
+    required: true,
+    confirmLabel: "建立事件",
+  });
   if (!title?.trim()) return;
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
@@ -10226,7 +10352,12 @@ async function createEventFromSelection() {
 }
 
 async function deleteEventSegment(group, segment) {
-  if (!window.confirm(`从“${group.title}”删除镜头“${segment.role}”？`)) return;
+  if (!await requestActionConfirmation({
+    title: "从事件中删除镜头",
+    summary: `确认从“${group.title}”删除“${segment.role || segment.title || "这个镜头"}”？`,
+    details: ["只修改当前事件编排，不会删除源视频或候选镜头。"],
+    confirmLabel: "删除镜头",
+  })) return;
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
   try {
@@ -10243,7 +10374,12 @@ async function deleteTimelineItem() {
     return deleteEventSegment(currentEventGroup, currentEventSegment);
   }
   if (!currentCandidate) return;
-  if (!window.confirm(`删除“${currentCandidate.title}”？对应时间轴片段、缩略图和波形标记会一起移除。`)) return;
+  if (!await requestActionConfirmation({
+    title: "删除候选片段",
+    summary: `确认从当前审核中删除“${currentCandidate.title}”？`,
+    details: ["对应时间轴片段、缩略图和波形标记会从本次审核中移除。", "源视频不会被修改。"],
+    confirmLabel: "删除片段",
+  })) return;
   const actionToken = captureJobAction();
   actionBusy = true;
   try {
@@ -10281,18 +10417,26 @@ async function reorderEventSegment(group, from, to) {
 async function moveEventSegment(group, segment) {
   const destinations = currentJob.eventGroups.filter((item) => item.id !== group.id);
   if (!destinations.length) return void showToast("当前没有其他事件组");
-  const listing = destinations.map((item, index) => `${index + 1}. ${item.title}`).join("\n");
-  const choice = Number(window.prompt(`移动到哪个事件？\n${listing}`, "1"));
-  if (!Number.isInteger(choice) || choice < 1 || choice > destinations.length) return;
+  const destinationId = await requestChoice({
+    kicker: "移动镜头",
+    title: "选择目标事件",
+    summary: `“${segment.role || segment.title || "当前镜头"}”将从“${group.title}”移出。`,
+    selectLabel: "目标事件",
+    options: destinations.map((item) => ({ value: item.id, label: item.title })),
+    confirmLabel: "移动镜头",
+  });
+  if (!destinationId) return;
+  const destination = destinations.find((item) => String(item.id) === String(destinationId));
+  if (!destination) return void showToast("目标事件已变化，请刷新后重试");
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
   try {
     const { job } = await apiJson(`/api/jobs/${actionToken.jobId}/event-groups/${encodeURIComponent(group.id)}/segments/${encodeURIComponent(segment.id)}/move`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: { destinationGroupId: destinations[choice - 1].id },
+      body: { destinationGroupId: destination.id },
     });
     if (!jobActionStillCurrent(actionToken)) return;
-    currentEventGroup = destinations[choice - 1];
+    currentEventGroup = destination;
     currentEventSegment = null;
     commitJobAction(job, actionToken);
   } catch (error) { if (jobActionStillCurrent(actionToken)) showToast(error.message); }
@@ -10711,7 +10855,7 @@ function resetCandidateDrawerContext() {
   const title = $("#candidateDrawerTitle");
   if (title) title.textContent = "精彩镜头候选";
   const kicker = $("#candidateDrawerKicker");
-  if (kicker) kicker.textContent = "RAW VISUAL MOMENTS";
+  if (kicker) kicker.textContent = "源镜头候选";
   const description = $("#candidateDrawerDescription");
   if (description) description.textContent = "这些是视觉模型精修后的源镜头，可预览或补充到事件成片中。";
   const list = $("#candidateDrawerList");
@@ -10935,10 +11079,17 @@ function openCandidateDrawer() {
 async function addCandidateToEvent(candidate) {
   const groups = currentJob?.eventGroups || [];
   if (!groups.length) return;
-  const listing = groups.map((group, index) => `${index + 1}. ${group.title}`).join("\n");
-  const choice = Number(window.prompt(`将“${candidate.title}”加入哪个事件？\n${listing}`, "1"));
-  if (!Number.isInteger(choice) || choice < 1 || choice > groups.length) return;
-  const group = groups[choice - 1];
+  const groupId = await requestChoice({
+    kicker: "补充镜头",
+    title: "选择要加入的事件",
+    summary: `“${candidate.title || "当前候选"}”会追加到所选事件的末尾，之后仍可调整顺序。`,
+    selectLabel: "目标事件",
+    options: groups.map((group) => ({ value: group.id, label: group.title })),
+    confirmLabel: "加入事件",
+  });
+  if (!groupId) return;
+  const group = groups.find((item) => String(item.id) === String(groupId));
+  if (!group) return void showToast("目标事件已变化，请刷新后重试");
   const actionToken = captureJobAction();
   if (!jobActionStillCurrent(actionToken)) return;
   try {
@@ -10958,7 +11109,14 @@ async function createEventFromCandidateSelection() {
   if (!currentJob || currentJob.status !== "awaiting_confirmation" || actionBusy) return;
   const indices = [...$("#candidateDrawerList")?.querySelectorAll(".drawer-candidate-check:checked") || []].map((input) => Number(input.value));
   if (!indices.length) return void showToast("请至少选择一个镜头候选");
-  const title = window.prompt("为这组镜头命名", "重新编排高光");
+  const title = await requestTextInput({
+    kicker: "建立事件",
+    title: "为所选镜头命名",
+    summary: `已选择 ${indices.length} 个镜头；会按当前顺序建立一个可继续调整的事件。`,
+    label: "事件名称",
+    value: "重新编排高光",
+    confirmLabel: "建立事件",
+  });
   if (title === null) return;
   const actionToken = captureJobAction();
   actionBusy = true;
@@ -11249,7 +11407,7 @@ function renderReviewRail(job) {
   if (job.status === "brief_confirmation") {
     const brief = job.brief || {};
     setRailTitle("需求确认");
-    body.innerHTML = `<div class="rail-section-title"><strong>AI 剪辑需求简报</strong><b>等待确认</b></div><p class="rail-summary">请在 AI 高光导演的需求简报卡中修改并保存；确认后才会调用视觉模型。</p><section class="brief-review-card"><dl><div><dt>剪辑目标</dt><dd>${escapeHtml(brief.objective || "事件高光合集")}</dd></div><div><dt>单条成片目标</dt><dd>${brief.targetDurationSeconds ? `${Number(brief.targetDurationSeconds).toFixed(1)} 秒` : "AI 推荐"}</dd></div><div><dt>关注重点</dt><dd>${escapeHtml((brief.focus || ["综合判断"]).join("、"))}</dd></div><div><dt>风格节奏</dt><dd>${escapeHtml([brief.style?.pace, brief.style?.tone].filter(Boolean).join(" · ") || "纪实自然")}</dd></div></dl><button type="button" class="confirm-brief-button" data-focus-brief>编辑并确认简报</button></section>`;
+    body.innerHTML = `<div class="rail-section-title"><strong>高光剪辑需求简报</strong><b>等待确认</b></div><p class="rail-summary">请在剪辑需求卡中修改并保存；确认后才会调用视觉模型。</p><section class="brief-review-card"><dl><div><dt>剪辑目标</dt><dd>${escapeHtml(brief.objective || "事件高光合集")}</dd></div><div><dt>单条成片目标</dt><dd>${brief.targetDurationSeconds ? `${Number(brief.targetDurationSeconds).toFixed(1)} 秒` : "AI 推荐"}</dd></div><div><dt>关注重点</dt><dd>${escapeHtml((brief.focus || ["综合判断"]).join("、"))}</dd></div><div><dt>风格节奏</dt><dd>${escapeHtml([brief.style?.pace, brief.style?.tone].filter(Boolean).join(" · ") || "纪实自然")}</dd></div></dl><button type="button" class="confirm-brief-button" data-focus-brief>编辑并确认简报</button></section>`;
     body.querySelector("[data-focus-brief]")?.addEventListener("click", () => $("#chatMessages .brief-editor")?.scrollIntoView({ behavior: "smooth", block: "center" }));
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -11526,6 +11684,7 @@ function renderJob(job) {
   // A response for another task is stale even when the user is no longer on
   // the home screen (for example, task A finishes after task B was opened).
   if (!restoringHistory && currentJob && String(currentJob.id) !== String(job.id)) return;
+  window.ClipTalkAppShell?.syncCurrentJob(job);
   rememberCurrentJob(job);
   const previousId = currentJob?.id;
   const previousPersonSearchId = String(currentJob?.contentSearch?.id || "");
@@ -12228,7 +12387,7 @@ async function toggleContentTimelineSelection() {
   await saveContentReviewDraft(context.root, currentJob);
   syncContentTimelineEditActions(match);
   updateTimeline();
-  showToast(context.input.checked ? "片段已加入探索结果" : "片段已从探索结果移出", "success");
+  showToast(context.input.checked ? "片段已保存到当前探索结果" : "片段已从当前探索结果移出", "success");
 }
 
 async function moveContentTimelineSelection(direction) {
@@ -12427,10 +12586,16 @@ async function restoreContentSearch(searchId) {
 
 async function updateContentPersonLabel(personId, currentLabel = "") {
   if (!currentJob || !personId || actionBusy) return;
-  const label = window.prompt(
-    "为这个匿名人物添加项目内标签（例如：男主持人、女嘉宾、黑衣讲解员）",
-    currentLabel,
-  );
+  const label = await requestTextInput({
+    kicker: "人物校正",
+    title: currentLabel ? "修改人物标签" : "添加人物标签",
+    summary: "标签只在当前项目内使用，不会推断或保存真实身份。",
+    label: "项目内标签",
+    value: currentLabel,
+    placeholder: "例如：主持人、女嘉宾、黑衣讲解员",
+    required: true,
+    confirmLabel: "保存标签",
+  });
   if (label === null) return;
   const normalized = String(label).trim().replace(/\s+/g, " ");
   if (!normalized) return void showToast("人物标签不能为空");
@@ -12521,7 +12686,14 @@ async function splitSelectedCurrentPersonRanges() {
   if (!currentJob?.id || !selectedCurrentPersonRangeOwner || !rangeIds.length || actionBusy) return;
   const person = currentPersonCatalog(currentJob).find((item) => String(item.id) === selectedCurrentPersonRangeOwner);
   if (!person) return void showToast("人物列表已变化，请刷新后重试");
-  const label = window.prompt("为拆分出的人物命名（可留空，之后再添加标签）", "");
+  const label = await requestTextInput({
+    kicker: "人物校正",
+    title: "为拆分出的人物命名",
+    summary: "可留空并稍后添加标签；拆分后的出镜片段会组成一张新人物卡。",
+    label: "新人物标签（可选）",
+    placeholder: "例如：另一位嘉宾",
+    confirmLabel: "继续拆分",
+  });
   if (label === null) return;
   const confirmed = await requestActionConfirmation({
     title: "将错误片段拆为新人物",
@@ -13144,7 +13316,17 @@ async function sendChat(text, contentOptions = null) {
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new Error(body.detail || `请求失败（${response.status}）`);
+      if (window.ClipTalkApi?.createResponseError) {
+        throw window.ClipTalkApi.createResponseError(
+          body,
+          response.status,
+          response.headers.get("X-Request-ID") || "",
+        );
+      }
+      throw new Error(
+        (typeof body.detail === "object" ? body.detail?.message : body.detail)
+        || `请求失败（${response.status}）`,
+      );
     }
     if (!response.body) throw new Error("浏览器不支持流式响应");
     const reader = response.body.getReader();
@@ -13451,7 +13633,12 @@ async function loadHistory() {
       <div><a href="${escapeHtml(item.videoUrl)}" target="_blank" rel="noopener">播放</a><a class="download" href="${escapeHtml(item.downloadUrl)}">下载</a><button type="button" data-delete-kept data-job-id="${escapeHtml(item.jobId)}" data-filename="${escapeHtml(item.filename)}">删除</button></div>
     </article>`).join("") : '<p class="empty">暂无独立成片副本</p>';
     $("#keptList")?.querySelectorAll("[data-delete-kept]").forEach((button) => button.addEventListener("click", async () => {
-      if (!window.confirm(`确定从保留库移除“${button.dataset.filename}”吗？`)) return;
+      if (!await requestActionConfirmation({
+        title: "删除保留副本",
+        summary: `确认从保留库移除“${button.dataset.filename}”？`,
+        warning: "该独立成片文件将被删除，原任务中的源视频不会受影响。",
+        confirmLabel: "删除副本",
+      })) return;
       await api(`/api/kept/${encodeURIComponent(button.dataset.jobId)}/${encodeURIComponent(button.dataset.filename)}`, { method: "DELETE" });
       loadHistory();
     }));
@@ -13479,6 +13666,7 @@ async function deleteHistoryJob(jobId) {
     });
     if (currentJob?.id === jobId) resetWorkspace();
     loadHistory();
+    window.ClipTalkAppShell?.refreshCatalog();
   } catch (error) { showToast(error.message); }
 }
 
@@ -13845,6 +14033,9 @@ async function loadHomeTaskThumbnail(image, { forceRetry = false } = {}) {
 }
 
 async function loadHomeTasks() {
+  if (window.ClipTalkAppShell?.loadHomeTasks) {
+    return window.ClipTalkAppShell.loadHomeTasks();
+  }
   const grid = $("#homeTaskGrid");
   if (!grid) return;
   setHomeViewState("loading");
@@ -13920,9 +14111,11 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   if (showHome) {
     studio?.classList.add("home-mode");
     $("#homeView")?.classList.remove("hidden");
+    window.ClipTalkAppShell?.showView("home", { route: false });
   } else {
     studio?.classList.remove("home-mode");
     $("#homeView")?.classList.add("hidden");
+    window.ClipTalkAppShell?.showView("workspace", { route: false });
   }
   // Clear the conversation before optional media/timeline cleanup. This
   // makes a new task visually empty even when an older task lacks a legacy
@@ -14665,7 +14858,6 @@ $("#addToChatButton")?.addEventListener("click", () => {
   const item = currentEventSegment || currentCandidate || currentJob?.manualSelection;
   if (item) selectTimelineItemForChat(item);
 });
-$("#homeButton")?.addEventListener("click", () => resetWorkspace(true));
 $("#openCandidateDrawer")?.addEventListener("click", openCandidateDrawer);
 $("#closeCandidateDrawer")?.addEventListener("click", closeCandidateDrawer);
 $("#drawerBackdrop")?.addEventListener("click", closeCandidateDrawer);
@@ -14673,6 +14865,29 @@ function setVisionConnectionStatus(message, tone = "neutral") {
   const node = $("#visionConnectionStatus");
   if (!node) return;
   setGenerativeInlineStatus(node, message, tone, "orbit");
+}
+
+function updateSettingsSaveState(role, dirty) {
+  const vision = role !== "llm";
+  if (vision) visionSettingsDirty = Boolean(dirty);
+  else llmSettingsDirty = Boolean(dirty);
+  const changed = vision ? visionSettingsDirty : llmSettingsDirty;
+  const busy = vision ? visionSettingsBusy : llmSettingsBusy;
+  const form = $(vision ? "#visionSettingsForm" : "#llmSettingsForm");
+  const state = $(vision ? "#visionDirtyState" : "#llmDirtyState");
+  const discard = $(vision ? "#discardVisionSettings" : "#discardLlmSettings");
+  const save = $(vision ? "#saveVisionSettings" : "#saveLlmSettings");
+  if (form) form.dataset.dirty = String(changed);
+  if (state) {
+    state.textContent = changed ? "存在未保存修改" : "所有修改已保存";
+    state.dataset.tone = changed ? "dirty" : "saved";
+  }
+  if (discard) discard.disabled = busy || !changed;
+  if (save) save.disabled = busy || !changed;
+}
+
+function markSettingsDirty(role) {
+  updateSettingsSaveState(role === "llm" ? "llm" : "vision", true);
 }
 
 function selectedVisionProviderRecord() {
@@ -14772,9 +14987,13 @@ function renderVisionSettings(state) {
   visionSettingsState = state;
   const list = $("#visionProviderList");
   if (!list) return;
-  list.innerHTML = (state.providers || []).map((item) => `<button type="button" role="tab" data-vision-provider="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description)}</small><span>${item.configured ? "已配置" : "未配置"}</span></button>`).join("");
-  list.querySelectorAll("[data-vision-provider]").forEach((button) => button.addEventListener("click", () => renderVisionProvider(button.dataset.visionProvider)));
+  list.innerHTML = (state.providers || []).map((item) => `<button type="button" role="tab" data-vision-provider="${escapeHtml(item.id)}" data-configured="${String(Boolean(item.configured))}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description)}</small><span>${item.configured ? "已配置" : "未配置"}</span></button>`).join("");
+  list.querySelectorAll("[data-vision-provider]").forEach((button) => button.addEventListener("click", () => {
+    renderVisionProvider(button.dataset.visionProvider);
+    markSettingsDirty("vision");
+  }));
   renderVisionProvider(state.activeProvider || state.providers?.[0]?.id);
+  updateSettingsSaveState("vision", false);
 }
 
 async function loadVisionSettings() {
@@ -14788,10 +15007,9 @@ async function loadVisionSettings() {
 
 function setVisionSettingsBusy(busy) {
   visionSettingsBusy = busy;
-  ["#discoverVisionModels", "#saveVisionSettings"].forEach((selector) => {
-    const button = $(selector);
-    if (button) button.disabled = busy;
-  });
+  const discover = $("#discoverVisionModels");
+  if (discover) discover.disabled = busy;
+  updateSettingsSaveState("vision", visionSettingsDirty);
 }
 
 async function discoverAvailableVisionModels() {
@@ -14815,6 +15033,7 @@ async function discoverAvailableVisionModels() {
     visionDiscoveredModels = result.models || [];
     visionVerifiedAt = result.verifiedAt || null;
     renderVisionModelOptions(record.model || "");
+    markSettingsDirty("vision");
     const recommended = visionDiscoveredModels.filter((item) => item.recommended).length;
     setVisionConnectionStatus(`连接成功，读取到 ${visionDiscoveredModels.length} 个账号可见模型，其中 ${recommended} 个优先列为视觉候选；尚未测试实际视觉能力。`, "success");
   } catch (error) {
@@ -14991,10 +15210,14 @@ function renderLlmSettings(state) {
   llmSettingsState = state;
   const list = $("#llmProviderList");
   if (!list) return;
-  list.innerHTML = (state.providers || []).map((item) => `<button type="button" role="tab" data-llm-provider="${escapeHtml(item.id)}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description)}</small><span>${item.configured ? "已配置" : "未配置"}</span></button>`).join("");
-  list.querySelectorAll("[data-llm-provider]").forEach((button) => button.addEventListener("click", () => renderLlmProvider(button.dataset.llmProvider)));
+  list.innerHTML = (state.providers || []).map((item) => `<button type="button" role="tab" data-llm-provider="${escapeHtml(item.id)}" data-configured="${String(Boolean(item.configured))}"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description)}</small><span>${item.configured ? "已配置" : "未配置"}</span></button>`).join("");
+  list.querySelectorAll("[data-llm-provider]").forEach((button) => button.addEventListener("click", () => {
+    renderLlmProvider(button.dataset.llmProvider);
+    markSettingsDirty("llm");
+  }));
   renderLlmProvider(state.activeProvider || state.providers?.[0]?.id);
   setLlmMode(state.reuseVision ? "reuse_vision" : "independent");
+  updateSettingsSaveState("llm", false);
 }
 
 async function loadLlmSettings() {
@@ -15008,10 +15231,9 @@ async function loadLlmSettings() {
 
 function setLlmSettingsBusy(busy) {
   llmSettingsBusy = busy;
-  ["#discoverLlmModels", "#saveLlmSettings"].forEach((selector) => {
-    const button = $(selector);
-    if (button) button.disabled = busy;
-  });
+  const discover = $("#discoverLlmModels");
+  if (discover) discover.disabled = busy;
+  updateSettingsSaveState("llm", llmSettingsDirty);
 }
 
 async function discoverAvailableLlmModels() {
@@ -15035,6 +15257,7 @@ async function discoverAvailableLlmModels() {
     llmDiscoveredModels = result.models || [];
     llmVerifiedAt = result.verifiedAt || null;
     renderLlmModelOptions(record.model || "");
+    markSettingsDirty("llm");
     setLlmConnectionStatus(`连接成功，读取到 ${llmDiscoveredModels.length} 个账号可见文本模型；尚未测试实际规划能力。`, "success");
   } catch (error) {
     llmDiscoveredModels = [];
@@ -15114,18 +15337,35 @@ function setModelSettingsRole(role) {
   document.querySelectorAll("[data-model-view]").forEach((view) => view.classList.toggle("hidden", view.dataset.modelView !== selected));
 }
 
+function discardVisionSettingsChanges() {
+  if (!visionSettingsState) return;
+  renderVisionSettings(visionSettingsState);
+  showToast("已放弃视觉分析配置的未保存修改", "neutral");
+}
+
+function discardLlmSettingsChanges() {
+  if (!llmSettingsState) return;
+  renderLlmSettings(llmSettingsState);
+  showToast("已放弃剪辑规划配置的未保存修改", "neutral");
+}
+
 function openSettings() {
   $("#settingsPanel")?.classList.remove("hidden");
-  $("#settingsBackdrop")?.classList.remove("hidden");
+  $("#settingsBackdrop")?.classList.add("hidden");
   document.body.classList.add("settings-open");
-  loadVisionSettings();
-  loadLlmSettings();
+  if (window.ClipTalkAppShell?.showView) {
+    window.ClipTalkAppShell.showView("settings", { route: false });
+  } else {
+    loadVisionSettings();
+    loadLlmSettings();
+  }
 }
 
 function closeSettings() {
   $("#settingsPanel")?.classList.add("hidden");
   $("#settingsBackdrop")?.classList.add("hidden");
   document.body.classList.remove("settings-open");
+  window.ClipTalkAppShell?.returnFromPage();
 }
 
 function currentPersonCatalog(job = currentJob) {
@@ -15154,6 +15394,7 @@ function resetCurrentPersonState(jobId = "") {
   selectedCurrentPersonRangeOwner = "";
   currentPersonMatchMode = "any";
   currentPersonActivity = "appearance";
+  currentPersonRangeLimits.clear();
 }
 
 function ensureCurrentPersonState(job = currentJob) {
@@ -15334,12 +15575,21 @@ function renderCurrentPersons() {
       const duplicate = persons.find((item) => String(item.id) === String(duplicateId));
       return duplicate ? String(duplicate.label || duplicate.defaultLabel || duplicate.id) : "";
     }).filter(Boolean);
-    const rangeRows = ranges.map((range, index) => {
+    const rangeLimit = Math.max(
+      currentPersonRangePageSize,
+      Number(currentPersonRangeLimits.get(personId) || currentPersonRangePageSize),
+    );
+    const visibleRanges = ranges.slice(0, rangeLimit);
+    const rangeRows = visibleRanges.map((range, index) => {
       const rangeId = String(range.id || `${personId}_range_${String(index).padStart(4, "0")}`);
       return `<div class="current-person-range-row"><input type="checkbox" data-current-person-range-select="${escapeHtml(rangeId)}" data-current-person-range-owner="${escapeHtml(personId)}" ${selectedCurrentPersonRanges.has(rangeId) ? "checked" : ""} aria-label="选择片段 ${index + 1} 进行人物校正"><button type="button" data-current-person-range="${index}" data-current-person-ref="${escapeHtml(personId)}" data-person-start="${range.start}" data-person-end="${range.end}" aria-label="播放${escapeHtml(label)}的第 ${index + 1} 个出镜片段，${escapeHtml(formatTime(range.start))}到${escapeHtml(formatTime(range.end))}"><b><i aria-hidden="true">▶</i> 片段 ${index + 1}</b><span>${escapeHtml(formatTime(range.start))} → ${escapeHtml(formatTime(range.end))}</span><em>${(range.end - range.start).toFixed(1)}s</em></button></div>`;
     }).join("");
+    const remainingRangeCount = Math.max(0, ranges.length - visibleRanges.length);
+    const moreRanges = remainingRangeCount
+      ? `<button type="button" class="current-person-range-more" data-current-person-ranges-more="${escapeHtml(personId)}">再显示 ${Math.min(currentPersonRangePageSize, remainingRangeCount)} 段 · 尚有 ${remainingRangeCount} 段</button>`
+      : "";
     const rangeMarkup = ranges.length
-      ? `<details class="current-person-ranges" aria-label="${escapeHtml(label)}的全部出镜片段"${ranges.length <= 8 ? " open" : ""}><summary><strong>全部出镜片段</strong><small>${ranges.length} 段 · ${personAppearanceSeconds(person).toFixed(1)} 秒</small><em>展开</em></summary><div>${rangeRows}</div></details>`
+      ? `<details class="current-person-ranges" aria-label="${escapeHtml(label)}的全部出镜片段"${ranges.length <= 8 || rangeLimit > currentPersonRangePageSize ? " open" : ""}><summary><strong>全部出镜片段</strong><small>${ranges.length} 段 · ${personAppearanceSeconds(person).toFixed(1)} 秒</small><em>展开</em></summary><div>${rangeRows}${moreRanges}</div></details>`
       : '<p class="current-person-ranges-empty">尚未形成可播放的连续出镜片段</p>';
     return `<article class="current-person-card${selected ? " selected" : ""}${focused ? " focused" : ""}${review ? " review" : ""}" data-current-person="${escapeHtml(personId)}" style="--person-color:${color}">
       <label class="current-person-choice"><input type="checkbox" data-current-person-select value="${escapeHtml(personId)}" ${selected ? "checked" : ""}><span class="current-person-thumbnail"><img src="${escapeHtml(person.thumbnailUrl || "")}" alt="${escapeHtml(label)}的代表画面" loading="lazy"><em>播放片段</em></span><span class="current-person-copy"><strong>${escapeHtml(label)}</strong><small>${personAppearanceSeconds(person).toFixed(1)} 秒出镜 · ${ranges.length} 段</small><small>${duplicateLabels.length ? `疑似与 ${duplicateLabels.join("、")} 为同一人 · 请复核` : review ? "短暂或不稳定人物簇 · 建议复核" : `${Number(person.trackCount || ranges.length)} 次画面观测 · 自动分组`}</small></span></label>
@@ -15366,6 +15616,12 @@ function renderCurrentPersons() {
   list.querySelectorAll("[data-current-person-range]").forEach((button) => button.addEventListener("click", () => {
     const person = persons.find((item) => String(item.id) === String(button.dataset.currentPersonRef));
     previewCurrentPerson(person, Number(button.dataset.personStart), Number(button.dataset.personEnd));
+  }));
+  list.querySelectorAll("[data-current-person-ranges-more]").forEach((button) => button.addEventListener("click", () => {
+    const personId = String(button.dataset.currentPersonRangesMore || "");
+    const currentLimit = Number(currentPersonRangeLimits.get(personId) || currentPersonRangePageSize);
+    currentPersonRangeLimits.set(personId, currentLimit + currentPersonRangePageSize);
+    renderCurrentPersons();
   }));
   list.querySelectorAll("[data-current-person-range-select]").forEach((input) => input.addEventListener("change", () => {
     const owner = String(input.dataset.currentPersonRangeOwner || "");
@@ -15459,6 +15715,8 @@ let currentVoiceCanUndo = false;
 let currentVoiceJobId = "";
 let currentVoiceRequestGeneration = 0;
 let currentVoiceDiscoveryStatus = "not_started";
+const currentVoiceTurnPageSize = 80;
+let currentVoiceTurnLimit = currentVoiceTurnPageSize;
 let focusedCurrentVoiceRef = "";
 let selectedCurrentVoices = new Set();
 let selectedVoiceCorrectionVoices = new Set();
@@ -15486,6 +15744,7 @@ function resetCurrentVoiceState(jobId = "") {
   currentVoiceRevision = 0;
   currentVoiceCanUndo = false;
   currentVoiceDiscoveryStatus = "not_started";
+  currentVoiceTurnLimit = currentVoiceTurnPageSize;
   focusedCurrentVoiceRef = "";
   selectedCurrentVoices.clear();
   selectedVoiceCorrectionVoices.clear();
@@ -15729,7 +15988,13 @@ function renderCurrentVoiceTimeline() {
   const rows = $("#currentVoiceTurns");
   if (!rows) return;
   const colorIndex = new Map(currentVoices.map((voice, index) => [voice.speakerRef, index % 6]));
-  rows.innerHTML = currentVoiceTimeline.map((turn) => `<article class="current-voice-turn${turn.requiresReview ? " review" : ""}" style="--voice-color:var(--voice-${colorIndex.get(turn.speakerRef) || 0})"><label><input type="checkbox" data-voice-turn-select value="${escapeHtml(turn.turnId)}"><span><b>${escapeHtml(turn.label || turn.speakerRef)}</b><small>${formatTime(turn.start)} → ${formatTime(turn.end)}${turn.overlapSeconds >= .15 ? " · 有重叠声音" : ""}</small></span></label><button type="button" data-voice-turn-preview="${escapeHtml(turn.turnId)}">${escapeHtml(turn.text || "试听这段发言")}</button></article>`).join("");
+  const selectedTurnIds = new Set(
+    [...rows.querySelectorAll("[data-voice-turn-select]:checked")].map((input) => String(input.value)),
+  );
+  const visibleTurns = currentVoiceTimeline.slice(0, currentVoiceTurnLimit);
+  const remainingTurnCount = Math.max(0, currentVoiceTimeline.length - visibleTurns.length);
+  rows.innerHTML = visibleTurns.map((turn) => `<article class="current-voice-turn${turn.requiresReview ? " review" : ""}${selectedTurnIds.has(String(turn.turnId)) ? " selected" : ""}" style="--voice-color:var(--voice-${colorIndex.get(turn.speakerRef) || 0})"><label><input type="checkbox" data-voice-turn-select value="${escapeHtml(turn.turnId)}" ${selectedTurnIds.has(String(turn.turnId)) ? "checked" : ""}><span><b>${escapeHtml(turn.label || turn.speakerRef)}</b><small>${formatTime(turn.start)} → ${formatTime(turn.end)}${turn.overlapSeconds >= .15 ? " · 有重叠声音" : ""}</small></span></label><button type="button" data-voice-turn-preview="${escapeHtml(turn.turnId)}">${escapeHtml(turn.text || "试听这段发言")}</button></article>`).join("")
+    + (remainingTurnCount ? `<button type="button" class="current-voice-turn-more" data-current-voice-turn-more>再显示 ${Math.min(currentVoiceTurnPageSize, remainingTurnCount)} 段 · 尚有 ${remainingTurnCount} 段</button>` : "");
   $("#currentVoiceTurnCount").textContent = `${currentVoiceTimeline.length} 段${currentVoiceRevision ? ` · 已校正 r${currentVoiceRevision}` : " · 自动分组"}`;
   rows.querySelectorAll("[data-voice-turn-select]").forEach((input) => input.addEventListener("change", () => {
     input.closest(".current-voice-turn")?.classList.toggle("selected", input.checked);
@@ -15742,6 +16007,11 @@ function renderCurrentVoiceTimeline() {
       previewCurrentVoice(Number(turn.start), Number(turn.end));
     }
   }));
+  rows.querySelector("[data-current-voice-turn-more]")?.addEventListener("click", () => {
+    currentVoiceTurnLimit += currentVoiceTurnPageSize;
+    renderCurrentVoiceTimeline();
+    syncCurrentVoiceControls();
+  });
   renderTimelineSpeakerTrack();
 }
 
@@ -16010,6 +16280,7 @@ async function loadCurrentVoices() {
     currentVoiceRevision = Number(result.revision || 0);
     currentVoiceCanUndo = Boolean(result.canUndo);
     renderCurrentVoices(result.status || {});
+    if (secondaryEditorOpen() && workflowKindForJob(currentJob) === "speaker_edit") renderSecondaryEditorLibrary();
     if (result.status?.status === "running" && !$("#voiceProfilePanel")?.classList.contains("hidden")) {
       voiceDiscoveryTimer = setTimeout(loadCurrentVoices, 1500);
     }
@@ -16067,7 +16338,15 @@ function previewCurrentVoice(start, end) {
 
 async function labelCurrentVoice(speakerRef) {
   const voice = currentVoices.find((item) => item.speakerRef === speakerRef);
-  const label = window.prompt("给这个声音命名", voice?.label || "")?.trim();
+  const label = (await requestTextInput({
+    kicker: "声音校正",
+    title: "给这个声音命名",
+    summary: "名称只在当前项目内用于区分说话人。",
+    label: "说话人名称",
+    value: voice?.label || "",
+    required: true,
+    confirmLabel: "保存名称",
+  }))?.trim();
   if (!label || label === voice?.label) return;
   const jobId = String(currentJob?.id || "");
   try {
@@ -16413,7 +16692,15 @@ async function submitVoiceEnrollment(profileId = "") {
 
 async function renameVoiceProfile(profileId) {
   const profile = voiceProfiles.find((item) => item.id === profileId);
-  const label = window.prompt("新的声纹人物名称", profile?.label || "")?.trim();
+  const label = (await requestTextInput({
+    kicker: "声纹人物库",
+    title: "修改声纹人物名称",
+    summary: "只修改显示名称，不会重新计算已有声纹。",
+    label: "人物名称",
+    value: profile?.label || "",
+    required: true,
+    confirmLabel: "保存名称",
+  }))?.trim();
   if (!label || label === profile?.label) return;
   try {
     await apiJson(`/api/voice-profiles/${encodeURIComponent(profileId)}`, { method: "PATCH", body: { label } });
@@ -16423,7 +16710,12 @@ async function renameVoiceProfile(profileId) {
 
 async function deleteVoiceProfile(profileId) {
   const profile = voiceProfiles.find((item) => item.id === profileId);
-  if (!window.confirm(`删除“${profile?.label || "这个人物"}”的声纹？已有视频和成片不会被删除。`)) return;
+  if (!await requestActionConfirmation({
+    title: "删除声纹人物",
+    summary: `确认删除“${profile?.label || "这个人物"}”的声纹？`,
+    details: ["已有视频、检索结果和成片不会被删除。", "以后需要再次使用时，必须重新注册参考声音。"],
+    confirmLabel: "删除声纹",
+  })) return;
   try {
     await api(`/api/voice-profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
     await loadVoiceProfiles();
@@ -16499,9 +16791,20 @@ $("#crossVideoVoiceSection")?.addEventListener("toggle", (event) => {
 $("#discoverVisionModels")?.addEventListener("click", discoverAvailableVisionModels);
 $("#visionSettingsForm")?.addEventListener("submit", saveVisionConfiguration);
 document.querySelectorAll("[data-model-role]").forEach((button) => button.addEventListener("click", () => setModelSettingsRole(button.dataset.modelRole)));
-document.querySelectorAll("[data-llm-mode]").forEach((button) => button.addEventListener("click", () => setLlmMode(button.dataset.llmMode)));
+document.querySelectorAll("[data-llm-mode]").forEach((button) => button.addEventListener("click", () => {
+  setLlmMode(button.dataset.llmMode);
+  markSettingsDirty("llm");
+}));
 $("#discoverLlmModels")?.addEventListener("click", discoverAvailableLlmModels);
 $("#llmSettingsForm")?.addEventListener("submit", saveLlmConfiguration);
+[$("#visionSettingsForm"), $("#llmSettingsForm")].forEach((form) => {
+  if (!form) return;
+  const role = form.id === "llmSettingsForm" ? "llm" : "vision";
+  form.addEventListener("input", () => markSettingsDirty(role));
+  form.addEventListener("change", () => markSettingsDirty(role));
+});
+$("#discardVisionSettings")?.addEventListener("click", discardVisionSettingsChanges);
+$("#discardLlmSettings")?.addEventListener("click", discardLlmSettingsChanges);
 $("#toggleVisionKey")?.addEventListener("click", () => {
   const input = $("#visionApiKey");
   if (!input) return;
@@ -16520,6 +16823,7 @@ $("#toggleManualVisionModel")?.addEventListener("click", () => {
   field.classList.toggle("hidden");
   $("#toggleManualVisionModel").textContent = field.classList.contains("hidden") ? "找不到模型？手动填写模型 ID" : "返回模型列表";
   if (!field.classList.contains("hidden")) $("#visionModelManual")?.focus();
+  markSettingsDirty("vision");
 });
 $("#toggleManualLlmModel")?.addEventListener("click", () => {
   const field = $("#llmManualModelField");
@@ -16527,6 +16831,7 @@ $("#toggleManualLlmModel")?.addEventListener("click", () => {
   field.classList.toggle("hidden");
   $("#toggleManualLlmModel").textContent = field.classList.contains("hidden") ? "找不到模型？手动填写模型 ID" : "返回模型列表";
   if (!field.classList.contains("hidden")) $("#llmModelManual")?.focus();
+  markSettingsDirty("llm");
 });
 $("#visionApiKey")?.addEventListener("input", () => { visionVerifiedAt = null; setVisionConnectionStatus("密钥已修改，请重新验证连接。", "neutral"); });
 $("#visionBaseUrl")?.addEventListener("input", () => { visionVerifiedAt = null; setVisionConnectionStatus("接口地址已修改，请重新验证连接。", "neutral"); });
@@ -16604,6 +16909,9 @@ let secondaryEditDropIndex = null;
 let secondaryEditDraggedMaterial = null;
 let secondaryEditSelectedMarkerId = null;
 let secondaryEditSelectedCueId = null;
+let secondaryEditSelectedTextLayerId = null;
+let secondaryEditTextLayerDrag = null;
+let secondaryEditTextTimeDrag = null;
 let secondaryEditPreviewRequestToken = 0;
 let secondaryEditPreviewPending = false;
 let secondaryEditSourceTime = 0;
@@ -16640,58 +16948,265 @@ function secondaryEditorWorkflowLabel(workflow) {
   return ({ highlight: "高光候选", content_search: "内容检索结果", person_edit: "人物出镜结果", speaker_edit: "说话人发言结果" })[workflow] || "可用片段";
 }
 
-function secondaryEditorMaterials(job = currentJob) {
-  const rows = [];
-  const seen = new Set();
-  const add = (item, sourceKind, fallbackTitle = "可用片段") => {
-    const start = Number(item?.start);
-    const end = Number(item?.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
-    const sourceId = String(item.id ?? item.candidateId ?? item.index ?? `${start}:${end}`);
-    const key = `${sourceKind}:${sourceId}:${start}:${end}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    rows.push({
-      id: key,
-      title: String(item.title || item.role || item.shotTitle || fallbackTitle),
-      start, end,
-      reason: String(item.reason || item.summary || item.transcriptExcerpt || "来自当前任务已验证的源片段"),
-      sourceRef: { kind: sourceKind, id: sourceId },
-    });
+function secondaryEditorWorkflowContext(workflow) {
+  return ({
+    highlight: "已继承高光模式，只显示事件候选、未采用镜头和当前时间线来源。",
+    content_search: "已继承内容检索，当前结果、历史保留结果和低置信候选会分组显示。",
+    person_edit: "已继承人物模式，只整理所选人物的出镜轨迹及需要复核的匹配。",
+    speaker_edit: "已继承说话人模式，只整理目标声音的发言片段及需要复核的轮次。",
+  })[workflow] || "这里只显示当前任务可追溯的源视频片段。";
+}
+
+function secondaryEditorMaterialClipIds(item, session = secondaryEditSession) {
+  const direct = Array.isArray(item?.timelineClipIds) ? item.timelineClipIds.map(String) : [];
+  const referenceKind = String(item?.sourceRef?.kind || "");
+  const referenceId = String(item?.sourceRef?.id || "");
+  const start = Number(item?.start);
+  const end = Number(item?.end);
+  const matches = (session?.clips || []).filter((clip) => {
+    if (direct.includes(String(clip.id))) return true;
+    const clipKind = String(clip.sourceRef?.kind || "");
+    const clipId = String(clip.sourceRef?.id || "");
+    const originIds = [clip.origin?.candidateId, clip.origin?.matchId].map(String).filter(Boolean);
+    const referenceMatch = referenceId && (
+      (clipKind === referenceKind && clipId === referenceId)
+      || clipId === referenceId
+      || originIds.includes(referenceId)
+    );
+    const rangeMatch = Number.isFinite(start) && Number.isFinite(end)
+      && Math.abs(Number(clip.sourceStart) - start) <= .035
+      && Math.abs(Number(clip.sourceEnd) - end) <= .035;
+    return referenceMatch || rangeMatch;
+  }).map((clip) => String(clip.id));
+  return [...new Set([...direct, ...matches])];
+}
+
+function secondaryEditorMaterialGroups(job = currentJob, session = secondaryEditSession) {
+  const workflow = String(session?.workflowKind || workflowKindForJob(job));
+  const groupDescriptions = {
+    timeline: "正在成片时间线上使用，可再次插入或从草稿移除",
+    recommended: ({
+      highlight: "当前模式发现但尚未采用的高质量事件与镜头",
+      content_search: "当前检索中证据充分、尚未采用的结果",
+      person_edit: "所选人物尚未采用的连续出镜轨迹",
+      speaker_edit: "目标说话人尚未采用的可靠发言片段",
+    })[workflow] || "当前模式建议补入的源片段",
+    kept: workflow === "content_search"
+      ? "历史检索结果和已由你确认保留的片段"
+      : "已由你确认，但尚未放入当前时间线的片段",
+    review: "低置信候选、已排除内容和从本草稿移除的片段",
   };
-  if (workflowKindForJob(job) === "highlight") {
-    (job?.eventGroups || []).forEach((group) => (group.segments || []).forEach((item) => add(item, "event_segment", group.title)));
-    (job?.candidates || []).forEach((item) => add(item, "candidate", item.title));
+  const groups = [
+    { id: "timeline", title: "当前成片素材", description: groupDescriptions.timeline, items: [], open: true },
+    { id: "recommended", title: "推荐补充", description: groupDescriptions.recommended, items: [], open: true },
+    { id: "kept", title: "已保留素材", description: groupDescriptions.kept, items: [], open: false },
+    { id: "review", title: "待确认与已移除", description: groupDescriptions.review, items: [], open: false },
+  ];
+  const groupLookup = new Map(groups.map((group) => [group.id, group]));
+  const groupKeys = new Map(groups.map((group) => [group.id, new Set()]));
+  const catalogRanges = new Set();
+  const validRange = (start, end) => Number.isFinite(start) && Number.isFinite(end) && end > start;
+  const rangeKey = (start, end) => `${Number(start).toFixed(3)}:${Number(end).toFixed(3)}`;
+  const sourceIdFor = (item, start, end) => String(item?.id ?? item?.candidateId ?? item?.turnId ?? item?.index ?? rangeKey(start, end));
+  const add = (groupId, raw, options = {}) => {
+    const start = Number(raw?.sourceStart ?? raw?.start);
+    const end = Number(raw?.sourceEnd ?? raw?.end);
+    if (!validRange(start, end)) return null;
+    const sourceKind = String(options.sourceKind || raw?.sourceRef?.kind || "source_range");
+    const sourceId = String(options.sourceId || raw?.sourceRef?.id || sourceIdFor(raw, start, end));
+    const key = `${sourceKind}:${sourceId}:${rangeKey(start, end)}`;
+    const seen = groupKeys.get(groupId);
+    if (!seen || seen.has(key)) {
+      const existing = groupLookup.get(groupId)?.items.find((item) => item.id === `${groupId}:${key}`);
+      if (existing && options.timelineClipIds?.length) {
+        existing.timelineClipIds = [...new Set([...(existing.timelineClipIds || []), ...options.timelineClipIds.map(String)])];
+      }
+      return existing || null;
+    }
+    seen.add(key);
+    const item = {
+      id: `${groupId}:${key}`,
+      title: String(options.title || raw?.title || raw?.role || raw?.shotTitle || "可用片段"),
+      start, end,
+      reason: String(options.reason || raw?.reason || raw?.summary || raw?.transcriptExcerpt || "来自当前任务可追溯的源视频范围"),
+      sourceRef: { ...(raw?.sourceRef || {}), kind: sourceKind, id: sourceId },
+      sourceLabel: String(options.sourceLabel || "源视频"),
+      state: String(options.state || groupId),
+      timelineClipIds: (options.timelineClipIds || []).map(String),
+      confidenceTier: String(options.confidenceTier || raw?.confidenceTier || ""),
+    };
+    groupLookup.get(groupId).items.push(item);
+    return item;
+  };
+  const addCatalog = (raw, options = {}) => {
+    const start = Number(raw?.start);
+    const end = Number(raw?.end);
+    if (!validRange(start, end)) return;
+    const exactRange = rangeKey(start, end);
+    if (catalogRanges.has(exactRange) && !options.allowDuplicateRange) return;
+    const status = String(raw?.reviewStatus || "");
+    const tier = String(raw?.confidenceTier || options.confidenceTier || (raw?.requiresReview ? "possible" : "reliable"));
+    const retained = Boolean(options.retained || raw?.selected || status === "kept");
+    let groupId = "recommended";
+    let state = options.historical ? "historical" : "recommended";
+    if (status === "rejected") { groupId = "review"; state = "rejected"; }
+    else if (status === "pending" || (tier === "possible" && status !== "kept")) { groupId = "review"; state = "pending"; }
+    else if (retained || options.historical) { groupId = "kept"; state = options.historical ? "historical" : "kept"; }
+    const probe = {
+      start, end,
+      sourceRef: { kind: options.sourceKind || "content_match", id: options.sourceId || sourceIdFor(raw, start, end) },
+    };
+    if (secondaryEditorMaterialClipIds(probe, session).length) return;
+    catalogRanges.add(exactRange);
+    add(groupId, raw, { ...options, state, confidenceTier: tier });
+  };
+
+  (session?.clips || []).forEach((clip, index) => add("timeline", clip, {
+    sourceKind: clip.sourceRef?.kind || "timeline_clip",
+    sourceId: clip.sourceRef?.id || clip.id,
+    title: clip.title || `片段 ${index + 1}`,
+    reason: clip.sourceRef?.kind === "manual_range"
+      ? "从源视频手动加入的范围"
+      : "来自当前成片草稿，可继续裁剪、复制或调整顺序",
+    sourceLabel: clip.sourceRef?.kind === "manual_range" ? "手动范围" : "当前成片",
+    state: "timeline",
+    timelineClipIds: [clip.id],
+  }));
+
+  if (workflow === "highlight") {
+    (job?.eventGroups || []).forEach((event) => (event.segments || []).forEach((segment, index) => addCatalog(segment, {
+      sourceKind: "event_segment",
+      sourceLabel: `高光事件 · ${event.title || "未命名事件"}`,
+      title: segment.title || segment.role || `${event.title || "高光事件"} · 镜头 ${index + 1}`,
+      reason: segment.reason || event.summary || "来自高光分析确认的事件内部镜头",
+      retained: Boolean(segment.selected || event.selected),
+    })));
+    (job?.candidates || []).forEach((candidate) => addCatalog(candidate, {
+      sourceKind: "candidate", sourceLabel: "高光候选", retained: Boolean(candidate.selected),
+    }));
   } else {
-    const records = [job?.contentSearch, ...(job?.contentSearchRecords || []), ...(job?.contentSearchHistory || [])].filter(Boolean);
-    records.forEach((record) => (record.candidates || []).forEach((item) => add(item, "content_match", item.title || record.instruction)));
+    const records = contentSearchRecordsForJob(job);
+    const activeWithCandidates = records.find((record) => (
+      String(record?.id || "") === String(job?.contentSearchSession?.activeSearchId || "")
+      && ((record?.candidates || []).length || (record?.timelineCandidates || []).length)
+    ));
+    const currentSearchId = String(activeWithCandidates?.id || job?.contentSearch?.id || records.at(-1)?.id || "");
+    const basketRefs = new Set(((job?.contentSelectionBasket || {}).items || []).map((item) => `${item.searchId}:${item.matchId}`));
+    const orderedRecords = [...records].sort((left, right) => (
+      Number(String(right?.id || "") === currentSearchId) - Number(String(left?.id || "") === currentSearchId)
+    ));
+    orderedRecords.forEach((record, recordIndex) => {
+      const candidates = (record?.candidates || []).length ? record.candidates : (record?.timelineCandidates || []);
+      const historical = String(record?.id || "") !== currentSearchId;
+      const selectedIds = new Set([
+        ...(record?.reviewDraft?.selectedMatchIds || []),
+        ...(record?.defaultSelectedIds || []),
+        ...(record?.confirmedMatchIds || []),
+      ].map(String));
+      const query = String(record?.intent?.query || record?.instruction || `检索 ${recordIndex + 1}`);
+      candidates.forEach((candidate) => addCatalog(candidate, {
+        sourceKind: "content_match",
+        sourceLabel: `${historical ? "历史检索" : "当前检索"} · ${query}`,
+        reason: candidate.reason || candidate.summary || candidate.transcriptExcerpt || `来自${historical ? "已保留的历史" : "当前"}检索“${query}”`,
+        historical,
+        retained: selectedIds.has(String(candidate.id)) || basketRefs.has(`${record.id}:${candidate.id}`),
+      }));
+    });
+
+    if (workflow === "person_edit") {
+      const targetIds = new Set((currentPersonTargetState(job).personIds || []).map(String));
+      if (!targetIds.size) {
+        records.flatMap((record) => record?.candidates || record?.timelineCandidates || []).forEach((candidate) => {
+          (candidate?.matchedPersonIds || []).forEach((id) => targetIds.add(String(id)));
+        });
+      }
+      currentPersonCatalog(job).filter((person) => targetIds.has(String(person.id))).forEach((person) => {
+        validPersonRanges(person).forEach((range, index) => addCatalog({
+          ...range, id: `${person.id}:${index}`,
+          title: `${person.label || person.defaultLabel || "所选人物"} 出镜 · 第 ${index + 1} 段`,
+        }, {
+          sourceKind: "person_range",
+          sourceLabel: `人物轨迹 · ${person.label || person.defaultLabel || person.id}`,
+          reason: "来自已选人物的连续出镜轨迹，可直接补回成片",
+          confidenceTier: person.reviewRecommended || range.requiresReview ? "possible" : "reliable",
+        }));
+      });
+    }
+
+    if (workflow === "speaker_edit" && String(currentVoiceJobId || "") === String(job?.id || "") && currentVoiceTimeline.length) {
+      const selectedRefs = new Set([
+        ...((job?.contentSearch?.intent || {}).speakerRefs || []),
+        ...(job?.contentSearch?.selectedSpeakerRefs || []),
+      ].map(String));
+      currentVoiceTimeline.filter((turn) => !selectedRefs.size || selectedRefs.has(String(turn.speakerRef))).forEach((turn) => addCatalog({
+        ...turn, id: turn.turnId,
+        title: `${turn.label || turn.speakerRef || "目标说话人"} 发言`,
+        confidenceTier: turn.requiresReview ? "possible" : "reliable",
+        reviewStatus: turn.requiresReview ? "pending" : "confirmed",
+      }, {
+        sourceKind: "speaker_turn",
+        sourceLabel: `说话人时间线 · ${turn.label || turn.speakerRef || "匿名声音"}`,
+        reason: turn.text || "来自当前视频已校正的说话人发言时间线",
+      }));
+    }
   }
-  if (!rows.length) {
-    jobOutputVersions(job).flatMap((version) => version.outputs || []).flatMap((output) => output.segments || [])
-      .forEach((item) => add(item, "output_segment", item.role || item.title));
-  }
-  return rows.sort((left, right) => left.start - right.start);
+
+  const baseVersion = (job?.outputVersions || []).find((version) => String(version.id) === String(session?.baseVersionId));
+  const baseOutput = (baseVersion?.outputs || []).find((output) => (
+    !session?.baseOutputFilename || String(output.filename) === String(session.baseOutputFilename)
+  ));
+  (baseOutput?.segments || []).forEach((segment, index) => {
+    const start = Number(segment.start);
+    const end = Number(segment.end);
+    const sourceId = sourceIdFor(segment, start, end);
+    const probe = { start, end, sourceRef: { kind: "output_segment", id: sourceId } };
+    if (secondaryEditorMaterialClipIds(probe, session).length) return;
+    add("review", segment, {
+      sourceKind: "output_segment", sourceId,
+      sourceLabel: "已从草稿移除",
+      title: segment.title || segment.role || `原成片片段 ${index + 1}`,
+      reason: "该源视频范围来自初始成片，已从当前草稿移除，可重新插入恢复",
+      state: "removed",
+    });
+  });
+
+  groups.forEach((group) => group.items.sort((left, right) => left.start - right.start || left.end - right.end));
+  return groups;
 }
 
 function renderSecondaryEditorLibrary() {
   const body = $("#secondaryEditorLibraryBody");
   if (!body || !currentJob) return;
-  const materials = secondaryEditorMaterials(currentJob);
-  $("#secondaryEditorLibraryTitle").textContent = secondaryEditorWorkflowLabel(secondaryEditSession?.workflowKind);
+  const workflow = String(secondaryEditSession?.workflowKind || workflowKindForJob(currentJob));
+  const groups = secondaryEditorMaterialGroups(currentJob, secondaryEditSession);
+  const materials = groups.flatMap((group) => group.items);
+  $("#secondaryEditorLibraryTitle").textContent = secondaryEditorWorkflowLabel(workflow);
   $("#secondaryEditorLibraryCount").textContent = `${materials.length} 段`;
-  body.innerHTML = materials.length ? materials.map((item) => {
+  const context = $("#secondaryEditorLibraryContext");
+  const sourceRangeActive = $("#secondaryEditor [data-secondary-library='source']")?.classList.contains("active");
+  if (context) context.textContent = sourceRangeActive
+    ? "输入源视频的真实入点与出点，片段只会作为虚拟范围加入时间线。"
+    : secondaryEditorWorkflowContext(workflow);
+  const itemMarkup = (item) => {
     const previewing = String(item.id) === String(secondaryEditPreviewMaterialId);
-    const usedClipIds = (secondaryEditSession?.clips || []).filter((clip) => (
-      String(clip.sourceRef?.kind || "") === String(item.sourceRef?.kind || "")
-      && String(clip.sourceRef?.id || "") === String(item.sourceRef?.id || "")
-    )).map((clip) => String(clip.id));
+    const usedClipIds = secondaryEditorMaterialClipIds(item);
+    const stateLabel = ({
+      timeline: "成片中", recommended: "建议补充", kept: "已保留", historical: "历史结果",
+      pending: "待确认", rejected: "已排除", removed: "已移除",
+    })[item.state] || "源素材";
+    const insertLabel = item.state === "removed" || item.state === "rejected"
+      ? "恢复到时间线" : usedClipIds.length ? "再次插入" : "插入";
     return `<article draggable="true" tabindex="0" class="secondary-library-item${previewing ? " previewing" : ""}" data-secondary-material="${escapeHtml(item.id)}" aria-label="${escapeHtml(`${item.title}，源片 ${formatPreciseTimecode(item.start)} 到 ${formatPreciseTimecode(item.end)}`)}">
       <button class="secondary-library-thumb" data-secondary-material-preview type="button" aria-label="预览${escapeHtml(item.title)}" aria-pressed="${previewing}"><span class="secondary-clip-media" aria-hidden="true">${secondaryEditorClipMediaMarkup({ sourceStart: item.start, sourceEnd: item.end })}</span><i aria-hidden="true"></i><em>${previewing ? "正在预览" : "预览"}</em></button>
-      <div class="secondary-library-copy"><strong title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</strong><small>源片 ${formatPreciseTimecode(item.start)} → ${formatPreciseTimecode(item.end)}</small><span><b>${(item.end - item.start).toFixed(2)} 秒</b>${usedClipIds.length ? `<b class="used">时间线 ${usedClipIds.length} 处</b>` : ""}</span></div>
+      <div class="secondary-library-copy"><strong title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</strong><small>源片 ${formatPreciseTimecode(item.start)} → ${formatPreciseTimecode(item.end)}</small><span><b>${(item.end - item.start).toFixed(2)} 秒</b><b class="source">${escapeHtml(item.sourceLabel)}</b><b class="state-${escapeHtml(item.state)}">${stateLabel}</b>${usedClipIds.length ? `<b class="used">时间线 ${usedClipIds.length} 处</b>` : ""}</span></div>
       <p>${escapeHtml(item.reason)}</p>
-      <footer class="${usedClipIds.length ? "has-used-clips" : ""}"><button data-secondary-material-preview type="button">${previewing ? "重新播放" : "预览"}</button><button class="primary" data-secondary-material-insert type="button">${usedClipIds.length ? "再次插入" : "插入"}</button>${usedClipIds.length ? `<button class="secondary-library-remove" data-secondary-material-remove type="button">从时间线移除${usedClipIds.length > 1 ? `（${usedClipIds.length}）` : ""}</button>` : ""}</footer>
+      <footer class="${usedClipIds.length ? "has-used-clips" : ""}"><button data-secondary-material-preview type="button">${previewing ? "重新播放" : "预览"}</button><button class="primary" data-secondary-material-insert type="button">${insertLabel}</button>${usedClipIds.length ? `<button class="secondary-library-remove" data-secondary-material-remove type="button">从时间线移除${usedClipIds.length > 1 ? `（${usedClipIds.length}）` : ""}</button>` : ""}</footer>
     </article>`;
-  }).join("") : '<div class="secondary-inspector-empty">当前模式没有额外候选。可以切换到“手动范围”，从源视频加入任意片段。</div>';
+  };
+  body.innerHTML = groups.map((group) => `<details class="secondary-library-group" data-secondary-material-group="${group.id}" ${group.open && group.items.length ? "open" : ""}>
+    <summary><span><strong>${group.title}</strong><small>${escapeHtml(group.description)}</small></span><b>${group.items.length}</b></summary>
+    <div class="secondary-library-group-items">${group.items.length ? group.items.map(itemMarkup).join("") : `<p class="secondary-library-group-empty">${group.id === "timeline" ? "当前时间线还没有片段" : group.id === "recommended" ? "暂时没有新的建议素材" : group.id === "kept" ? "还没有单独保留的素材" : "没有待确认或已移除的素材"}</p>`}</div>
+  </details>`).join("");
   body.querySelectorAll("[data-secondary-material]").forEach((node) => {
     const item = materials.find((value) => value.id === node.dataset.secondaryMaterial);
     node.querySelectorAll("[data-secondary-material-preview]").forEach((button) => button.addEventListener("click", (event) => {
@@ -16704,10 +17219,7 @@ function renderSecondaryEditorLibrary() {
     });
     node.querySelector("[data-secondary-material-remove]")?.addEventListener("click", (event) => {
       event.stopPropagation();
-      const clipIds = (secondaryEditSession?.clips || []).filter((clip) => (
-        String(clip.sourceRef?.kind || "") === String(item.sourceRef?.kind || "")
-        && String(clip.sourceRef?.id || "") === String(item.sourceRef?.id || "")
-      )).map((clip) => String(clip.id));
+      const clipIds = secondaryEditorMaterialClipIds(item);
       if (clipIds.length) void secondaryEditorOperation({ type: "delete_clips", clipIds });
     });
     node.addEventListener("click", (event) => { if (!event.target.closest("button")) secondaryEditorPreviewMaterial(item); });
@@ -17217,11 +17729,183 @@ function secondaryEditorSnapOutputTime(value, { altKey = false, cueId = "" } = {
     if (String(cue.id) === String(cueId)) return;
     candidates.push({ time: Number(cue.start), label: "字幕边界" }, { time: Number(cue.end), label: "字幕边界" });
   });
+  (secondaryEditSession?.textLayers || []).forEach((layer) => {
+    if (String(layer.id) === String(cueId)) return;
+    candidates.push({ time: Number(layer.start), label: "文本边界" }, { time: Number(layer.end), label: "文本边界" });
+  });
   const canvas = $("#secondaryEditorTimelineCanvas");
   const threshold = Math.max(3 / fps, duration / Math.max(1, canvas?.clientWidth || 1) * 10);
   const match = candidates.filter((item) => Number.isFinite(item.time) && Math.abs(item.time - frameValue) <= threshold)
     .sort((left, right) => Math.abs(left.time - frameValue) - Math.abs(right.time - frameValue))[0];
   return match || { time: frameValue, label: `帧 ${Math.round(frameValue * fps)}` };
+}
+
+function secondaryEditorTextLayers() {
+  return Array.isArray(secondaryEditSession?.textLayers) ? secondaryEditSession.textLayers : [];
+}
+
+function secondaryEditorTextLayer(layerId = secondaryEditSelectedTextLayerId) {
+  return secondaryEditorTextLayers().find((item) => String(item.id) === String(layerId)) || null;
+}
+
+function secondaryEditorTextLayerStyle(layer) {
+  return secondaryEditorNormalizedSubtitleStyle(layer?.style || { vertical: "middle" });
+}
+
+function renderSecondaryEditorTextCanvas() {
+  const canvas = $("#secondaryEditorTextLayerCanvas");
+  if (!canvas) return;
+  const active = secondaryEditExactPreview ? [] : secondaryEditorTextLayers().filter((layer) =>
+    secondaryEditPlayheadTime >= Number(layer.start) && secondaryEditPlayheadTime <= Number(layer.end)
+  );
+  const media = secondaryEditorSubtitleMediaRect();
+  canvas.innerHTML = active.map((layer) => {
+    const style = secondaryEditorTextLayerStyle(layer);
+    const horizontalBase = ({ left: .05, center: .5, right: .95 })[style.horizontal] ?? .5;
+    const verticalBase = ({ top: .05, middle: .5, bottom: .95 })[style.vertical] ?? .5;
+    const left = media.left + media.width * Math.max(.05, Math.min(.95, horizontalBase + style.offsetXRatio));
+    const top = media.top + media.height * Math.max(.05, Math.min(.95, verticalBase + style.offsetYRatio));
+    const transformX = style.horizontal === "left" ? "0" : style.horizontal === "right" ? "-100%" : "-50%";
+    const transformY = style.vertical === "top" ? "0" : style.vertical === "bottom" ? "-100%" : "-50%";
+    const color = style.preset === "bold" ? "#ffe66d" : "#fff";
+    const background = style.preset === "social" ? "rgba(0,0,0,.62)" : "rgba(4,8,10,.72)";
+    return `<div class="secondary-editor-text-layer${String(layer.id) === String(secondaryEditSelectedTextLayerId) ? " selected" : ""}" data-secondary-text-layer="${escapeHtml(layer.id)}" tabindex="0" style="left:${left}px;top:${top}px;max-width:${media.width * .9}px;font-size:${Math.max(8, Math.min(media.width, media.height) * style.fontSizeRatio)}px;font-weight:${["bold", "social"].includes(style.preset) ? 750 : 650};transform:translate(${transformX},${transformY})"><button type="button" data-secondary-text-move aria-label="拖动文本位置">✥</button><span data-secondary-text-content contenteditable="plaintext-only" role="textbox" spellcheck="false" style="color:${color};background:${background}">${escapeHtml(layer.text || "")}</span><button type="button" data-secondary-text-resize aria-label="拖动调整文本大小"></button></div>`;
+  }).join("");
+  canvas.querySelectorAll("[data-secondary-text-layer]").forEach((node) => {
+    const layer = secondaryEditorTextLayer(node.dataset.secondaryTextLayer);
+    if (!layer) return;
+    const select = () => {
+      secondaryEditSelectedTextLayerId = String(layer.id);
+      renderSecondaryEditorTextTrack();
+      syncSecondaryEditorControls();
+      node.classList.add("selected");
+    };
+    node.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("[data-secondary-text-content],[data-secondary-text-move],[data-secondary-text-resize]")) return;
+      beginSecondaryEditorTextLayerTransform(event, layer.id, "move");
+    });
+    node.addEventListener("click", select);
+    node.querySelector("[data-secondary-text-move]")?.addEventListener("pointerdown", (event) => beginSecondaryEditorTextLayerTransform(event, layer.id, "move"));
+    node.querySelector("[data-secondary-text-resize]")?.addEventListener("pointerdown", (event) => beginSecondaryEditorTextLayerTransform(event, layer.id, "resize"));
+    const editor = node.querySelector("[data-secondary-text-content]");
+    editor?.addEventListener("focus", (event) => { select(); $("#secondaryEditorVideo")?.pause(); event.stopPropagation(); });
+    editor?.addEventListener("input", () => {
+      layer.text = String(editor.textContent || "").replace(/\r?\n/g, " ").slice(0, 500);
+      secondaryEditorMarkPreviewStale("文本已变化 · 预览样片需要重新生成");
+      renderSecondaryEditorTextTrack();
+    });
+    editor?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); editor.blur(); }
+      if (event.key === "Escape") { event.preventDefault(); editor.blur(); }
+      event.stopPropagation();
+    });
+    editor?.addEventListener("blur", () => {
+      if (!String(layer.text || "").trim()) void secondaryEditorOperation({ type: "delete_text_layer", layerId: layer.id });
+      else void secondaryEditorOperation({ type: "update_text_layer", layerId: layer.id, text: layer.text });
+    });
+  });
+}
+
+function renderSecondaryEditorTextTrack() {
+  const summary = $("#secondaryEditorTextSummary");
+  const blocks = $("#secondaryEditorTextBlocks");
+  if (!summary || !blocks || !secondaryEditSession) return;
+  const layers = secondaryEditorTextLayers();
+  summary.classList.toggle("hidden", Boolean(layers.length));
+  summary.textContent = "暂无文本 · 点击上方“＋ 文本”添加";
+  const duration = Math.max(.01, secondaryEditorTimelineDuration());
+  blocks.innerHTML = layers.map((layer) => {
+    const start = Math.max(0, Number(layer.start || 0));
+    const end = Math.min(duration, Number(layer.end || start));
+    return `<article class="secondary-editor-text-block${String(layer.id) === String(secondaryEditSelectedTextLayerId) ? " selected" : ""}" data-secondary-text-block="${escapeHtml(layer.id)}" style="left:${start / duration * 100}%;width:${Math.max(.08, (end - start) / duration * 100)}%" title="独立文本 · 成片 ${escapeHtml(formatPreciseTimecode(start))} → ${escapeHtml(formatPreciseTimecode(end))}"><span class="secondary-text-time-handle start" data-secondary-text-time-handle="start"></span><span data-secondary-text-track-content contenteditable="plaintext-only" spellcheck="false">${escapeHtml(layer.text || "")}</span><span class="secondary-text-time-handle end" data-secondary-text-time-handle="end"></span></article>`;
+  }).join("");
+  blocks.querySelectorAll("[data-secondary-text-block]").forEach((node) => {
+    const layer = secondaryEditorTextLayer(node.dataset.secondaryTextBlock);
+    if (!layer) return;
+    node.addEventListener("click", (event) => {
+      if (event.target.closest("[contenteditable],[data-secondary-text-time-handle]")) return;
+      secondaryEditSelectedTextLayerId = String(layer.id);
+      secondaryEditorSeekOutputTime(Number(layer.start || 0), false, true);
+      renderSecondaryEditorTextTrack();
+      renderSecondaryEditorTextCanvas();
+    });
+    const editor = node.querySelector("[data-secondary-text-track-content]");
+    editor?.addEventListener("click", (event) => event.stopPropagation());
+    editor?.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); editor.blur(); } });
+    editor?.addEventListener("input", () => { layer.text = String(editor.textContent || "").slice(0, 500); secondaryEditorMarkPreviewStale("文本已变化 · 预览样片需要重新生成"); });
+    editor?.addEventListener("blur", () => {
+      if (!String(layer.text || "").trim()) void secondaryEditorOperation({ type: "delete_text_layer", layerId: layer.id });
+      else void secondaryEditorOperation({ type: "update_text_layer", layerId: layer.id, text: layer.text });
+    });
+    node.querySelectorAll("[data-secondary-text-time-handle]").forEach((handle) => {
+      handle.addEventListener("pointerdown", (event) => beginSecondaryEditorTextTimeDrag(event, layer.id, handle.dataset.secondaryTextTimeHandle));
+    });
+  });
+}
+
+function beginSecondaryEditorTextTimeDrag(event, layerId, boundary) {
+  const layer = secondaryEditorTextLayer(layerId);
+  const canvas = $("#secondaryEditorTimelineCanvas");
+  if (!layer || !canvas || secondaryEditBusy) return;
+  event.preventDefault(); event.stopPropagation(); $("#secondaryEditorVideo")?.pause();
+  secondaryEditSelectedTextLayerId = String(layer.id);
+  secondaryEditTextTimeDrag = { layer, boundary, startX: event.clientX, originalStart: Number(layer.start), originalEnd: Number(layer.end), width: Math.max(1, canvas.clientWidth), duration: secondaryEditorTimelineDuration() };
+  document.addEventListener("pointermove", moveSecondaryEditorTextTimeDrag);
+  document.addEventListener("pointerup", finishSecondaryEditorTextTimeDrag, { once: true });
+  document.addEventListener("pointercancel", finishSecondaryEditorTextTimeDrag, { once: true });
+}
+
+function moveSecondaryEditorTextTimeDrag(event) {
+  const drag = secondaryEditTextTimeDrag;
+  if (!drag) return;
+  const delta = (event.clientX - drag.startX) / drag.width * drag.duration;
+  if (drag.boundary === "start") drag.layer.start = Math.min(drag.originalEnd - .08, Math.max(0, secondaryEditorSnapOutputTime(drag.originalStart + delta, { altKey: event.altKey, cueId: drag.layer.id }).time));
+  else drag.layer.end = Math.max(drag.originalStart + .08, Math.min(drag.duration, secondaryEditorSnapOutputTime(drag.originalEnd + delta, { altKey: event.altKey, cueId: drag.layer.id }).time));
+  renderSecondaryEditorTextTrack(); renderSecondaryEditorTextCanvas(); secondaryEditorMarkPreviewStale("文本时长已变化 · 预览样片需要重新生成");
+}
+
+function finishSecondaryEditorTextTimeDrag() {
+  const drag = secondaryEditTextTimeDrag;
+  if (!drag) return;
+  secondaryEditTextTimeDrag = null;
+  document.removeEventListener("pointermove", moveSecondaryEditorTextTimeDrag);
+  void secondaryEditorOperation({ type: "update_text_layer", layerId: drag.layer.id, start: drag.layer.start, end: drag.layer.end });
+}
+
+function beginSecondaryEditorTextLayerTransform(event, layerId, mode) {
+  const layer = secondaryEditorTextLayer(layerId);
+  if (!layer || secondaryEditBusy || secondaryEditExactPreview) return;
+  event.preventDefault(); event.stopPropagation(); $("#secondaryEditorVideo")?.pause();
+  secondaryEditSelectedTextLayerId = String(layer.id);
+  const style = secondaryEditorTextLayerStyle(layer);
+  layer.style = { ...style };
+  secondaryEditTextLayerDrag = { layer, mode, startX: event.clientX, startY: event.clientY, startStyle: { ...style }, media: secondaryEditorSubtitleMediaRect() };
+  renderSecondaryEditorTextTrack(); syncSecondaryEditorControls();
+  document.addEventListener("pointermove", moveSecondaryEditorTextLayerTransform);
+  document.addEventListener("pointerup", finishSecondaryEditorTextLayerTransform, { once: true });
+  document.addEventListener("pointercancel", finishSecondaryEditorTextLayerTransform, { once: true });
+}
+
+function moveSecondaryEditorTextLayerTransform(event) {
+  const drag = secondaryEditTextLayerDrag;
+  if (!drag) return;
+  const dx = event.clientX - drag.startX, dy = event.clientY - drag.startY;
+  if (drag.mode === "resize") {
+    const diagonal = Math.max(1, Math.hypot(drag.media.width, drag.media.height));
+    drag.layer.style.fontSizeRatio = Math.max(.012, Math.min(.12, drag.startStyle.fontSizeRatio + (dx + dy) / diagonal * .12));
+  } else {
+    drag.layer.style.offsetXRatio = Math.max(-.45, Math.min(.45, drag.startStyle.offsetXRatio + dx / Math.max(1, drag.media.width)));
+    drag.layer.style.offsetYRatio = Math.max(-.45, Math.min(.45, drag.startStyle.offsetYRatio + dy / Math.max(1, drag.media.height)));
+  }
+  renderSecondaryEditorTextCanvas(); secondaryEditorMarkPreviewStale("文本位置或大小已变化 · 预览样片需要重新生成");
+}
+
+function finishSecondaryEditorTextLayerTransform() {
+  const drag = secondaryEditTextLayerDrag;
+  if (!drag) return;
+  secondaryEditTextLayerDrag = null;
+  document.removeEventListener("pointermove", moveSecondaryEditorTextLayerTransform);
+  void secondaryEditorOperation({ type: "update_text_layer", layerId: drag.layer.id, style: drag.layer.style });
 }
 
 function renderSecondaryEditorSubtitleTrack() {
@@ -17499,38 +18183,29 @@ function resetSecondaryEditorSubtitleTransform() {
   scheduleSecondaryEditorSubtitleSave(0);
 }
 
-function addSecondaryEditorSubtitleCue() {
-  if (!secondaryEditSubtitleDraft) return void showToast("请先建立并校对字幕");
-  const context = secondaryEditorSubtitleClipContext();
-  if (!context) return void showToast("请先把播放头定位到一个片段");
-  const clipStart = Number(context.schedule.outputStart || 0);
-  const clipEnd = Number(context.schedule.outputEnd || clipStart);
-  const start = Math.max(clipStart, Math.min(clipEnd - .08, secondaryEditPlayheadTime));
-  const end = Math.min(clipEnd, start + Math.min(2.5, Math.max(.08, clipEnd - start)));
-  if (end - start < .08) return void showToast("当前播放位置距离片段结尾太近，请向前移动播放头");
-  const cue = {
-    id: `cue_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    kind: "text_box", outputIndex: 0, start, end,
-    text: "输入文本", originalText: "", suggestionStatus: "none",
-  };
-  secondaryEditSubtitleDraft.cues.push(cue);
-  secondaryEditSelectedCueId = cue.id;
-  secondaryEditSubtitleDraft.cueStyleOverrides ||= {};
-  secondaryEditSubtitleDraft.cueStyleOverrides[cue.id] = {
-    ...secondaryEditorNormalizedSubtitleStyle(secondaryEditSubtitleDraft.globalStyle),
-    horizontal: "center", vertical: "middle", offsetXRatio: 0, offsetYRatio: 0,
-  };
-  secondaryEditorMarkPreviewStale("字幕已变化 · 预览样片需要重新生成");
-  renderSecondaryEditorSubtitleTrack();
-  renderSecondaryEditorSubtitlePreview();
-  scheduleSecondaryEditorSubtitleSave(0);
+async function addSecondaryEditorTextLayer() {
+  if (!secondaryEditSession || secondaryEditBusy) return;
+  const duration = Math.max(0, secondaryEditorTimelineDuration());
+  if (duration < .08) return void showToast("时间线为空，暂时不能添加文本");
+  let start = Math.max(0, Math.min(duration - .08, secondaryEditPlayheadTime));
+  let end = Math.min(duration, start + 2.5);
+  if (end - start < .5 && duration >= .5) {
+    start = Math.max(0, duration - 2.5);
+    end = duration;
+  }
+  const created = await secondaryEditorOperation({
+    type: "add_text_layer", start, end, text: "输入文本",
+    style: { preset: "clean", fontSizeRatio: .04, horizontal: "center", vertical: "middle", offsetXRatio: 0, offsetYRatio: 0 },
+  });
+  if (!created || !secondaryEditSelectedTextLayerId) return;
+  secondaryEditorSeekOutputTime(start, false, true);
   window.requestAnimationFrame(() => {
-    const editor = $("#secondaryEditorSubtitlePreview [data-secondary-subtitle-preview-text]");
+    const editor = $(`[data-secondary-text-layer="${CSS.escape(String(secondaryEditSelectedTextLayerId))}"] [data-secondary-text-content]`);
     if (!editor) return;
     editor.focus();
-    const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(editor);
+    const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
   });
@@ -17723,6 +18398,7 @@ function updateSecondaryEditorPlayhead(outputTime, reveal = false) {
     ruler.setAttribute("aria-valuetext", formatPreciseTimecode(value));
   }
   renderSecondaryEditorSubtitlePreview();
+  renderSecondaryEditorTextCanvas();
   const schedule = secondaryEditorSchedule();
   $("#secondaryEditorTimeline")?.querySelectorAll("[data-secondary-clip]").forEach((node, index) => {
     const item = schedule[index] || {};
@@ -17996,6 +18672,7 @@ function renderSecondaryEditorTimeline() {
   $("#secondaryEditorSnap")?.classList.toggle("active", secondaryEditSnapEnabled);
   $("#secondaryEditorSnap")?.setAttribute("aria-pressed", String(secondaryEditSnapEnabled));
   renderSecondaryEditorSubtitleTrack();
+  renderSecondaryEditorTextTrack();
   renderSecondaryEditorMarkers();
   window.requestAnimationFrame(drawSecondaryEditorWaveforms);
   updateSecondaryEditorPlayhead(Math.min(secondaryEditPlayheadTime, duration));
@@ -18264,6 +18941,11 @@ function syncSecondaryEditorControls() {
   if ($("#secondaryInspectorTransitionDuration")) $("#secondaryInspectorTransitionDuration").disabled = secondaryEditBusy || $("#secondaryInspectorTransition")?.value === "cut";
   if ($("#secondaryEditorInsertTarget")) $("#secondaryEditorInsertTarget").disabled = secondaryEditBusy;
   if ($("#secondaryEditorInsertFollow")) $("#secondaryEditorInsertFollow").disabled = secondaryEditBusy || secondaryEditInsertionIndexOverride === null;
+  const textDelete = $("#secondaryTextDelete");
+  if (textDelete) {
+    textDelete.classList.toggle("hidden", !secondaryEditSelectedTextLayerId);
+    textDelete.disabled = secondaryEditBusy || !secondaryEditorTextLayer();
+  }
 }
 
 async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null) {
@@ -18302,6 +18984,9 @@ async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null
     secondaryEditDraggedMaterial = null;
     secondaryEditSelectedMarkerId = null;
     secondaryEditSelectedCueId = null;
+    secondaryEditSelectedTextLayerId = null;
+    secondaryEditTextLayerDrag = null;
+    secondaryEditTextTimeDrag = null;
     secondaryEditPreviewPending = false;
     secondaryEditPreviewRequestToken += 1;
     setSecondaryEditorSourceVideo();
@@ -18349,6 +19034,9 @@ function closeSecondaryEditor() {
   secondaryEditDraggedMaterial = null;
   secondaryEditSelectedMarkerId = null;
   secondaryEditSelectedCueId = null;
+  secondaryEditSelectedTextLayerId = null;
+  secondaryEditTextLayerDrag = null;
+  secondaryEditTextTimeDrag = null;
   secondaryEditPreviewPending = false;
   secondaryEditPreviewRequestToken += 1;
   $("#secondaryEditor")?.classList.remove("library-open", "inspector-open");
@@ -18357,6 +19045,8 @@ function closeSecondaryEditor() {
   document.removeEventListener("pointermove", moveSecondaryEditorTrim);
   document.removeEventListener("pointermove", moveSecondaryEditorCueDrag);
   document.removeEventListener("pointermove", moveSecondaryEditorSubtitleCanvasTransform);
+  document.removeEventListener("pointermove", moveSecondaryEditorTextLayerTransform);
+  document.removeEventListener("pointermove", moveSecondaryEditorTextTimeDrag);
 }
 
 async function requestCloseSecondaryEditor() {
@@ -18580,20 +19270,30 @@ async function secondaryEditorOperation(operation, { allowInspectorDraft = false
     return null;
   }
   const previousClips = secondaryEditSession.clips || [];
+  const previousTextLayerIds = new Set(secondaryEditorTextLayers().map((layer) => String(layer.id)));
   const selectedIndex = Math.max(0, previousClips.findIndex((clip) => secondaryEditSelectedClips.has(String(clip.id))));
   setSecondaryEditorBusy(true, "正在自动保存");
   try {
     const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}`, { method: "PATCH", body: { revision: secondaryEditSession.revision, operation } });
     secondaryEditSession = payload.session;
     secondaryEditInspectorDraft = null;
-    const timelineChangingOperations = new Set(["trim_clip", "roll_trim", "trim_to_playhead", "split_clip", "delete_clips", "duplicate_clips", "reorder_clips", "insert_clip", "update_clip", "update_clips", "add_marker", "update_marker", "delete_marker"]);
+    const subtitleInvalidatingOperations = new Set(["trim_clip", "roll_trim", "trim_to_playhead", "split_clip", "delete_clips", "duplicate_clips", "reorder_clips", "insert_clip", "update_clip", "update_clips"]);
+    const timelineChangingOperations = new Set([...subtitleInvalidatingOperations, "add_marker", "update_marker", "delete_marker", "add_text_layer", "update_text_layer", "delete_text_layer"]);
     if (operation.type === "set_subtitle") secondaryEditSubtitleNeedsReview = false;
-    else if (timelineChangingOperations.has(operation.type) && secondaryEditSession.subtitleDraftId) secondaryEditSubtitleNeedsReview = true;
+    else if (subtitleInvalidatingOperations.has(operation.type) && secondaryEditSession.subtitleDraftId) secondaryEditSubtitleNeedsReview = true;
     if (timelineChangingOperations.has(operation.type) || operation.type === "set_subtitle") secondaryEditorMarkPreviewStale();
     secondaryEditSelectedClips = new Set([...secondaryEditSelectedClips].filter((id) => secondaryEditSession.clips.some((clip) => String(clip.id) === id)));
     secondaryEditSequenceIndex = Math.max(0, Math.min(secondaryEditSequenceIndex, Math.max(0, secondaryEditSession.clips.length - 1)));
     secondaryEditPlayheadTime = Math.min(secondaryEditPlayheadTime, Number(secondaryEditSession.duration || 0));
     let insertedClip = null;
+    if (operation.type === "add_text_layer") {
+      const added = secondaryEditorTextLayers().find((layer) => !previousTextLayerIds.has(String(layer.id)));
+      secondaryEditSelectedTextLayerId = added ? String(added.id) : null;
+    } else if (operation.type === "delete_text_layer" && String(operation.layerId) === String(secondaryEditSelectedTextLayerId)) {
+      secondaryEditSelectedTextLayerId = null;
+    } else if (secondaryEditSelectedTextLayerId && !secondaryEditorTextLayer()) {
+      secondaryEditSelectedTextLayerId = null;
+    }
     if (operation.type === "insert_clip") {
       const previousIds = new Set(previousClips.map((clip) => String(clip.id)));
       const insertedIndex = secondaryEditSession.clips.findIndex((clip) => !previousIds.has(String(clip.id)));
@@ -18878,6 +19578,10 @@ $("#secondaryEditor")?.querySelectorAll("[data-secondary-library]").forEach((but
   $("#secondaryEditor")?.querySelectorAll("[data-secondary-library]").forEach((item) => { item.classList.toggle("active", item === button); item.setAttribute("aria-selected", String(item === button)); });
   $("#secondaryEditorLibraryBody")?.classList.toggle("hidden", button.dataset.secondaryLibrary !== "mode");
   $("#secondaryEditorRangeForm")?.classList.toggle("hidden", button.dataset.secondaryLibrary !== "source");
+  const context = $("#secondaryEditorLibraryContext");
+  if (context) context.textContent = button.dataset.secondaryLibrary === "source"
+    ? "输入源视频的真实入点与出点，片段只会作为虚拟范围加入时间线。"
+    : secondaryEditorWorkflowContext(secondaryEditSession?.workflowKind || workflowKindForJob(currentJob));
 }));
 $("#secondaryEditor")?.querySelectorAll("[data-secondary-view]").forEach((button) => button.addEventListener("click", () => {
   if (button.dataset.secondaryView === "source") clearSecondaryEditorMaterialPreview();
@@ -18892,7 +19596,11 @@ $("#secondaryEditorSubtitleEnabled")?.addEventListener("change", async (event) =
   } else await secondaryEditorOperation({ type: "set_subtitle", enabled: true, subtitleDraftId: secondaryEditSession.subtitleDraftId, subtitleStyle: secondaryEditSession.subtitleStyle || "clean" });
 });
 $("#secondaryEditorSubtitleReview")?.addEventListener("click", reviewSecondaryEditorSubtitles);
-$("#secondarySubtitleAdd")?.addEventListener("click", addSecondaryEditorSubtitleCue);
+$("#secondarySubtitleAdd")?.addEventListener("click", addSecondaryEditorTextLayer);
+$("#secondaryTextDelete")?.addEventListener("click", () => {
+  const layer = secondaryEditorTextLayer();
+  if (layer) void secondaryEditorOperation({ type: "delete_text_layer", layerId: layer.id });
+});
 $("#secondarySubtitleSplit")?.addEventListener("click", splitSecondaryEditorSubtitleCue);
 $("#secondarySubtitleMerge")?.addEventListener("click", mergeSecondaryEditorSubtitleCue);
 $("#secondarySubtitleDelete")?.addEventListener("click", deleteSecondaryEditorSubtitleCue);
@@ -19035,8 +19743,8 @@ $("#secondaryEditorMediaFullscreen")?.addEventListener("click", async () => {
 });
 $("#secondaryEditorVideo")?.addEventListener("dblclick", () => $("#secondaryEditorMediaFullscreen")?.click());
 ["play", "pause", "loadedmetadata", "durationchange", "volumechange", "ended"].forEach((eventName) => $("#secondaryEditorVideo")?.addEventListener(eventName, syncSecondaryEditorMediaControls));
-$("#secondaryEditorVideo")?.addEventListener("loadedmetadata", renderSecondaryEditorSubtitlePreview);
-document.addEventListener("fullscreenchange", () => { syncSecondaryEditorMediaControls(); renderSecondaryEditorSubtitlePreview(); });
+$("#secondaryEditorVideo")?.addEventListener("loadedmetadata", () => { renderSecondaryEditorSubtitlePreview(); renderSecondaryEditorTextCanvas(); });
+document.addEventListener("fullscreenchange", () => { syncSecondaryEditorMediaControls(); renderSecondaryEditorSubtitlePreview(); renderSecondaryEditorTextCanvas(); });
 $("#secondaryEditorVideo")?.addEventListener("timeupdate", (event) => {
   const video = event.currentTarget;
   if (!secondaryEditSession) return;
@@ -19099,11 +19807,11 @@ $("#secondaryEditorVideo")?.addEventListener("timeupdate", (event) => {
 });
 window.addEventListener("resize", () => {
   if (secondaryEditorOpen() && secondaryEditTimelinePixelsPerSecond === null) renderSecondaryEditorTimeline();
-  if (secondaryEditorOpen()) renderSecondaryEditorSubtitlePreview();
+  if (secondaryEditorOpen()) { renderSecondaryEditorSubtitlePreview(); renderSecondaryEditorTextCanvas(); }
 });
 document.addEventListener("keydown", (event) => {
   if (!secondaryEditorOpen()) return;
-  const editable = /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "");
+  const editable = /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "") || Boolean(event.target?.isContentEditable);
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); secondaryEditorHistory(event.shiftKey ? "redo" : "undo"); }
   else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); secondaryEditorHistory("redo"); }
   else if (!editable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") { event.preventDefault(); $("#secondaryEditorSplit")?.click(); }
@@ -19117,6 +19825,7 @@ document.addEventListener("keydown", (event) => {
   else if (!editable && (event.key === "+" || event.key === "=")) { event.preventDefault(); adjustSecondaryEditorTimelineZoom("in"); }
   else if (!editable && event.key === "-") { event.preventDefault(); adjustSecondaryEditorTimelineZoom("out"); }
   else if (!editable && event.key === "/") { event.preventDefault(); adjustSecondaryEditorTimelineZoom("fit"); }
+  else if (!editable && (event.key === "Delete" || event.key === "Backspace") && secondaryEditorTextLayer()) { event.preventDefault(); secondaryEditorOperation({ type: "delete_text_layer", layerId: secondaryEditSelectedTextLayerId }); }
   else if (!editable && (event.key === "Delete" || event.key === "Backspace") && secondaryEditSelectedClips.size) { event.preventDefault(); secondaryEditorOperation({ type: "delete_clips", clipIds: [...secondaryEditSelectedClips] }); }
   else if (event.key === "Escape" && !subtitleReviewDraft) void requestCloseSecondaryEditor();
 });
@@ -19151,8 +19860,9 @@ elapsedTicker = setInterval(() => {
     const etaText = progressEtaText(currentJob, !stageProgressIsDeterminate(currentJob));
     const consoleEta = $("#jobEta");
     const inlineEta = document.querySelector("[data-inline-eta]");
-    if (consoleEta) consoleEta.textContent = etaText;
-    if (inlineEta) inlineEta.textContent = etaText;
+    const cancellationPending = document.querySelector("#inlineAnalysisProgress")?.dataset.cancelRequested === "true";
+    if (consoleEta && !cancellationPending) consoleEta.textContent = etaText;
+    if (inlineEta && !cancellationPending) inlineEta.textContent = etaText;
   }
 }, 1000);
 document.addEventListener("visibilitychange", () => {

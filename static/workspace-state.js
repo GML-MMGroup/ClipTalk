@@ -17,13 +17,16 @@
     if (uploading) return STATES.UPLOADING;
     if (routingConfirmation) return STATES.ROUTING_CONFIRMATION;
     if (!job) return hasUpload ? STATES.PREPARING : STATES.HOME;
-    const status = String(job.status || "");
+    const execution = job.execution && Number(job.execution.schemaVersion) >= 1 ? job.execution : null;
+    const workflow = job.presentation || job.workflow || null;
+    const status = String(execution?.status || job.status || "");
     if (["failed", "cancelled"].includes(status)) return STATES.FAILED;
     if (job.reediting) return STATES.REVISING;
-    if (status === "completed") return STATES.COMPLETED;
-    if (["rendering"].includes(status) || ["queued", "running"].includes(String(job.autoComposition?.status || ""))) return STATES.COMPOSING;
-    if (["awaiting_confirmation", "awaiting_content_confirmation"].includes(status)) return STATES.REVIEWING;
-    if (["queued", "running", "cancelling", "awaiting_model_decision"].includes(status)) return STATES.ANALYSING;
+    if (status === "completed" || execution?.outcome === "output_ready" || workflow?.phase === "complete") return STATES.COMPLETED;
+    if (["render", "auto_composition", "quality_review"].includes(String(execution?.operation || ""))
+      || ["render", "complete"].includes(String(workflow?.phase || ""))) return STATES.COMPOSING;
+    if (status === "waiting_user" || workflow?.state === "action_required" || workflow?.phase === "review") return STATES.REVIEWING;
+    if (execution?.active || ["queued", "running", "cancelling", "awaiting_model_decision"].includes(status)) return STATES.ANALYSING;
     return STATES.PREPARING;
   }
 

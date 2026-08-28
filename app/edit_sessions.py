@@ -9,7 +9,7 @@ from typing import Any
 from .editing_techniques import composition_schedule
 
 
-EDIT_SESSION_SCHEMA_VERSION = 2
+EDIT_SESSION_SCHEMA_VERSION = 3
 EDIT_SESSION_SPEEDS = (0.5, 0.75, 1.0, 1.1, 1.25, 1.5, 2.0)
 EDIT_SESSION_TRANSITIONS = {"cut", "dissolve", "fade_black"}
 EDIT_SESSION_AUDIO_BRIDGES = {"none", "j_cut", "l_cut"}
@@ -106,11 +106,12 @@ def _session_state(session: dict[str, Any]) -> dict[str, Any]:
         "subtitleStyle": str(session.get("subtitleStyle") or "clean"),
         "disabledCutawayIds": list(session.get("disabledCutawayIds") or []),
         "markers": copy.deepcopy(session.get("markers") or []),
+        "textLayers": copy.deepcopy(session.get("textLayers") or []),
     }
 
 
 def _restore_state(session: dict[str, Any], state: dict[str, Any]) -> None:
-    for key in ("clips", "subtitleEnabled", "subtitleDraftId", "subtitleStyle", "disabledCutawayIds", "markers"):
+    for key in ("clips", "subtitleEnabled", "subtitleDraftId", "subtitleStyle", "disabledCutawayIds", "markers", "textLayers"):
         session[key] = copy.deepcopy(state.get(key))
 
 
@@ -231,6 +232,31 @@ def refresh_edit_session(session: dict[str, Any], job: dict[str, Any] | None = N
     schedule = _schedule_for_clips(clips)
     session["schedule"] = schedule
     session["duration"] = round(max((float(item["outputEnd"]) for item in schedule), default=0.0), 3)
+    text_layers = session.get("textLayers") if isinstance(session.get("textLayers"), list) else []
+    normalized_text_layers: list[dict[str, Any]] = []
+    for item in text_layers:
+        if not isinstance(item, dict):
+            continue
+        start = max(0.0, min(session["duration"], round(float(item.get("start") or 0), 3)))
+        end = max(start, min(session["duration"], round(float(item.get("end") or start), 3)))
+        if end - start < .08 or not str(item.get("text") or "").strip():
+            continue
+        style = item.get("style") if isinstance(item.get("style"), dict) else {}
+        normalized_text_layers.append({
+            "id": str(item.get("id") or _id("edit_text")),
+            "text": str(item.get("text") or "")[:500],
+            "start": start,
+            "end": end,
+            "style": {
+                "preset": str(style.get("preset") or "clean") if str(style.get("preset") or "clean") in {"clean", "bold", "social"} else "clean",
+                "fontSizeRatio": round(max(.012, min(.12, float(style.get("fontSizeRatio") or .04))), 4),
+                "horizontal": str(style.get("horizontal") or "center") if str(style.get("horizontal") or "center") in {"left", "center", "right"} else "center",
+                "vertical": str(style.get("vertical") or "middle") if str(style.get("vertical") or "middle") in {"top", "middle", "bottom"} else "middle",
+                "offsetXRatio": round(max(-.45, min(.45, float(style.get("offsetXRatio") or 0))), 4),
+                "offsetYRatio": round(max(-.45, min(.45, float(style.get("offsetYRatio") or 0))), 4),
+            },
+        })
+    session["textLayers"] = normalized_text_layers
     session["clipCount"] = len(clips)
     session["canUndo"] = bool(session.get("undo"))
     session["canRedo"] = bool(session.get("redo"))
@@ -284,6 +310,7 @@ def create_or_resume_edit_session(
         "cutaways": copy.deepcopy(output.get("cutaways") or []),
         "disabledCutawayIds": [],
         "markers": [],
+        "textLayers": [],
         "subtitleEnabled": bool(output.get("subtitleMode") == "burn"),
         "subtitleDraftId": None,
         "subtitleStyle": str(output.get("subtitleStyle") or "clean"),
@@ -371,6 +398,7 @@ def create_or_resume_content_edit_session(
         "cutaways": [],
         "disabledCutawayIds": [],
         "markers": [],
+        "textLayers": [],
         "subtitleEnabled": False,
         "subtitleDraftId": None,
         "subtitleStyle": "clean",
@@ -438,6 +466,44 @@ def _normalize_bridge(value: Any) -> dict[str, Any]:
     if bridge_type not in EDIT_SESSION_AUDIO_BRIDGES:
         raise EditSessionError("不支持的声音衔接方式")
     return {"type": bridge_type, "duration": 0.18 if bridge_type != "none" else 0.0}
+
+
+def _text_layer_lookup(session: dict[str, Any], layer_id: str) -> dict[str, Any]:
+    layer = next(
+        (item for item in session.get("textLayers") or [] if str(item.get("id") or "") == str(layer_id)),
+        None,
+    )
+    if not layer:
+        raise EditSessionError("文本图层不存在")
+    return layer
+
+
+def _text_layer_range(session: dict[str, Any], start: Any, end: Any) -> tuple[float, float]:
+    try:
+        start_value = round(float(start), 3)
+        end_value = round(float(end), 3)
+    except (TypeError, ValueError) as error:
+        raise EditSessionError("文本图层时间范围无效") from error
+    duration = max(0.0, float(session.get("duration") or 0))
+    if start_value < 0 or end_value > duration + .01 or end_value - start_value < .08:
+        raise EditSessionError("文本图层必须位于成片时间线内，且至少保留 0.08 秒")
+    return start_value, end_value
+
+
+def _normalize_text_layer_style(value: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    base = current if isinstance(current, dict) else {}
+    preset = str(raw.get("preset", base.get("preset", "clean")))
+    horizontal = str(raw.get("horizontal", base.get("horizontal", "center")))
+    vertical = str(raw.get("vertical", base.get("vertical", "middle")))
+    return {
+        "preset": preset if preset in {"clean", "bold", "social"} else "clean",
+        "fontSizeRatio": round(max(.012, min(.12, float(raw.get("fontSizeRatio", base.get("fontSizeRatio", .04))))), 4),
+        "horizontal": horizontal if horizontal in {"left", "center", "right"} else "center",
+        "vertical": vertical if vertical in {"top", "middle", "bottom"} else "middle",
+        "offsetXRatio": round(max(-.45, min(.45, float(raw.get("offsetXRatio", base.get("offsetXRatio", 0))))), 4),
+        "offsetYRatio": round(max(-.45, min(.45, float(raw.get("offsetYRatio", base.get("offsetYRatio", 0))))), 4),
+    }
 
 
 def _apply_operation(job: dict[str, Any], session: dict[str, Any], operation: dict[str, Any]) -> str:
@@ -641,6 +707,47 @@ def _apply_operation(job: dict[str, Any], session: dict[str, Any], operation: di
         if len(session["markers"]) == before:
             raise EditSessionError("时间线标记不存在")
         return "已删除时间线标记"
+    if operation_type == "add_text_layer":
+        start, end = _text_layer_range(session, operation.get("start"), operation.get("end"))
+        text = str(operation.get("text") or "输入文本").strip()[:500]
+        if not text:
+            raise EditSessionError("请输入文本内容")
+        layer = {
+            "id": _id("edit_text"),
+            "text": text,
+            "start": start,
+            "end": end,
+            "style": _normalize_text_layer_style(operation.get("style")),
+        }
+        session.setdefault("textLayers", []).append(layer)
+        operation["createdTextLayerId"] = layer["id"]
+        return "已添加文本图层"
+    if operation_type == "update_text_layer":
+        layer = _text_layer_lookup(session, str(operation.get("layerId") or ""))
+        if operation.get("start") is not None or operation.get("end") is not None:
+            start, end = _text_layer_range(
+                session,
+                operation.get("start", layer.get("start")),
+                operation.get("end", layer.get("end")),
+            )
+            layer.update({"start": start, "end": end})
+        if operation.get("text") is not None:
+            text = str(operation.get("text") or "").strip()[:500]
+            if not text:
+                raise EditSessionError("文本内容不能为空；如需移除，请删除该文本图层")
+            layer["text"] = text
+        if operation.get("style") is not None:
+            layer["style"] = _normalize_text_layer_style(operation.get("style"), layer.get("style"))
+        return "已更新文本图层"
+    if operation_type == "delete_text_layer":
+        layer_id = str(operation.get("layerId") or "")
+        before = len(session.get("textLayers") or [])
+        session["textLayers"] = [
+            item for item in session.get("textLayers") or [] if str(item.get("id") or "") != layer_id
+        ]
+        if len(session["textLayers"]) == before:
+            raise EditSessionError("文本图层不存在")
+        return "已删除文本图层"
     if operation_type == "set_subtitle":
         session["subtitleEnabled"] = bool(operation.get("enabled"))
         session["subtitleDraftId"] = str(operation.get("subtitleDraftId") or "") or None

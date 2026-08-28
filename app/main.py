@@ -21,9 +21,10 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -372,6 +373,7 @@ from .security import (
 )
 from .media import (
     MediaError,
+    SampledFrame,
     create_contact_sheet,
     detect_scene_changes,
     extract_frames_at_times,
@@ -485,6 +487,111 @@ async def app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="ClipTalk Video Editor", version="2.0.0", lifespan=app_lifespan)
+
+
+def _api_recovery_action(status_code: int, code: str = "") -> str:
+    """Return a stable recovery hint without coupling clients to Chinese copy."""
+    if status_code == 401:
+        return "authenticate"
+    if status_code == 404:
+        return "refresh"
+    if status_code == 409:
+        return "refresh_and_retry"
+    if status_code == 429:
+        return "wait_and_retry"
+    if status_code in {400, 413, 422}:
+        return "check_input"
+    if status_code == 503 or code.endswith("_unavailable"):
+        return "check_settings_or_retry"
+    return "retry"
+
+
+def api_error_payload(
+    request: Request,
+    *,
+    status_code: int,
+    detail: Any,
+    default_code: str = "request_failed",
+    message_override: str = "",
+) -> dict[str, Any]:
+    """Build a backward-compatible, actionable API error response.
+
+    ``detail`` remains available for older clients. New clients consume the
+    stable ``error`` object and can render a recovery action plus request ID.
+    """
+    structured = detail if isinstance(detail, dict) else {}
+    message = str(
+        message_override
+        or structured.get("message")
+        or structured.get("detail")
+        or detail
+        or "服务暂时无法完成请求"
+    )
+    code = str(structured.get("code") or default_code)
+    request_id = str(getattr(request.state, "request_id", "") or uuid.uuid4().hex)
+    error = {
+        "code": code,
+        "message": message[:1000],
+        "recoveryAction": str(
+            structured.get("recoveryAction")
+            or _api_recovery_action(status_code, code)
+        ),
+        "requestId": request_id,
+    }
+    return {"detail": detail, "code": code, "error": error, "requestId": request_id}
+
+
+@app.exception_handler(HTTPException)
+async def structured_http_error(request: Request, error: HTTPException) -> JSONResponse:
+    return JSONResponse(
+        api_error_payload(
+            request,
+            status_code=int(error.status_code),
+            detail=error.detail,
+            default_code=f"http_{int(error.status_code)}",
+        ),
+        status_code=int(error.status_code),
+        headers=error.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def structured_validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        api_error_payload(
+            request,
+            status_code=422,
+            detail=error.errors(),
+            default_code="validation_error",
+            message_override="请求参数不完整或格式无效，请检查后重试。",
+        ),
+        status_code=422,
+    )
+
+
+@app.exception_handler(Exception)
+async def structured_internal_error(request: Request, error: Exception) -> JSONResponse:
+    logging.getLogger("cliptalk").exception(
+        "unhandled_api_error",
+        extra={"structured": {
+            "requestId": str(getattr(request.state, "request_id", "")),
+            "path": request.url.path,
+        }},
+    )
+    return JSONResponse(
+        api_error_payload(
+            request,
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "服务暂时无法完成请求，请重试；如仍失败，可使用请求编号排查。",
+                "recoveryAction": "retry",
+            },
+        ),
+        status_code=500,
+    )
+
+
 request_metrics = RequestMetrics()
 job_stage_metrics = JobStageMetrics()
 app.add_middleware(
@@ -592,13 +699,27 @@ async def protect_and_limit_requests(request: Request, call_next):
         and not authenticated_by_header
         and not authenticated_by_cookie
     ):
-        return JSONResponse({"detail": "访问令牌无效"}, status_code=401)
+        return JSONResponse(
+            api_error_payload(
+                request,
+                status_code=401,
+                detail={"code": "invalid_access_token", "message": "访问令牌无效"},
+            ),
+            status_code=401,
+        )
     if path == "/api/jobs" and request.method == "POST":
         address = request.client.host if request.client else "unknown"
         now = time.monotonic()
         attempts = [value for value in upload_attempts.get(address, []) if now - value < 3600]
         if len(attempts) >= 10:
-            return JSONResponse({"detail": "上传任务过于频繁，请稍后再试"}, status_code=429)
+            return JSONResponse(
+                api_error_payload(
+                    request,
+                    status_code=429,
+                    detail={"code": "upload_rate_limited", "message": "上传任务过于频繁，请稍后再试"},
+                ),
+                status_code=429,
+            )
         attempts.append(now)
         upload_attempts[address] = attempts
     response = await call_next(request)
@@ -4507,6 +4628,19 @@ def content_workflow_snapshot(job: dict[str, Any]) -> dict[str, Any] | None:
             "kind": "select_person", "title": "选择目标人物",
             "message": "请从画面人物卡片中选择要提取全部出镜的人物。", "blocking": True,
         }
+    elif phase == "review" and search.get("id") and action_required is None:
+        state = "action_required"
+        review_titles = {
+            "content_search": "确认内容片段",
+            "person_edit": "核对人物出镜片段",
+            "speaker_edit": "核对说话人发言片段",
+        }
+        action_required = {
+            "kind": "review_content",
+            "title": review_titles.get(workflow_kind, "确认内容片段"),
+            "message": "预览并调整片段边界，确认后再生成视频。",
+            "blocking": True,
+        }
     return {
         "schemaVersion": 2,
         "mode": "content_extract",
@@ -4561,6 +4695,87 @@ def workflow_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "schemaVersion": 2, "mode": "highlight", "kind": kind,
         "phase": phase, "state": state, "steps": steps, "actionRequired": action_required,
+    }
+
+
+def workflow_presentation_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    """Canonical UI contract shared by the task list, workspace and poller."""
+    workflow = workflow_snapshot(job)
+    execution = execution_snapshot(job)
+    kind = str(workflow.get("kind") or workflow_kind_for_job(job))
+    action = workflow.get("actionRequired") if isinstance(workflow.get("actionRequired"), dict) else None
+    action_kind = str((action or {}).get("kind") or execution.get("actionRequired") or "")
+    action_labels = {
+        "confirm_brief": "确认剪辑要求",
+        "resolve_model_stage": "处理模型异常",
+        "review_highlights": "审核高光事件",
+        "review_content": "确认内容片段",
+        "start_speaker_discovery": "开始区分说话人",
+        "select_speaker": "选择目标说话人",
+        "select_person": "选择目标人物",
+        "coverage_incomplete": "检查未完成的分析",
+    }
+    if action_kind:
+        primary_action = {
+            "kind": action_kind,
+            "label": action_labels.get(action_kind) or str((action or {}).get("title") or "继续处理"),
+            "blocking": bool((action or {}).get("blocking", True)),
+        }
+    elif execution.get("active"):
+        primary_action = {
+            "kind": "view_progress",
+            "label": "查看处理进度",
+            "blocking": False,
+        }
+    elif execution.get("outcome") == "output_ready":
+        primary_action = {
+            "kind": "view_outputs",
+            "label": "查看成片版本",
+            "blocking": False,
+        }
+    else:
+        primary_action = None
+
+    vocabulary = {
+        "highlight": {
+            "result": "高光成片", "candidate": "事件镜头", "review": "事件审核",
+        },
+        "content_search": {
+            "result": "内容视频", "candidate": "匹配片段", "review": "片段确认",
+        },
+        "person_edit": {
+            "result": "人物剪辑", "candidate": "出镜片段", "review": "出镜核对",
+        },
+        "speaker_edit": {
+            "result": "发言视频", "candidate": "发言片段", "review": "发言核对",
+        },
+    }.get(kind, {})
+    raw_error = job.get("error")
+    error = None
+    if raw_error:
+        stored = raw_error if isinstance(raw_error, dict) else {}
+        error = {
+            "code": str(stored.get("code") or "job_failed"),
+            "message": str(stored.get("message") or stored.get("detail") or raw_error)[:1000],
+            "recoveryAction": str(stored.get("recoveryAction") or "retry"),
+            "requestId": str(stored.get("requestId") or ""),
+        }
+    return {
+        "schemaVersion": 1,
+        "workflowKind": kind,
+        "phase": workflow.get("phase"),
+        "state": workflow.get("state"),
+        "currentStep": next(
+            (str(item.get("id") or "") for item in workflow.get("steps") or [] if item.get("state") == "current"),
+            None,
+        ),
+        "steps": copy.deepcopy(workflow.get("steps") or []),
+        "actionRequired": copy.deepcopy(action),
+        "primaryAction": primary_action,
+        "progress": copy.deepcopy(execution.get("progress") or {}),
+        "capabilities": copy.deepcopy(execution.get("capabilities") or {}),
+        "terminology": vocabulary,
+        "error": error,
     }
 
 
@@ -5075,6 +5290,7 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
     )
     visible["workflow"] = workflow_snapshot(visible)
     visible["execution"] = execution_snapshot(job)
+    visible["presentation"] = workflow_presentation_snapshot(job)
     return visible
 
 
@@ -5117,6 +5333,7 @@ def public_job_summary(job: dict[str, Any]) -> dict[str, Any]:
         "candidateCount": len(content_candidates) if job.get("taskMode") == "content_extract" else len(candidates),
         "outputCount": job_output_count(job),
         "execution": execution_snapshot(job),
+        "presentation": workflow_presentation_snapshot(job),
         "activeChildJobId": job.get("activeChildJobId"),
         "latestHandoff": job.get("latestHandoff"),
         "analysisPipelineVersion": job.get("analysisPipelineVersion"),
@@ -5178,6 +5395,7 @@ def public_job_status(job: dict[str, Any]) -> dict[str, Any]:
         "outputVersionCount": len(job.get("outputVersions") or []),
         "outputCount": job_output_count(job),
         "execution": execution_snapshot(job),
+        "presentation": workflow_presentation_snapshot(job),
         "activeChildJobId": job.get("activeChildJobId"),
         "latestHandoff": job.get("latestHandoff"),
         "analysisPipelineVersion": job.get("analysisPipelineVersion"),
@@ -5789,7 +6007,7 @@ def content_index_cache_key(job: dict[str, Any]) -> str:
         # recognition artifacts. Keep this signature stable so a corrected
         # person-speaking query can enrich an existing speech/visual index
         # with only the missing person capability.
-        "content-strict-demand-index-v9-face-anchored-person-identity-query-plan-v4"
+        "content-strict-demand-index-v10-analysis-proxy-adaptive-cpu-query-plan-v4"
         if index_version == MULTIMODAL_INDEX_VERSION
         else "content-strict-demand-index-v4-coverage-manifest-v3-query-plan-v3"
     )
@@ -5829,13 +6047,139 @@ def content_index_cache_key(job: dict[str, Any]) -> str:
             str(settings.recognition_youtureid_model),
             "person-body-4fps-face-boundary-anchor-hungarian-v3",
         ])
-    identity_parts.append("shot-sampling-v4|ocr-dense-2fps-v1|person-cluster-v6-face-anchor|person-dense-4fps-v2")
+    identity_parts.append(
+        "shot-sampling-v5-balanced-visual-0.5fps-ocr-1fps|analysis-proxy-960-v1|"
+        "query-frame-reuse-v1|person-cluster-v6-face-anchor|person-dense-4fps-v2"
+    )
     identity = "\n".join(identity_parts)
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def content_index_directory(job: dict[str, Any]) -> Path:
     return settings.data_root / "cache" / f"content-index-{content_index_cache_key(job)}"
+
+
+def _content_analysis_proxy_path(job: dict[str, Any]) -> Path:
+    paths = PreviewAssetPaths(settings.data_root)
+    return paths.analysis_proxy(paths.source_identity(job))
+
+
+def _content_visual_source(job: dict[str, Any]) -> Path:
+    """Use the timestamp-preserving analysis proxy when it has been prepared."""
+    proxy = _content_analysis_proxy_path(job)
+    if proxy.is_file() and proxy.stat().st_size > 0:
+        return proxy
+    return Path(job["sourcePath"])
+
+
+def _prepare_content_visual_source(job: dict[str, Any], info: Any) -> tuple[Path, dict[str, Any]]:
+    """Prepare one 960p decode source for high-resolution content analysis."""
+    original = Path(job["sourcePath"])
+    source_width = max(0, int(getattr(info, "width", 0) or 0))
+    source_height = max(0, int(getattr(info, "height", 0) or 0))
+    metadata: dict[str, Any] = {
+        "kind": "original",
+        "sourceWidth": source_width,
+        "sourceHeight": source_height,
+        "maximumDimension": max(source_width, source_height),
+        "cacheHit": False,
+        "elapsedMilliseconds": 0.0,
+    }
+    if max(source_width, source_height) <= 1280:
+        return original, metadata
+    proxy = _content_analysis_proxy_path(job)
+    cache_hit = proxy.is_file() and proxy.stat().st_size > 0
+    started = time.monotonic()
+    prepared = preview_asset_service().prepare_analysis(job)
+    metadata.update({
+        "kind": "analysis_proxy",
+        "path": prepared.name,
+        "maximumDimension": 960,
+        "cacheHit": cache_hit,
+        "elapsedMilliseconds": round((time.monotonic() - started) * 1000, 1),
+    })
+    return prepared, metadata
+
+
+def _content_index_sampled_frames(job: dict[str, Any]) -> list[SampledFrame]:
+    """Load reusable index frames without exposing their paths in public state."""
+    root = content_index_directory(job)
+    frames: dict[int, SampledFrame] = {}
+    for directory_name in ("recognition-frames", "person-frames"):
+        directory = root / directory_name
+        manifest_path = directory / ".detail-frames.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        for item in manifest.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            path = directory / str(item.get("filename") or "")
+            try:
+                frame_time = float(item.get("time") or 0)
+            except (TypeError, ValueError):
+                continue
+            if path.is_file() and path.stat().st_size > 0:
+                frames.setdefault(int(round(frame_time * 1000)), SampledFrame(path=path, time=frame_time))
+    return list(frames.values())
+
+
+def _extract_content_frames(
+    job: dict[str, Any], output_directory: Path, times: Any, *,
+    retrieval_stats: dict[str, Any] | None = None,
+) -> list[SampledFrame]:
+    """Reuse exact index samples and decode only query-time gaps from the proxy."""
+    requested = [max(0.0, float(value)) for value in times]
+    reusable = {
+        int(round(frame.time * 1000)): frame for frame in _content_index_sampled_frames(job)
+    }
+    resolved: dict[int, SampledFrame] = {}
+    missing_positions: list[int] = []
+    missing_times: list[float] = []
+    for position, frame_time in enumerate(requested):
+        frame = reusable.get(int(round(frame_time * 1000)))
+        if frame is not None:
+            resolved[position] = frame
+        else:
+            missing_positions.append(position)
+            missing_times.append(frame_time)
+    if missing_times:
+        extraction_root = output_directory if not resolved else output_directory / "uncached"
+        extracted = extract_frames_at_times(
+            _content_visual_source(job), extraction_root, missing_times,
+            ffmpeg=settings.ffmpeg,
+        )
+        unresolved_positions = set(missing_positions)
+        for frame in extracted:
+            if not unresolved_positions:
+                break
+            position = min(
+                unresolved_positions,
+                key=lambda value: abs(requested[value] - float(frame.time)),
+            )
+            resolved[position] = frame
+            unresolved_positions.remove(position)
+    reused_count = len(requested) - len(missing_times)
+    if retrieval_stats is not None:
+        retrieval_stats["reusedIndexFrameCount"] = int(
+            retrieval_stats.get("reusedIndexFrameCount") or 0
+        ) + reused_count
+        retrieval_stats["analysisProxyUsed"] = _content_visual_source(job) != Path(job["sourcePath"])
+    return [resolved[position] for position in range(len(requested)) if position in resolved]
+
+
+def _content_recognition_profile(
+    job: dict[str, Any], missing_modalities: set[str], *, runtime: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Keep full-density recognition for CUDA and adaptive density for CPU."""
+    resolved_runtime = runtime or runtime_capabilities(settings, probe_active_speaker=False)
+    device = str(resolved_runtime.get("device") or "cpu")
+    if _content_semantic_audio_requested(job):
+        return "full", device
+    if missing_modalities & {"visual", "ocr"}:
+        return ("full" if device == "cuda" else "balanced"), device
+    return settings.recognition_profile, device
 
 
 def _content_index_version(job: dict[str, Any]) -> str:
@@ -9549,6 +9893,7 @@ def _content_index_public_state(job: dict[str, Any], index: dict[str, Any]) -> d
         "coverageManifest": index.get("coverageManifest") or _content_coverage_manifest(index),
         "personSampling": copy.deepcopy(index.get("personSampling") or {}),
         "personIdentityPipeline": index.get("personIdentityPipeline"),
+        "performance": copy.deepcopy(index.get("performance") or {}),
         "persons": persons,
         "progress": 1.0,
     }
@@ -9703,6 +10048,7 @@ def _build_content_index_unlocked(
     required_modalities: set[str] | None = None,
     require_dialogue_graph: bool = False,
 ) -> dict[str, Any]:
+    index_started = time.monotonic()
     root = content_index_directory(job)
     index_version = _content_index_version(job)
     recognition_v4 = index_version.startswith("multimodal-index-v") and settings.recognition_enabled
@@ -9742,8 +10088,10 @@ def _build_content_index_unlocked(
         _content_progress(job_id, .72, "content_index_ready", "已复用当前检索所需的内容索引")
         return cached
 
+    source_probe_started = time.monotonic()
     source = Path(job["sourcePath"])
     info = probe_video(source, settings.ffprobe)
+    source_probe_milliseconds = round((time.monotonic() - source_probe_started) * 1000, 1)
     if info.duration > 7200.5:
         raise RuntimeError("内容剪辑首版支持最长 2 小时的视频")
     root.mkdir(parents=True, exist_ok=True)
@@ -9770,6 +10118,11 @@ def _build_content_index_unlocked(
         "coverage": {"start": round(scope_start, 3), "end": round(scope_end, 3)},
     })
     partial["status"] = "building"
+    performance = partial.setdefault("performance", {})
+    performance.update({
+        "schemaVersion": "content-performance-v1",
+        "sourceProbeMilliseconds": source_probe_milliseconds,
+    })
     attempted, completed, available = _recognition_modality_state(partial)
     partial["recognitionRequestedModalities"] = sorted(required)
     partial["recognitionAttemptedModalities"] = sorted(attempted)
@@ -9777,12 +10130,44 @@ def _build_content_index_unlocked(
     partial["recognitionAvailableModalities"] = sorted(available)
     partial["recognitionSkippedModalities"] = sorted(set(PIPELINE_RECOGNITION_MODALITIES) - required)
 
+    needs_frame_index = bool(required & {"visual", "ocr", "person"})
+    analysis_source = source
+    if needs_frame_index:
+        if max(int(getattr(info, "width", 0) or 0), int(getattr(info, "height", 0) or 0)) > 1280:
+            _content_progress(
+                job_id, .03, "content_sampling",
+                "正在生成轻量分析代理，后续画面检索将复用该版本",
+                model="FFmpeg",
+            )
+        try:
+            analysis_source, analysis_source_meta = _prepare_content_visual_source(job, info)
+        except Exception as error:
+            analysis_source_meta = {
+                "kind": "original_fallback",
+                "sourceWidth": int(getattr(info, "width", 0) or 0),
+                "sourceHeight": int(getattr(info, "height", 0) or 0),
+                "maximumDimension": max(
+                    int(getattr(info, "width", 0) or 0),
+                    int(getattr(info, "height", 0) or 0),
+                ),
+                "error": str(error)[:240],
+            }
+            partial.setdefault("degradedReasons", []).append(
+                f"analysis_proxy_unavailable:{str(error)[:160]}"
+            )
+        performance["analysisSource"] = analysis_source_meta
+        performance["analysisProxyMilliseconds"] = float(
+            analysis_source_meta.get("elapsedMilliseconds") or 0
+        )
+        _write_content_index(partial_path, partial)
+
     transcript_segments = list(partial.get("transcriptSegments") or [])
     if transcript_segments and not partial.get("speechUnits"):
         partial["speechUnits"] = merge_transcript_units(transcript_segments)
         _write_content_index(partial_path, partial)
     speech_analysis: dict[str, Any] = {}
     needs_speech_analysis = bool(required & {"speech", "audio"}) and "speech" not in completed
+    speech_started = time.monotonic()
     if needs_speech_analysis and not transcript_segments and info.has_audio and str(job.get("request", {}).get("analysisMode") or "audiovisual") == "audiovisual":
         speech_detail = (
             "正在建立可检索的对白和声音时间轴"
@@ -9901,17 +10286,23 @@ def _build_content_index_unlocked(
         partial.setdefault("degradedReasons", []).append("speech_disabled_by_analysis_mode")
         partial["recognitionAttemptedModalities"] = sorted(attempted)
 
+    if needs_speech_analysis:
+        performance["speechMilliseconds"] = round((time.monotonic() - speech_started) * 1000, 1)
+
     if cancel_event.is_set():
         raise RuntimeError("任务已取消")
-    needs_frame_index = bool(required & {"visual", "ocr", "person"})
     if needs_frame_index:
         _content_progress(job_id, .16, "content_sampling", "正在准备画面检索范围", model="FFmpeg")
     scene_cuts = partial.get("sceneCuts") if isinstance(partial.get("sceneCuts"), list) else None
     if scene_cuts is None and needs_frame_index:
+        scene_started = time.monotonic()
         try:
-            scene_cuts = detect_scene_changes(source, ffmpeg=settings.ffmpeg, maximum=400)
+            scene_cuts = detect_scene_changes(analysis_source, ffmpeg=settings.ffmpeg, maximum=400)
         except Exception:
             scene_cuts = []
+        performance["sceneDetectionMilliseconds"] = round(
+            (time.monotonic() - scene_started) * 1000, 1
+        )
         partial["sceneCuts"] = scene_cuts
         _write_content_index(partial_path, partial)
     if scene_cuts is None:
@@ -9949,6 +10340,7 @@ def _build_content_index_unlocked(
 
     missing_recognition = required - completed - {"speech"}
     if recognition_v4 and missing_recognition:
+        recognition_started = time.monotonic()
         try:
             enrichment = enrich_multimodal_index_isolated if settings.recognition_worker_python else enrich_multimodal_index
 
@@ -9973,20 +10365,21 @@ def _build_content_index_unlocked(
                     ),
                 )
 
+            recognition_profile, recognition_device = _content_recognition_profile(
+                job, missing_recognition,
+            )
+            performance["recognitionDevice"] = recognition_device
+            performance["recognitionProfile"] = recognition_profile
             multimodal = enrichment(
                 **({"worker_python": settings.recognition_worker_python} if settings.recognition_worker_python else {}),
-                source=source,
+                source=analysis_source,
                 root=root,
                 duration=info.duration,
                 scene_cuts=scene_cuts,
                 transcript_segments=transcript_segments,
                 speech_units=list(partial.get("speechUnits") or []),
                 settings=settings,
-                recognition_profile=(
-                    "full" if missing_recognition & {"visual", "ocr"}
-                    or _content_semantic_audio_requested(job)
-                    else settings.recognition_profile
-                ),
+                recognition_profile=recognition_profile,
                 requested_modalities=missing_recognition,
                 speech_analysis_complete="speech" in completed and info.has_audio,
                 scope_start=scope_start, scope_end=scope_end,
@@ -9998,6 +10391,9 @@ def _build_content_index_unlocked(
             _merge_recognition_enrichment(partial, multimodal, requested=required)
         except Exception as error:
             partial.setdefault("degradedReasons", []).append(f"multimodal_pipeline_failed:{str(error)[:300]}")
+        performance["recognitionMilliseconds"] = round(
+            (time.monotonic() - recognition_started) * 1000, 1
+        )
         partial.pop("recognitionComplete", None)
         _write_content_index(partial_path, partial)
 
@@ -10007,6 +10403,7 @@ def _build_content_index_unlocked(
         and "speech" in required and transcript_segments
         and settings.content_search_dialogue_v2
     ):
+        dialogue_started = time.monotonic()
         transcript_signature = hashlib.sha256(json.dumps([
             (item.get("id"), item.get("start"), item.get("end"), item.get("speaker"), item.get("text"))
             for item in transcript_segments if isinstance(item, dict)
@@ -10023,6 +10420,9 @@ def _build_content_index_unlocked(
                     str(graph.get("reason") or "dialogue_graph_incomplete")
                 )
             _write_content_index(partial_path, partial)
+        performance["dialogueGraphMilliseconds"] = round(
+            (time.monotonic() - dialogue_started) * 1000, 1
+        )
 
     all_units = [
         *(partial.get("speechUnits") or []), *visual_units,
@@ -10067,6 +10467,8 @@ def _build_content_index_unlocked(
     index["recognitionSkippedModalities"] = sorted(set(PIPELINE_RECOGNITION_MODALITIES) - required)
     index["coverageManifest"] = _content_coverage_manifest(index)
     index["indexRevision"] = _content_index_revision(index)
+    performance["totalIndexMilliseconds"] = round((time.monotonic() - index_started) * 1000, 1)
+    index["performance"] = copy.deepcopy(performance)
     _write_content_index(final_path, index)
     partial_path.unlink(missing_ok=True)
     with jobs_lock:
@@ -10171,11 +10573,10 @@ def _refine_visual_content_matches(
             duration = max(.2, end - start)
             sample_count = min(12, max(5, math.ceil(duration / 3)))
             times = [start + duration * index / max(1, sample_count - 1) for index in range(sample_count)]
-            frames = extract_frames_at_times(
-                Path(job["sourcePath"]),
+            frames = _extract_content_frames(
+                job,
                 Path(job["workDirectory"]) / "content-search" / search_id / f"visual-{position:02d}",
-                times,
-                ffmpeg=settings.ffmpeg,
+                times, retrieval_stats=retrieval_stats,
             )
             if len(frames) < 2:
                 continue
@@ -10311,10 +10712,10 @@ def _verify_labeled_person_speaking_matches(
             ]
             reference_time = float(person.get("representativeTime") or 0)
             frame_times = [reference_time, *candidate_times]
-            frames = extract_frames_at_times(
-                Path(job["sourcePath"]),
+            frames = _extract_content_frames(
+                job,
                 Path(job["workDirectory"]) / "content-search" / search_id / f"speaker-{position:02d}",
-                frame_times, ffmpeg=settings.ffmpeg,
+                frame_times,
             )
             if len(frames) < 4:
                 match["requiresReview"] = True
@@ -10450,11 +10851,11 @@ def _verify_person_action_matches(
                     start + duration * index / 5 for index in range(6)
                 ]
                 reference_time = float(person.get("representativeTime") or 0)
-                frames = extract_frames_at_times(
-                    Path(job["sourcePath"]),
+                frames = _extract_content_frames(
+                    job,
                     Path(job["workDirectory"]) / "content-search" / search_id /
                     f"actor-{match_position:03d}-{person_position:02d}",
-                    [reference_time, *candidate_times], ffmpeg=settings.ffmpeg,
+                    [reference_time, *candidate_times], retrieval_stats=retrieval_stats,
                 )
                 if len(frames) < 4:
                     decisions.append({"keep": False, "reason": "候选连续画面不足"})
@@ -10618,10 +11019,10 @@ def _resolve_person_speaker_with_vlm(
             duration = max(.2, end - start)
             candidate_times = [start + duration * index / 7 for index in range(8)]
             reference_time = float(person.get("representativeTime") or 0)
-            frames = extract_frames_at_times(
-                Path(job["sourcePath"]),
+            frames = _extract_content_frames(
+                job,
                 Path(job["workDirectory"]) / "content-search" / search_id / f"speaker-resolve-{position:02d}",
-                [reference_time, *candidate_times], ffmpeg=settings.ffmpeg,
+                [reference_time, *candidate_times], retrieval_stats=retrieval_stats,
             )
             if len(frames) < 5:
                 continue
@@ -11072,10 +11473,10 @@ def _direct_labeled_person_speaking_matches(
                     })
                     save_job(live_job)
             requested_times = [round(float(item.get("start") or 0), 3) for item in page_tracks]
-            frames = extract_frames_at_times(
-                Path(job["sourcePath"]),
+            frames = _extract_content_frames(
+                job,
                 Path(job["workDirectory"]) / "content-search" / search_id / f"direct-speaker-{page_position:02d}",
-                requested_times, ffmpeg=settings.ffmpeg,
+                requested_times, retrieval_stats=retrieval_stats,
             )
             cropped_frames = []
             for frame in frames:
@@ -11435,11 +11836,10 @@ def _targeted_visual_chapter_matches(
                     start + (end - start) * index / max(1, sample_total - 1)
                     for index in range(sample_total)
                 ]
-            frames = extract_frames_at_times(
-                Path(job["sourcePath"]),
+            frames = _extract_content_frames(
+                job,
                 Path(job["workDirectory"]) / "content-search" / search_id / f"dense-{chapter_position:02d}",
-                times,
-                ffmpeg=settings.ffmpeg,
+                times, retrieval_stats=retrieval_stats,
             )
             if strict_scan:
                 retrieval_stats["strictVisualExtractedFrames"] = int(
@@ -11867,7 +12267,7 @@ def _apply_boundary_refinement_feedback(
             ]
             try:
                 asd = run_talknet_active_speaker(
-                    source=Path(job["sourcePath"]),
+                    source=_content_visual_source(job),
                     work_directory=Path(job["workDirectory"]) / "content-search" / "boundary-refinement-v2",
                     source_hash=(
                         f"{str(job.get('sourceHash') or index.get('cacheKey') or '')}:"
@@ -12440,7 +12840,7 @@ def _search_content_index(
             # selection; duplicate person cards therefore cannot steal each
             # other's tracks during source-level preprocessing.
             batch_asd = run_talknet_active_speakers(
-                source=Path(job["sourcePath"]),
+                source=_content_visual_source(job),
                 work_directory=Path(job["workDirectory"]) / "content-search",
                 source_hash=str(job.get("sourceHash") or index.get("cacheKey") or ""),
                 persons=unresolved_people, person_tracks=list(index.get("personTracks") or []),
@@ -12580,7 +12980,7 @@ def _search_content_index(
                 }
             else:
                 asd_result = run_talknet_active_speaker(
-                    source=Path(job["sourcePath"]),
+                    source=_content_visual_source(job),
                     work_directory=Path(job["workDirectory"]) / "content-search",
                     source_hash=str(job.get("sourceHash") or index.get("cacheKey") or ""),
                     person=person, person_tracks=list(index.get("personTracks") or []),
@@ -13445,7 +13845,7 @@ def _search_content_index(
             if not object_matches:
                 continue
             count, warning = ground_objects_in_matches(
-                source=Path(job["sourcePath"]),
+                source=_content_visual_source(job),
                 root=Path(job["workDirectory"]) / "content-search" / search_id / predicate_id,
                 matches=object_matches,
                 labels=[str(predicate.get("entity") or predicate.get("value") or "")],
@@ -13618,7 +14018,7 @@ def _search_content_index(
         and "visual" in allowed_modalities and object_labels and not predicate_execution
     ):
         grounded_count, grounding_warning = ground_objects_in_matches(
-            source=Path(job["sourcePath"]),
+            source=_content_visual_source(job),
             root=Path(job["workDirectory"]) / "content-search" / search_id,
             matches=matches,
             labels=object_labels,
@@ -14549,15 +14949,28 @@ def run_job(job_id: str, resume_action: str | None = None) -> None:
             embedding_device=settings.sensevoice_device,
         )
 
-        def progress(value: float, stage: str, detail: str) -> None:
+        def progress(
+            value: float,
+            stage: str,
+            detail: str,
+            facts: dict[str, Any] | None = None,
+        ) -> None:
             if cancel_event.is_set():
                 return
             with jobs_lock:
                 current_job = jobs.get(job_id, {})
                 previous_overall = float(current_job.get("progress") or 0.0)
                 overall = round(max(previous_overall, max(0.0, min(1.0, value))), 4)
-                progress_facts = structured_progress(current_job, stage=stage, overall=overall, detail=detail)
-            measured_stage_progress = stage_progress_for(stage, overall, detail)
+                progress_facts = structured_progress(
+                    current_job, stage=stage, overall=overall, detail=detail, facts=facts,
+                )
+            measured_stage_progress = stage_progress_for(
+                stage,
+                overall,
+                completed=(facts or {}).get("completed"),
+                total=(facts or {}).get("total"),
+                fraction=(facts or {}).get("fraction"),
+            )
             update_job(
                 job_id,
                 progress=overall,
@@ -16942,7 +17355,7 @@ def _content_selection_fidelity(
     }
 
 
-def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: str = "single_reel", variant_mode: str = "complete", variant_label: str = "", finalize_status: bool = True, planned_sequence: list[dict[str, Any]] | None = None, planned_title: str = "", planned_chapters: list[dict[str, Any]] | None = None, subtitle_mode: str = "none", order_mode: str = "source", subtitle_style: str = "clean", auto_meta: dict[str, Any] | None = None, background_auto: bool = False, planned_cutaways: list[dict[str, Any]] | None = None, technique_policy: dict[str, Any] | None = None, finalize_source_version_id: str | None = None, subtitle_draft_id: str | None = None) -> None:
+def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: str = "single_reel", variant_mode: str = "complete", variant_label: str = "", finalize_status: bool = True, planned_sequence: list[dict[str, Any]] | None = None, planned_title: str = "", planned_chapters: list[dict[str, Any]] | None = None, subtitle_mode: str = "none", order_mode: str = "source", subtitle_style: str = "clean", auto_meta: dict[str, Any] | None = None, background_auto: bool = False, planned_cutaways: list[dict[str, Any]] | None = None, technique_policy: dict[str, Any] | None = None, finalize_source_version_id: str | None = None, subtitle_draft_id: str | None = None, text_layers: list[dict[str, Any]] | None = None) -> None:
     subtitle_mode = "burn" if str(subtitle_mode).strip().lower() == "burn" else "none"
     content_extract_render = str((auto_meta or {}).get("strategyKey") or "") == "content_extract"
     # Automatic samples are deliberately clean. Hard subtitles are only added
@@ -17088,6 +17501,21 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
                 str(key): normalize_subtitle_layout(value)
                 for key, value in (subtitle_draft.get("cueStyleOverrides") or {}).items()
             }
+        if not subtitle_cues_by_selection:
+            subtitle_cues_by_selection = [[] for _selection in selections]
+        for layer in text_layers or []:
+            if not isinstance(layer, dict) or not str(layer.get("text") or "").strip():
+                continue
+            output_index = max(0, min(len(selections) - 1, int(layer.get("outputIndex") or 0)))
+            layer_id = str(layer.get("id") or f"edit_text_{len(subtitle_cue_styles)}")
+            subtitle_cues_by_selection[output_index].append({
+                "id": layer_id,
+                "outputIndex": output_index,
+                "start": float(layer.get("start") or 0),
+                "end": float(layer.get("end") or 0),
+                "text": str(layer.get("text") or "")[:500],
+            })
+            subtitle_cue_styles[layer_id] = normalize_subtitle_layout(layer.get("style"), "clean")
         subtitle_notice = ""
         selection_fidelity: dict[str, Any] | None = None
         if str((auto_meta or {}).get("strategyKey") or "") == "content_extract":
@@ -17127,7 +17555,7 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             subtitle_draft_revision=(
                 f"{subtitle_draft.get('id')}:{subtitle_draft.get('revision')}"
                 if subtitle_draft else ""
-            ),
+            ) + (json.dumps(text_layers or [], ensure_ascii=False, sort_keys=True, default=str) if text_layers else ""),
         )
         output_directory = Path(job["outputDirectory"])
         with jobs_lock:
@@ -17355,7 +17783,7 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
                     else f"正在导出事件视频 {position + 1}/{len(selections)}（{len(segments)} 个镜头）"
                 ),
             )
-            subtitle_cues = subtitle_cues_by_selection[position] if subtitle_mode == "burn" else []
+            subtitle_cues = subtitle_cues_by_selection[position] if position < len(subtitle_cues_by_selection) else []
             effective_subtitle_mode = "burn" if subtitle_cues else "none"
             subtitle_path = staging_directory / f"{Path(filename).stem}.ass" if effective_subtitle_mode == "burn" else None
             if subtitle_path:
@@ -17839,6 +18267,7 @@ def _edit_session_preview_fingerprint(job: dict[str, Any], session: dict[str, An
         "subtitleEnabled": bool(session.get("subtitleEnabled")),
         "subtitleStyle": str(session.get("subtitleStyle") or "clean"),
         "subtitle": subtitle,
+        "textLayers": session.get("textLayers") or [],
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
@@ -17865,6 +18294,7 @@ def run_edit_session_preview(
             subtitle_draft_id = str(session.get("subtitleDraftId") or "")
             subtitle_enabled = bool(session.get("subtitleEnabled") and subtitle_draft_id)
             subtitle_style = str(session.get("subtitleStyle") or "clean")
+            text_layers = copy.deepcopy(session.get("textLayers") or [])
         preview_directory = Path(snapshot["workDirectory"]) / "edit-previews"
         preview_directory.mkdir(parents=True, exist_ok=True)
         preview_path = preview_directory / f"{session_id}-{requested_fingerprint}.mp4"
@@ -17882,6 +18312,18 @@ def run_edit_session_preview(
                     str(key): normalize_subtitle_layout(value)
                     for key, value in (draft.get("cueStyleOverrides") or {}).items()
                 }
+        for layer in text_layers:
+            if not isinstance(layer, dict) or not str(layer.get("text") or "").strip():
+                continue
+            layer_id = str(layer.get("id") or f"edit_text_{len(cue_styles)}")
+            cues.append({
+                "id": layer_id,
+                "outputIndex": 0,
+                "start": float(layer.get("start") or 0),
+                "end": float(layer.get("end") or 0),
+                "text": str(layer.get("text") or "")[:500],
+            })
+            cue_styles[layer_id] = normalize_subtitle_layout(layer.get("style"), "clean")
         expected = render_composition(
             Path(snapshot["sourcePath"]), temporary,
             segments=segments,
@@ -18044,6 +18486,7 @@ def run_edit_session_render(job_id: str, session_id: str, requested_revision: in
             subtitle_mode = "burn" if session.get("subtitleEnabled") and session.get("subtitleDraftId") else "none"
             subtitle_style = str(session.get("subtitleStyle") or "clean")
             subtitle_draft_id = str(session.get("subtitleDraftId") or "") or None
+            text_layers = copy.deepcopy(session.get("textLayers") or [])
             version_ids_before = {
                 str(version.get("id") or "") for version in job.get("outputVersions") or []
             }
@@ -18065,7 +18508,7 @@ def run_edit_session_render(job_id: str, session_id: str, requested_revision: in
         run_confirmed_render(
             job_id, [], "single_reel", "complete", str(session.get("renderLabel") or "精剪版"), True,
             segments, "二次精剪成片", [], subtitle_mode, "selection", subtitle_style,
-            metadata, False, cutaways, {}, None, subtitle_draft_id,
+            metadata, False, cutaways, {}, None, subtitle_draft_id, text_layers,
         )
         with jobs_lock:
             job = jobs.get(job_id)
@@ -18480,10 +18923,80 @@ def runtime_metrics() -> dict[str, Any]:
     )
 
 
-def list_jobs() -> dict[str, Any]:
+def list_jobs(
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    cursor: str | None = None,
+    status: str | None = None,
+    workflow: str | None = None,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+) -> dict[str, Any]:
+    """Return a bounded, filterable task catalog for the application shell.
+
+    The original no-argument call remains a 30-item newest-first response.
+    ``cursor`` is intentionally an opaque offset to clients so its encoding can
+    change later without coupling the sidebar to storage details.
+    """
+    try:
+        offset = max(0, int(cursor or 0))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, "任务列表游标无效") from error
+
+    requested_statuses = {
+        value.strip().lower()
+        for value in str(status or "").split(",")
+        if value.strip()
+    }
+    requested_workflow = str(workflow or "").strip().lower()
+    query = str(q or "").strip().casefold()
+
+    def status_group(job: dict[str, Any]) -> str:
+        raw_status = str(job.get("status") or "").lower()
+        presentation = workflow_presentation_snapshot(job)
+        action_required = presentation.get("actionRequired") if isinstance(presentation, dict) else None
+        state = str(presentation.get("state") or "") if isinstance(presentation, dict) else ""
+        if raw_status in {"failed", "cancelled"}:
+            return "failed"
+        if action_required or state == "action_required" or raw_status in {
+            "brief_confirmation", "awaiting_model_decision",
+            "awaiting_confirmation", "awaiting_content_confirmation",
+        }:
+            return "action_required"
+        if raw_status == "completed":
+            return "completed"
+        if raw_status in {"briefing", "queued", "running", "cancelling", "rendering"}:
+            return "active"
+        return "other"
+
+    def matches(job: dict[str, Any]) -> bool:
+        raw_status = str(job.get("status") or "").lower()
+        group = status_group(job)
+        if requested_statuses and raw_status not in requested_statuses and group not in requested_statuses:
+            return False
+        job_workflow = workflow_kind_for_job(job).lower()
+        if requested_workflow and requested_workflow != job_workflow:
+            return False
+        if query:
+            haystack = " ".join((
+                str(job.get("filename") or ""),
+                str(job.get("detail") or ""),
+                raw_status,
+                job_workflow,
+            )).casefold()
+            if query not in haystack:
+                return False
+        return True
+
     with jobs_lock:
-        ordered = sorted(jobs.values(), key=lambda item: item.get("createdAt", ""), reverse=True)
-        visible_jobs = ordered[:30]
+        ordered = sorted(
+            (job for job in jobs.values() if matches(job)),
+            key=lambda item: (
+                str(item.get("updatedAt") or item.get("createdAt") or ""),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        visible_jobs = ordered[offset:offset + limit]
+        has_more = offset + len(visible_jobs) < len(ordered)
         payload = [public_job_summary(job) for job in visible_jobs]
         missing_thumbnail_ids = [
             str(job["id"]) for job in visible_jobs
@@ -18491,7 +19004,11 @@ def list_jobs() -> dict[str, Any]:
         ]
     for job_id in missing_thumbnail_ids:
         schedule_job_thumbnail(job_id)
-    return {"jobs": payload}
+    return {
+        "jobs": payload,
+        "nextCursor": str(offset + len(visible_jobs)) if has_more else None,
+        "hasMore": has_more,
+    }
 
 
 async def create_upload(request: Request) -> dict[str, Any]:

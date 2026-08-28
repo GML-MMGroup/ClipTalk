@@ -50,7 +50,7 @@ from .prompts import (
 from .speech import analyze_speech, speech_evidence, transcript_context
 
 
-ProgressCallback = Callable[[float, str, str], None]
+ProgressCallback = Callable[..., None]
 ANALYSIS_CACHE_VERSION = f"visual-highlights-v17-constrained-semantic-edl-{PROMPT_VERSION}"
 
 
@@ -851,6 +851,7 @@ class HighlightPipeline:
         progress: ProgressCallback,
         maximum_tokens: int,
         system_prompt: str = COMMON_SYSTEM_PROMPT,
+        progress_facts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stopped = threading.Event()
         started = time.monotonic()
@@ -859,7 +860,7 @@ class HighlightPipeline:
             while not stopped.wait(5):
                 elapsed = int(time.monotonic() - started)
                 visible_detail = f"{detail}（模型响应较慢，仍在处理中）" if elapsed >= 60 else detail
-                progress(progress_value, stage, visible_detail)
+                progress(progress_value, stage, visible_detail, progress_facts)
 
         thread = threading.Thread(target=heartbeat, name="ark-progress-heartbeat", daemon=True)
         thread.start()
@@ -885,6 +886,7 @@ class HighlightPipeline:
         progress: ProgressCallback,
         maximum_tokens: int,
         system_prompt: str = COMMON_SYSTEM_PROMPT,
+        progress_facts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stopped = threading.Event()
         started = time.monotonic()
@@ -893,7 +895,7 @@ class HighlightPipeline:
             while not stopped.wait(5):
                 elapsed = int(time.monotonic() - started)
                 visible_detail = f"{detail}（模型响应较慢，仍在处理中）" if elapsed >= 60 else detail
-                progress(progress_value, stage, visible_detail)
+                progress(progress_value, stage, visible_detail, progress_facts)
 
         thread = threading.Thread(target=heartbeat, name="ark-event-heartbeat", daemon=True)
         thread.start()
@@ -1259,6 +1261,12 @@ class HighlightPipeline:
                             0.04 + 0.02 * min(.995, max(0.0, fraction)),
                             "audio_analysis",
                             f"音频波形已处理 {round(processed)}/{round(total)} 秒",
+                            {
+                                "completed": processed,
+                                "total": total,
+                                "unit": "秒",
+                                "fraction": fraction,
+                            },
                         )
                     audio_waveform = extract_audio_waveform(
                         source, ffmpeg=self.ffmpeg, bins=waveform_bins, sample_rate=1000,
@@ -1297,7 +1305,6 @@ class HighlightPipeline:
                             total: Any = None,
                             phase: Any = None,
                         ) -> None:
-                            del processed, total
                             raw_fraction = max(0.0, float(value or 0))
                             fraction = min(1.0, raw_fraction)
                             # Older persistent speech workers do not expose a
@@ -1311,6 +1318,14 @@ class HighlightPipeline:
                                 "SenseVoice 正在整理识别结果"
                                 if finalizing
                                 else (f"SenseVoice 正在理解对白 · {int(fraction * 100)}%" if measured else "SenseVoice 正在理解对白、情绪与声音事件"),
+                                {"finalizing": True}
+                                if finalizing
+                                else ({
+                                    "completed": processed,
+                                    "total": total,
+                                    "unit": "语音块",
+                                    "fraction": fraction,
+                                } if measured and processed is not None and total else None),
                             )
 
                         speech_analysis = analyze_speech(
@@ -1354,6 +1369,7 @@ class HighlightPipeline:
                     0.08 + 0.04 * fraction,
                     "sampling",
                     f"已抽取 {completed}/{total} 帧画面",
+                    {"completed": completed, "total": total, "unit": "帧", "fraction": fraction},
                 )
             frames = extract_frames_at_times(
                 source,
@@ -1375,6 +1391,7 @@ class HighlightPipeline:
                 progress(
                     0.115, "sampling",
                     f"正在补充镜头、声音与对白变化画面 0/{len(priority_times)} 帧",
+                    {"completed": 0, "total": len(priority_times), "unit": "帧", "fraction": 0.0},
                 )
                 priority_frames = extract_frames_at_times(
                     source,
@@ -1385,6 +1402,12 @@ class HighlightPipeline:
                         0.115 + 0.005 * completed / max(1, total),
                         "sampling",
                         f"正在补充镜头、声音与对白变化画面 {completed}/{total} 帧",
+                        {
+                            "completed": completed,
+                            "total": total,
+                            "unit": "帧",
+                            "fraction": completed / max(1, total),
+                        },
                     ),
                 )
                 frames = merge_priority_frames(frames, priority_frames)
@@ -1458,6 +1481,13 @@ class HighlightPipeline:
                 0.14 + 0.36 * index / max(1, len(pages)),
                 "coarse_vlm",
                 f"视觉大模型正在分析第 {index + 1}/{len(pages)} 组画面",
+                {
+                    "completed": index,
+                    "total": len(pages),
+                    "unit": "组",
+                    "currentItemIndex": index + 1,
+                    "fraction": index / max(1, len(pages)),
+                },
             )
             result = self._analyze_with_heartbeat(
                 prompt_text=coarse_discovery_prompt(
@@ -1473,6 +1503,13 @@ class HighlightPipeline:
                 detail=f"视觉大模型正在分析第 {index + 1}/{len(pages)} 组画面",
                 progress=progress,
                 maximum_tokens=1200,
+                progress_facts={
+                    "completed": index,
+                    "total": len(pages),
+                    "unit": "组",
+                    "currentItemIndex": index + 1,
+                    "fraction": index / max(1, len(pages)),
+                },
             )
             usage.append(result.pop("_usage", {}))
             page_candidates: list[HighlightCandidate] = []
@@ -1498,7 +1535,12 @@ class HighlightPipeline:
                 if algorithm_version == "editing-algorithm-v2" else page_candidates
             )
 
-        progress(.50, "coarse_vlm", f"已完成 {len(pages)}/{len(pages)} 组画面分析")
+        progress(
+            .50,
+            "coarse_vlm",
+            f"已完成 {len(pages)}/{len(pages)} 组画面分析",
+            {"completed": len(pages), "total": len(pages), "unit": "组", "fraction": 1.0},
+        )
 
         audio_candidates = (
             speech_signal_candidates(speech_segments, video_duration=info.duration)
@@ -1599,7 +1641,14 @@ class HighlightPipeline:
                 base_progress = 0.52 + 0.28 * index / max(1, len(refinement_pool))
                 pass_text = "" if pass_index == 0 else "（边界触窗，已扩大观察范围）"
                 detail = f"视觉大模型正在精修候选 {index + 1}/{len(refinement_pool)}{pass_text}"
-                progress(base_progress, "refine_vlm", detail)
+                refine_facts = {
+                    "completed": index,
+                    "total": len(refinement_pool),
+                    "unit": "候选",
+                    "currentItemIndex": index + 1,
+                    "fraction": index / max(1, len(refinement_pool)),
+                }
+                progress(base_progress, "refine_vlm", detail, refine_facts)
                 result = self._analyze_with_heartbeat(
                     prompt_text=boundary_refinement_prompt(
                         content_profile=content_profile,
@@ -1616,6 +1665,7 @@ class HighlightPipeline:
                     detail=detail,
                     progress=progress,
                     maximum_tokens=900,
+                    progress_facts=refine_facts,
                 )
                 usage.append(result.pop("_usage", {}))
                 if result.get("keep") is False:
@@ -1712,7 +1762,17 @@ class HighlightPipeline:
                 video_duration=info.duration,
             ))
 
-        progress(.80, "refine_vlm", f"已完成 {len(refinement_pool)}/{len(refinement_pool)} 个候选精修")
+        progress(
+            .80,
+            "refine_vlm",
+            f"已完成 {len(refinement_pool)}/{len(refinement_pool)} 个候选精修",
+            {
+                "completed": len(refinement_pool),
+                "total": len(refinement_pool),
+                "unit": "候选",
+                "fraction": 1.0,
+            },
+        )
 
         eligible = [candidate for candidate in [*refined, *locally_aligned] if not overlaps_ranges(candidate, exclusions)]
         selected = select_montage_moments(
@@ -1764,6 +1824,12 @@ class HighlightPipeline:
                     .80 + .03 * completed / max(1, total),
                     "event_grouping",
                     f"已提取 {completed}/{total} 帧事件编排画面",
+                    {
+                        "completed": completed,
+                        "total": total,
+                        "unit": "帧",
+                        "fraction": completed / max(1, total),
+                    },
                 )
             director_frames = extract_frames_at_times(
                 source, work_directory / "director-frames", director_times, ffmpeg=self.ffmpeg,
@@ -1820,7 +1886,12 @@ class HighlightPipeline:
                 **director_checkpoint, "phase": "completed", "decisionRequired": False,
             })
             return manifest
-        progress(0.83, "rendering", f"正在渲染 {len(selected)} 个高光片段")
+        progress(
+            0.83,
+            "rendering",
+            f"正在渲染 {len(selected)} 个高光片段",
+            {"completed": 0, "total": len(selected), "unit": "片段", "fraction": 0.0},
+        )
         output_directory.mkdir(parents=True, exist_ok=True)
         outputs: list[dict[str, Any]] = []
         for index, candidate in enumerate(selected):
@@ -1854,7 +1925,17 @@ class HighlightPipeline:
                 "reason": candidate.reason,
                 "evidence": candidate.evidence,
             })
-            progress(0.83 + 0.15 * (index + 1) / len(selected), "rendering", f"已生成 {index + 1}/{len(selected)} 个片段")
+            progress(
+                0.83 + 0.15 * (index + 1) / len(selected),
+                "rendering",
+                f"已生成 {index + 1}/{len(selected)} 个片段",
+                {
+                    "completed": index + 1,
+                    "total": len(selected),
+                    "unit": "片段",
+                    "fraction": (index + 1) / len(selected),
+                },
+            )
 
         manifest = {
             "schemaVersion": 1,
@@ -1874,5 +1955,10 @@ class HighlightPipeline:
             "usage": usage,
         }
         (output_directory / "highlights.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        progress(1.0, "completed", f"已生成 {len(outputs)} 个视觉高光片段")
+        progress(
+            1.0,
+            "completed",
+            f"已生成 {len(outputs)} 个视觉高光片段",
+            {"completed": len(outputs), "total": len(outputs), "unit": "片段", "fraction": 1.0},
+        )
         return manifest

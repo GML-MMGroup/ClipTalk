@@ -206,6 +206,19 @@ def enrich_multimodal_index(
         generic_times = dense_person_sample_times(
             shots, start=bounded_start, end=bounded_end, interval=1.0,
         )
+    elif work["needsOcr"]:
+        # CPU/balanced mode still needs useful temporal recall, but a full
+        # 2 FPS OCR pass is too expensive for ordinary content lookup. Sample
+        # at 1 FPS and cap long sources to the existing balanced frame budget.
+        generic_times = _spread(dense_person_sample_times(
+            shots, start=bounded_start, end=bounded_end, interval=1.0,
+        ), 300)
+    elif work["needsVisualEmbeddings"]:
+        # Build a 0.5 FPS local recall layer on CPU. Query-time verification
+        # can densify promising windows, avoiding a full-source GPU-grade pass.
+        generic_times = _spread(dense_person_sample_times(
+            shots, start=bounded_start, end=bounded_end, interval=2.0,
+        ), 300)
     person_times = dense_person_sample_times(
         shots, start=bounded_start, end=bounded_end,
         interval=.25 if algorithm_version == "editing-algorithm-v2" else .5,
@@ -282,12 +295,15 @@ def enrich_multimodal_index(
             "coverageMode": "continuous_sampled" if work["needsPersons"] else "not_requested",
         },
         "ocrSampling": {
-            "intervalSeconds": .5 if work["needsOcr"] and effective == "full" else None,
+            "intervalSeconds": (
+                .5 if work["needsOcr"] and effective == "full"
+                else 1.0 if work["needsOcr"] else None
+            ),
             "requestedFrameCount": len(generic_times) if work["needsOcr"] else 0,
             "extractedFrameCount": len(frames) if work["needsOcr"] else 0,
             "coverageMode": (
                 "continuous_sampled" if work["needsOcr"] and effective == "full"
-                else "sampled" if work["needsOcr"] else "not_requested"
+                else "adaptive_sampled" if work["needsOcr"] else "not_requested"
             ),
         },
         "recognitionRequestedModalities": sorted(requested),
