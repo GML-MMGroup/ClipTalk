@@ -1,9 +1,0 @@
--r requirements.txt
-
-# Versions validated by this repository's SenseVoice and optional Whisper
-# adapters. NumPy 1.26 avoids the mixed NumPy 1/2 ABI failures still common in
-# audio and computer-vision wheels.
-numpy==1.26.4
-funasr==1.4.1
-faster-whisper==1.1.0
-ctranslate2==4.4.0

@@ -1,0 +1,30 @@
+# Complete NVIDIA environment. The validated combination uses the CUDA 12.1
+# PyTorch wheels and PaddlePaddle's CUDA 11.8 wheels. The host must provide a
+# compatible NVIDIA driver.
+--extra-index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu118/
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+httpx>=0.27,<1
+python-multipart>=0.0.9,<1
+pydantic>=2.10,<3
+starlette>=0.40,<1
+pillow>=10,<13
+opencv-python-headless>=4.9,<5
+cryptography>=41,<47
+
+numpy==1.26.4
+scipy>=1.8,<2
+scikit-learn>=1.2,<2
+funasr==1.4.1
+faster-whisper==1.1.0
+ctranslate2==4.4.0
+torch==2.2.0+cu121
+torchaudio==2.2.0+cu121
+
+transformers==4.57.6
+safetensors==0.8.0
+sentencepiece==0.2.2
+paddleocr==3.7.0
+paddlepaddle-gpu==3.3.0

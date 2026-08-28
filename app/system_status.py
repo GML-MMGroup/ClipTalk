@@ -8,6 +8,7 @@ def build_health_snapshot(
     *, settings: Any, speech_state: dict[str, Any],
     active_vision: dict[str, Any], vision_provider_name: str,
     active_llm: dict[str, Any], recognition_state: dict[str, Any],
+    voiceprint_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the stable public health contract from resolved dependencies."""
     vision_configured = bool(
@@ -16,7 +17,7 @@ def build_health_snapshot(
     llm_configured = bool(active_llm.get("apiKey") and active_llm.get("model") and active_llm.get("baseUrl"))
     return {
         "ok": True,
-        "service": "vlm-highlight-cutter",
+        "service": "cliptalk",
         "visionConfigured": vision_configured,
         "visionProvider": active_vision.get("provider"),
         "visionProviderLabel": vision_provider_name,
@@ -43,6 +44,7 @@ def build_health_snapshot(
         "speechDiarization": settings.sensevoice_diarization,
         "speechModelError": speech_state.get("error"),
         "contentRecognition": recognition_state,
+        "voiceprint": voiceprint_state or {"enabled": False, "reason": "not_configured"},
         "ffmpeg": Path(settings.ffmpeg).is_file(),
         "ffprobe": Path(settings.ffprobe).is_file(),
         "dataRoot": str(settings.data_root),
@@ -54,7 +56,8 @@ def build_health_snapshot(
 def build_runtime_metrics(
     *, job_statuses: Iterable[str], http_metrics: dict[str, Any],
     analysis_queue: dict[str, int], render_queue: dict[str, int],
-    analysis_workers: int,
+    analysis_workers: int, stage_metrics: dict[str, Any] | None = None,
+    resources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate low-cardinality process metrics without exposing job data."""
     status_counts: dict[str, int] = {}
@@ -66,5 +69,7 @@ def build_runtime_metrics(
         "jobs": dict(sorted(status_counts.items())),
         "analysisQueue": analysis_queue,
         "renderQueue": render_queue,
+        "stagePerformance": stage_metrics or {"activeJobs": 0, "stages": {}},
+        "resources": resources or {},
         "workers": {"analysis": analysis_workers, "render": 2, "preview": 1},
     }

@@ -1,6 +1,2 @@
-# Reproducible CPU default.  FunASR intentionally leaves the PyTorch runtime
-# to applications because CPU and CUDA wheels come from different indexes.
--r requirements-speech-common.txt
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.0+cpu
-torchaudio==2.2.0+cpu
+# Backward-compatible alias retained for the published README.
+-r requirements-cpu.txt

@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 _whisper_models: dict[tuple[str, str], Any] = {}
 _whisper_lock = threading.Lock()
@@ -35,8 +37,8 @@ EVENTS = {
     "breath": "breath", "music": "bgm",
 }
 TAG_PATTERN = re.compile(r"<\|([^|>]+)\|>")
-SPEECH_SCHEMA_VERSION = 7
-SPEECH_WORKER_RUNTIME_VERSION = "7.2"
+SPEECH_SCHEMA_VERSION = 9
+SPEECH_WORKER_RUNTIME_VERSION = "9.0"
 SPEECH_REQUEST_LEASE_SECONDS = 30.0
 SPEECH_REQUEST_TIMEOUT_SECONDS = 4 * 60 * 60
 MAX_SPEECH_SEGMENT_SECONDS = 90.0
@@ -113,11 +115,12 @@ def _sensevoice_model_options(
     punc_model: str,
     spk_model: str,
     diarization: bool,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "model": model_name,
         "vad_model": vad_model,
-        "vad_kwargs": {"max_single_segment_time": 30000},
+        "vad_kwargs": {"max_single_segment_time": 3000 if algorithm_version == "editing-algorithm-v2" else 30000},
         "device": device,
         "disable_update": True,
     }
@@ -134,6 +137,85 @@ def _sensevoice_model_options(
     return options
 
 
+def _cluster_short_speaker_embeddings(
+    embeddings: Any, *, oracle_num: int | None = None,
+) -> Any:
+    """Cluster a short recording without FunASR's all-one-speaker shortcut.
+
+    FunASR 1.4's CAM++ backend returns label zero for every matrix with fewer
+    than 20 rows. Short interviews commonly fall into that branch, even when
+    two clearly different voices alternate. Use deterministic cosine K-means
+    and a conservative silhouette gate instead. An explicitly supplied
+    speaker count remains authoritative.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+    rows = embeddings.detach().cpu().numpy() if hasattr(embeddings, "detach") else np.asarray(embeddings)
+    rows = np.asarray(rows, dtype=np.float32)
+    if rows.ndim != 2 or rows.shape[0] < 1:
+        raise ValueError("说话人聚类需要二维声纹矩阵")
+    rows /= np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-8)
+    count = int(rows.shape[0])
+    requested = max(0, min(count, int(oracle_num or 0)))
+    if requested == 1 or count == 1:
+        return np.zeros(count, dtype=int)
+    if requested >= 2:
+        return KMeans(n_clusters=requested, random_state=0, n_init=10).fit_predict(rows)
+    if count == 2:
+        similarity = float(np.dot(rows[0], rows[1]))
+        return np.asarray([0, 1], dtype=int) if similarity < .55 else np.zeros(2, dtype=int)
+    pairwise = np.matmul(rows, rows.T)
+    if float(pairwise[np.triu_indices(count, 1)].min()) >= .82:
+        return np.zeros(count, dtype=int)
+
+    maximum = min(12, count - 1, max(2, int(round(math.sqrt(count))) + 2))
+    best: tuple[float, float, Any] | None = None
+    for clusters in range(2, maximum + 1):
+        label_runs = [
+            KMeans(n_clusters=clusters, random_state=seed, n_init=10).fit_predict(rows)
+            for seed in (0, 17, 43)
+        ]
+        labels = label_runs[0]
+        sizes = np.bincount(labels, minlength=clusters)
+        # A one-off cough/noise fragment must not become a confident person.
+        if count >= 6 and int(sizes.min()) < 2:
+            continue
+        silhouette = float(silhouette_score(rows, labels, metric="cosine"))
+        stability = min(adjusted_rand_score(labels, value) for value in label_runs[1:])
+        penalized = silhouette * .82 + stability * .18 - .035 * (clusters - 2)
+        if best is None or penalized > best[0]:
+            best = (penalized, silhouette, labels)
+    if best is None or best[1] < .22:
+        return np.zeros(count, dtype=int)
+    return np.asarray(best[2], dtype=int)
+
+
+def _configure_speaker_cluster_backend(model: Any) -> None:
+    """Make CAM++ prefer reviewable over-separation to irreversible merging."""
+    import types
+
+    backend = getattr(model, "cb_model", None)
+    if backend is None or getattr(backend, "_videopilot_cluster_v3", False):
+        return
+    original_forward = backend.forward
+    if isinstance(getattr(backend, "model_config", None), dict):
+        # Keep ambiguous voices separate without turning normal within-speaker
+        # variation into duplicate Speaker cards. The former .86 threshold was
+        # intentionally over-conservative and fragmented longer conversations.
+        backend.model_config["merge_thr"] = .82
+
+    def conservative_forward(_backend: Any, matrix: Any, **params: Any) -> Any:
+        oracle = params.get("oracle_num")
+        if oracle is not None or int(matrix.shape[0]) < 20:
+            return _cluster_short_speaker_embeddings(matrix, oracle_num=oracle)
+        return original_forward(matrix, **params)
+
+    backend.forward = types.MethodType(conservative_forward, backend)
+    backend._videopilot_cluster_v3 = True
+
+
 def _sensevoice_instance(
     *,
     model_name: str,
@@ -143,10 +225,11 @@ def _sensevoice_instance(
     spk_model: str,
     diarization: bool,
     model_cache: Path,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> tuple[Any, str]:
     global _sensevoice_model, _sensevoice_key
     resolved = _resolve_sensevoice_device(device)
-    key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache))
+    key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache), algorithm_version)
     with _sensevoice_lock:
         if _sensevoice_model is not None and _sensevoice_key == key:
             return _sensevoice_model, resolved
@@ -162,6 +245,7 @@ def _sensevoice_instance(
                 punc_model=punc_model,
                 spk_model=spk_model,
                 diarization=diarization,
+                algorithm_version=algorithm_version,
             )
             try:
                 instance = AutoModel(**options)
@@ -170,8 +254,10 @@ def _sensevoice_instance(
                     raise
                 resolved = "cpu"
                 options["device"] = resolved
-                key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache))
+                key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache), algorithm_version)
                 instance = AutoModel(**options)
+            if diarization:
+                _configure_speaker_cluster_backend(instance)
         except Exception as error:
             _set_sensevoice_state(status="failed", device=resolved, error=str(error)[:800])
             raise RuntimeError(f"SenseVoice 模型加载失败：{error}") from error
@@ -301,6 +387,7 @@ def _sensevoice_via_worker(
     worker_directory: Path,
     cancelled: Any,
     progress_callback: Any = None,
+    preset_speaker_count: int | None = None,
 ) -> dict[str, Any]:
     requests = worker_directory / "requests"
     results = worker_directory / "results"
@@ -327,6 +414,7 @@ def _sensevoice_via_worker(
     temporary.write_text(json.dumps({
         "id": request_id, "source": str(source), "ownerPid": os.getpid(),
         "createdAt": created_at, "deadlineAt": deadline_at,
+        "presetSpeakerCount": int(preset_speaker_count or 0),
     }, ensure_ascii=False), encoding="utf-8")
     temporary.replace(request_path)
     status_path = worker_directory / "status.json"
@@ -627,6 +715,53 @@ def normalize_sensevoice_result(result: Any) -> dict[str, Any]:
     }
 
 
+def enforce_speaker_turn_contract(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply overlap cannot-link and calibrated turn quality for v2."""
+    rows = sorted((dict(item) for item in segments), key=lambda item: (
+        float(item.get("start") or 0), float(item.get("end") or 0),
+    ))
+    existing = [str(item.get("speaker") or "") for item in rows if item.get("speaker")]
+    next_speaker = len(dict.fromkeys(existing)) + 1
+    active: list[dict[str, Any]] = []
+    for row in rows:
+        start, end = float(row.get("start") or 0), float(row.get("end") or 0)
+        active = [item for item in active if float(item.get("end") or 0) > start + .12]
+        same = next((item for item in active if row.get("speaker") and item.get("speaker") == row.get("speaker")), None)
+        if same and min(end, float(same.get("end") or 0)) - start >= .12:
+            row["speaker"] = f"Speaker {next_speaker}"
+            next_speaker += 1
+            row["overlapStatus"] = "separated_overlap"
+            same["overlapStatus"] = "separated_overlap"
+        else:
+            row["overlapStatus"] = "overlap" if active else "none"
+        active.append(row)
+    by_speaker: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_speaker.setdefault(str(row.get("speaker") or "unknown"), []).append(row)
+    for speaker_rows in by_speaker.values():
+        turn_scores: list[float] = []
+        for row in speaker_rows:
+            duration = max(0.0, float(row.get("end") or 0) - float(row.get("start") or 0))
+            duration_score = 1.0 if 1.5 <= duration <= 3.2 else max(.45, 1 - abs(duration - 2.25) / 8)
+            text_score = min(1.0, max(.45, len(str(row.get("text") or "").strip()) / 12))
+            overlap_penalty = .22 if row.get("overlapStatus") != "none" else 0.0
+            turn_score = max(.35, min(.95, .52 * duration_score + .48 * text_score - overlap_penalty))
+            boundary = .92 if row.get("words") else .68 if not row.get("timingApproximate") else .5
+            row["turnConfidence"] = round(turn_score, 3)
+            row["boundaryConfidence"] = round(boundary, 3)
+            turn_scores.append(turn_score)
+        cluster_score = max(.4, min(.95,
+            float(np.mean(turn_scores)) + min(.08, math.log1p(len(turn_scores)) * .02)
+        ))
+        for row in speaker_rows:
+            row["clusterConfidence"] = round(cluster_score, 3)
+            row["requiresReview"] = bool(
+                cluster_score < .62 or float(row["turnConfidence"]) < .6
+                or row.get("overlapStatus") != "none" or float(row["boundaryConfidence"]) < .6
+            )
+    return rows
+
+
 def _read_cache(cache_path: Path) -> dict[str, Any] | None:
     if not cache_path.is_file():
         return None
@@ -658,29 +793,40 @@ def _analyze_sensevoice(
     model_cache: Path,
     cancelled: Any,
     progress_callback: Any = None,
+    preset_speaker_count: int | None = None,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     model, actual_device = _sensevoice_instance(
         model_name=model_name, device=device, vad_model=vad_model, punc_model=punc_model,
         spk_model=spk_model, diarization=diarization, model_cache=model_cache,
+        algorithm_version=algorithm_version,
     )
     if cancelled and cancelled():
         raise RuntimeError("任务已取消")
     started = time.monotonic()
     try:
+        generate_options: dict[str, Any] = {
+            "input": str(source), "cache": {}, "language": "auto", "use_itn": True,
+            "batch_size_s": 60, "merge_vad": False,
+            "sentence_timestamp": True, "progress_callback": progress_callback,
+        }
+        if diarization and int(preset_speaker_count or 0) > 0:
+            generate_options["preset_spk_num"] = int(preset_speaker_count or 0)
         result = model.generate(
-            input=str(source), cache={}, language="auto", use_itn=True,
-            batch_size_s=60, merge_vad=False,
-            sentence_timestamp=True, progress_callback=progress_callback,
+            **generate_options,
         )
     except Exception as error:
         raise RuntimeError(f"SenseVoice 推理失败：{error}") from error
     if cancelled and cancelled():
         raise RuntimeError("任务已取消")
     normalized = normalize_sensevoice_result(result)
+    if algorithm_version == "editing-algorithm-v2":
+        normalized["segments"] = enforce_speaker_turn_contract(normalized["segments"])
     return {
         "schemaVersion": SPEECH_SCHEMA_VERSION, "engine": "sensevoice", "model": model_name,
         "device": actual_device, "language": normalized.get("language"),
         "diarization": normalized.get("diarization", False),
+        "presetSpeakerCount": int(preset_speaker_count or 0),
         "segments": normalized["segments"],
         "repairedLongSegments": int(normalized.get("repairedLongSegments") or 0),
         "droppedLongSegments": int(normalized.get("droppedLongSegments") or 0),
@@ -759,9 +905,17 @@ def analyze_speech(
     whisper_device: str = "auto",
     cancelled: Any = None,
     progress_callback: Any = None,
+    preset_speaker_count: int | None = None,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     cached = _read_cache(cache_path)
-    if cached and cached.get("schemaVersion") == SPEECH_SCHEMA_VERSION:
+    if (
+        cached
+        and cached.get("schemaVersion") == SPEECH_SCHEMA_VERSION
+        and (not diarization or bool(cached.get("diarization")))
+        and int(cached.get("presetSpeakerCount") or 0) == int(preset_speaker_count or 0)
+        and str(cached.get("algorithmVersion") or "editing-algorithm-v1") == algorithm_version
+    ):
         return cached
     if engine == "sensevoice":
         try:
@@ -773,11 +927,13 @@ def analyze_speech(
                     worker_directory=worker_directory, model_name=model_name, device=device,
                     vad_model=vad_model, punc_model=punc_model, spk_model=spk_model,
                     diarization=diarization, model_cache=resolved_cache,
+                    algorithm_version=algorithm_version,
                 )
                 try:
                     payload = _sensevoice_via_worker(
                         source, worker_directory=worker_directory, cancelled=cancelled,
                         progress_callback=progress_callback,
+                        preset_speaker_count=preset_speaker_count,
                     )
                     break
                 except Exception as error:
@@ -802,6 +958,7 @@ def analyze_speech(
         payload = _analyze_whisper(source, model_name=model_name, device=device, cancelled=cancelled)
     else:
         raise RuntimeError(f"不支持的语音引擎：{engine}")
+    payload["algorithmVersion"] = algorithm_version
     _write_cache(cache_path, payload)
     return payload
 

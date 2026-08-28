@@ -11,6 +11,9 @@ from .media import probe_video, render_composition
 from .quality_gate import validate_edit_sequence
 
 
+SUBTITLE_RENDER_VERSION = "short-edge-safe-width-v2"
+
+
 def event_group_edl_hash(group: dict[str, Any]) -> str:
     payload = {
         "title": group.get("title"),
@@ -77,6 +80,7 @@ def composition_edl_hash(
     if subtitle_mode == "burn":
         payload["subtitleStyle"] = subtitle_style
         payload["subtitleDraftRevision"] = subtitle_draft_revision
+        payload["subtitleRenderVersion"] = SUBTITLE_RENDER_VERSION
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
@@ -126,13 +130,20 @@ def validate_render_selections(
             item
             for item in sequence_validation.get("issues") or []
             if item.get("severity") == "critical"
-            and str(item.get("category") or "")
-            not in {"duration_overflow", "duration_shortfall", "duration"}
         ]
-        if automatic and blocking_issues:
-            top = str(blocking_issues[0].get("description") or "")
+        duration_outside_target = sequence_validation.get("durationPreferred") is False
+        if automatic and (
+            not sequence_validation.get("passed")
+            or duration_outside_target
+            or blocking_issues
+        ):
+            duration_issue = next((
+                item for item in sequence_validation.get("issues") or []
+                if str(item.get("category") or "").startswith("duration")
+            ), None)
+            top = str(((duration_issue or (blocking_issues[0] if blocking_issues else {}))).get("description") or "")
             raise RuntimeError(
-                f"自动成片未通过渲染前质量门：{top or '镜头边界、章节关系或目标时长不安全'}"
+                f"自动成片未通过渲染前质量门：{top or '镜头边界、章节关系或目标时长不安全'}；已停止渲染并返回重新选片"
             )
     return selections
 

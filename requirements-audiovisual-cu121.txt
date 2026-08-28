@@ -1,5 +1,2 @@
-# NVIDIA CUDA 12.1 variant. The NVIDIA driver must support CUDA 12.1.
--r requirements-speech-common.txt
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.2.0+cu121
-torchaudio==2.2.0+cu121
+# Backward-compatible alias retained for the published README.
+-r requirements-gpu.txt

@@ -62,6 +62,74 @@ def test_broad_multisource_is_executable_union() -> None:
     assert [(item["start"], item["end"]) for item in matches] == [(1.0, 2.0), (5.0, 6.0)]
 
 
+def test_broad_multisource_accepts_typed_visual_action_branch() -> None:
+    intent = parse_content_intent("查找有明确对白或关键动作的完整片段", {
+        "query": "明确对白或关键动作", "retrievalScope": "broad_multisource",
+        "predicates": [
+            {"id": "s", "kind": "speech.semantic", "value": "明确对白", "required": True},
+            {"id": "v", "kind": "visual.action", "value": "关键动作", "required": True},
+            {"id": "o", "kind": "screen_text.text", "value": "关键文字", "required": True},
+        ],
+        "logic": {"op": "any", "children": [
+            {"op": "predicate", "predicateId": "s"},
+            {"op": "predicate", "predicateId": "v"},
+            {"op": "predicate", "predicateId": "o"},
+        ]},
+    })
+    assert not intent["validationErrors"]
+    assert "visual.verify_action" in intent["queryPlan"]["requiredOperations"]
+
+
+def test_concrete_object_action_does_not_expand_to_speech_and_ocr() -> None:
+    intent = parse_content_intent("帮我找出来切西瓜的片段", {
+        "query": "切西瓜", "retrievalScope": "broad_multisource",
+        "predicates": [
+            {
+                "id": "v", "kind": "visual.semantic", "value": "切西瓜", "required": True,
+                "subject": {"description": "西瓜", "type": "object"},
+            },
+            {
+                "id": "s", "kind": "speech.semantic", "value": "切西瓜", "required": True,
+                "subject": {"description": "西瓜", "type": "object"},
+            },
+            {
+                "id": "o", "kind": "screen_text.text", "value": "切西瓜", "required": True,
+                "subject": {"description": "西瓜", "type": "object"},
+            },
+        ],
+        "logic": {"op": "any", "children": [
+            {"op": "predicate", "predicateId": "v"},
+            {"op": "predicate", "predicateId": "s"},
+            {"op": "predicate", "predicateId": "o"},
+        ]},
+    })
+    plan = intent["queryPlan"]
+    assert [item["kind"] for item in plan["predicates"]] == ["visual.semantic"]
+    assert plan["logic"] == {"op": "predicate", "predicateId": "v"}
+    assert plan["requiredOperations"] == ["visual.embed"]
+    assert intent["retrievalScope"] == "explicit_source"
+    assert intent["modalities"] == ["visual"]
+
+
+def test_abstract_topic_without_related_wording_remains_multisource() -> None:
+    intent = parse_content_intent("找到糖尿病发作机理的片段", {
+        "query": "糖尿病发作机理", "retrievalScope": "broad_multisource",
+        "predicates": [
+            {"id": "v", "kind": "visual.semantic", "value": "糖尿病发作机理", "subject": {"type": "topic"}},
+            {"id": "s", "kind": "speech.semantic", "value": "糖尿病发作机理", "subject": {"type": "topic"}},
+            {"id": "o", "kind": "screen_text.text", "value": "糖尿病发作机理", "subject": {"type": "topic"}},
+        ],
+        "logic": {"op": "any", "children": [
+            {"op": "predicate", "predicateId": "v"},
+            {"op": "predicate", "predicateId": "s"},
+            {"op": "predicate", "predicateId": "o"},
+        ]},
+    })
+    assert {item["kind"] for item in intent["queryPlan"]["predicates"]} == {
+        "visual.semantic", "speech.semantic", "screen_text.text",
+    }
+
+
 def test_nested_any_all_and_not_are_executed() -> None:
     plan = compile_query_plan({
         "query": "复合条件",

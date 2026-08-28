@@ -21,9 +21,11 @@ def is_loopback_bind_host(host: str) -> bool:
         return False
 
 
-def validate_deployment_access(host: str, access_token: str) -> None:
+def validate_deployment_access(
+    host: str, access_token: str, *, allow_unauthenticated_remote: bool = False,
+) -> None:
     """Refuse an externally reachable bind without a meaningful bearer token."""
-    if is_loopback_bind_host(host):
+    if is_loopback_bind_host(host) or allow_unauthenticated_remote:
         return
     token = str(access_token or "").strip()
     if len(token) < 16:

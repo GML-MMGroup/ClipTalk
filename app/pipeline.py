@@ -9,11 +9,19 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from PIL import Image, ImageChops, ImageStat
 
 from .edit_boundaries import annotate_candidate_boundaries
 from .ark_client import VisionModelClient
-from .event_groups import allocate_event_group_budget, build_event_groups, event_groups_total, split_event_groups_at_scene_cuts
+from .event_groups import (
+    allocate_event_group_budget,
+    build_event_groups,
+    candidate_is_semantic,
+    event_groups_total,
+    is_generic_event_title,
+    split_event_groups_at_scene_cuts,
+)
 from .media import (
     SampledFrame,
     VideoInfo,
@@ -23,7 +31,6 @@ from .media import (
     detect_scene_changes_in_ranges,
     extract_audio_waveform,
     extract_frames_at_times,
-    extract_uniform_frames,
     silence_intervals_from_waveform,
     probe_video,
     render_clip,
@@ -44,7 +51,7 @@ from .speech import analyze_speech, speech_evidence, transcript_context
 
 
 ProgressCallback = Callable[[float, str, str], None]
-ANALYSIS_CACHE_VERSION = f"visual-highlights-v15-evidence-routing-{PROMPT_VERSION}"
+ANALYSIS_CACHE_VERSION = f"visual-highlights-v17-constrained-semantic-edl-{PROMPT_VERSION}"
 
 
 class ModelDecisionRequired(RuntimeError):
@@ -99,6 +106,9 @@ class HighlightCandidate:
     peak_end: float = 0.0
     minimum_keep_seconds: float = 0.0
     boundary_confidence: float = 0.0
+    candidate_origin: str = "vlm"
+    semantic_status: str = "verified"
+    visual_embedding: tuple[float, ...] = ()
 
     @property
     def duration(self) -> float:
@@ -237,10 +247,17 @@ def merge_priority_frames(
 
 def refinement_candidate_limit(
     *, discovery_only: bool, total_target_seconds: float | None, target_seconds: float, count: int,
-    video_duration: float | None = None,
+    video_duration: float | None = None, algorithm_version: str = "editing-algorithm-v1",
 ) -> int:
     if discovery_only:
         duration = max(0.0, float(video_duration or 0.0))
+        if algorithm_version == "editing-algorithm-v2":
+            recall_budget = min(48, max(
+                12,
+                math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
+                math.ceil(duration / 180.0),
+            ))
+            return min(24, max(6, math.ceil(recall_budget / 2)))
         # Deep visual boundary review is the expensive part of the pipeline.
         # Keep a small duration-aware budget here; the wider recall pool is
         # still retained and aligned locally with speech/scene evidence below.
@@ -505,6 +522,12 @@ def _refined_candidate(
         peak_end=round(peak_end, 3),
         minimum_keep_seconds=round(minimum_keep, 3),
         boundary_confidence=round(boundary_confidence, 3),
+        candidate_origin=fallback.candidate_origin,
+        semantic_status=(
+            "verified"
+            if not is_generic_event_title(raw.get("title") or fallback.title)
+            else fallback.semantic_status
+        ),
     )
 
 
@@ -563,6 +586,7 @@ def speech_signal_candidates(
             },
             peak_start=round(start, 3), peak_end=round(end, 3),
             minimum_keep_seconds=round(duration, 3), boundary_confidence=.9,
+            candidate_origin="speech_signal", semantic_status="recall_only",
         ))
     ranked = sorted(candidates, key=lambda item: (-item.score, item.start))
     selected: list[HighlightCandidate] = []
@@ -606,6 +630,7 @@ def visual_change_candidates(
             evidence=[f"相邻采样帧变化强度 {value:.1f}"], role="视觉转折", possible_event="画面变化",
             peak_start=max(start, center - 1.0), peak_end=min(end, center + 1.0),
             minimum_keep_seconds=min(3.0, end - start), boundary_confidence=.35,
+            candidate_origin="visual_change", semantic_status="recall_only",
         ))
         if len(selected) >= maximum:
             break
@@ -637,6 +662,7 @@ def waveform_hotspot_candidates(
             audio_evidence={"energy": round(strength, 4), "source": "waveform"},
             peak_start=max(start, center - .8), peak_end=min(end, center + .8),
             minimum_keep_seconds=min(2.5, end - start), boundary_confidence=.4,
+            candidate_origin="waveform", semantic_status="recall_only",
         ))
         if len(selected) >= maximum:
             break
@@ -651,10 +677,31 @@ def image_average_hash(path: Path) -> str:
 
 
 def candidate_visual_similarity(left: HighlightCandidate, right: HighlightCandidate) -> float:
+    if left.visual_embedding and len(left.visual_embedding) == len(right.visual_embedding):
+        a = np.asarray(left.visual_embedding, dtype=np.float32)
+        b = np.asarray(right.visual_embedding, dtype=np.float32)
+        denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float(np.dot(a, b) / denominator) if denominator > 0 else 0.0
     if len(left.visual_signature) != 64 or len(right.visual_signature) != 64:
         return 0.0
     distance = sum(a != b for a, b in zip(left.visual_signature, right.visual_signature))
     return 1.0 - distance / 64.0
+
+
+def calibrate_page_candidate_scores(candidates: list[HighlightCandidate]) -> list[HighlightCandidate]:
+    """Reduce score drift between independent contact-sheet model calls."""
+    if not candidates:
+        return []
+    ordered = sorted(range(len(candidates)), key=lambda index: candidates[index].score)
+    percentiles = {
+        candidate_index: rank / max(1, len(candidates) - 1)
+        for rank, candidate_index in enumerate(ordered)
+    }
+    return [replace(
+        candidate,
+        score=round(min(100.0, max(0.0, candidate.score * .7 + (65 + 35 * percentiles[index]) * .3)), 2),
+        evidence=[*candidate.evidence, "候选分数已按当前联系表内排名校准"],
+    ) for index, candidate in enumerate(candidates)]
 
 
 def select_non_overlapping(candidates: list[HighlightCandidate], count: int) -> list[HighlightCandidate]:
@@ -678,7 +725,9 @@ def select_non_overlapping(candidates: list[HighlightCandidate], count: int) -> 
     return sorted(selected, key=lambda item: item.start)
 
 
-def select_montage_moments(candidates: list[HighlightCandidate], count: int) -> list[HighlightCandidate]:
+def select_montage_moments(
+    candidates: list[HighlightCandidate], count: int, *, semantic_dedup: bool = False,
+) -> list[HighlightCandidate]:
     """Keep multiple complementary shots from one event while removing temporal/visual duplicates."""
     selected: list[HighlightCandidate] = []
     for candidate in sorted(candidates, key=lambda item: (-item.score, item.start)):
@@ -687,6 +736,13 @@ def select_montage_moments(candidates: list[HighlightCandidate], count: int) -> 
         # not as a duplicate moment.
         if any(
             min(candidate.end, other.end) - max(candidate.start, other.start) > .12
+            for other in selected
+        ):
+            continue
+        if semantic_dedup and any(
+            candidate_visual_similarity(candidate, other) >= .94
+            and candidate_text_similarity(candidate, other) >= .5
+            and abs((candidate.start + candidate.end) / 2 - (other.start + other.end) / 2) <= 90
             for other in selected
         ):
             continue
@@ -771,11 +827,18 @@ def touches_refinement_boundary(
 
 
 class HighlightPipeline:
-    def __init__(self, *, client: VisionModelClient, ffmpeg: str, ffprobe: str, selection_backend: str = "openai-compatible-vlm") -> None:
+    def __init__(
+        self, *, client: VisionModelClient, ffmpeg: str, ffprobe: str,
+        selection_backend: str = "openai-compatible-vlm", visual_embedding_model: str = "",
+        model_cache: Path | None = None, embedding_device: str = "auto",
+    ) -> None:
         self.client = client
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
         self.selection_backend = selection_backend
+        self.visual_embedding_model = visual_embedding_model
+        self.model_cache = model_cache
+        self.embedding_device = embedding_device
 
     def _analyze_with_heartbeat(
         self,
@@ -920,6 +983,7 @@ class HighlightPipeline:
         usage: list[dict[str, Any]],
         progress: ProgressCallback,
         degraded: bool = False,
+        algorithm_version: str = "editing-algorithm-v1",
     ) -> dict[str, Any]:
         candidates = annotate_candidate_boundaries(
             candidates,
@@ -946,13 +1010,20 @@ class HighlightPipeline:
             "on_target" if total_target_seconds is None or abs(allocated_total - total_target_seconds) <= tolerance
             else ("under_target" if allocated_total < total_target_seconds else "over_target")
         )
+        recall_signal_count = sum(not candidate_is_semantic(candidate) for candidate in candidates)
+        if not event_groups:
+            # Detector peaks are useful diagnostics, but an empty semantic
+            # result must be reported as empty instead of an invalid timeline.
+            candidates = []
         progress(1.0, "awaiting_confirmation", f"VLM 精修保留 {len(candidates)} 个候选镜头，已归并为 {len(event_groups)} 个精彩事件")
         return {
             "schemaVersion": 4,
+            "algorithmVersion": algorithm_version,
             "promptVersion": PROMPT_VERSION,
             "source": source.name,
             "video": info,
             "candidateCount": len(candidates),
+            "recallSignalCount": recall_signal_count,
             "candidates": candidates,
             "eventGroupCount": len(event_groups),
             "eventGroups": event_groups,
@@ -995,6 +1066,8 @@ class HighlightPipeline:
         progress: ProgressCallback,
         cancelled: Callable[[], bool],
         excluded_ranges: list[tuple[float, float]] | None = None,
+        analysis_start: float = 0.0,
+        analysis_end: float | None = None,
         automatic_duration: bool = False,
         discovery_only: bool = False,
         analysis_mode: str = "visual",
@@ -1012,6 +1085,7 @@ class HighlightPipeline:
         requested_count: int | None = None,
         resume_action: str | None = None,
         scene_cuts: list[float] | None = None,
+        algorithm_version: str = "editing-algorithm-v1",
     ) -> dict[str, Any]:
         exclusions = [
             (max(0.0, float(start)), max(0.0, float(end)))
@@ -1025,6 +1099,14 @@ class HighlightPipeline:
             container_duration=verified_info.container_duration,
         )
         effective_duration = verified_info.duration
+        scope_start = max(0.0, min(effective_duration, float(analysis_start or 0.0)))
+        scope_end = min(
+            effective_duration,
+            float(analysis_end) if analysis_end is not None else effective_duration,
+        )
+        if scope_end <= scope_start:
+            raise RuntimeError("任务素材范围无效，无法进行视觉分析")
+        scope_duration = scope_end - scope_start
         if cancelled():
             raise RuntimeError("任务已取消")
         checkpoint = load_analysis_checkpoint(work_directory) if resume_action else None
@@ -1083,6 +1165,7 @@ class HighlightPipeline:
                 usage=usage,
                 progress=progress,
                 degraded=degraded,
+                algorithm_version=algorithm_version,
             )
             manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {**checkpoint, "phase": "completed", "decisionRequired": False})
@@ -1113,6 +1196,7 @@ class HighlightPipeline:
                         spk_model=sensevoice_spk_model, diarization=sensevoice_diarization,
                         model_cache=speech_model_cache, whisper_model=whisper_model,
                         whisper_device=whisper_device, cancelled=cancelled,
+                        algorithm_version=algorithm_version,
                     )
                     speech_segments = list(speech_analysis.get("segments") or [])
                     speech_analysis = {**speech_analysis, "status": "ready", "segments": len(speech_segments)}
@@ -1238,6 +1322,7 @@ class HighlightPipeline:
                             model_cache=speech_model_cache, whisper_model=whisper_model,
                             whisper_device=whisper_device, cancelled=cancelled,
                             progress_callback=report_speech_progress,
+                            algorithm_version=algorithm_version,
                         )
                         speech_segments = list(speech_analysis.get("segments") or [])
                         speech_analysis = {**speech_analysis, "status": "ready", "segments": len(speech_segments)}
@@ -1253,25 +1338,29 @@ class HighlightPipeline:
                 elif analysis_mode == "audiovisual":
                     speech_analysis = {"engine": speech_engine, "status": "no_audio", "segments": 0}
 
-            progress(0.08, "sampling", "正在抽取全片与关键变化画面")
-            maximum_coarse_frames = coarse_frame_limit(info.duration)
-            sampling_interval = max(2.0, info.duration / max(12, maximum_coarse_frames))
-            expected_coarse_frames = max(1, min(maximum_coarse_frames, math.ceil(info.duration / sampling_interval)))
-            def report_sampling_progress(extracted: list[SampledFrame]) -> None:
-                completed = min(expected_coarse_frames, len(extracted))
-                fraction = completed / expected_coarse_frames
+            progress(0.08, "sampling", "正在抽取所选素材范围与关键变化画面")
+            maximum_coarse_frames = coarse_frame_limit(scope_duration)
+            sampling_interval = max(2.0, scope_duration / max(12, maximum_coarse_frames))
+            expected_coarse_frames = max(2, min(maximum_coarse_frames, math.ceil(scope_duration / sampling_interval) + 1))
+            uniform_times = [
+                min(scope_end - .001, scope_start + scope_duration * index / max(1, expected_coarse_frames - 1))
+                for index in range(expected_coarse_frames)
+            ]
+            def report_sampling_progress(completed: int, total: int) -> None:
+                if cancelled():
+                    raise RuntimeError("任务已取消")
+                fraction = min(1.0, completed / max(1, total))
                 progress(
                     0.08 + 0.04 * fraction,
                     "sampling",
-                    f"已抽取 {completed}/{expected_coarse_frames} 帧画面",
+                    f"已抽取 {completed}/{total} 帧画面",
                 )
-            frames = extract_uniform_frames(
-                source, work_directory / "coarse-frames", duration=info.duration,
-                ffmpeg=self.ffmpeg, maximum_frames=maximum_coarse_frames,
+            frames = extract_frames_at_times(
+                source,
+                work_directory / "coarse-frames",
+                uniform_times,
+                ffmpeg=self.ffmpeg,
                 progress_callback=report_sampling_progress,
-                progress_batch_size=4,
-                progress_first_batch_size=1,
-                cancelled=cancelled,
             )
             priority_times = coarse_priority_times(
                 duration=info.duration,
@@ -1280,6 +1369,7 @@ class HighlightPipeline:
                 waveform=audio_waveform,
                 speech_segments=speech_segments,
             )
+            priority_times = [value for value in priority_times if scope_start <= value <= scope_end]
             priority_frames: list[SampledFrame] = []
             if priority_times:
                 progress(
@@ -1304,7 +1394,7 @@ class HighlightPipeline:
             frames = snapshot_sampled_frames(frames, work_directory / "analysis-frames")
             progress(
                 0.12, "sampling",
-                f"全片采样完成：{len(frames)} 帧，其中 {len(priority_frames)} 帧来自关键变化",
+                f"所选范围采样完成：{len(frames)} 帧，其中 {len(priority_frames)} 帧来自关键变化",
             )
             if len(frames) < 2:
                 raise RuntimeError("视频可用画面不足，无法进行视觉高光分析")
@@ -1385,6 +1475,7 @@ class HighlightPipeline:
                 maximum_tokens=1200,
             )
             usage.append(result.pop("_usage", {}))
+            page_candidates: list[HighlightCandidate] = []
             for raw in result.get("candidates", []):
                 if not isinstance(raw, dict):
                     continue
@@ -1401,7 +1492,11 @@ class HighlightPipeline:
                     automatic_duration=automatic_duration,
                 )
                 if candidate:
-                    coarse.append(candidate)
+                    page_candidates.append(candidate)
+            coarse.extend(
+                calibrate_page_candidate_scores(page_candidates)
+                if algorithm_version == "editing-algorithm-v2" else page_candidates
+            )
 
         progress(.50, "coarse_vlm", f"已完成 {len(pages)}/{len(pages)} 组画面分析")
 
@@ -1434,13 +1529,22 @@ class HighlightPipeline:
             target_seconds=target_seconds,
             count=count,
             video_duration=info.duration,
+            algorithm_version=algorithm_version,
         )
         # Adjacent moments can be different physical shots belonging to the
         # same event. Do not apply title/one-second-gap deduplication before
         # visual refinement, otherwise a complete event can collapse into one
         # shot. Exact overlaps are removed here; semantic/visual deduplication
         # is deferred until the model has refined the real boundaries.
-        recall_target = min(18, max(8, count * 3, math.ceil(float(total_target_seconds or 30.0) / 7.0)))
+        recall_target = (
+            min(48, max(
+                12,
+                math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
+                math.ceil(float(info.duration or 0.0) / 180.0),
+            ))
+            if algorithm_version == "editing-algorithm-v2"
+            else min(18, max(8, count * 3, math.ceil(float(total_target_seconds or 30.0) / 7.0)))
+        )
         recall_pool = select_montage_moments(coarse, recall_target)
         refinement_pool = sorted(
             recall_pool,
@@ -1452,10 +1556,12 @@ class HighlightPipeline:
         )[:refinement_target]
         refined_ids = {id(item) for item in refinement_pool}
         refined: list[HighlightCandidate] = []
+        refined_visual_paths: list[Path] = []
         for index, candidate in enumerate(refinement_pool):
             if cancelled():
                 raise RuntimeError("任务已取消")
             refined_candidate = candidate
+            representative_path: Path | None = None
             keep_candidate = True
             center = (candidate.start + candidate.end) / 2
             window = refinement_window_seconds(
@@ -1472,12 +1578,14 @@ class HighlightPipeline:
             ) else 1
             for pass_index in range(maximum_passes):
                 previous_refined = refined_candidate
-                window_start = max(0.0, min(info.duration - window, center - window / 2))
-                window_end = min(info.duration, window_start + window)
+                window = min(scope_duration, window)
+                window_start = max(scope_start, min(scope_end - window, center - window / 2))
+                window_end = min(scope_end, window_start + window)
+                window = max(.05, window_end - window_start)
                 frame_count = 11 if automatic_duration else 9
                 sample_step = window / max(1, frame_count - 1)
                 times = [
-                    min(info.duration - 0.05, window_start + window * step / (frame_count - 1))
+                    min(scope_end - 0.001, window_start + window * step / (frame_count - 1))
                     for step in range(frame_count)
                 ]
                 pass_directory = work_directory / "refine-frames" / f"candidate-{index:03d}-pass-{pass_index + 1}"
@@ -1487,6 +1595,7 @@ class HighlightPipeline:
                     work_directory / "refine-sheets" / f"candidate-{index:03d}-pass-{pass_index + 1}.jpg",
                     columns=4 if automatic_duration else 3,
                 )
+                representative_path = Path(sheet)
                 base_progress = 0.52 + 0.28 * index / max(1, len(refinement_pool))
                 pass_text = "" if pass_index == 0 else "（边界触窗，已扩大观察范围）"
                 detail = f"视觉大模型正在精修候选 {index + 1}/{len(refinement_pool)}{pass_text}"
@@ -1545,47 +1654,48 @@ class HighlightPipeline:
                 ):
                     break
                 center = (refined_candidate.start + refined_candidate.end) / 2
-                window = min(info.duration, max(60.0, window * 1.8, refined_candidate.duration * 2.2))
+                window = min(scope_duration, max(60.0, window * 1.8, refined_candidate.duration * 2.2))
             if not keep_candidate:
                 continue
             if audio_waveform:
                 energy = candidate_audio_energy(refined_candidate, audio_waveform, info.duration)
-                refined_candidate = HighlightCandidate(
-                    start=refined_candidate.start,
-                    end=refined_candidate.end,
+                refined_candidate = replace(
+                    refined_candidate,
                     score=round(min(100.0, refined_candidate.score * .9 + energy * 10.0), 2),
-                    title=refined_candidate.title,
-                    reason=refined_candidate.reason,
                     evidence=refined_candidate.evidence + ([f"声音辅助证据：该区间音频能量强度约为 {energy * 100:.0f}%"] if energy >= .65 else []),
-                    visual_signature=refined_candidate.visual_signature,
-                    role=refined_candidate.role,
-                    possible_event=refined_candidate.possible_event,
-                    audio_evidence=refined_candidate.audio_evidence,
-                    peak_start=refined_candidate.peak_start,
-                    peak_end=refined_candidate.peak_end,
-                    minimum_keep_seconds=refined_candidate.minimum_keep_seconds,
-                    boundary_confidence=refined_candidate.boundary_confidence,
                 )
             if detail_frames:
-                refined_candidate = HighlightCandidate(
-                    start=refined_candidate.start,
-                    end=refined_candidate.end,
-                    score=refined_candidate.score,
-                    title=refined_candidate.title,
-                    reason=refined_candidate.reason,
-                    evidence=refined_candidate.evidence,
-                    visual_signature=image_average_hash(detail_frames[len(detail_frames) // 2].path),
-                    role=refined_candidate.role,
-                    possible_event=refined_candidate.possible_event,
+                representative_path = Path(detail_frames[len(detail_frames) // 2].path)
+                refined_candidate = replace(
+                    refined_candidate,
+                    visual_signature=image_average_hash(representative_path),
                     audio_evidence=speech_evidence(
                         speech_segments, refined_candidate.start, refined_candidate.end,
                     ) if speech_segments else {},
-                    peak_start=refined_candidate.peak_start,
-                    peak_end=refined_candidate.peak_end,
-                    minimum_keep_seconds=refined_candidate.minimum_keep_seconds,
-                    boundary_confidence=refined_candidate.boundary_confidence,
                 )
             refined.append(refined_candidate)
+            if representative_path is not None:
+                refined_visual_paths.append(representative_path)
+
+        if (
+            algorithm_version == "editing-algorithm-v2" and len(refined_visual_paths) == len(refined)
+            and self.visual_embedding_model
+        ):
+            try:
+                from .recognition_models import SiglipEncoder
+
+                embeddings = SiglipEncoder(
+                    self.visual_embedding_model, device=self.embedding_device,
+                    cache_dir=self.model_cache,
+                ).encode_images(refined_visual_paths, batch_size=16)
+                refined = [
+                    replace(candidate, visual_embedding=tuple(float(value) for value in embedding))
+                    for candidate, embedding in zip(refined, embeddings)
+                ]
+            except Exception:
+                # Average hash remains an explicit local degradation path; it
+                # never changes a low-confidence candidate into a recommendation.
+                pass
 
         # Candidates outside the deep-review budget remain available to the
         # evidence graph and LLM planner.  Their boundaries are aligned using
@@ -1605,7 +1715,11 @@ class HighlightPipeline:
         progress(.80, "refine_vlm", f"已完成 {len(refinement_pool)}/{len(refinement_pool)} 个候选精修")
 
         eligible = [candidate for candidate in [*refined, *locally_aligned] if not overlaps_ranges(candidate, exclusions)]
-        selected = select_montage_moments(eligible, min(14, max(8, count * 3)))
+        selected = select_montage_moments(
+            eligible,
+            recall_target if algorithm_version == "editing-algorithm-v2" else min(14, max(8, count * 3)),
+            semantic_dedup=algorithm_version == "editing-algorithm-v2",
+        )
         if not selected:
             raise RuntimeError(
                 "排除已有高光后，视觉模型没有给出不重叠的新片段" if exclusions
@@ -1630,6 +1744,8 @@ class HighlightPipeline:
                 "role": candidate.role,
                 "possibleEvent": candidate.possible_event,
                 "audioEvidence": candidate.audio_evidence,
+                "candidateOrigin": candidate.candidate_origin,
+                "semanticStatus": candidate.semantic_status,
             } for index, candidate in enumerate(selected)]
             director_times: list[float] = []
             director_labels: list[tuple[int, str]] = []
@@ -1697,6 +1813,7 @@ class HighlightPipeline:
                 scene_cuts=list(scene_cuts or []),
                 speech_analysis=speech_analysis,
                 exclusions=exclusions, usage=usage, progress=progress,
+                algorithm_version=algorithm_version,
             )
             manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {

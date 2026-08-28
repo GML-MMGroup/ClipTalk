@@ -1,0 +1,6 @@
+services:
+  cliptalk:
+    build:
+      args:
+        CLIPTALK_INSTALL_PROFILE: gpu
+    gpus: all

@@ -26,21 +26,32 @@ BASE_MODULES = {
     "fastapi": "fastapi",
     "uvicorn": "uvicorn",
     "httpx": "httpx",
+    "Python Multipart": "multipart",
+    "Pydantic": "pydantic",
+    "Starlette": "starlette",
+    "Cryptography": "cryptography",
     "Pillow": "PIL",
     "OpenCV": "cv2",
 }
 AUDIO_MODULES = {
     "NumPy": "numpy",
+    "SciPy": "scipy",
+    "scikit-learn": "sklearn",
     "PyTorch": "torch",
     "Torchaudio": "torchaudio",
     "FunASR": "funasr",
     "Faster Whisper": "faster_whisper",
+    "CTranslate2": "ctranslate2",
 }
 RECOGNITION_MODULES = {
     "Transformers": "transformers",
+    "Safetensors": "safetensors",
+    "SentencePiece": "sentencepiece",
     "PaddlePaddle": "paddle",
     "PaddleOCR": "paddleocr",
 }
+
+SUBTITLE_FONT = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
 
 
 def _result(name: str, status: str, detail: str) -> dict[str, str]:
@@ -91,6 +102,10 @@ def inspect_environment(profile: str = "visual") -> dict[str, Any]:
     for label, binary in (("FFmpeg", settings.ffmpeg), ("FFprobe", settings.ffprobe)):
         ready, detail = _binary_version(binary)
         checks.append(_result(label, "ok" if ready else "blocker", detail))
+    checks.append(_result(
+        "中文字幕字体", "ok" if SUBTITLE_FONT.is_file() else "blocker",
+        str(SUBTITLE_FONT) if SUBTITLE_FONT.is_file() else f"缺少 {SUBTITLE_FONT}（Debian/Ubuntu 包：fonts-wqy-zenhei）",
+    ))
 
     writable, detail = _writable_location(settings.data_root)
     checks.append(_result("数据目录", "ok" if writable else "blocker", detail))
@@ -129,6 +144,22 @@ def inspect_environment(profile: str = "visual") -> dict[str, Any]:
             except Exception as error:  # pragma: no cover - depends on host CUDA runtime
                 cuda_detail = f"CUDA 探测失败：{str(error)[:140]}"
         checks.append(_result("NVIDIA CUDA", "ok" if cuda_ready else "blocker", cuda_detail))
+        paddle_cuda_ready = False
+        paddle_cuda_detail = "PaddlePaddle 未安装或不是 CUDA 构建"
+        if importlib.util.find_spec("paddle") is not None:
+            try:
+                import paddle
+
+                paddle_cuda_ready = bool(paddle.device.is_compiled_with_cuda())
+                paddle_cuda_detail = (
+                    f"PaddlePaddle {paddle.__version__} CUDA 构建"
+                    if paddle_cuda_ready else f"PaddlePaddle {paddle.__version__} 是 CPU 构建"
+                )
+            except Exception as error:  # pragma: no cover - depends on Paddle runtime
+                paddle_cuda_detail = f"Paddle CUDA 探测失败：{str(error)[:140]}"
+        checks.append(_result(
+            "PaddlePaddle CUDA", "ok" if paddle_cuda_ready else "blocker", paddle_cuda_detail,
+        ))
 
     blockers = sum(item["status"] == "blocker" for item in checks)
     warnings = sum(item["status"] == "warning" for item in checks)

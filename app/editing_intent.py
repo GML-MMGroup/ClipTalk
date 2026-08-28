@@ -248,7 +248,7 @@ def evaluate_sequence_against_intent(
     minimum = _number(hard.get("minimumSeconds"))
     maximum = _number(hard.get("maximumSeconds"))
     identities: set[str] = set()
-    semantic: set[str] = set()
+    semantic_ranges: dict[str, list[tuple[float, float]]] = {}
     duplicates: list[str] = []
     exclusions: list[dict[str, Any]] = []
     unsafe_speech: list[str] = []
@@ -268,9 +268,16 @@ def evaluate_sequence_against_intent(
         if identity and identity in identities:
             duplicates.append(identity)
         identities.add(identity)
-        if semantic_id and semantic_id in semantic:
+        start = _number(item.get("start"), 0) or 0
+        end = _number(item.get("end"), start) or start
+        previous_ranges = semantic_ranges.setdefault(semantic_id, []) if semantic_id else []
+        if semantic_id and any(
+            min(end, previous_end) - max(start, previous_start) > .12
+            for previous_start, previous_end in previous_ranges
+        ):
             duplicates.append(semantic_id)
-        semantic.add(semantic_id)
+        if semantic_id:
+            previous_ranges.append((start, end))
         alignment = candidate_requirement_alignment(item, intent)
         covered_includes.update(alignment["matchedInclude"])
         covered_speakers.update(alignment["matchedSpeakers"])

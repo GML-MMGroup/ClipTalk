@@ -299,6 +299,7 @@ def run_talknet_active_speakers(
     scope_start: float, scope_end: float, settings: Any,
     progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    stable_scan_anchors: bool = False,
 ) -> dict[str, Any]:
     """Run an isolated TalkNet-compatible worker using a strict JSON protocol.
 
@@ -352,11 +353,18 @@ def run_talknet_active_speakers(
     # Safe contiguous-window acceleration: only narrow the official scan when
     # the selected person's reference anchors are concentrated. Sparse anchors
     # spanning most of the video retain the strict full-scope scan.
-    anchor_times = [
-        _number(track.get("time")) for target in targets
-        for track in target.get("targetTracks") or []
-        if scope_start <= _number(track.get("time")) <= scope_end
-    ]
+    anchor_times = (
+        [
+            _number(track.get("start")) for track in person_tracks
+            if isinstance(track, dict)
+            and scope_start <= _number(track.get("start")) <= scope_end
+        ]
+        if stable_scan_anchors else [
+            _number(track.get("time")) for target in targets
+            for track in target.get("targetTracks") or []
+            if scope_start <= _number(track.get("time")) <= scope_end
+        ]
+    )
     scan_start, scan_end = scope_start, scope_end
     scan_windows: list[dict[str, float]] = []
     if len(anchor_times) >= 2:
@@ -397,6 +405,7 @@ def run_talknet_active_speakers(
         "scope": [round(scope_start, 3), round(scope_end, 3)],
         "scanScope": scan_scope,
         "scanWindows": scan_windows,
+        "stableScanAnchors": bool(stable_scan_anchors),
         "checkpoint": {
             "path": str(getattr(settings, "talknet_checkpoint", "")),
             "size": Path(str(getattr(settings, "talknet_checkpoint", ""))).stat().st_size,
@@ -408,6 +417,11 @@ def run_talknet_active_speakers(
     }, ensure_ascii=False, sort_keys=True)
     cache_key = hashlib.sha256(cache_material.encode("utf-8")).hexdigest()
     root = work_directory / "active-speaker" / cache_key
+    source_analysis_cache_hit = all(
+        (root / "talknet-official" / f"window-{window_index:03d}" / "input" / "pywork" / "tracks.pckl").is_file()
+        and (root / "talknet-official" / f"window-{window_index:03d}" / "input" / "pywork" / "scores.pckl").is_file()
+        for window_index in range(max(1, len(scan_windows)))
+    )
     target_material = json.dumps({
         "targets": [{
             "id": item["id"],
@@ -446,6 +460,7 @@ def run_talknet_active_speakers(
             if cached.get("protocolVersion") == ACTIVE_SPEAKER_PROTOCOL_VERSION:
                 return {
                     **runtime, "attempted": True, "cacheHit": True,
+                    "sourceAnalysisCacheHit": True,
                     "resultsByPerson": normalized_results(cached),
                     "modelVersion": str(cached.get("modelVersion") or ""),
                     "coverageComplete": True,
@@ -536,6 +551,7 @@ def run_talknet_active_speakers(
     _emit_talknet_progress(progress, {"phase": "complete", "fraction": 1.0})
     return {
         **runtime, "attempted": True, "cacheHit": False,
+        "sourceAnalysisCacheHit": source_analysis_cache_hit,
         "resultsByPerson": normalized_results(payload),
         "modelVersion": str(payload.get("modelVersion") or ""),
         "coverageComplete": True,
@@ -549,6 +565,7 @@ def run_talknet_active_speaker(
     scope_start: float, scope_end: float, settings: Any,
     progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    stable_scan_anchors: bool = False,
 ) -> dict[str, Any]:
     """Backward-compatible single-target facade over the v2 batch worker."""
     result = run_talknet_active_speakers(
@@ -556,6 +573,7 @@ def run_talknet_active_speaker(
         persons=[person], person_tracks=person_tracks, speech_units=speech_units,
         scope_start=scope_start, scope_end=scope_end, settings=settings,
         progress=progress, cancelled=cancelled,
+        stable_scan_anchors=stable_scan_anchors,
     )
     person_result = (result.get("resultsByPerson") or {}).get(str(person.get("id") or ""), {})
     return {

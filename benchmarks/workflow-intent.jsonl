@@ -1,0 +1,45 @@
+{"expected":"highlight","text":"帮我生成一条高光集锦"}
+{"expected":"highlight","text":"做一个30秒的精彩回顾视频"}
+{"expected":"highlight","text":"从全片挑出最精彩的瞬间做成短片"}
+{"expected":"highlight","text":"剪一个有节奏的旅行 vlog 成片"}
+{"expected":"highlight","text":"做一条预告片，突出情绪起伏"}
+{"expected":"highlight","text":"把关键动作和人物反应剪成一分钟视频"}
+{"expected":"highlight","text":"制作比赛最佳镜头合集"}
+{"expected":"highlight","text":"把整段浓缩成一条短视频"}
+{"expected":"highlight","text":"生成婚礼高光，保留最感人的时刻"}
+{"expected":"highlight","text":"create a highlight reel with the best moments"}
+{"expected":"content_search","text":"查找所有提到产品续航的发言片段"}
+{"expected":"content_search","text":"定位后半段女嘉宾介绍离线功能的画面"}
+{"expected":"content_search","text":"找出医生讨论糖尿病发作机理的片段"}
+{"expected":"content_search","text":"截取主持人说欢迎大家的完整对白"}
+{"expected":"content_search","text":"搜索屏幕上出现价格的画面"}
+{"expected":"content_search","text":"找出所有采访问题，包括口头提问"}
+{"expected":"content_search","text":"保留开头两分钟里展示手机的镜头"}
+{"expected":"content_search","text":"查一下谁介绍了电池容量"}
+{"expected":"content_search","text":"find every time someone says battery life"}
+{"expected":"content_search","text":"提取 03:20 附近的内容"}
+{"expected":"person_edit","text":"按人物剪辑，先让我选择一个人"}
+{"expected":"person_edit","text":"识别画面人物后提取目标人物所有出镜"}
+{"expected":"person_edit","text":"把这个人的所有出镜都找出来"}
+{"expected":"person_edit","text":"人物 A 的所有出现画面都保留"}
+{"expected":"person_edit","text":"选择目标人物并剪出他的全部片段"}
+{"expected":"person_edit","text":"根据人物分段，分别提取每个人"}
+{"expected":"person_edit","text":"提取该人物全部出镜"}
+{"expected":"person_edit","text":"按脸选人，再剪出这个人出现的所有镜头"}
+{"expected":"person_edit","text":"先看看视频里有哪些人，我选一个再剪"}
+{"expected":"person_edit","text":"只保留红衣女生每次出现的画面"}
+{"expected":"speaker_edit","text":"按说话人剪辑，先试听再选择"}
+{"expected":"speaker_edit","text":"先识别有哪些声音，再提取其中一个人的发言"}
+{"expected":"speaker_edit","text":"保留这个说话人的所有发言"}
+{"expected":"speaker_edit","text":"Speaker 2 的全部说话片段"}
+{"expected":"speaker_edit","text":"根据音色筛选并剪辑"}
+{"expected":"speaker_edit","text":"选一个声音，提取他的全部发言"}
+{"expected":"speaker_edit","text":"把不同人的说话分开，我再选一个"}
+{"expected":"speaker_edit","text":"识别发言人并提取目标声音"}
+{"expected":"speaker_edit","text":"先区分说话人，然后只保留其中一位"}
+{"expected":"speaker_edit","text":"只要某个声音说话的全部片段"}
+{"expected":"clarification","text":"帮我剪一下这个视频"}
+{"expected":"clarification","text":"处理一下这个素材"}
+{"expected":"clarification","text":"给我做个视频"}
+{"expected":"clarification","text":"整理一下"}
+{"expected":"clarification","text":"看看这个视频怎么剪"}

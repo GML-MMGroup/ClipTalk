@@ -272,6 +272,93 @@ class AnonymousFaceEngine:
         return rows
 
 
+class AnonymousBodyEngine:
+    """OpenCV Zoo YOLOX person detector plus YoutuReID body embedding.
+
+    The detector is deliberately class-filtered before any identity decision;
+    embeddings are anonymous and remain local to a single source video.
+    """
+
+    def __init__(self, yolox_model: Path, reid_model: Path, *, device: str = "auto") -> None:
+        import cv2
+
+        use_cuda = _torch_device(device).startswith("cuda") and hasattr(cv2.dnn, "DNN_TARGET_CUDA")
+        backend = cv2.dnn.DNN_BACKEND_CUDA if use_cuda else cv2.dnn.DNN_BACKEND_OPENCV
+        target = cv2.dnn.DNN_TARGET_CUDA_FP16 if use_cuda else cv2.dnn.DNN_TARGET_CPU
+        self.detector = cv2.dnn.readNet(str(yolox_model))
+        self.reid = cv2.dnn.readNet(str(reid_model))
+        for model in (self.detector, self.reid):
+            model.setPreferableBackend(backend)
+            model.setPreferableTarget(target)
+        grids, expanded = [], []
+        for stride in (8, 16, 32):
+            size = 640 // stride
+            xv, yv = np.meshgrid(np.arange(size), np.arange(size))
+            grid = np.stack((xv, yv), 2).reshape(1, -1, 2)
+            grids.append(grid)
+            expanded.append(np.full((*grid.shape[:2], 1), stride))
+        self.grids = np.concatenate(grids, axis=1)
+        self.expanded_strides = np.concatenate(expanded, axis=1)
+
+    def _embedding(self, crop: Any) -> list[float]:
+        import cv2
+
+        resized = cv2.resize(crop, (128, 256), interpolation=cv2.INTER_LINEAR)
+        rgb = resized[:, :, ::-1].astype(np.float32) / 255.0
+        rgb = (rgb - np.asarray((.485, .456, .406), dtype=np.float32)) / np.asarray((.229, .224, .225), dtype=np.float32)
+        self.reid.setInput(cv2.dnn.blobFromImage(rgb))
+        embedding = self.reid.forward().reshape(-1).astype(np.float32)
+        embedding /= max(float(np.linalg.norm(embedding)), 1e-12)
+        return embedding.tolist()
+
+    def detect(self, path: Path, *, time_value: float) -> list[dict[str, Any]]:
+        import cv2
+
+        image = cv2.imread(str(path))
+        if image is None:
+            return []
+        height, width = image.shape[:2]
+        ratio = min(640 / max(1, height), 640 / max(1, width))
+        resized = cv2.resize(image, (int(width * ratio), int(height * ratio)), interpolation=cv2.INTER_LINEAR)
+        padded = np.full((640, 640, 3), 114, dtype=np.float32)
+        padded[:resized.shape[0], :resized.shape[1]] = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        self.detector.setInput(np.transpose(padded, (2, 0, 1))[None])
+        output = self.detector.forward(self.detector.getUnconnectedOutLayersNames())[0][0].copy()
+        output[:, :2] = (output[:, :2] + self.grids[0]) * self.expanded_strides[0]
+        output[:, 2:4] = np.exp(output[:, 2:4]) * self.expanded_strides[0]
+        scores = output[:, 4] * output[:, 5]  # COCO class zero is person.
+        keep = np.where(scores >= .35)[0]
+        if not len(keep):
+            return []
+        boxes: list[list[float]] = []
+        confidences: list[float] = []
+        for index in keep:
+            center_x, center_y, box_width, box_height = output[index, :4]
+            boxes.append([
+                float((center_x - box_width / 2) / ratio),
+                float((center_y - box_height / 2) / ratio),
+                float(box_width / ratio), float(box_height / ratio),
+            ])
+            confidences.append(float(scores[index]))
+        retained = cv2.dnn.NMSBoxes(boxes, confidences, .35, .5)
+        rows: list[dict[str, Any]] = []
+        for position, raw_index in enumerate(np.asarray(retained).reshape(-1).tolist() if len(retained) else []):
+            x, y, box_width, box_height = boxes[int(raw_index)]
+            x1, y1 = max(0, int(x)), max(0, int(y))
+            x2, y2 = min(width, int(x + box_width)), min(height, int(y + box_height))
+            if x2 - x1 < 16 or y2 - y1 < 32:
+                continue
+            crop = image[y1:y2, x1:x2]
+            rows.append({
+                "id": f"body_{time_value:.3f}_{position}", "start": float(time_value), "end": float(time_value),
+                "box": [float(x1), float(y1), float(x2), float(y2)],
+                "confidence": confidences[int(raw_index)], "embedding": self._embedding(crop),
+                "frameWidth": int(width), "frameHeight": int(height),
+                "coordinateSpace": "recognition_frame", "observationType": "body",
+            })
+        return rows
+
+
 class GroundingDinoEngine:
     def __init__(self, model_id: str, *, device: str = "auto", cache_dir: Path | None = None) -> None:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor

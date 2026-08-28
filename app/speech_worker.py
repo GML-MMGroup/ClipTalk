@@ -133,6 +133,7 @@ def main() -> int:
                 write_json(status_path, {"status": "running", "phase": phase, "device": config.get("device"), "error": None, "pid": os.getpid(), "requestId": request_id, "progress": value, "processed": processed, "total": total})
             payload = _analyze_sensevoice(
                 Path(request["source"]), **config, cancelled=cancel_path.is_file, progress_callback=report_progress,
+                preset_speaker_count=int(request.get("presetSpeakerCount") or 0) or None,
             )
             write_json(status_path, {"status": "running", "phase": "finalizing", "device": config.get("device"), "error": None, "pid": os.getpid(), "requestId": request_id, "progress": None, "processed": None, "total": None})
             write_json(results / f"{request_id}.json", {"payload": payload})

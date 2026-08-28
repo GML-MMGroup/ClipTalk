@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -41,6 +42,25 @@ def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 def tracked_files(root: Path) -> list[str]:
     completed = _git(root, "ls-files", "-z")
     return [value for value in completed.stdout.split("\0") if value]
+
+
+def is_git_repository(root: Path) -> bool:
+    return _git(root, "rev-parse", "--is-inside-work-tree", check=False).returncode == 0
+
+
+def filesystem_files(root: Path) -> list[str]:
+    """Audit a source snapshot when Git metadata was intentionally omitted."""
+    excluded_directories = {
+        ".git", ".pytest_cache", "__pycache__", "data", "local-artifacts", "tmp", "test-results",
+        "playwright-report", "node_modules", ".venv", "venv",
+    }
+    files: list[str] = []
+    for current, directories, filenames in os.walk(root):
+        directories[:] = [name for name in directories if name not in excluded_directories]
+        directory = Path(current)
+        for filename in filenames:
+            files.append((directory / filename).relative_to(root).as_posix())
+    return files
 
 
 def environment_names_from_python(path: Path) -> set[str]:
@@ -93,13 +113,31 @@ def configuration_errors(root: Path) -> list[str]:
     return [f".env.example 缺少配置项：{name}" for name in sorted(referenced - documented)]
 
 
-def repository_errors(root: Path, *, compare_ref: str = "") -> list[str]:
+def repository_errors(root: Path, *, compare_ref: str = "", mode: str = "source") -> list[str]:
+    if mode not in {"source", "deployment"}:
+        raise ValueError(f"未知仓库检查模式：{mode}")
     errors = configuration_errors(root)
-    files = tracked_files(root)
+    git_backed = is_git_repository(root)
+    files = tracked_files(root) if git_backed else filesystem_files(root)
+    if not git_backed and mode == "source":
+        if (root / ".env").is_file():
+            errors.append("源码快照包含真实环境文件：.env")
+        for prefix in FORBIDDEN_PREFIXES:
+            directory = root / prefix.rstrip("/")
+            if directory.exists():
+                errors.append(f"源码快照包含运行目录：{prefix}")
     for relative in files:
         path = Path(relative)
         lowered = relative.lower()
-        if relative == ".env" or (relative.startswith(".env.") and relative != ".env.example"):
+        local_environment = relative == ".env" or (relative.startswith(".env.") and relative != ".env.example")
+        runtime_artifact = (
+            any(relative.startswith(prefix) for prefix in FORBIDDEN_PREFIXES)
+            or lowered.endswith(FORBIDDEN_SUFFIXES)
+            or (len(path.parts) == 1 and path.suffix.lower() in {".png", ".jpg", ".jpeg"})
+        )
+        if mode == "deployment" and (local_environment or runtime_artifact):
+            continue
+        if local_environment:
             errors.append(f"禁止提交真实环境文件：{relative}")
         if any(relative.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
             errors.append(f"禁止提交运行目录：{relative}")
@@ -125,6 +163,9 @@ def repository_errors(root: Path, *, compare_ref: str = "") -> list[str]:
             errors.append(f"包含本机绝对路径：{relative}")
 
     if compare_ref:
+        if not git_backed:
+            errors.append("无 Git 元数据，不能执行 --compare-ref 保护检查")
+            return list(dict.fromkeys(errors))
         for protected in PROTECTED_FILES:
             changed = _git(root, "diff", "--quiet", compare_ref, "--", protected, check=False)
             if changed.returncode != 0:
@@ -136,10 +177,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="检查 ClipTalk Git 提交边界")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--compare-ref", default="", help="用于保护 README 和 LICENSE 的 Git 基线")
+    parser.add_argument("--mode", choices=("source", "deployment"), default="source", help="源码提交或运行实例检查")
     args = parser.parse_args()
     root = args.root.resolve()
     try:
-        errors = repository_errors(root, compare_ref=args.compare_ref)
+        errors = repository_errors(root, compare_ref=args.compare_ref, mode=args.mode)
     except (OSError, subprocess.CalledProcessError, SyntaxError) as error:
         print(f"仓库检查无法完成：{error}", file=sys.stderr)
         return 2
@@ -148,7 +190,7 @@ def main() -> int:
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-    print("仓库检查通过：配置模板完整，未发现本机数据、密钥模式或超大文件")
+    print(f"仓库检查通过：{args.mode} 模式配置与边界有效")
     return 0
 
 

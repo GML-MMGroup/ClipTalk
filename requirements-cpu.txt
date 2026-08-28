@@ -1,0 +1,29 @@
+# Complete CPU environment: web service, speech and multimodal recognition.
+# NumPy 1.26 avoids mixed NumPy 1/2 ABI failures in audio
+# and computer-vision wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+httpx>=0.27,<1
+python-multipart>=0.0.9,<1
+pydantic>=2.10,<3
+starlette>=0.40,<1
+pillow>=10,<13
+opencv-python-headless>=4.9,<5
+cryptography>=41,<47
+
+numpy==1.26.4
+scipy>=1.8,<2
+scikit-learn>=1.2,<2
+funasr==1.4.1
+faster-whisper==1.1.0
+ctranslate2==4.4.0
+torch==2.2.0+cpu
+torchaudio==2.2.0+cpu
+
+transformers==4.57.6
+safetensors==0.8.0
+sentencepiece==0.2.2
+paddleocr==3.7.0
+paddlepaddle==3.3.0

@@ -38,7 +38,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+          python -m pip install -r requirements-cpu.txt
+          python -m pip install 'pytest>=9,<10' 'ruff>=0.12,<1'
 
       - name: Install Node dependencies and Chromium
         run: |
@@ -54,6 +55,17 @@ jobs:
 
       - name: Check runtime prerequisites
         run: python tools/doctor.py --profile visual
+
+      - name: Verify generated UI runtimes
+        run: |
+          npm run build:ui-runtime
+          git diff --exit-code -- static/thinking-orbs.js static/generative-loaders.js static/generative-loaders.css static/border-beam.js static/ui-icons.js
+
+      - name: Compile Python sources
+        run: python -m compileall -q app tools
+
+      - name: Run static analysis
+        run: npm run lint
 
       - name: Run Python tests
         run: python -m pytest -q
@@ -77,7 +89,9 @@ jobs:
         run: cp .env.example .env
 
       - name: Validate Compose configuration
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --quiet
 
       - name: Build and start CPU image
         run: docker compose up --build --detach
@@ -92,6 +106,9 @@ jobs:
           done
           docker compose logs
           exit 1
+
+      - name: Smoke test installed CPU capabilities
+        run: docker compose exec -T cliptalk python tools/container_smoke.py
 
       - name: Stop Compose services
         if: always()

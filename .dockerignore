@@ -11,6 +11,7 @@ __pycache__
 .pytest_cache
 node_modules
 data
+local-artifacts
 assets
 benchmarks
 docs

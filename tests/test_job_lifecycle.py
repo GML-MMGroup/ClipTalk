@@ -3,6 +3,7 @@ from app.job_lifecycle import (
     CANCELLABLE_STATUSES,
     can_cancel,
     can_delete,
+    has_background_execution,
     has_active_execution,
     interrupted_job_patch,
 )
@@ -21,6 +22,21 @@ def test_active_job_must_be_cancelled_before_deletion() -> None:
     assert not can_delete({"status": "queued"})
     assert can_delete({"status": "awaiting_confirmation"})
     assert can_delete({"status": "completed"})
+
+
+def test_nested_automatic_composition_is_an_active_execution() -> None:
+    job = {
+        "status": "awaiting_confirmation",
+        "autoComposition": {"status": "running"},
+    }
+    assert has_background_execution(job)
+    assert has_active_execution(job)
+    assert can_cancel(job)
+    assert not can_delete(job)
+    assert not has_background_execution({
+        "status": "awaiting_confirmation",
+        "autoComposition": {"status": "completed"},
+    })
 
 
 def test_interrupted_patch_is_consistent_and_resumable_only_with_checkpoint() -> None:

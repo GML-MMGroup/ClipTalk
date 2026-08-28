@@ -41,7 +41,10 @@ def main() -> None:
             "workerPid": os.getpid(), "ownerPid": owner_pid,
         })
     raw_settings = dict(request.get("settings") or {})
-    for key in ("recognition_yunet_model", "recognition_sface_model", "recognition_model_cache"):
+    for key in (
+        "recognition_yunet_model", "recognition_sface_model", "recognition_yolox_model",
+        "recognition_youtureid_model", "recognition_model_cache",
+    ):
         raw_settings[key] = Path(raw_settings[key])
     result = enrich_multimodal_index(
         source=Path(request["source"]), root=Path(request["root"]),
@@ -53,6 +56,7 @@ def main() -> None:
         speech_analysis_complete=bool(request.get("speechAnalysisComplete")),
         scope_start=float(request.get("scopeStart") or 0),
         scope_end=float(request["scopeEnd"]) if request.get("scopeEnd") is not None else None,
+        algorithm_version=str(request.get("algorithmVersion") or "editing-algorithm-v1"),
         ffmpeg=str(request["ffmpeg"]),
         progress=report,
         cancelled=lambda: not owner_alive(),

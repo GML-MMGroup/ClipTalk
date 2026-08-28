@@ -21,6 +21,10 @@ from app.content_search import evaluate_content_search_cases
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate annotated content-search JSONL results")
     parser.add_argument("input", type=Path, help="JSONL file with expected and predicted ranges")
+    parser.add_argument(
+        "--require-input", action="store_true",
+        help="Fail instead of reporting not-run when a private dataset is absent",
+    )
     parser.add_argument("--check", action="store_true", help="Fail when regression thresholds are not met")
     parser.add_argument("--min-recall", type=float, default=0.80)
     parser.add_argument("--min-precision", type=float, default=0.75)
@@ -42,6 +46,15 @@ def main() -> None:
         help="Apply the production interview/lesson quality bar from the dialogue-v2 plan",
     )
     args = parser.parse_args()
+    if not args.input.is_file():
+        print(json.dumps({
+            "status": "not_run",
+            "dataset": str(args.input),
+            "reason": "标注集未提供；请按 benchmarks/INTERVIEW_ANNOTATION.md 准备本地私有数据",
+        }, ensure_ascii=False, indent=2))
+        if args.require_input:
+            raise SystemExit(2)
+        return
     cases = [
         json.loads(line)
         for line in args.input.read_text(encoding="utf-8").splitlines()

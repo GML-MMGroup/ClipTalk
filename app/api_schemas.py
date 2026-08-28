@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     text: str
+    confirmedWorkflowKind: str | None = None
     uiContext: dict[str, Any] | None = None
     subtitleMode: str | None = None
     selections: list[dict[str, Any]] | None = None
@@ -20,6 +21,25 @@ class ChatRequest(BaseModel):
     contentExclusions: list[str] | None = None
     evidenceMode: str | None = None
     allowedCapabilities: list[str] | None = None
+
+
+class WorkflowIntentRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    currentWorkflowKind: str | None = Field(default=None, max_length=24)
+    context: dict[str, Any] | None = None
+
+
+class ClientErrorReportRequest(BaseModel):
+    kind: str = Field(default="error", min_length=1, max_length=32)
+    name: str = Field(default="Error", min_length=1, max_length=80)
+    message: str = Field(default="", max_length=1000)
+    stack: str = Field(default="", max_length=6000)
+    pagePath: str = Field(default="/", max_length=500)
+    scriptPath: str = Field(default="", max_length=500)
+    line: int | None = Field(default=None, ge=0, le=10_000_000)
+    column: int | None = Field(default=None, ge=0, le=10_000_000)
+    jobId: str = Field(default="", max_length=96)
+    build: str = Field(default="", max_length=120)
 
 
 class ContentSearchConfirmRequest(BaseModel):
@@ -37,6 +57,11 @@ class ContentSearchConfirmRequest(BaseModel):
 class ContentSelectionBasketRequest(BaseModel):
     items: list[dict[str, str]] = Field(default_factory=list, max_length=200)
     revision: int | None = None
+    outputMode: str | None = None
+    orderMode: str | None = None
+    subtitleMode: str | None = None
+    subtitleStyle: str | None = None
+    targetSeconds: float | None = None
 
 
 class ContentSelectionBasketConfirmRequest(BaseModel):
@@ -47,6 +72,7 @@ class ContentSelectionBasketConfirmRequest(BaseModel):
     subtitleDraftId: str | None = None
     acknowledgeIncomplete: bool = False
     acknowledgeOverlap: bool = False
+    targetSeconds: float | None = None
 
 
 class ContentSearchOrderRequest(BaseModel):
@@ -85,6 +111,13 @@ class ContentSearchBoundaryRequest(BaseModel):
     end: float | None = None
 
 
+class ContentSearchManualRangeRequest(BaseModel):
+    searchId: str
+    start: float
+    end: float
+    title: str = Field(default="", max_length=80)
+
+
 class ContentSearchBulkKeepRequest(BaseModel):
     searchId: str
     matchIds: list[str] = Field(default_factory=list, max_length=200)
@@ -100,11 +133,78 @@ class PersonTargetRequest(BaseModel):
     personId: str | None = Field(default=None, min_length=1, max_length=64)
     personIds: list[str] | None = Field(default=None, min_length=1, max_length=12)
     matchMode: str = Field(default="any", min_length=3, max_length=8)
+    activity: str | None = Field(default=None, min_length=8, max_length=10)
 
 
 class PersonSpeakerRequest(BaseModel):
     personId: str = Field(min_length=1, max_length=64)
     speakerRef: str = Field(min_length=1, max_length=64)
+
+
+class PersonMergeRequest(BaseModel):
+    personIds: list[str] = Field(min_length=2, max_length=12)
+    targetPersonId: str | None = Field(default=None, min_length=1, max_length=64)
+    label: str | None = Field(default=None, max_length=48)
+    revision: int | None = Field(default=None, ge=0)
+
+
+class PersonRangeEditRequest(BaseModel):
+    sourcePersonId: str = Field(min_length=1, max_length=64)
+    rangeIds: list[str] = Field(min_length=1, max_length=500)
+    targetPersonId: str | None = Field(default=None, min_length=1, max_length=64)
+    label: str | None = Field(default=None, max_length=48)
+    revision: int | None = Field(default=None, ge=0)
+
+
+class VoiceProfileLabelRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=48)
+
+
+class VoiceTargetSearchRequest(BaseModel):
+    profileId: str = Field(min_length=1, max_length=80)
+    query: str = Field(default="", max_length=500)
+
+
+class CurrentVoiceLabelRequest(BaseModel):
+    speakerRef: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=48)
+
+
+class CurrentVoiceRoleRequest(BaseModel):
+    speakerRef: str = Field(min_length=1, max_length=64)
+    role: str = Field(min_length=4, max_length=16)
+
+
+class CurrentVoiceDiscoveryRequest(BaseModel):
+    expectedSpeakerCount: int = Field(default=0, ge=0, le=12)
+    force: bool = False
+
+
+class CurrentVoiceTargetRequest(BaseModel):
+    speakerRef: str = Field(min_length=1, max_length=64)
+    query: str = Field(default="", max_length=500)
+
+
+class CurrentVoiceSelectionRequest(BaseModel):
+    speakerRefs: list[str] = Field(min_length=1, max_length=12)
+    mode: str = Field(default="include", min_length=2, max_length=16)
+    query: str = Field(default="", max_length=500)
+
+
+class CurrentVoiceEditRequest(BaseModel):
+    operation: str = Field(min_length=4, max_length=16)
+    speakerRefs: list[str] = Field(default_factory=list, max_length=12)
+    turnIds: list[str] = Field(default_factory=list, max_length=500)
+    targetSpeakerRef: str | None = Field(default=None, max_length=64)
+    label: str | None = Field(default=None, max_length=48)
+    splitTime: float | None = Field(default=None, ge=0)
+    revision: int | None = Field(default=None, ge=0)
+
+
+class TemporaryVoiceSessionRequest(BaseModel):
+    referenceSpeakerRef: str = Field(min_length=1, max_length=64)
+    targetJobIds: list[str] = Field(min_length=1, max_length=12)
+    query: str = Field(default="", max_length=500)
 
 
 class BriefConfirmRequest(BaseModel):
@@ -144,6 +244,18 @@ class DeriveJobRequest(BaseModel):
     message: str = "根据当前结果继续生成"
 
 
+class SameSourceTaskRequest(BaseModel):
+    workflowKind: str = Field(min_length=8, max_length=24)
+    instruction: str = Field(default="", max_length=500)
+    sourceScopeKind: str = Field(default="all", min_length=3, max_length=16)
+    sourceScopeStart: float | None = Field(default=None, ge=0)
+    sourceScopeEnd: float | None = Field(default=None, gt=0)
+    expectedSpeakerCount: int | None = Field(default=None, ge=1, le=32)
+    targetSeconds: float | None = Field(default=None, ge=4, le=86400)
+    variantCount: int | None = Field(default=None, ge=1, le=4)
+    autoCompose: bool = True
+
+
 class ConfirmCandidatesRequest(BaseModel):
     indices: list[int] | None = None
     groupIds: list[str] | None = None
@@ -164,7 +276,7 @@ class AutoPlanRequest(BaseModel):
     segmentIds: dict[str, list[str]] | None = None
     targetSeconds: float | None = None
     structure: str = "auto"
-    variantCount: int = 3
+    variantCount: int = 1
     techniquePolicy: dict[str, Any] | None = None
 
 
@@ -184,11 +296,17 @@ class FinalizeOutputVersionRequest(BaseModel):
     subtitleMode: str = "none"
     subtitleStyle: str = "clean"
     subtitleDraftId: str | None = None
+    acknowledgeQualityRisk: bool = False
+
+
+class RegenerateAutoCompositionRequest(BaseModel):
+    targetVariantCount: int = Field(default=3, ge=1, le=4)
 
 
 class SubtitleDraftCreateRequest(BaseModel):
     outputs: list[dict[str, Any]] = Field(default_factory=list)
     subtitleStyle: str = "clean"
+    startTranscription: bool = True
 
 
 class SubtitleDraftUpdateRequest(BaseModel):
@@ -276,3 +394,35 @@ class CreateEventGroupRequest(BaseModel):
 class CreateEventFromCandidatesRequest(BaseModel):
     indices: list[int]
     title: str = "重新编排高光"
+
+
+class EditSessionCreateRequest(BaseModel):
+    baseVersionId: str | None = Field(default=None, min_length=1, max_length=64)
+    outputFilename: str | None = Field(default=None, max_length=255)
+    sourceSearchId: str | None = Field(default=None, min_length=1, max_length=64)
+    selectedMatchIds: list[str] = Field(default_factory=list, max_length=256)
+    orderMode: str = Field(default="source", max_length=32)
+
+
+class EditSessionOperationRequest(BaseModel):
+    revision: int = Field(ge=0)
+    operation: dict[str, Any]
+
+
+class EditSessionRevisionRequest(BaseModel):
+    revision: int = Field(ge=0)
+
+
+class EditSessionRenderRequest(BaseModel):
+    revision: int = Field(ge=0)
+    subtitleMode: str = "none"
+    subtitleStyle: str = "clean"
+    subtitleDraftId: str | None = None
+    versionLabel: str | None = Field(default=None, max_length=80)
+    acknowledgedWarningCodes: list[str] = Field(default_factory=list, max_length=32)
+
+
+class EditSessionProposalRequest(BaseModel):
+    revision: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=500)
+    selectedClipIds: list[str] = Field(default_factory=list, max_length=64)

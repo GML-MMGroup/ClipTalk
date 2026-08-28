@@ -14,9 +14,25 @@ from .active_speaker import active_speaker_runtime
 
 
 LEGACY_MULTIMODAL_INDEX_VERSION = "multimodal-index-v4"
-MULTIMODAL_INDEX_VERSION = "multimodal-index-v7-dense-screen-text"
-RECOGNITION_SCHEMA_VERSION = 7
+CONTINUITY_MULTIMODAL_INDEX_VERSION = "multimodal-index-v8-continuity"
+PREVIOUS_MULTIMODAL_INDEX_VERSION = "multimodal-index-v9-person-continuity"
+MULTIMODAL_INDEX_VERSION = "multimodal-index-v11-face-anchored-person-identity"
+RECOGNITION_SCHEMA_VERSION = 10
 RECOGNITION_MODALITIES = ("speech", "visual", "ocr", "audio", "person")
+
+PERSON_TRACK_CONTINUITY_GAP_SECONDS = 2.0
+PERSON_IDENTITY_SIMILARITY_THRESHOLD = .42
+PERSON_DUPLICATE_REVIEW_SIMILARITY = .62
+PERSON_SAME_FRAME_TOLERANCE_SECONDS = .05
+PERSON_SAMPLE_SUPPORT_SECONDS = .3
+PERSON_SCENE_CUT_BRIDGE_GAP_SECONDS = 1.1
+PERSON_SCENE_CUT_BRIDGE_SIMILARITY = .72
+# SFace's published generic threshold is too permissive for this pipeline's
+# compressed, interview-style crops: different men in the regression asset
+# reach .461 cosine similarity, while repeated observations of the same five
+# people stay at or above .661. Keep a measured safety margin between them.
+PERSON_FACE_MATCH_SIMILARITY = .58
+PERSON_FACE_CONFLICT_SIMILARITY = .50
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -50,6 +66,8 @@ def runtime_capabilities(settings: Any, *, probe_active_speaker: bool = True) ->
     profile = normalize_recognition_profile(getattr(settings, "recognition_profile", "auto"), cuda_available=cuda)
     yunet = Path(getattr(settings, "recognition_yunet_model", ""))
     sface = Path(getattr(settings, "recognition_sface_model", ""))
+    yolox = Path(getattr(settings, "recognition_yolox_model", ""))
+    youtureid = Path(getattr(settings, "recognition_youtureid_model", ""))
     enabled = bool(getattr(settings, "recognition_enabled", True))
     capabilities = {
         "schemaVersion": RECOGNITION_SCHEMA_VERSION,
@@ -75,8 +93,10 @@ def runtime_capabilities(settings: Any, *, probe_active_speaker: bool = True) ->
             "model": getattr(settings, "recognition_grounding_model", ""),
         },
         "anonymousPersons": {
-            "status": "ready" if enabled and yunet.is_file() and sface.is_file() else "degraded",
-            "reason": "" if yunet.is_file() and sface.is_file() else "face_models_not_prepared",
+            "status": "ready" if enabled and all(path.is_file() for path in (yunet, sface, yolox, youtureid)) else "degraded",
+            "reason": "" if all(path.is_file() for path in (yunet, sface, yolox, youtureid)) else "person_body_or_face_models_not_prepared",
+            "detector": "OpenCV Zoo YOLOX",
+            "reId": "OpenCV Zoo YoutuReID",
         },
         "activeSpeaker": active_speaker_runtime(settings, probe=probe_active_speaker),
     }
@@ -158,7 +178,8 @@ def dense_person_sample_times(
     ``interval`` seconds inside the requested range.
     """
     lower = max(0.0, _number(start))
-    upper = max(lower, _number(end, lower)) if end is not None else None
+    inferred_end = max((_number(shot.get("end"), lower) for shot in shots), default=lower)
+    upper = max(lower, _number(end, inferred_end)) if end is not None else max(lower, inferred_end)
     step = max(.1, _number(interval, .5))
     values: set[float] = set()
     for shot in shots:
@@ -172,7 +193,15 @@ def dense_person_sample_times(
         while value < shot_end:
             values.add(round(value, 3))
             value += step
-        values.add(round(shot_end, 3))
+        # The media duration is the first instant *after* the last decodable
+        # frame. Requesting that exact timestamp makes ffmpeg legitimately
+        # return one frame fewer and used to leave otherwise complete scans at
+        # 99.9% forever. Scene-cut boundaries remain valid samples; only the
+        # terminal source boundary is moved slightly inside the asset.
+        terminal_boundary = upper is not None and shot_end >= upper - .0005
+        terminal_margin = min(.05, max(.001, (shot_end - shot_start) * .25))
+        final_sample = max(shot_start, shot_end - terminal_margin) if terminal_boundary else shot_end
+        values.add(round(final_sample, 3))
     return sorted(values)
 
 
@@ -251,25 +280,210 @@ def _cosine(left: Iterable[Any], right: Iterable[Any]) -> float:
     return float(np.dot(a, b) / denominator) if denominator > 0 else -1.0
 
 
+def _center_distance(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_box, right_box = list(left.get("box") or []), list(right.get("box") or [])
+    if len(left_box) < 4 or len(right_box) < 4:
+        return 1.0
+    left_center = ((_number(left_box[0]) + _number(left_box[2])) / 2, (_number(left_box[1]) + _number(left_box[3])) / 2)
+    right_center = ((_number(right_box[0]) + _number(right_box[2])) / 2, (_number(right_box[1]) + _number(right_box[3])) / 2)
+    width = max(1.0, _number(left.get("frameWidth"), _number(right.get("frameWidth"), 1)))
+    height = max(1.0, _number(left.get("frameHeight"), _number(right.get("frameHeight"), 1)))
+    return min(1.0, math.hypot((left_center[0] - right_center[0]) / width, (left_center[1] - right_center[1]) / height) * 2)
+
+
+def link_body_tracklets(
+    detections: list[dict[str, Any]], *, maximum_gap: float = .65,
+    scene_cuts: Iterable[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Associate dense body detections without carrying identity across edits.
+
+    A fixed interview camera can place several consecutive people inside an
+    almost identical box.  Spatial continuity is useful inside a shot, but it
+    is not identity evidence across a cut.  Reset active tracklets whenever a
+    scene boundary is crossed and let the identity clusterer reconnect only
+    when ReID or a face anchor supports it.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    rows = sorted((dict(item) for item in detections), key=lambda item: (_number(item.get("start")), str(item.get("id") or "")))
+    cuts = sorted(_number(value) for value in scene_cuts or [])
+    by_time: dict[float, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_time.setdefault(round(_number(row.get("start")), 3), []).append(row)
+    active: dict[str, dict[str, Any]] = {}
+    next_track = 1
+    result: list[dict[str, Any]] = []
+    for time_value, frame_rows in sorted(by_time.items()):
+        active = {
+            key: value for key, value in active.items()
+            if time_value - _number(value.get("start")) <= maximum_gap
+            and not any(
+                _number(value.get("start")) < cut <= time_value
+                for cut in cuts
+            )
+        }
+        track_ids = list(active)
+        assignments: dict[int, str] = {}
+        if track_ids and frame_rows:
+            cost = np.full((len(track_ids), len(frame_rows)), 10.0, dtype=np.float32)
+            for left_index, track_id in enumerate(track_ids):
+                previous = active[track_id]
+                for right_index, detection in enumerate(frame_rows):
+                    similarity = _cosine(previous.get("embedding") or [], detection.get("embedding") or [])
+                    previous_face = list(previous.get("faceEmbedding") or [])
+                    detection_face = list(detection.get("faceEmbedding") or [])
+                    face_similarity = (
+                        _cosine(previous_face, detection_face)
+                        if previous_face and detection_face else None
+                    )
+                    if (
+                        face_similarity is not None
+                        and face_similarity < PERSON_FACE_CONFLICT_SIMILARITY
+                    ):
+                        # Some fixed-camera edits are too visually similar for
+                        # the generic scene detector. A conflicting face is a
+                        # stronger boundary than box overlap or clothing ReID.
+                        continue
+                    iou = _box_iou(previous.get("box"), detection.get("box"))
+                    center = _center_distance(previous, detection)
+                    value = .48 * (1 - max(-1.0, similarity)) / 2 + .32 * (1 - iou) + .20 * center
+                    if face_similarity is not None and face_similarity >= PERSON_FACE_MATCH_SIMILARITY:
+                        value = max(0.0, value - .12)
+                    if similarity >= .2 or iou >= .08:
+                        cost[left_index, right_index] = value
+            left_indices, right_indices = linear_sum_assignment(cost)
+            for left_index, right_index in zip(left_indices.tolist(), right_indices.tolist()):
+                if float(cost[left_index, right_index]) <= .62:
+                    assignments[right_index] = track_ids[left_index]
+        for index, detection in enumerate(frame_rows):
+            track_id = assignments.get(index)
+            if not track_id:
+                track_id = f"body_track_{next_track:05d}"
+                next_track += 1
+            detection["trackletId"] = track_id
+            active[track_id] = detection
+            result.append(detection)
+    return result
+
+
 def cluster_person_tracks(
-    tracks: list[dict[str, Any]], *, similarity_threshold: float = .45,
-    scene_cuts: Iterable[Any] | None = None, maximum_gap: float = 1.25,
+    tracks: list[dict[str, Any]], *, similarity_threshold: float = PERSON_IDENTITY_SIMILARITY_THRESHOLD,
+    scene_cuts: Iterable[Any] | None = None,
+    maximum_gap: float = PERSON_TRACK_CONTINUITY_GAP_SECONDS,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> list[dict[str, Any]]:
     tracks = sorted((dict(item) for item in tracks if item.get("embedding")), key=lambda item: _number(item.get("start")))
+    identity_scene_cuts = sorted(_number(value) for value in scene_cuts or [])
     clusters: list[dict[str, Any]] = []
     for track in tracks:
         embedding = list(track.get("embedding") or [])
+        face_embedding = list(track.get("faceEmbedding") or [])
+        # Faces detected in one sampled frame are a hard cannot-link pair.  It
+        # lets us use a slightly more tolerant identity threshold for pose and
+        # lighting changes without merging two people who are visibly present
+        # at the same time.
+        tracklet_id = str(track.get("trackletId") or "")
+        track_time = _number(track.get("start"))
+
+        def identity_profile(cluster: dict[str, Any]) -> dict[str, Any]:
+            body_similarity = _cosine(cluster["centroid"], embedding)
+            cluster_face = list(cluster.get("faceCentroid") or [])
+            face_similarity = (
+                _cosine(cluster_face, face_embedding)
+                if cluster_face and face_embedding else None
+            )
+            last_time = max((_number(value.get("start")) for value in cluster.get("tracks") or []), default=-1)
+            crossed_shot = any(last_time < cut <= track_time for cut in identity_scene_cuts)
+            required = similarity_threshold + (.1 if algorithm_version == "editing-algorithm-v2" and crossed_shot else 0)
+            return {
+                "body": body_similarity,
+                "face": face_similarity,
+                "sameTracklet": bool(tracklet_id and tracklet_id in cluster.get("trackletIds", set())),
+                "crossedShot": crossed_shot,
+                "required": min(.9, required),
+            }
+
+        def identity_eligible(profile: dict[str, Any]) -> bool:
+            face_similarity = profile["face"]
+            if face_similarity is not None:
+                # Once both sides have a face anchor it owns the identity
+                # decision.  Body appearance must not override a conflicting
+                # face merely because several interviewees occupy the same
+                # fixed camera position.
+                if face_similarity >= PERSON_FACE_MATCH_SIMILARITY:
+                    return True
+                return bool(
+                    profile["sameTracklet"]
+                    and not profile["crossedShot"]
+                    and face_similarity >= PERSON_FACE_CONFLICT_SIMILARITY
+                )
+            if profile["sameTracklet"] and not profile["crossedShot"]:
+                return True
+            return profile["body"] >= profile["required"]
+
         candidates = [
-            cluster for cluster in clusters
-            if _cosine(cluster["centroid"], embedding) >= similarity_threshold
+            (cluster, identity_profile(cluster)) for cluster in clusters
+            if not any(
+                abs(_number(existing.get("start")) - _number(track.get("start")))
+                <= PERSON_SAME_FRAME_TOLERANCE_SECONDS
+                for existing in cluster["tracks"]
+            )
         ]
-        cluster = max(candidates, key=lambda item: _cosine(item["centroid"], embedding), default=None)
+        candidates = [item for item in candidates if identity_eligible(item[1])]
+
+        def identity_rank(item: tuple[dict[str, Any], dict[str, Any]]) -> tuple[float, float, float]:
+            profile = item[1]
+            face_similarity = profile["face"]
+            face_priority = 2.0 if face_similarity is not None and face_similarity >= PERSON_FACE_MATCH_SIMILARITY else (
+                1.0 if profile["sameTracklet"] else 0.0
+            )
+            return (
+                face_priority,
+                face_similarity if face_similarity is not None else profile["body"],
+                profile["body"],
+            )
+
+        ranked_candidates = sorted(
+            candidates, key=identity_rank, reverse=True,
+        )
+        cluster = ranked_candidates[0][0] if ranked_candidates else None
+        best_profile = ranked_candidates[0][1] if ranked_candidates else None
+        if (
+            algorithm_version == "editing-algorithm-v2" and cluster is not None
+            and best_profile is not None
+            and not best_profile["sameTracklet"]
+            and not (
+                best_profile["face"] is not None
+                and best_profile["face"] >= PERSON_FACE_MATCH_SIMILARITY
+            )
+            and len(ranked_candidates) > 1
+            and best_profile["body"] - ranked_candidates[1][1]["body"] < .06
+        ):
+            cluster = None
         if cluster is None:
-            cluster = {"tracks": [], "embeddings": [], "centroid": embedding}
+            cluster = {
+                "tracks": [], "embeddings": [], "centroid": embedding,
+                "faceEmbeddings": [], "faceCentroid": [], "trackletIds": set(),
+            }
             clusters.append(cluster)
-        cluster["tracks"].append({key: value for key, value in track.items() if key != "embedding"})
+        public_track = {
+            key: value for key, value in track.items()
+            if key not in {"embedding", "faceEmbedding"}
+        }
+        # Retain the embedding only while constructing continuity ranges. It is
+        # never exposed in the anonymous-person index or persisted as UI data.
+        public_track["_continuityEmbedding"] = embedding
+        public_track["_continuityFaceEmbedding"] = face_embedding
+        cluster["tracks"].append(public_track)
+        if tracklet_id:
+            cluster["trackletIds"].add(tracklet_id)
         cluster["embeddings"].append(embedding)
         cluster["centroid"] = np.mean(np.asarray(cluster["embeddings"], dtype=np.float32), axis=0).tolist()
+        if face_embedding:
+            cluster["faceEmbeddings"].append(face_embedding)
+            cluster["faceCentroid"] = np.mean(
+                np.asarray(cluster["faceEmbeddings"], dtype=np.float32), axis=0,
+            ).tolist()
     result: list[dict[str, Any]] = []
     for index, cluster in enumerate(clusters):
         items = cluster["tracks"]
@@ -287,14 +501,37 @@ def cluster_person_tracks(
         # person, so expanding backwards can put the wrong person into the
         # returned clip. Keep both sides tiny; continuity is recovered by
         # merging observations, not by padding into neighboring content.
-        lead_window = min(.08, max(.04, maximum_gap * .08))
-        trail_window = min(.08, max(.04, maximum_gap * .08))
+        lead_window = min(PERSON_SAMPLE_SUPPORT_SECONDS, max(.12, maximum_gap * .15))
+        trail_window = min(PERSON_SAMPLE_SUPPORT_SECONDS, max(.12, maximum_gap * .15))
         for item in observed_items:
             time_value = _number(item.get("start"))
             start = max(0.0, _number(item.get("start"), time_value) - lead_window)
             end = max(start + .1, _number(item.get("end"), time_value) + trail_window)
-            crossed_cut = bool(ranges and any(ranges[-1]["end"] < cut < start for cut in cuts))
-            if ranges and not crossed_cut and start - ranges[-1]["end"] <= maximum_gap:
+            previous_cut = max((cut for cut in cuts if cut <= time_value), default=None)
+            next_cut = min((cut for cut in cuts if cut > time_value), default=None)
+            if previous_cut is not None:
+                start = max(start, previous_cut)
+            if next_cut is not None:
+                end = min(end, next_cut)
+            end = max(start + .1, end)
+            previous_observed_time = (
+                _number(range_evidence[-1].get("lastObservedTime")) if range_evidence else time_value
+            )
+            crossed_cut = bool(
+                ranges and any(previous_observed_time < cut <= time_value for cut in cuts)
+            )
+            previous_embedding = range_evidence[-1].get("_lastEmbedding") if range_evidence else None
+            continuity_similarity = _cosine(previous_embedding or [], item.get("_continuityEmbedding") or [])
+            cut_bridge_threshold = max(
+                PERSON_SCENE_CUT_BRIDGE_SIMILARITY,
+                min(.96, similarity_threshold + .18),
+            )
+            short_confident_cut = bool(
+                crossed_cut
+                and time_value - previous_observed_time <= PERSON_SCENE_CUT_BRIDGE_GAP_SECONDS
+                and continuity_similarity >= cut_bridge_threshold
+            )
+            if ranges and (not crossed_cut or short_confident_cut) and start - ranges[-1]["end"] <= maximum_gap:
                 gap = max(0.0, time_value - _number(range_evidence[-1].get("lastObservedTime"), time_value))
                 ranges[-1]["end"] = round(max(ranges[-1]["end"], end), 3)
                 range_evidence[-1]["observedCount"] += 1
@@ -302,22 +539,48 @@ def cluster_person_tracks(
                     _number(range_evidence[-1].get("maxObservedGap")), gap,
                 ), 3)
                 range_evidence[-1]["lastObservedTime"] = round(time_value, 3)
+                range_evidence[-1]["_lastEmbedding"] = item.get("_continuityEmbedding") or []
+                if short_confident_cut:
+                    range_evidence[-1]["sceneCutBridgeCount"] += 1
             else:
                 ranges.append({"start": round(start, 3), "end": round(end, 3)})
                 range_evidence.append({
-                    "observedCount": 1,
+                "observedCount": 1,
                     "maxObservedGap": 0.0,
                     "lastObservedTime": round(time_value, 3),
+                    "sceneCutBridgeCount": 0,
+                    "_lastEmbedding": item.get("_continuityEmbedding") or [],
                 })
-        for evidence in range_evidence:
+        for range_index, evidence in enumerate(range_evidence):
             evidence.pop("lastObservedTime", None)
+            evidence.pop("_lastEmbedding", None)
             evidence["interpolated"] = bool(
                 _number(evidence.get("maxObservedGap")) > max(.75, maximum_gap * .6)
+                or int(evidence.get("sceneCutBridgeCount") or 0) > 0
             )
-            evidence["confidence"] = round(
-                max(.55, min(.98, .72 + min(.18, .03 * evidence["observedCount"])
-                - (.1 if evidence["interpolated"] else 0))), 3,
-            )
+            if algorithm_version == "editing-algorithm-v2":
+                evidence["status"] = (
+                    "face_confirmed" if any(
+                        str(item.get("identityStatus") or "") == "face_confirmed"
+                        and ranges[range_index]["start"] - .001 <= _number(item.get("start")) <= ranges[range_index]["end"] + .001
+                        for item in observed_items
+                    ) else "body_tracked"
+                )
+                evidence["confidence"] = round(max(.5, min(.96,
+                    .58
+                    + (.18 if evidence["status"] == "face_confirmed" else .08)
+                    + min(.12, .02 * math.sqrt(evidence["observedCount"]))
+                    - (.12 if evidence["interpolated"] else 0)
+                )), 3)
+                if evidence["confidence"] < .62:
+                    evidence["status"] = "possible"
+            else:
+                evidence["confidence"] = round(
+                    max(.55, min(.98, .72 + min(.18, .03 * evidence["observedCount"])
+                    - (.1 if evidence["interpolated"] else 0))), 3,
+                )
+        appearance_seconds = sum(max(0.0, item["end"] - item["start"]) for item in ranges)
+        face_anchor_count = len(cluster.get("faceEmbeddings") or [])
         result.append({
             "id": f"person_{index + 1}", "modality": "person",
             "label": f"人物 {chr(65 + index) if index < 26 else index + 1}",
@@ -325,11 +588,70 @@ def cluster_person_tracks(
             "start": ranges[0]["start"], "end": ranges[-1]["end"], "ranges": ranges,
             "rangeEvidence": range_evidence,
             "trackIds": [str(item.get("id") or "") for item in items],
-            "trackCount": len(items), "confidence": round(min(1.0, .55 + .06 * len(items)), 3),
+            "trackCount": len(items), "confidence": (
+                round(float(np.mean([_number(value.get("confidence"), .5) for value in range_evidence])), 3)
+                if algorithm_version == "editing-algorithm-v2" and range_evidence
+                else round(min(1.0, .55 + .06 * len(items)), 3)
+            ),
+            "confidenceCalibration": "person-identity-v3-face-anchor" if algorithm_version == "editing-algorithm-v2" else "legacy-observation-count",
+            "faceAnchorCount": face_anchor_count,
+            "appearanceSeconds": round(appearance_seconds, 3),
+            "reviewRecommended": (
+                len(items) < 3 or appearance_seconds < 1.0
+                or (algorithm_version == "editing-algorithm-v2" and face_anchor_count == 0)
+            ),
             "representativeTime": round(_number(representative.get("start")), 3),
             "representativeBox": [round(_number(value), 2) for value in representative.get("box") or []],
             "anonymous": True, "scope": "single_video",
         })
+    # A same-frame cannot-link is still the safest automatic decision for a
+    # normal shot.  Split screens, mirrors and replay overlays are the notable
+    # exception: the same real person can legitimately occur twice in one
+    # frame.  Surface very similar cluster centroids for human review instead
+    # of silently merging them (which would be destructive for real groups of
+    # lookalike people).
+    duplicate_threshold = max(PERSON_DUPLICATE_REVIEW_SIMILARITY, similarity_threshold + .12)
+    for left_index, left_cluster in enumerate(clusters):
+        for right_index in range(left_index + 1, len(clusters)):
+            right_cluster = clusters[right_index]
+            body_similarity = _cosine(
+                left_cluster.get("centroid") or [], right_cluster.get("centroid") or [],
+            )
+            left_face = left_cluster.get("faceCentroid") or []
+            right_face = right_cluster.get("faceCentroid") or []
+            face_similarity = _cosine(left_face, right_face) if left_face and right_face else None
+            if face_similarity is not None:
+                duplicate = face_similarity >= PERSON_FACE_MATCH_SIMILARITY
+                similarity = face_similarity
+                evidence_type = "face_anchor"
+            else:
+                duplicate = body_similarity >= duplicate_threshold
+                similarity = body_similarity
+                evidence_type = "body_reid"
+            if not duplicate:
+                continue
+            left_person = result[left_index]
+            right_person = result[right_index]
+            left_person.setdefault("possibleDuplicatePersonIds", []).append(right_person["id"])
+            right_person.setdefault("possibleDuplicatePersonIds", []).append(left_person["id"])
+            left_person["duplicateReviewRecommended"] = True
+            right_person["duplicateReviewRecommended"] = True
+            left_person["duplicateEvidenceType"] = evidence_type
+            right_person["duplicateEvidenceType"] = evidence_type
+            left_person["duplicateSimilarity"] = round(max(
+                _number(left_person.get("duplicateSimilarity")), similarity,
+            ), 3)
+            right_person["duplicateSimilarity"] = round(max(
+                _number(right_person.get("duplicateSimilarity")), similarity,
+            ), 3)
+            left_person["duplicateBodySimilarity"] = round(max(
+                _number(left_person.get("duplicateBodySimilarity")), body_similarity,
+            ), 3)
+            right_person["duplicateBodySimilarity"] = round(max(
+                _number(right_person.get("duplicateBodySimilarity")), body_similarity,
+            ), 3)
+            left_person["reviewRecommended"] = True
+            right_person["reviewRecommended"] = True
     return result
 
 

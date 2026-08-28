@@ -4,10 +4,11 @@ import json
 from typing import Any
 
 
-PROMPT_VERSION = "highlight-director-v12-evidence-graph-20260813"
+PROMPT_VERSION = "highlight-director-v13-semantic-signal-gate-20260824"
 EDIT_PLAN_PROMPT_VERSION = "edit-plan-v8-quality-gate-20260813"
 BRIEF_PROMPT_VERSION = "brief-v1-20260806"
-COMPOSITION_REVIEW_PROMPT_VERSION = "composition-review-v4-multi-event-gate-20260813"
+COMPOSITION_REVIEW_PROMPT_VERSION = "composition-review-v6-tiered-display-20260821"
+COMPOSITION_EVIDENCE_RECOVERY_PROMPT_VERSION = "composition-evidence-recovery-v1-20260821"
 
 COMMON_SYSTEM_PROMPT = """你是专业视频高光导演和纪录片剪辑师。
 所有判断必须来自输入中真实可见的画面、图片时间码，以及明确提供的音频或逐字稿。
@@ -33,6 +34,31 @@ def generic_content_profile(theme: str = "") -> dict[str, Any]:
         "reason": f"内容类型识别降级，按通用标准分析。用户重点：{theme.strip() or '综合判断'}",
         "fallback": True,
     }
+
+
+def composition_evidence_recovery_prompt(
+    *, segment_id: str, window_start: float, window_end: float,
+    current_start: float, current_end: float, issue: str,
+    evidence_mode: str = "dynamic_video",
+) -> str:
+    duration = max(0.0, window_end - window_start)
+    time_rule = (
+        f"联系表格子标注的是源视频绝对时间码。先从标注时间减去 {window_start:.3f}，再填写相对局部窗口开头的秒数。"
+        if evidence_mode == "source_time_contact_sheet"
+        else f"输入视频只包含源视频 {window_start:.3f} 到 {window_end:.3f} 秒，局部视频的 0 秒对应源视频 {window_start:.3f} 秒。"
+    )
+    return f"""你正在复核源视频中的一个问题镜头。{time_rule}
+
+问题镜头 ID：{segment_id}
+当前源边界：{current_start:.3f} 到 {current_end:.3f} 秒
+质量问题：{issue}
+
+请检查目标动作、表达或结果是否在这个局部视频中完整出现。只有亲眼看到动作结束、结果状态稳定出现或完整表达自然结束，才能返回 complete。不要把后续无关动作当作原动作结果。
+complete_start_offset 和 complete_end_offset 必须是相对本局部视频开头的秒数，范围为 0 到 {duration:.3f}；边界应包含必要建立、完整动作和可辨认结果，但不要包含后续无关事件。
+如果只看到动作中途、没有结果，或无法确认，返回 unavailable。
+
+仅返回 JSON：
+{{"verdict":"complete/unavailable","complete_start_offset":数字或null,"complete_end_offset":数字或null,"action_complete":true或false,"evidence":"实际看到的动作与结果"}}"""
 
 
 def content_classification_prompt(*, video_duration: float, theme: str, analysis_mode: str) -> str:
@@ -101,6 +127,7 @@ def boundary_refinement_prompt(
 {exclusions}
 
 你的任务只包括确定真正可剪辑的开始和结束、标出其中不可丢失的精彩核心、删除无价值前摇拖尾、保证动作/人物反应/表达完整，并判断候选是否仍值得保留。
+候选标题如果是“画面变化热点”“声音能量热点”等检测器信号，你必须根据真实音画识别出“谁做了什么”或“发生了什么”，并改成具体事件/动作标题；无法确认具体内容时必须 keep=false。不得把热点、峰值、变化、视觉高光、精彩片段等检测器名称作为精修标题。
 通常保留 3–18 秒，确有完整性需要时最长 30 秒。不要把整段节目、整段采访或整个事件当成一个镜头。
 开始不要落在明显动作中段，结束不要截断仍在发展的动作或表达。只能使用联系表实际显示且位于 0 到 {video_duration:.3f} 秒的时间码。
 peak_start_seconds 和 peak_end_seconds 表示该候选最有价值、缩短时必须优先保留的核心范围；必须位于 start_seconds/end_seconds 内。
@@ -137,6 +164,7 @@ def event_director_prompt(
 {'候选边界已参考逐字稿。' if transcript_available else '没有逐字稿，不得虚构对白。'}
 
 请把属于同一真实事件的候选组合为事件高光。每组只围绕一个事件，优先包含事件建立、发展、高潮、人物反应、结果和必要上下文等互补镜头。
+“画面变化热点”“声音能量热点”等只是召回线索，不是事件。只有联系表能确认具体动作或事件时才能采用，事件标题必须明确描述实际发生的内容；无法确认时必须省略该候选。禁止输出热点、峰值、变化或“精彩片段”等泛化事件标题。
 同时显式判断镜头故事关系：story_function 说明镜头在事件中的叙事职责；requires_candidate_indices 只列出理解本镜头前必须出现的候选；leads_to_candidate_indices 表示它自然推动到的后续；standalone 表示脱离上下文是否仍成立；emotion_direction 描述情绪变化方向。
 不得因为人物或地点相同就合并不同事件；主体镜头只能属于一个事件，只有栏目开场或地点建立等公共上下文可标 reusable_anchor=true。
 不重复镜头、不加入无关画面、不为目标时长破坏事件完整性。新闻、访谈和纪实默认保持因果与源时间顺序；纯视觉蒙太奇才可调整顺序。
@@ -262,7 +290,9 @@ def composition_visual_review_prompt(
 用户剪辑目标：{json.dumps(user_goal, ensure_ascii=False)}
 实际成片时间线：{json.dumps(timeline, ensure_ascii=False)}
 
-一条成片允许包含多个真实事件章节。请分别检查每个章节内部是否围绕同一事件、动作与表达是否完整，再检查章节之间是否存在主题、因果、时间或情绪联系。不要因为成片包含多个章节就判为“事件不完整”；只有把无关事件伪装成同一连续场景才是问题。
+一条成片允许包含多个真实事件章节，也允许蒙太奇并列独立事件。请分别检查每个章节内部是否围绕同一事件、动作与表达是否完整；章节之间具有共同主题或风格即可，不强制因果或连续时间。不要因为成片包含多个章节就判为“事件不完整”；只有把无关事件伪装成同一连续场景才是问题。
+你正在审看整批任务中的一条样片。不得因为当前输入只有一条成片，就声称用户要求的多条成片数量未完成；整批数量由任务调度器另行校验。
+时间线中的 transitionOverlap 是 dissolve/fade_black 的正常渲染重叠。如果相邻镜头的 outputStart 早于前镜头 outputEnd，且差值等于 transitionOverlap，不得判为时间线冲突。
 请检查：开场是否快速建立主题、画面信息是否可理解、动作是否截断、切点是否跳跃、景别/主体/运动是否连续、是否出现视觉重复、高潮是否成立、结尾是否有自然落点。不同事件之间使用 dissolve 或声音桥属于关键连续性问题。
 如果时间线中存在 uncertainty.requiresDynamicReview=true，只选择对成片影响最大的最多 2 个镜头进行定向动态复核，判断画面事实、动作起止和高潮/结果落点是否真正成立。无法确认时 verdict 必须为 rejected，并在 issues 中给出 critical 问题；不要为普通低风险镜头增加复核项。
 只能引用联系表和时间线中的真实证据；不得猜测未显示的对白，不得创建时间码，不负责直接改片。
@@ -285,13 +315,14 @@ VLM 画面审片：{json.dumps(visual_review, ensure_ascii=False)}
 渲染后真实媒体检测（PCM 音轨、黑帧/冻结与切点，不是模型推测）：{json.dumps(media_evidence or {}, ensure_ascii=False)}
 可用候选池（所有边界均为硬边界）：{json.dumps(candidates, ensure_ascii=False)}
 
-重点检查内容完整性、因果和叙事、节奏、画面连续性、对白/声音连续性、用户目标匹配。成片可由多个事件章节组成：章节内部必须是同一事件，章节之间必须存在清楚的主题/因果/时间/情绪关系。不能仅因接近目标时长就给高分，也不能仅因包含多个事件章节就扣分。
-返修只能引用真实 segmentId/candidateId；禁止自由创造时间范围。adjust_bounds 必须位于候选 start/end 内，不能低于 minimumKeepSeconds，不能截断 speechUnits。
+重点检查内容完整性、因果和叙事、节奏、画面连续性、对白/声音连续性、用户目标匹配。成片可由多个事件章节组成，也可采用蒙太奇并列独立事件：章节内部必须是同一事件；章节之间具有共同主题或风格即可，不强制因果或连续时间。不能仅因接近目标时长就给高分，也不能仅因包含多个事件章节就扣分。
+这里只审看整批任务中的当前一条样片。不得以“只产出一条、未生成用户要求的多条视频”为当前样片的问题；整批数量由任务调度器校验。transitionOverlap 是转场的正常渲染重叠，不是时间码冲突。
+返修只能引用真实 segmentId/candidateId；禁止自由创造时间范围。adjust_bounds 必须位于候选 start/end 内，不能低于 minimumKeepSeconds，不能截断 speechUnits。音频切点突变使用 set_audio_fade，audioFadeSeconds 只能为 0.06 到 0.35 秒；不同事件之间仍必须保持无声音桥。
 remove_segment 不能删除唯一镜头；replace_segment 只能使用候选池；insert_segment 只用于补足必要上下文、故事结果或目标时长，并且只能插入候选池中尚未使用的高价值候选；afterSegmentId 为空表示放在开头。reorder_segments 必须完整保留当前镜头；完整对白、高潮、人物反应和结尾禁止变速。
 没有 major/critical 且可修复的问题时 repairActions 返回空数组。不要为了凑时长加入重复或无价值素材。
 
 仅返回 JSON：
-{{"summary":"综合审片结论","overallScore":0到100,"scores":{{"content":0到100,"narrative":0到100,"rhythm":0到100,"continuity":0到100,"audiovisual":0到100,"goalMatch":0到100}},"strengths":["优点"],"issues":[{{"id":"edit_1","severity":"critical/major/minor","category":"content/narrative/rhythm/continuity/audiovisual/goal","segmentIds":["真实镜头ID"],"outputTime":成片秒数,"description":"问题","evidence":"证据","fixable":true或false}}],"repairActions":[{{"type":"adjust_bounds/remove_segment/replace_segment/insert_segment/reorder_segments/set_transition/set_audio_bridge/set_speed","segmentId":"镜头ID","replacementCandidateId":"候选ID或空","afterSegmentId":"插入位置前一个镜头ID或空","start":数字或null,"end":数字或null,"orderedSegmentIds":["完整镜头顺序"],"playbackRate":1.0或1.1或1.25,"transitionIn":{{"type":"cut/dissolve/fade_black","duration":数字}},"audioBridge":{{"type":"none/j_cut/l_cut","duration":数字}},"reason":"返修依据"}}]}}"""
+{{"summary":"综合审片结论","overallScore":0到100,"scores":{{"content":0到100,"narrative":0到100,"rhythm":0到100,"continuity":0到100,"audiovisual":0到100,"goalMatch":0到100}},"strengths":["优点"],"issues":[{{"id":"edit_1","severity":"critical/major/minor","category":"content/narrative/rhythm/continuity/audiovisual/goal","segmentIds":["真实镜头ID"],"outputTime":成片秒数,"description":"问题","evidence":"证据","fixable":true或false}}],"repairActions":[{{"type":"adjust_bounds/remove_segment/replace_segment/insert_segment/reorder_segments/set_transition/set_audio_bridge/set_audio_fade/set_speed","segmentId":"镜头ID","replacementCandidateId":"候选ID或空","afterSegmentId":"插入位置前一个镜头ID或空","start":数字或null,"end":数字或null,"orderedSegmentIds":["完整镜头顺序"],"playbackRate":1.0或1.1或1.25,"audioFadeSeconds":0.06到0.35,"transitionIn":{{"type":"cut/dissolve/fade_black","duration":数字}},"audioBridge":{{"type":"none/j_cut/l_cut","duration":数字}},"reason":"返修依据"}}]}}"""
 
 
 def user_brief_prompt(*, filename: str, theme: str, count: str, target_seconds: str, analysis_mode: str, subtitle_mode: str = "ask", edit_mode: str = "ai_plan", structure: str = "auto") -> str:

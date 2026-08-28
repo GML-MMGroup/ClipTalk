@@ -9,6 +9,10 @@ from .edit_boundaries import semantic_safe_range
 from .editing_intent import candidate_requirement_alignment, evaluate_sequence_against_intent
 
 
+MIN_EDL_SEGMENT_SECONDS = .2
+DURATION_EPSILON = 1e-6
+
+
 def _number(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -162,7 +166,32 @@ def optimize_edl(
     function. It never shortens a spoken expression merely to hit duration.
     """
     intent = editing_intent if isinstance(editing_intent, dict) else {}
-    pool = [copy.deepcopy(item) for item in candidate_pool or [] if isinstance(item, dict)]
+    raw_pool = [copy.deepcopy(item) for item in candidate_pool or [] if isinstance(item, dict)]
+    recall_origins = {"speech_signal", "visual_change", "waveform"}
+    pool = [
+        item for item in raw_pool
+        if str(item.get("semanticStatus") or "").lower() != "recall_only"
+        and str(item.get("candidateOrigin") or "").lower() not in recall_origins
+    ]
+    # Canonicalise only overlapping copies.  Adjacent physical shots may share
+    # a semantic parent and remain useful, while a reusable anchor copied into
+    # another event must not consume duration twice.
+    canonical_pool: list[dict[str, Any]] = []
+    for item in sorted(pool, key=lambda value: (
+        -_number(value.get("editorialScore"), _number(value.get("score"))),
+        _number(value.get("start")),
+    )):
+        semantic_id = str(item.get("semanticUnitId") or item.get("candidateId") or item.get("id") or "")
+        start, end = _number(item.get("start")), _number(item.get("end"))
+        if any(
+            semantic_id
+            and semantic_id == str(existing.get("semanticUnitId") or existing.get("candidateId") or existing.get("id") or "")
+            and min(end, _number(existing.get("end"))) - max(start, _number(existing.get("start"))) > .12
+            for existing in canonical_pool
+        ):
+            continue
+        canonical_pool.append(item)
+    pool = canonical_pool
     if intent:
         for item in pool:
             alignment = candidate_requirement_alignment(item, intent)
@@ -195,7 +224,7 @@ def optimize_edl(
             lower_bound=max(0.0, _number(candidate.get("start"), 0.0)),
             upper_bound=_number(candidate.get("end"), video_duration or end) if candidate is not item else video_duration,
         )
-        if safe["end"] - safe["start"] < .2:
+        if safe["end"] - safe["start"] + DURATION_EPSILON < MIN_EDL_SEGMENT_SECONDS:
             rejected.append({"segmentId": _candidate_id(item), "reason": "安全边界后时长不足"})
             continue
         item.update({
@@ -237,6 +266,14 @@ def optimize_edl(
             continue
         previous_index = semantic_positions[semantic_id]
         previous = deduplicated[previous_index]
+        # Scene-cut splitting intentionally creates adjacent physical shots
+        # under one semantic unit.  Deduplicate only competing copies of the
+        # same source moment, not those complementary adjacent shots.
+        if min(_number(previous.get("end")), _number(item.get("end"))) - max(
+            _number(previous.get("start")), _number(item.get("start"))
+        ) <= .12:
+            deduplicated.append(item)
+            continue
         previous_score = _number(candidate_map.get(_candidate_id(previous), previous).get("editorialScore"), _number(previous.get("score"), 0))
         current_score = _number(candidate_map.get(_candidate_id(item), item).get("editorialScore"), _number(item.get("score"), 0))
         if current_score > previous_score:
@@ -253,7 +290,7 @@ def optimize_edl(
         target = float(target_seconds) if target_seconds not in (None, 0, "", "auto") else None
     except (TypeError, ValueError):
         target = None
-    upper_limit = target + max(5.0, target * .15) if target else None
+    upper_limit = target * 1.10 if target else None
 
     def total() -> float:
         return round(sum(_duration(item) for item in normalized), 3)
@@ -264,7 +301,7 @@ def optimize_edl(
             normalized, candidate_map, target=target, upper_limit=upper_limit,
         )
 
-    if allow_fill and target and total() < target - max(4.0, target * .1):
+    if allow_fill and target and total() < target * .90:
         occupied = [(_number(item.get("start")), _number(item.get("end"))) for item in normalized]
         used = {_candidate_id(item) for item in normalized}
         present_events = {_event_id(item) for item in normalized if _event_id(item)}
@@ -276,7 +313,10 @@ def optimize_edl(
         for candidate in ranked:
             candidate_id = _candidate_id(candidate)
             start, end = _number(candidate.get("start")), _number(candidate.get("end"))
-            if not candidate_id or candidate_id in used or end - start < .2:
+            if (
+                not candidate_id or candidate_id in used
+                or end - start + DURATION_EPSILON < MIN_EDL_SEGMENT_SECONDS
+            ):
                 continue
             if any(max(start, left) < min(end, right) for left, right in occupied):
                 continue
@@ -315,7 +355,7 @@ def optimize_edl(
         if event_id
     }
     actual = total()
-    tolerance = max(4.0, target * .1) if target else 0.0
+    tolerance = target * .1 if target else 0.0
     available_event_ids = {_event_id(item) for item in pool if _event_id(item)}
     duration_status = (
         "automatic" if target is None else

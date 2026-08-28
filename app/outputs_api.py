@@ -7,8 +7,11 @@ from fastapi import APIRouter
 
 
 OUTPUT_ROUTES = (
+    ("create_alternative_cut", "/api/jobs/{job_id}/alternative", "POST", 202),
     ("render_auto_edit_plan", "/api/jobs/{job_id}/auto-plans/{plan_id}/render", "POST", 202),
     ("finalize_preview_output_version", "/api/jobs/{job_id}/output-versions/{version_id}/finalize", "POST", 202),
+    ("regenerate_auto_composition", "/api/jobs/{job_id}/auto-composition/regenerate", "POST", 202),
+    ("delete_auto_composition_batch", "/api/jobs/{job_id}/auto-composition/batches/{batch_id}", "DELETE", 200),
     ("confirm_job_candidates", "/api/jobs/{job_id}/confirm", "POST", 202),
     ("reopen_job_for_editing", "/api/jobs/{job_id}/reedit", "POST", 200),
     ("cancel_job_reediting", "/api/jobs/{job_id}/reedit/cancel", "POST", 200),

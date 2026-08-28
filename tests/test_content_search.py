@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+import re
+import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -37,6 +40,149 @@ from app.content_search import (
 
 
 class ContentIntentTests(unittest.TestCase):
+    def test_instruction_count_overrides_default_search_limit(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {
+                "request": {"searchScopeKind": "all", "searchResultLimit": 12},
+                "videoInfo": {"duration": 82},
+            },
+            "找出最相关的3个煎蛋或装盘片段",
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "action": "extract_content", "query": "煎蛋或装盘",
+                    "resultMode": "top_k", "requestedCount": 3,
+                    "predicates": [{"id": "action", "kind": "visual.action", "value": "煎蛋或装盘"}],
+                    "logic": {"op": "predicate", "predicateId": "action"},
+                    "relations": [],
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+        self.assertEqual(intent["resultMode"], "top_k")
+        self.assertEqual(intent["requestedCount"], 3)
+        self.assertEqual(intent["queryPlan"]["result"]["limit"], 3)
+
+    def test_full_source_scope_does_not_allow_model_to_force_exhaustive_scan(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {
+                "request": {"searchScopeKind": "all", "searchResultLimit": 12},
+                "videoInfo": {"duration": 542.5},
+            },
+            "找到鹦鹉的片段",
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "action": "extract_content", "query": "鹦鹉",
+                    "resultMode": "exhaustive", "requestedCount": None,
+                    "predicates": [{
+                        "id": "object", "kind": "visual.object", "value": "鹦鹉",
+                    }],
+                    "logic": {"op": "predicate", "predicateId": "object"},
+                    "relations": [],
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        self.assertEqual(intent["searchScope"]["kind"], "all")
+        self.assertEqual(intent["resultMode"], "top_k")
+        self.assertEqual(intent["queryPlan"]["result"]["mode"], "top_k")
+
+    def test_contextual_visual_actor_does_not_require_person_target(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 82}},
+            "查找女子煎蛋的完整片段",
+            {
+                "capabilityProposal": {"capabilities": ["person", "visual"]},
+                "intent": {
+                    "action": "extract_content", "query": "女子煎蛋",
+                    "predicates": [{
+                        "id": "action", "kind": "visual.action", "value": "女子煎蛋",
+                        "subject": {"description": "女子", "type": "person", "identityPolicy": "context"},
+                        "subjectPersonRef": "anonymous:woman", "required": True,
+                    }],
+                    "logic": {"op": "predicate", "predicateId": "action"},
+                    "relations": [],
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        predicate = intent["queryPlan"]["predicates"][0]
+        self.assertNotIn("subjectPersonRef", predicate)
+        self.assertEqual(intent["modalities"], ["visual"])
+        self.assertNotIn("person.track_face", intent["queryPlan"]["requiredOperations"])
+        self.assertNotIn("_clarification", intent)
+
+    def test_continuous_actions_do_not_invent_same_event_index_requirement(self) -> None:
+        from app import main as main_app
+
+        instruction = "查找煎蛋、把煎蛋盛到盘子并淋上调味汁的完整连续动作"
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 180}},
+            instruction,
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "action": "extract_content", "query": instruction,
+                    "predicates": [
+                        {"id": "cook", "kind": "visual.action", "value": "煎蛋"},
+                        {"id": "plate", "kind": "visual.action", "value": "把煎蛋盛到盘子并淋上调味汁"},
+                    ],
+                    "relations": [
+                        {"type": "same_event", "left": "cook", "right": "plate"},
+                        {"type": "after", "left": "cook", "right": "plate"},
+                    ],
+                    "logic": {"op": "all", "children": [
+                        {"op": "predicate", "predicateId": "cook"},
+                        {"op": "predicate", "predicateId": "plate"},
+                    ]},
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        self.assertEqual(len(intent["queryPlan"]["predicates"]), 1)
+        self.assertTrue(intent["predicates"][0]["compositeAction"])
+        self.assertEqual(intent["queryPlan"]["relations"], [])
+        self.assertNotIn("timeline.event_boundary", intent["queryPlan"]["requiredOperations"])
+        self.assertNotIn("_clarification", intent)
+
+    def test_explicit_same_event_relation_is_preserved(self) -> None:
+        from app import main as main_app
+
+        raw = {
+            "predicates": [
+                {"id": "a", "kind": "visual.action", "value": "开门"},
+                {"id": "b", "kind": "visual.action", "value": "入座"},
+            ],
+            "relations": [{"type": "same_event", "left": "a", "right": "b"}],
+        }
+        normalized = main_app._normalize_unrequested_strict_relations(raw, "找同一事件里开门并入座")
+        self.assertEqual(len(normalized["predicates"]), 2)
+        self.assertEqual(normalized["relations"][0]["type"], "same_event")
+
+    def test_coverage_snapshot_uses_verified_units_not_evaluated_total(self) -> None:
+        from app import main as main_app
+
+        snapshot = main_app.content_search_coverage_snapshot({
+            "id": "search_1", "coverageComplete": False,
+            "retrievalStats": {
+                "unitTotal": 497, "rerankUnitCount": 160,
+                "semanticVerifiedUnitCount": 160,
+            },
+            "completeness": {"status": "incomplete", "evaluatedUnitCount": 497, "channels": []},
+        })
+        self.assertEqual(snapshot["semantic"], {"completed": 160, "total": 497, "percent": 32.2})
+        self.assertIsNone(snapshot["overallPercent"])
+
     def test_subject_evidence_is_generic_and_keeps_unverified_matches(self) -> None:
         match = {
             "start": 2, "end": 5, "transcriptExcerpt": "这段内容讨论目标主题",
@@ -162,6 +308,24 @@ class ContentIntentTests(unittest.TestCase):
         self.assertEqual(trimmed["matchedSegmentIds"], ["s1"])
         self.assertEqual(trimmed["transcriptExcerpt"], "说。")
 
+    def test_user_confirmed_speaker_timeline_is_materialized_without_asd(self) -> None:
+        from app import main as main_app
+
+        matches = main_app._direct_user_confirmed_speaker_matches({
+            "id": "person_1", "label": "人物 A", "primarySpeaker": "Speaker 1",
+            "speakerAssociationMethod": "active_speaker_user_confirmed",
+        }, [
+            {"id": "s1", "start": 1.0, "end": 2.0, "text": "你好", "speakers": ["Speaker 1"]},
+            {"id": "s2", "start": 2.2, "end": 3.0, "text": "继续", "speaker": "Speaker 1"},
+            {"id": "s3", "start": 4.0, "end": 5.0, "text": "其他人", "speaker": "Speaker 2"},
+        ], scope_start=0, scope_end=6)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["speaker"], "Speaker 1")
+        self.assertEqual(matches[0]["boundarySource"], "user_confirmed_speaker_timeline")
+        self.assertEqual(matches[0]["matchedSegmentIds"], ["s1", "s2"])
+        self.assertEqual(len(main_app._grounded_person_speaking_matches(matches)), 1)
+
     def test_structured_predicates_and_relations_are_preserved_in_query_plan(self) -> None:
         intent = parse_content_intent("说退款政策时拿着黄色电钻", {
             "action": "extract_content", "query": "退款政策和黄色电钻",
@@ -266,6 +430,56 @@ class ContentIntentTests(unittest.TestCase):
         self.assertEqual(decision["editProposal"]["title"], "调整镜头顺序")
         self.assertEqual([item["type"] for item in decision["editProposal"]["operations"]], ["reorder_segments"])
 
+    def test_full_source_highlight_is_not_parsed_as_current_candidate_compose(self) -> None:
+        decision = parse_content_chat_decision("把整个视频提取出30s的高光片段", {
+            "action": "highlight_generation", "confidence": .98,
+            "reason": "用户要求重新分析整个源视频",
+            "highlightRequest": {"targetSeconds": 30, "theme": "", "scope": "all"},
+            "editProposal": {
+                "operations": [{"type": "compose", "matchIds": ["match_old"]}],
+            },
+        })
+        self.assertEqual(decision["action"], "highlight_generation")
+        self.assertEqual(decision["highlightRequest"]["targetSeconds"], 30)
+        self.assertEqual(decision["highlightRequest"]["scope"], "all")
+        self.assertEqual(decision["editProposal"]["operations"], [])
+
+    def test_highlight_replan_preserves_duration_and_discards_edit_operations(self) -> None:
+        decision = parse_content_chat_decision("重新生成为90s的高光视频", {
+            "action": "highlight_replan", "confidence": .97,
+            "reason": "复用当前高光任务的已有证据重新规划",
+            "highlightRequest": {"targetSeconds": 90, "variantCount": 2, "scope": "all"},
+            "editProposal": {"operations": [{"type": "compose", "groupIds": ["event_old"]}]},
+        })
+        self.assertEqual(decision["action"], "highlight_replan")
+        self.assertEqual(decision["highlightRequest"]["targetSeconds"], 90)
+        self.assertEqual(decision["highlightRequest"]["variantCount"], 2)
+        self.assertEqual(decision["editProposal"]["operations"], [])
+
+    def test_router_guard_corrects_full_source_highlight_misclassified_as_compose(self) -> None:
+        decision = parse_content_chat_decision("把整个视频提取出30s的高光片段", {
+            "action": "editing_action", "confidence": .9,
+            "editProposal": {
+                "title": "30秒高光", "operations": [
+                    {"type": "compose", "matchIds": ["match_current"]},
+                ],
+            },
+        })
+        self.assertEqual(decision["action"], "highlight_generation")
+        self.assertEqual(decision["highlightRequest"]["targetSeconds"], 30)
+        self.assertEqual(decision["editProposal"]["operations"], [])
+
+    def test_cross_search_assembly_is_not_reduced_to_current_search_compose(self) -> None:
+        decision = parse_content_chat_decision("把所有检索结果合并", {
+            "action": "editing_action", "confidence": .91,
+            "editProposal": {"operations": [
+                {"type": "compose", "matchIds": ["match_current"]},
+            ]},
+        })
+        self.assertEqual(decision["action"], "content_assembly")
+        self.assertTrue(decision["assemblyRequest"]["includeAllSearches"])
+        self.assertEqual(decision["editProposal"]["operations"], [])
+
     def test_evidence_plan_does_not_infer_capabilities_from_language(self) -> None:
         for text in (
             "找出 Speaker 1 提到离线功能的发言",
@@ -351,8 +565,13 @@ class ContentIntentTests(unittest.TestCase):
         self.assertNotIn("start", intent)
         self.assertNotIn("end", intent)
 
-    def test_unspecified_result_count_defaults_to_exhaustive(self) -> None:
+    def test_unspecified_result_count_defaults_to_ranked_retrieval(self) -> None:
         intent = fallback_content_intent("找出和冰箱相关的片段")
+        self.assertEqual(intent["resultMode"], "top_k")
+        self.assertIsNone(intent["requestedCount"])
+
+    def test_explicit_completeness_wording_uses_exhaustive_retrieval(self) -> None:
+        intent = fallback_content_intent("找出所有和冰箱相关的片段，不要遗漏")
         self.assertEqual(intent["resultMode"], "exhaustive")
         self.assertIsNone(intent["requestedCount"])
 
@@ -578,6 +797,119 @@ class ContentRankingTests(unittest.TestCase):
         ]}])
         self.assertEqual([item["unit"]["id"] for item in ranked], ["speech_1"])
 
+    def _run_adaptive_top_k_search(self, *, return_all_batch_matches: bool):
+        from app import main as main_app
+
+        units = [{
+            "id": f"u{index:03d}", "modality": "speech",
+            "start": index * 3.0, "end": index * 3.0 + 1.0,
+            "text": f"证据 {index}", "speakers": [],
+        } for index in range(80)]
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_json(self, prompt, **_kwargs):
+                self.calls += 1
+                unit_ids = [
+                    value for value in re.findall(r"'id': '([^']+)'", prompt)
+                    if value.startswith("u")
+                ]
+                if not return_all_batch_matches:
+                    unit_ids = unit_ids[:1]
+                return {"matches": [{
+                    "unit_id": unit_id, "score": 88,
+                    "support_level": "explicit", "evidence_grounded": True,
+                    "matched_evidence": f"证据 {int(unit_id[1:])}",
+                    "reason": "明确证据",
+                } for unit_id in unit_ids]}
+
+            def cancel(self):
+                return None
+
+        client = FakeClient()
+        job = {
+            "id": "adaptive_top_k", "sourceHash": "adaptive-top-k",
+            "request": {}, "videoInfo": {"duration": 240},
+        }
+        index = {
+            "cacheKey": "adaptive-index", "indexRevision": "r1",
+            "duration": 240, "video": {"duration": 240},
+            "speechUnits": units, "transcriptSegments": [],
+            "chapters": [{
+                "id": "chapter", "start": 0, "end": 240,
+                "unitIds": [unit["id"] for unit in units],
+            }],
+            "recognitionCompletedModalities": ["speech"],
+            "recognitionAvailableModalities": ["speech"],
+            "recognitionAttemptedModalities": ["speech"],
+            "recognitionRequestedModalities": ["speech"],
+        }
+        intent = {
+            "action": "extract_content", "query": "做家务",
+            "modalities": ["speech"], "resultMode": "top_k",
+            "requestedCount": 12,
+            "predicates": [{
+                "id": "p1", "kind": "speech.semantic",
+                "value": "做家务", "required": True,
+            }],
+            "searchScope": {"start": 0, "end": 240},
+            "boundaryMode": "complete",
+        }
+        recalled = [{"unit": unit, "score": 80, "lexicalScore": 0} for unit in units]
+        with patch.object(main_app, "_content_progress"), patch.object(
+            main_app, "read_source_evidence", return_value=[],
+        ), patch.object(
+            main_app, "_read_content_query_cache", return_value=None,
+        ), patch.object(main_app, "_write_content_query_cache"), patch.object(
+            main_app, "_promote_query_evidence",
+        ), patch.object(
+            main_app, "local_recall", return_value=recalled,
+        ), patch.object(
+            main_app, "select_candidate_units", return_value=units,
+        ), patch.object(
+            main_app, "create_llm_client_for_job", return_value=client,
+        ):
+            result = main_app._search_content_index(
+                "adaptive_top_k", job, index, "做家务", intent, threading.Event(),
+            )
+        return result, client.calls
+
+    def test_adaptive_top_k_expands_when_first_wave_is_under_target(self) -> None:
+        result, calls = self._run_adaptive_top_k_search(return_all_batch_matches=False)
+        stats = result["retrievalStats"]
+        self.assertEqual(calls, 5)
+        self.assertEqual(result["candidateCount"], 5)
+        self.assertTrue(stats["adaptiveExpansionTriggered"])
+        self.assertEqual(stats["semanticVerifiedUnitCount"], 80)
+        self.assertEqual(stats["adaptiveStopReason"], "candidate_pool_exhausted")
+        self.assertEqual(stats["semanticUnitsSkippedAfterRanking"], 0)
+
+    def test_adaptive_top_k_stops_when_target_is_satisfied(self) -> None:
+        result, calls = self._run_adaptive_top_k_search(return_all_batch_matches=True)
+        stats = result["retrievalStats"]
+        self.assertEqual(calls, 3)
+        self.assertEqual(result["candidateCount"], 12)
+        self.assertFalse(stats["adaptiveExpansionTriggered"])
+        self.assertEqual(stats["semanticVerifiedUnitCount"], 48)
+        self.assertEqual(stats["adaptiveStopReason"], "target_satisfied")
+        self.assertEqual(stats["semanticUnitsSkippedAfterRanking"], 32)
+
+    def test_first_semantic_wave_keeps_relevance_and_time_diversity(self) -> None:
+        from app import main as main_app
+
+        units = [{
+            "id": f"u{index:03d}", "start": index * 2.0, "end": index * 2.0 + 1.0,
+        } for index in range(80)]
+        ordered = main_app._temporally_diversified_semantic_units(
+            units, initial_budget=48, scope_start=0, scope_end=160,
+        )
+        first_ids = {item["id"] for item in ordered[:48]}
+        self.assertTrue({f"u{index:03d}" for index in range(24)} <= first_ids)
+        self.assertTrue(any(float(item["start"]) >= 120 for item in ordered[:48]))
+        self.assertEqual(len({item["id"] for item in ordered}), 80)
+
     def test_predicate_ranking_keeps_conditions_on_separate_scales(self) -> None:
         plan = {"predicates": [
             {"id": "p1", "kind": "speech.semantic", "value": "离线模式", "required": True},
@@ -634,6 +966,8 @@ class ContentRankingTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["end"], 10.0)
         self.assertEqual(merged[0]["evidenceType"], "audiovisual")
+        self.assertEqual(set(merged[0]["matchedModalities"]), {"speech", "visual"})
+        self.assertTrue(merged[0]["occurrenceId"].startswith("occ_"))
         self.assertEqual(merged[0]["position"], 1)
 
     def test_adjacent_visual_matches_from_different_shots_stay_separate(self) -> None:
@@ -642,6 +976,26 @@ class ContentRankingTests(unittest.TestCase):
             {"id": "b", "start": 5.4, "end": 8, "score": 82, "evidenceType": "visual", "predicateId": "p1", "shotIds": ["shot_2"]},
         ], maximum_gap=1.5)
         self.assertEqual(len(merged), 2)
+
+    def test_v2_adjacent_speech_requires_same_known_speaker(self) -> None:
+        different = merge_content_matches([
+            {"id": "a", "start": 2, "end": 5, "score": 80, "evidenceType": "speech", "speakerRef": "Speaker 1"},
+            {"id": "b", "start": 5.4, "end": 8, "score": 82, "evidenceType": "speech", "speakerRef": "Speaker 2"},
+        ], maximum_gap=1.5, algorithm_version="editing-algorithm-v2")
+        same = merge_content_matches([
+            {"id": "a", "start": 2, "end": 5, "score": 80, "evidenceType": "speech", "speakerRef": "Speaker 1"},
+            {"id": "b", "start": 5.4, "end": 8, "score": 82, "evidenceType": "speech", "speakerRef": "Speaker 1"},
+        ], maximum_gap=1.5, algorithm_version="editing-algorithm-v2")
+        self.assertEqual(len(different), 2)
+        self.assertEqual(len(same), 1)
+
+    def test_v2_two_contextual_modalities_do_not_auto_promote_reliability(self) -> None:
+        merged = merge_content_matches([
+            {"id": "speech", "start": 2, "end": 7, "score": 68, "evidenceType": "speech", "matchedModalities": ["speech"], "confidenceTier": "possible", "groundingStatus": "contextual", "evidenceItems": [{"type": "speech", "id": "s1"}]},
+            {"id": "visual", "start": 6, "end": 9, "score": 72, "evidenceType": "visual", "matchedModalities": ["visual"], "confidenceTier": "possible", "groundingStatus": "contextual", "evidenceItems": [{"type": "visual", "id": "v1"}]},
+        ], algorithm_version="editing-algorithm-v2")
+        self.assertEqual(merged[0]["confidenceTier"], "possible")
+        self.assertTrue(merged[0]["requiresReview"])
 
     def test_adjacent_alternative_modalities_stay_separate_without_shared_context(self) -> None:
         merged = merge_content_matches([
@@ -771,6 +1125,297 @@ class ContentRankingTests(unittest.TestCase):
 
 
 class ContentConfirmationTests(unittest.TestCase):
+    def test_person_index_loader_keeps_previous_continuity_index_readable(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "id": "previous-person-index", "recognitionSchemaVersion": 7,
+            "contentIndex": {"cacheKey": "previous-person-cache"},
+        }
+        seen_versions: list[str] = []
+
+        def read_index(_path: Path, *, expected_version: str, **_kwargs):
+            seen_versions.append(expected_version)
+            if expected_version == main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION:
+                return {"schemaVersion": expected_version, "status": "ready", "persons": []}
+            return None
+
+        with patch.object(main_app, "_read_content_index", side_effect=read_index):
+            loaded = main_app._load_content_person_index(job)
+        self.assertEqual(loaded["schemaVersion"], main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION)
+        self.assertIn(main_app.MULTIMODAL_INDEX_VERSION, seen_versions)
+        self.assertIn(main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION, seen_versions)
+
+    def test_person_index_loader_keeps_v8_continuity_index_readable(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "id": "v8-person-index", "recognitionSchemaVersion": 6,
+            "contentIndex": {"cacheKey": "v8-person-cache"},
+        }
+
+        def read_index(_path: Path, *, expected_version: str, **_kwargs):
+            if expected_version == main_app.CONTINUITY_MULTIMODAL_INDEX_VERSION:
+                return {"schemaVersion": expected_version, "status": "ready", "persons": []}
+            return None
+
+        with patch.object(main_app, "_read_content_index", side_effect=read_index):
+            loaded = main_app._load_content_person_index(job)
+        self.assertEqual(loaded["schemaVersion"], main_app.CONTINUITY_MULTIMODAL_INDEX_VERSION)
+
+    def test_reanalyze_cancelled_content_job_uses_content_worker_signature(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_reanalyze_content_signature"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/test-reanalyze-source.mp4"),
+            filename="source.mp4", size=100, count="auto",
+            target_seconds="auto", theme="查找人物",
+            source_hash="reanalyze-content-signature-hash",
+        )
+        job.update({
+            "taskMode": "content_extract", "workflowKind": "person_edit",
+            "status": "cancelled", "stage": "cancelled",
+        })
+        main_app.jobs[job_id] = job
+        try:
+            with patch.object(main_app, "save_job"), patch.object(
+                main_app, "append_message",
+            ), patch.object(main_app, "submit_analysis_task") as submit:
+                main_app.reanalyze_cancelled_job(job_id)
+            submit.assert_called_once_with(
+                job_id, main_app.run_content_search_job, job_id,
+            )
+        finally:
+            main_app.jobs.pop(job_id, None)
+            main_app.cancel_events.pop(job_id, None)
+
+    def test_person_edit_entry_builds_tracks_then_waits_for_selection(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_person_discovery_waits_for_target"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/test-person-source.mp4"),
+            filename="source.mp4", size=100, count="auto",
+            target_seconds="auto", theme="提取所选画面人物的所有出镜片段",
+            source_hash="person-discovery-waits-hash",
+        )
+        job.update({
+            "taskMode": "content_extract", "workflowKind": "person_edit",
+            "recognitionSchemaVersion": main_app.RECOGNITION_SCHEMA_VERSION,
+            "videoInfo": {"duration": 30.0},
+        })
+        job["request"].update({
+            "workflowKind": "person_edit", "entryWorkflow": "person_discovery",
+            "contentInstruction": "提取所选画面人物的所有出镜片段",
+            "contentEvidenceMode": "person", "contentAllowedCapabilities": ["person"],
+        })
+        parsed_visual_placeholder = {
+            "action": "extract_content",
+            "query": "提取所选画面人物的所有出镜片段",
+            "modalities": ["visual"],
+            "resultMode": "exhaustive",
+            "predicates": [{
+                "id": "p1", "kind": "visual.semantic",
+                "value": "所选画面人物出镜", "required": True,
+            }],
+            "relations": [],
+            "executionPlan": {"allowedCapabilities": ["visual"]},
+        }
+        index = {
+            "schemaVersion": main_app._content_index_version(job),
+            "cacheKey": "person-index", "indexRevision": "person-index-r1",
+            "recognitionRequestedModalities": ["person"],
+            "recognitionAttemptedModalities": ["person"],
+            "recognitionCompletedModalities": ["person"],
+            "recognitionAvailableModalities": ["person"],
+            "persons": [{
+                "id": "person_1", "label": "人物 A", "confidence": .91,
+                "ranges": [{"start": 1.0, "end": 8.0}], "trackCount": 4,
+            }],
+            "personTracks": [], "video": {"duration": 30.0},
+            "coverage": {"start": 0.0, "end": 30.0},
+        }
+        main_app.jobs[job_id] = job
+        main_app.cancel_events[job_id] = threading.Event()
+        try:
+            with patch.object(
+                main_app, "_parse_content_instruction",
+                return_value=parsed_visual_placeholder,
+            ), patch.object(
+                main_app, "_build_content_index", return_value=index,
+            ) as build_index, patch.object(
+                main_app, "_search_latest_content_instruction",
+            ) as execute_search, patch.object(
+                main_app, "recognition_summary", return_value={},
+            ), patch.object(main_app, "save_job"), patch.object(main_app, "append_message"):
+                main_app.run_content_search_job(job_id)
+
+            self.assertEqual(
+                build_index.call_args.kwargs["required_modalities"], {"person"},
+            )
+            execute_search.assert_not_called()
+            completed = main_app.jobs[job_id]
+            self.assertEqual(completed["status"], "awaiting_content_confirmation")
+            self.assertEqual(
+                completed["contentSearch"]["clarification"]["kind"], "person_target",
+            )
+            self.assertEqual(completed["contentIndex"]["anonymousPersonCount"], 1)
+            persisted_intent = completed["request"]["pendingContentIntent"]["intent"]
+            self.assertEqual(persisted_intent["modalities"], ["person"])
+            self.assertEqual(
+                [item["kind"] for item in persisted_intent["predicates"]],
+                ["person.appearance"],
+            )
+        finally:
+            main_app.jobs.pop(job_id, None)
+            main_app.cancel_events.pop(job_id, None)
+
+    def test_full_source_highlight_starts_fresh_job_without_search_candidates(self) -> None:
+        from app import main as main_app
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            source.write_bytes(b"video")
+            original_settings = main_app.settings
+            main_app.settings = replace(original_settings, data_root=root)
+            main_app.settings.ensure_directories()
+            parent_id = "content_to_highlight_parent"
+            main_app.jobs[parent_id] = {
+                "id": parent_id, "taskMode": "content_extract",
+                "status": "awaiting_content_confirmation",
+                "filename": "source.mp4", "sourcePath": str(source),
+                "sizeBytes": source.stat().st_size, "sourceHash": "same-source",
+                "storageMode": "editable", "messages": [{
+                    "id": "old_message", "role": "user", "text": "找到煎鸡蛋的画面", "kind": "content-query",
+                }],
+                "videoInfo": {"duration": 81.6, "width": 1280, "height": 720},
+                "request": {"analysisMode": "audiovisual"},
+                "contentSearch": {
+                    "id": "old_search", "defaultSelectedIds": ["match_egg"],
+                    "candidates": [{"id": "match_egg", "start": 35.5, "end": 41.0}],
+                },
+            }
+            try:
+                def enqueue_without_worker(job):
+                    main_app.jobs[job["id"]] = job
+
+                with patch.object(main_app, "enqueue_job", side_effect=enqueue_without_worker) as enqueue, patch.object(main_app, "save_job"):
+                    created = main_app.create_highlight_job_from_source(
+                        parent_id, "把整个视频提取出30s的高光片段", {
+                            "highlightRequest": {"targetSeconds": 30, "theme": "", "scope": "all"},
+                        },
+                    )
+                self.assertEqual(created["taskMode"], "highlight")
+                self.assertEqual(created["request"]["totalTargetSeconds"], 30)
+                self.assertEqual(created["request"]["sourceScopeKind"], "all")
+                self.assertEqual(created["parentJobId"], parent_id)
+                self.assertNotIn("contentSearch", created)
+                self.assertNotIn("match_egg", str(created))
+                self.assertIn("不会沿用上一轮内容检索候选", created["messages"][-1]["text"])
+                self.assertEqual(created["handoff"]["fromJobId"], parent_id)
+                self.assertEqual(created["handoff"]["reason"], "full_source_highlight")
+                self.assertEqual(main_app.jobs[parent_id]["activeChildJobId"], created["id"])
+                self.assertTrue(created["messages"][0]["inherited"])
+                self.assertEqual(created["messages"][0]["originJobId"], parent_id)
+                self.assertTrue(all(message.get("inherited") is False for message in created["messages"][-2:]))
+                enqueue.assert_called_once_with(created)
+            finally:
+                for job_id in list(main_app.jobs):
+                    if str(main_app.jobs[job_id].get("parentJobId") or "") == parent_id:
+                        main_app.jobs.pop(job_id, None)
+                main_app.jobs.pop(parent_id, None)
+                main_app.settings = original_settings
+
+    def test_existing_highlight_regeneration_reuses_evidence_in_same_job(self) -> None:
+        from app import main as main_app
+
+        job_id = "highlight_replan_same_job"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/replan-source.mp4"), filename="source.mp4",
+            size=100, count="auto", target_seconds=60, total_target_seconds=60,
+            theme="", source_hash="replan-source-hash",
+        )
+        job.update({
+            "taskMode": "highlight", "workflowKind": "highlight",
+            "status": "awaiting_confirmation", "stage": "review",
+            "videoInfo": {"duration": 180, "width": 1280, "height": 720, "has_audio": True},
+            "eventGroups": [{
+                "id": "event_1", "title": "人物进门并落座", "score": 90,
+                "segments": [{"id": "shot_1", "start": 2, "end": 62, "duration": 60}],
+            }, {
+                "id": "event_2", "title": "主角完成最终回应", "score": 86,
+                "segments": [{"id": "shot_2", "start": 80, "end": 115, "duration": 35}],
+            }],
+            "candidates": [{"index": 0, "title": "进门", "start": 2, "end": 62}],
+            "recommendedGroupIds": ["event_1"],
+            "outputVersions": [{
+                "id": "v001", "number": 1, "previewOnly": True,
+                "generationBatchId": "batch_old", "outputs": [{"filename": "old.mp4", "duration": 60}],
+            }],
+            "outputs": [{"filename": "old.mp4", "duration": 60}],
+            "autoComposition": {
+                "status": "completed", "batches": [{
+                    "id": "batch_old", "mode": "initial", "status": "completed",
+                    "targetVariantCount": 1,
+                }],
+            },
+        })
+        main_app.jobs[job_id] = job
+        decision = {
+            "action": "highlight_generation", "confidence": .96,
+            "highlightRequest": {"targetSeconds": 90, "variantCount": 2, "theme": ""},
+        }
+        try:
+            with patch.object(main_app, "_conversation_workflow_route", return_value=(None, None)), \
+                    patch.object(main_app, "_route_content_message", return_value=decision), \
+                    patch.object(main_app, "submit_render_task") as submit, \
+                    patch.object(main_app, "save_job"):
+                response = main_app.chat_with_job(
+                    job_id, main_app.ChatRequest(text="重新生成为90s的高光视频"),
+                )
+            self.assertEqual(response["action"], "highlight-replan-started")
+            self.assertEqual(response["job"]["id"], job_id)
+            self.assertNotIn("activeChildJobId", main_app.jobs[job_id])
+            self.assertEqual(main_app.jobs[job_id]["request"]["totalTargetSeconds"], 90)
+            self.assertEqual(main_app.jobs[job_id]["autoComposition"]["pendingReplan"]["evidenceSource"], "existing_analysis")
+            self.assertEqual(main_app.jobs[job_id]["outputVersions"][0]["id"], "v001")
+            submit.assert_called_once_with(job_id, main_app.run_automatic_composition)
+        finally:
+            main_app.cancel_events.pop(job_id, None)
+            main_app.jobs.pop(job_id, None)
+
+    def test_explicit_highlight_reanalysis_still_creates_a_child_task(self) -> None:
+        from app import main as main_app
+
+        job_id = "highlight_explicit_reanalysis"
+        main_app.jobs[job_id] = {
+            "id": job_id, "taskMode": "highlight", "workflowKind": "highlight",
+            "status": "awaiting_confirmation", "eventGroups": [{
+                "id": "event_1", "title": "完整叙事事件", "segments": [{"start": 1, "end": 10}],
+            }],
+            "messages": [], "request": {}, "outputs": [], "outputVersions": [],
+        }
+        decision = {
+            "action": "highlight_generation", "confidence": .99,
+            "highlightRequest": {"targetSeconds": 90, "variantCount": 3},
+        }
+        child = {"id": "child_reanalysis", "handoff": {"reason": "full_source_highlight"}}
+        try:
+            with patch.object(main_app, "_conversation_workflow_route", return_value=(None, None)), \
+                    patch.object(main_app, "_route_content_message", return_value=decision), \
+                    patch.object(main_app, "create_highlight_job_from_source", return_value=child) as create_child, \
+                    patch.object(main_app, "public_job", side_effect=lambda value: value):
+                response = main_app.chat_with_job(
+                    job_id,
+                    main_app.ChatRequest(text="不要之前候选，重新分析全片做90秒高光"),
+                )
+            self.assertEqual(response["action"], "job-handoff")
+            create_child.assert_called_once_with(job_id, "不要之前候选，重新分析全片做90秒高光", decision)
+        finally:
+            main_app.jobs.pop(job_id, None)
+
     def test_review_draft_persists_full_selection_order_and_settings(self) -> None:
         from app import main as main_app
 
@@ -897,7 +1542,7 @@ class ContentConfirmationTests(unittest.TestCase):
             self.assertEqual(main_app.jobs[job_id]["messages"][-2]["kind"], "editorial-question")
             self.assertEqual(main_app.jobs[job_id]["messages"][-1]["kind"], "editorial-answer")
             self.assertIn("一般属于", main_app.jobs[job_id]["messages"][-1]["text"])
-            client.complete_json.assert_called_once()
+            self.assertEqual(client.complete_json.call_count, 2)
         finally:
             main_app.jobs.pop(job_id, None)
 
@@ -939,7 +1584,226 @@ class ContentConfirmationTests(unittest.TestCase):
                 )
             self.assertEqual(response, expected)
             queue_search.assert_called_once()
-            client.complete_json.assert_called_once()
+            self.assertEqual(client.complete_json.call_count, 1)
+        finally:
+            main_app.jobs.pop(job_id, None)
+
+    def test_new_topic_resets_stale_custom_scope_to_full_video(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_fresh_topic_scope"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/test-content-source.mp4"), filename="source.mp4",
+            size=100, count="auto", target_seconds="auto", theme="冰箱",
+            source_hash="fresh-topic-scope-hash",
+        )
+        job.update({
+            "taskMode": "content_extract", "status": "awaiting_content_confirmation",
+            "request": {
+                **job["request"], "contentInstruction": "找到冰箱相关的片段",
+                "searchScopeKind": "custom", "searchScopeStart": 0, "searchScopeEnd": 150,
+            },
+            "contentSearch": {
+                "id": "search_fridge", "instruction": "找到冰箱相关的片段",
+                "intent": {"searchScope": {
+                    "kind": "custom", "start": 0, "end": 150, "duration": 150,
+                    "videoDuration": 643, "source": "quick", "origin": "explicit_ui",
+                }},
+                "candidates": [],
+            },
+            "videoInfo": {"duration": 643, "width": 1280, "height": 720, "has_audio": True},
+        })
+        main_app.jobs[job_id] = job
+        expected = {"action": "content-search", "job": {"id": job_id}}
+        client = MagicMock()
+        client.complete_json.return_value = {
+            "action": "content_search", "confidence": .98,
+            "capabilityProposal": {"capabilities": ["speech"]},
+            "intent": {
+                "action": "extract_content", "query": "洗衣机", "contextPolicy": "fresh",
+                "modalities": ["speech"],
+                "predicates": [{"id": "p1", "kind": "speech.semantic", "value": "洗衣机"}],
+            },
+        }
+        try:
+            with patch.object(main_app, "create_llm_client_for_job", return_value=client), \
+                    patch.object(main_app, "queue_content_followup", return_value=expected) as queue_search, \
+                    patch.object(main_app, "save_job"):
+                response = main_app.chat_with_job(
+                    job_id, main_app.ChatRequest(text="帮我找到洗衣机相关的片段"),
+                )
+            self.assertEqual(response, expected)
+            prepared = queue_search.call_args.kwargs["prepared_intent"]
+            self.assertEqual(prepared["searchScope"]["kind"], "all")
+            self.assertEqual((prepared["searchScope"]["start"], prepared["searchScope"]["end"]), (0.0, 643.0))
+            self.assertEqual(prepared["searchScope"]["origin"], "fresh_default")
+        finally:
+            main_app.jobs.pop(job_id, None)
+
+    def test_scope_policy_preserves_continuations_and_referenced_history(self) -> None:
+        from app import main as main_app
+
+        current_scope = {
+            "kind": "custom", "start": 0, "end": 150, "duration": 150,
+            "videoDuration": 643, "source": "quick", "origin": "explicit_ui",
+        }
+        historical_scope = {
+            "kind": "custom", "start": 300, "end": 420, "duration": 120,
+            "videoDuration": 643, "source": "quick", "origin": "explicit_ui",
+        }
+        base = {
+            "request": {"searchScopeKind": "custom", "searchScopeStart": 0, "searchScopeEnd": 150},
+            "videoInfo": {"duration": 643},
+            "contentSearch": {"id": "search_current", "intent": {"searchScope": current_scope}},
+            "contentSearchHistory": [{"id": "search_old", "intent": {"searchScope": historical_scope}}],
+        }
+
+        continuation_job = copy.deepcopy(base)
+        resolved = main_app._prepare_content_followup_scope(
+            continuation_job, main_app.ChatRequest(text="继续当前检索"), "继续当前检索",
+            {"contextPolicy": "fresh"}, continuation=True,
+        )
+        self.assertEqual((resolved["start"], resolved["end"]), (0.0, 150.0))
+        self.assertEqual(continuation_job["request"]["contentSearchScopeOrigin"], "continuation")
+
+        inherited_job = copy.deepcopy(base)
+        resolved = main_app._prepare_content_followup_scope(
+            inherited_job, main_app.ChatRequest(text="继续上次范围找洗衣机"), "继续上次范围找洗衣机",
+            {"contextPolicy": "inherit", "referencedSearchIds": ["search_old"]},
+        )
+        self.assertEqual((resolved["start"], resolved["end"]), (300.0, 420.0))
+        self.assertEqual(inherited_job["request"]["contentSearchScopeOrigin"], "inherited")
+
+    def test_fresh_text_time_scope_does_not_intersect_stale_custom_scope(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "request": {"searchScopeKind": "custom", "searchScopeStart": 0, "searchScopeEnd": 150},
+            "videoInfo": {"duration": 600},
+        }
+        resolved = main_app._prepare_content_followup_scope(
+            job, main_app.ChatRequest(text="找后半段的洗衣机"), "找后半段的洗衣机",
+            {"contextPolicy": "fresh"},
+        )
+        self.assertEqual((resolved["start"], resolved["end"]), (300.0, 600.0))
+        self.assertEqual(job["request"]["searchScopeKind"], "all")
+        self.assertEqual(job["request"]["contentSearchScopeOrigin"], "explicit_text")
+
+    def test_fresh_followup_resets_to_task_source_scope_not_previous_query_scope(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "request": {
+                "sourceScopeKind": "custom", "sourceScopeStart": 120, "sourceScopeEnd": 480,
+                "searchScopeKind": "custom", "searchScopeStart": 300, "searchScopeEnd": 360,
+            },
+            "videoInfo": {"duration": 600},
+            "contentSearch": {
+                "id": "previous", "intent": {"searchScope": {
+                    "kind": "custom", "start": 300, "end": 360, "duration": 60,
+                    "videoDuration": 600, "source": "quick", "origin": "explicit_text",
+                }},
+            },
+        }
+        resolved = main_app._prepare_content_followup_scope(
+            job, main_app.ChatRequest(text="找冰箱相关的片段"), "找冰箱相关的片段",
+            {"contextPolicy": "fresh"},
+        )
+        self.assertEqual((resolved["start"], resolved["end"]), (120.0, 480.0))
+        self.assertEqual(job["request"]["contentSearchScopeOrigin"], "fresh_default")
+
+    def test_followup_time_condition_cannot_expand_outside_task_source_scope(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "request": {
+                "sourceScopeKind": "custom", "sourceScopeStart": 120, "sourceScopeEnd": 480,
+                "searchScopeKind": "custom", "searchScopeStart": 120, "searchScopeEnd": 480,
+            },
+            "videoInfo": {"duration": 600},
+        }
+        resolved = main_app._prepare_content_followup_scope(
+            job, main_app.ChatRequest(text="找后半段的洗衣机"), "找后半段的洗衣机",
+            {"contextPolicy": "fresh"},
+        )
+        self.assertEqual((resolved["start"], resolved["end"]), (300.0, 480.0))
+
+    def test_explicit_full_scope_overrides_old_time_words_in_instruction(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "request": {
+                "contentInstruction": "找后半段的洗衣机", "searchScopeKind": "all",
+                "searchScopeStart": 0, "searchScopeEnd": 600,
+                "contentSearchScopeOrigin": "explicit_ui",
+            },
+            "videoInfo": {"duration": 600},
+        }
+        decision = {
+            "_parserLlmCalls": 0,
+            "intent": {
+                "action": "extract_content", "query": "洗衣机", "contextPolicy": "fresh",
+                "predicates": [{"id": "p1", "kind": "speech.semantic", "value": "洗衣机"}],
+            },
+            "capabilityProposal": {"capabilities": ["speech"]},
+        }
+        intent = main_app._content_intent_from_decision(job, "找后半段的洗衣机", decision)
+        self.assertEqual((intent["searchScope"]["start"], intent["searchScope"]["end"]), (0.0, 600.0))
+        self.assertEqual(intent["searchScope"]["origin"], "explicit_ui")
+        self.assertEqual(
+            (main_app._content_execution_scope(job)["start"], main_app._content_execution_scope(job)["end"]),
+            (0.0, 600.0),
+        )
+
+    def test_source_index_cache_key_does_not_split_by_query_scope(self) -> None:
+        from app import main as main_app
+
+        base = main_app.new_job_record(
+            job_id="scope_cache_a", source=Path("/tmp/source.mp4"), filename="source.mp4",
+            size=100, count="auto", target_seconds="auto", theme="冰箱",
+            source_hash="shared-source-index-hash",
+        )
+        base.update({"recognitionSchemaVersion": 7, "videoInfo": {"duration": 600}})
+        narrow = copy.deepcopy(base)
+        narrow["request"].update({
+            "searchScopeKind": "custom", "searchScopeStart": 0, "searchScopeEnd": 120,
+        })
+        full = copy.deepcopy(base)
+        full["request"].update({
+            "searchScopeKind": "all", "searchScopeStart": 0, "searchScopeEnd": 600,
+        })
+        self.assertEqual(
+            main_app.content_index_cache_key(narrow), main_app.content_index_cache_key(full),
+        )
+
+    def test_latest_instruction_rebuilds_index_when_scope_cache_key_changed(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_scope_index_rebuild"
+        job = {
+            "id": job_id, "request": {"contentInstruction": "找洗衣机", "searchScopeKind": "all"},
+            "videoInfo": {"duration": 643}, "recognitionSchemaVersion": 4,
+        }
+        main_app.jobs[job_id] = job
+        old_index = {"cacheKey": "narrow-scope", "schemaVersion": main_app._content_index_version(job)}
+        rebuilt_index = {"cacheKey": "full-scope", "schemaVersion": main_app._content_index_version(job)}
+        intent = {"modalities": ["speech"], "queryPlan": {"requiredOperations": []}}
+        expected_search = {"id": "search_full", "candidates": [], "candidateCount": 0}
+        try:
+            with patch.object(main_app, "_parse_content_instruction", return_value=intent), \
+                    patch.object(main_app, "_requested_content_modalities", return_value={"speech"}), \
+                    patch.object(main_app, "_intent_requires_dialogue_graph", return_value=False), \
+                    patch.object(main_app, "_recognition_modality_state", return_value=({"speech"}, {"speech"}, {"speech"})), \
+                    patch.object(main_app, "content_index_cache_key", return_value="full-scope"), \
+                    patch.object(main_app, "_build_content_index", return_value=rebuilt_index) as rebuild, \
+                    patch.object(main_app, "_search_content_index", return_value=expected_search) as search_index:
+                search, _, instruction = main_app._search_latest_content_instruction(
+                    job_id, old_index, threading.Event(),
+                )
+            self.assertEqual(search, expected_search)
+            self.assertEqual(instruction, "找洗衣机")
+            rebuild.assert_called_once()
+            self.assertIs(search_index.call_args.args[2], rebuilt_index)
         finally:
             main_app.jobs.pop(job_id, None)
 
@@ -1572,6 +2436,125 @@ class ContentConfirmationTests(unittest.TestCase):
         self.assertEqual(catalog[0]["speakerAssociationMethod"], "active_speaker_user_confirmed")
         self.assertFalse(catalog[0]["speakerReviewRequired"])
 
+    def test_person_catalog_applies_reversible_merge_overlay(self) -> None:
+        from app import main as main_app
+
+        index = {"persons": [
+            {"id": "person_1", "label": "人物 A", "ranges": [{"start": 1, "end": 2}], "trackCount": 1, "confidence": .7},
+            {"id": "person_2", "label": "人物 B", "ranges": [{"start": 4, "end": 6}], "trackCount": 2, "confidence": .9},
+        ]}
+        catalog = main_app._content_person_catalog({
+            "id": "job_1", "personMergeAliases": {"person_2": "person_1"},
+        }, index)
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]["sourcePersonIds"], ["person_1", "person_2"])
+        self.assertEqual(catalog[0]["appearanceSeconds"], 3)
+        self.assertEqual(catalog[0]["trackCount"], 3)
+        self.assertTrue(catalog[0]["userMerged"])
+
+    def test_person_catalog_exposes_face_anchor_duplicate_evidence(self) -> None:
+        from app import main as main_app
+
+        catalog = main_app._content_person_catalog({"id": "job_1"}, {"persons": [{
+            "id": "person_1", "label": "人物 A",
+            "ranges": [{"start": 1, "end": 3}], "trackCount": 2, "confidence": .86,
+            "faceAnchorCount": 5, "duplicateReviewRecommended": True,
+            "possibleDuplicatePersonIds": ["person_2"], "duplicateSimilarity": .73,
+            "duplicateEvidenceType": "face_anchor",
+        }]})
+        self.assertEqual(catalog[0]["faceAnchorCount"], 5)
+        self.assertTrue(catalog[0]["duplicateReviewRecommended"])
+        self.assertEqual(catalog[0]["possibleDuplicatePersonIds"], ["person_2"])
+        self.assertEqual(catalog[0]["duplicateEvidenceType"], "face_anchor")
+
+    def test_person_catalog_does_not_apply_overlays_from_obsolete_index(self) -> None:
+        from app import main as main_app
+
+        index = {"cacheKey": "new-index", "persons": [
+            {"id": "person_1", "label": "人物 A", "ranges": [{"start": 1, "end": 2}]},
+            {"id": "person_2", "label": "人物 B", "ranges": [{"start": 4, "end": 5}]},
+        ]}
+        catalog = main_app._content_person_catalog({
+            "id": "job_1", "personIdentityIndexCacheKey": "old-index",
+            "personLabels": {"person_1": {"label": "旧人物"}},
+            "personMergeAliases": {"person_2": "person_1"},
+        }, index)
+        self.assertEqual([item["id"] for item in catalog], ["person_1", "person_2"])
+        self.assertEqual(catalog[0]["label"], "人物 A")
+
+    def test_reindex_clears_stale_person_identity_corrections(self) -> None:
+        from app import main as main_app
+
+        job = {
+            "contentIndex": {"cacheKey": "old-index"},
+            "personMergeRevision": 3,
+            "personMergeAliases": {"person_2": "person_1"},
+            "personLabels": {"person_1": {"label": "嘉宾"}},
+            "personMergeHistory": [{"revision": 2}],
+            "request": {
+                "contentSearchTargetPersonId": "person_1",
+                "contentSearchPersonTarget": {"personIds": ["person_1"], "matchMode": "any"},
+            },
+        }
+        changed = main_app._reset_stale_person_identity_overlays(
+            job, {"cacheKey": "new-index"},
+        )
+        self.assertTrue(changed)
+        self.assertNotIn("personMergeAliases", job)
+        self.assertNotIn("personLabels", job)
+        self.assertNotIn("personMergeHistory", job)
+        self.assertNotIn("contentSearchTargetPersonId", job["request"])
+        self.assertNotIn("contentSearchPersonTarget", job["request"])
+        self.assertEqual(job["personIdentityIndexCacheKey"], "new-index")
+        self.assertEqual(job["personMergeRevision"], 4)
+
+    def test_person_catalog_reassigns_selected_ranges_into_durable_new_card(self) -> None:
+        from app import main as main_app
+
+        index = {"persons": [{
+            "id": "person_1", "label": "人物 A",
+            "ranges": [{"start": 1, "end": 2}, {"start": 4, "end": 6}],
+            "trackCount": 2, "confidence": .9,
+        }]}
+        catalog = main_app._content_person_catalog({
+            "id": "job_1",
+            "personRangeAssignments": {"person_1_range_0001": "person_user_1"},
+            "personLabels": {"person_user_1": {"label": "人物 B", "updatedAt": "now"}},
+        }, index)
+        by_id = {item["id"]: item for item in catalog}
+        self.assertEqual([item["id"] for item in by_id["person_1"]["ranges"]], ["person_1_range_0000"])
+        self.assertEqual([item["id"] for item in by_id["person_user_1"]["ranges"]], ["person_1_range_0001"])
+        self.assertEqual(by_id["person_user_1"]["label"], "人物 B")
+        self.assertEqual(by_id["person_user_1"]["sourcePersonIds"], ["person_1"])
+
+        regenerated = {"persons": [{
+            "id": "person_1", "label": "人物 A",
+            "ranges": [{"start": 1, "end": 2}, {"start": 3.9, "end": 6.1}],
+            "trackCount": 2, "confidence": .9,
+        }]}
+        catalog = main_app._content_person_catalog({
+            "id": "job_1",
+            "personIdentityConstraints": [{
+                "operation": "reassign_ranges", "sourcePersonId": "person_1",
+                "targetPersonId": "person_user_1", "ranges": [{"start": 4, "end": 6}],
+            }],
+        }, regenerated)
+        by_id = {item["id"]: item for item in catalog}
+        self.assertEqual(by_id["person_user_1"]["ranges"][0]["start"], 3.9)
+
+    def test_candidate_events_group_nearby_person_matches_without_changing_ids(self) -> None:
+        from app import main as main_app
+
+        candidates = [
+            {"id": "one", "start": 1, "end": 2, "matchedPersonIds": ["person_1"], "matchedPersonLabels": ["人物 A"]},
+            {"id": "two", "start": 3, "end": 4, "matchedPersonIds": ["person_1"], "matchedPersonLabels": ["人物 A"]},
+            {"id": "three", "start": 20, "end": 21, "matchedPersonIds": ["person_1"], "matchedPersonLabels": ["人物 A"]},
+        ]
+        events = main_app.content_candidate_events(candidates, "person_edit")
+        self.assertEqual([item["matchIds"] for item in events], [["one", "two"], ["three"]])
+        self.assertEqual(events[0]["clipDuration"], 2)
+        self.assertEqual(events[0]["sourceSpanDuration"], 3)
+
     def test_speaker_confirmation_options_fall_back_to_all_diarized_speakers(self) -> None:
         from app import main as main_app
 
@@ -1675,10 +2658,11 @@ class ContentConfirmationTests(unittest.TestCase):
             }],
         }
         main_app.jobs[job_id] = job
-        expected = {"action": "content-search", "job": {"id": job_id}}
+        expected = {"action": "content-search-reused", "reused": True, "job": {"id": job_id}}
         try:
             with patch.object(main_app, "_load_content_person_index", return_value=index), \
-                    patch.object(main_app, "queue_content_followup", return_value=expected), \
+                    patch.object(main_app, "_reuse_content_person_appearance_tracks", return_value=expected) as reuse_timeline, \
+                    patch.object(main_app, "queue_content_followup") as queue_search, \
                     patch.object(main_app, "save_job"):
                 response = main_app.confirm_content_person_speaker(
                     job_id, main_app.PersonSpeakerRequest(
@@ -1686,6 +2670,13 @@ class ContentConfirmationTests(unittest.TestCase):
                     ),
                 )
             self.assertEqual(response, expected)
+            queue_search.assert_not_called()
+            self.assertEqual(reuse_timeline.call_args.kwargs["reuse_kind"], "speaker_timeline")
+            prepared = reuse_timeline.call_args.args[2]
+            self.assertEqual(
+                [item["kind"] for item in prepared["queryPlan"]["predicates"]],
+                ["person.speaking"],
+            )
             self.assertEqual(
                 main_app.jobs[job_id]["personSpeakerLinks"]["person_2"]["speaker"],
                 "Speaker 1",
@@ -1713,10 +2704,11 @@ class ContentConfirmationTests(unittest.TestCase):
             }],
         }
         main_app.jobs[job_id] = job
-        expected = {"action": "content-search", "job": {"id": job_id}}
+        expected = {"action": "content-search-reused", "reused": True, "job": {"id": job_id}}
         try:
             with patch.object(main_app, "_load_content_person_index", return_value=index), \
-                    patch.object(main_app, "queue_content_followup", return_value=expected) as queue_search, \
+                    patch.object(main_app, "_reuse_content_person_appearance_tracks", return_value=expected) as reuse_tracks, \
+                    patch.object(main_app, "queue_content_followup") as queue_search, \
                     patch.object(main_app, "save_job"):
                 response = main_app.select_content_person_target(
                     job_id, main_app.PersonTargetRequest(personId="person_1"),
@@ -1726,11 +2718,15 @@ class ContentConfirmationTests(unittest.TestCase):
                 main_app.jobs[job_id]["request"]["contentSearchTargetPersonId"],
                 "person_1",
             )
-            self.assertEqual(queue_search.call_args.args[1], "人物 A")
-            prepared = queue_search.call_args.kwargs["prepared_intent"]
+            queue_search.assert_not_called()
+            prepared = reuse_tracks.call_args.args[2]
             self.assertEqual(
                 [item["kind"] for item in prepared["queryPlan"]["predicates"]],
                 ["person.appearance"],
+            )
+            self.assertEqual(
+                main_app.jobs[job_id]["request"]["contentSearchPersonTarget"]["activity"],
+                "appearance",
             )
         finally:
             main_app.jobs.pop(job_id, None)
@@ -1769,10 +2765,11 @@ class ContentConfirmationTests(unittest.TestCase):
             {"id": "person_2", "label": "人物 B", "ranges": [{"start": 2, "end": 9}]},
         ]}
         main_app.jobs[job_id] = job
-        expected = {"action": "content-search", "job": {"id": job_id}}
+        expected = {"action": "content-search-reused", "reused": True, "job": {"id": job_id}}
         try:
             with patch.object(main_app, "_load_content_person_index", return_value=index), \
-                    patch.object(main_app, "queue_content_followup", return_value=expected) as queue_search, \
+                    patch.object(main_app, "_reuse_content_person_appearance_tracks", return_value=expected) as reuse_tracks, \
+                    patch.object(main_app, "queue_content_followup") as queue_search, \
                     patch.object(main_app, "save_job"):
                 response = main_app.select_content_person_target(
                     job_id, main_app.PersonTargetRequest(
@@ -1780,14 +2777,25 @@ class ContentConfirmationTests(unittest.TestCase):
                     ),
                 )
             self.assertEqual(response, expected)
-            self.assertEqual(queue_search.call_args.args[1], instruction)
-            prepared = queue_search.call_args.kwargs["prepared_intent"]
+            queue_search.assert_not_called()
+            self.assertEqual(reuse_tracks.call_args.args[1], instruction)
+            prepared = reuse_tracks.call_args.args[2]
             self.assertNotIn("_clarification", prepared)
             self.assertEqual(prepared["personTarget"]["personIds"], ["person_1", "person_2"])
             self.assertEqual(prepared["personTarget"]["matchMode"], "all")
             self.assertEqual(prepared["personTarget"]["activity"], "appearance")
+            _, prepared_any, _ = main_app._bind_content_person_target(
+                job, index["persons"], "any", "appearance",
+            )
+            self.assertEqual(prepared_any["personTarget"]["matchMode"], "any")
+            self.assertNotEqual(
+                content_query_cache_key("same-person-index", prepared),
+                content_query_cache_key("same-person-index", prepared_any),
+                "任一人物与所有人物不能复用同一个检索缓存",
+            )
             self.assertEqual(main_app.jobs[job_id]["request"]["contentSearchPersonTarget"], {
                 "personIds": ["person_1", "person_2"], "matchMode": "all",
+                "activity": "appearance",
             })
             self.assertNotIn("contentSearchTargetPersonId", main_app.jobs[job_id]["request"])
         finally:
@@ -1886,10 +2894,10 @@ class ContentConfirmationTests(unittest.TestCase):
                 response = main_app.chat_with_job(
                     job_id, main_app.ChatRequest(text="那后面呢？"),
                 )
-            self.assertEqual(response["action"], "content-route-clarification")
+            self.assertEqual(response["action"], "workflow-confirmation")
             queue_search.assert_not_called()
             self.assertEqual(main_app.jobs[job_id]["status"], "awaiting_content_confirmation")
-            self.assertIn("意图判断服务暂时不可用", main_app.jobs[job_id]["messages"][-1]["text"])
+            self.assertIn("AI 意图判断暂时不可用", response["routingConfirmation"]["message"])
         finally:
             main_app.jobs.pop(job_id, None)
 
@@ -2195,6 +3203,127 @@ class ContentConfirmationTests(unittest.TestCase):
             main_app.jobs.pop(job_id, None)
             main_app.cancel_events.pop(job_id, None)
 
+    def test_person_confirmation_has_one_clear_clip_to_composition_handoff(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_person_composition_handoff"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/test-person-source.mp4"), filename="people.mp4",
+            size=100, count="auto", target_seconds="auto", theme="人物出镜", source_hash="person-handoff",
+        )
+        job.update({
+            "taskMode": "content_extract", "workflowKind": "person_edit",
+            "status": "awaiting_content_confirmation",
+            "videoInfo": {"duration": 30, "width": 1280, "height": 720, "has_audio": True},
+            "contentSearch": {
+                "id": "search_person", "instruction": "提取人物 A 的全部出镜", "status": "ready",
+                "candidates": [{
+                    "id": "person_match", "start": 5, "end": 9, "duration": 4,
+                    "title": "人物 A 出镜", "score": 96, "evidenceType": "person",
+                }],
+            },
+            "brief": {"objective": "按人物剪辑", "focus": [], "includeRules": [], "excludeRules": []},
+            "editingIntent": {"hardConstraints": {"includeRules": [], "excludeRules": []}, "style": {"allowReorder": False}},
+        })
+        main_app.jobs[job_id] = job
+        request = main_app.ContentSearchConfirmRequest(
+            searchId="search_person", matchIds=["person_match"], outputMode="single_reel",
+        )
+        try:
+            with patch.object(main_app, "save_job"), \
+                 patch.object(main_app, "append_message") as append, \
+                 patch.object(main_app, "submit_render_task") as submit:
+                response = main_app.confirm_content_search(job_id, request)
+            updated = response["job"]
+            self.assertEqual(updated["detail"], "已确认出镜片段，正在合成人物出镜视频")
+            self.assertEqual(updated["currentAction"], "正在合成已确认的出镜片段")
+            messages = [call.args[2] for call in append.call_args_list]
+            self.assertIn("已确认 1 个出镜片段，开始合成人物出镜视频。", messages)
+            self.assertTrue(any("合成阶段不会再增删片段" in message for message in messages))
+            self.assertEqual(submit.call_args.args[13]["displayName"], "人物剪辑")
+        finally:
+            main_app.jobs.pop(job_id, None)
+            main_app.cancel_events.pop(job_id, None)
+
+    def test_duplicate_content_composition_is_blocked_before_render(self) -> None:
+        from fastapi import HTTPException
+        from app import main as main_app
+
+        job_id = "test_duplicate_content_composition"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_directory = Path(temporary_directory)
+            output_file = output_directory / "v001-content.mp4"
+            output_file.write_bytes(b"playable-placeholder")
+            candidate = {
+                "id": "match_1", "start": 5, "end": 9, "duration": 4,
+                "title": "离线模式", "score": 92, "reason": "对白直接匹配",
+            }
+            segments = content_matches_to_segments([candidate])
+            job = main_app.new_job_record(
+                job_id=job_id, source=Path("/tmp/test-content-source.mp4"),
+                filename="source.mp4", size=100, count="auto", target_seconds="auto",
+                theme="离线模式", source_hash="duplicate-content-hash",
+            )
+            job.update({
+                "taskMode": "content_extract", "status": "awaiting_content_confirmation",
+                "outputDirectory": str(output_directory),
+                "contentSearch": {
+                    "id": "search_duplicate", "instruction": "截取离线模式介绍",
+                    "status": "ready", "candidates": [candidate],
+                },
+                "outputVersions": [{
+                    "id": "version_1", "number": 1, "outputMode": "single_reel",
+                    "subtitleMode": "none", "outputs": [{
+                        "filename": output_file.name, "segments": segments,
+                    }],
+                }],
+                "outputs": [{"filename": output_file.name, "segments": segments}],
+                "messages": [{"id": "before", "role": "assistant", "text": "已保存为 V1", "kind": "result"}],
+            })
+            main_app.jobs[job_id] = job
+            try:
+                with patch.object(main_app, "save_job"), patch.object(main_app, "append_message") as append, \
+                        patch.object(main_app, "submit_render_task") as submit:
+                    with self.assertRaises(HTTPException) as blocked:
+                        main_app.confirm_content_search(job_id, main_app.ContentSearchConfirmRequest(
+                            searchId="search_duplicate", matchIds=["match_1"], outputMode="single_reel",
+                        ))
+                self.assertEqual(blocked.exception.status_code, 409)
+                self.assertEqual(blocked.exception.detail["code"], "duplicate_content_composition")
+                self.assertEqual(blocked.exception.detail["existingVersionNumber"], 1)
+                self.assertEqual(blocked.exception.detail["filename"], output_file.name)
+                self.assertEqual(main_app.jobs[job_id]["status"], "awaiting_content_confirmation")
+                append.assert_not_called()
+                submit.assert_not_called()
+            finally:
+                main_app.jobs.pop(job_id, None)
+                main_app.cancel_events.pop(job_id, None)
+
+    def test_content_signature_ignores_random_subtitle_ids(self) -> None:
+        from app import main as main_app
+
+        job = {"sourceHash": "same-source"}
+        outputs = [[{"start": 1.0, "end": 3.5, "playbackRate": 1}]]
+        base_cue = {
+            "outputIndex": 0, "start": 0, "end": 2.5,
+            "sourceStart": 1, "sourceEnd": 3.5, "text": "同一条字幕",
+            "speakerLabel": "说话人 B", "showSpeakerLabel": True,
+        }
+        left = main_app._content_composition_signature(
+            job, outputs, output_mode="single_reel", subtitle_mode="burn", subtitle_style="clean",
+            subtitle_draft={"id": "draft_random_1", "cues": [{"id": "cue_random_1", **base_cue}]},
+        )
+        right = main_app._content_composition_signature(
+            job, outputs, output_mode="single_reel", subtitle_mode="burn", subtitle_style="clean",
+            subtitle_draft={"id": "draft_random_2", "cues": [{"id": "cue_random_2", **base_cue}]},
+        )
+        changed = main_app._content_composition_signature(
+            job, outputs, output_mode="single_reel", subtitle_mode="burn", subtitle_style="clean",
+            subtitle_draft={"id": "draft_random_3", "cues": [{"id": "cue_random_3", **base_cue, "text": "字幕内容已修改"}]},
+        )
+        self.assertEqual(left, right)
+        self.assertNotEqual(left, changed)
+
     def test_incomplete_exhaustive_search_can_render_only_after_acknowledgement(self) -> None:
         from fastapi import HTTPException
         from app import main as main_app
@@ -2495,6 +3624,49 @@ class ContentConfirmationTests(unittest.TestCase):
             main_app.jobs.pop(job_id, None)
             main_app.cancel_events.pop(job_id, None)
 
+    def test_manual_range_is_added_to_active_exploration_review_draft(self) -> None:
+        from app import main as main_app
+
+        job_id = "test_content_manual_range"
+        job = main_app.new_job_record(
+            job_id=job_id, source=Path("/tmp/test-content-source.mp4"), filename="source.mp4",
+            size=100, count="auto", target_seconds="auto", theme="人物发言",
+            source_hash="manual-range-hash",
+        )
+        job.update({
+            "taskMode": "content_extract", "status": "awaiting_content_confirmation",
+            "videoInfo": {"duration": 90, "frame_rate": 25},
+            "manualSelection": {"start": 20, "end": 26, "duration": 6},
+            "contentSearch": {
+                "id": "search_1", "instruction": "人物发言",
+                "candidates": [{
+                    "id": "match_1", "start": 2, "end": 5, "duration": 3,
+                    "reviewStatus": "kept", "selected": True,
+                }],
+                "defaultSelectedIds": ["match_1"],
+            },
+        })
+        main_app.jobs[job_id] = job
+        try:
+            with patch.object(main_app, "save_job"):
+                response = main_app.add_content_search_manual_range(
+                    job_id,
+                    main_app.ContentSearchManualRangeRequest(
+                        searchId="search_1", start=20, end=26, title="补充回答",
+                    ),
+                )
+            added = response["match"]
+            search = main_app.jobs[job_id]["contentSearch"]
+            self.assertEqual((added["start"], added["end"], added["title"]), (20, 26, "补充回答"))
+            self.assertEqual(added["boundarySource"], "user_manual_range")
+            self.assertIn(added["id"], search["reviewDraft"]["selectedMatchIds"])
+            self.assertIn(added["id"], search["reviewDraft"]["orderedMatchIds"])
+            self.assertEqual(search["candidateCount"], 2)
+            self.assertNotIn("manualSelection", main_app.jobs[job_id])
+        finally:
+            main_app.jobs.pop(job_id, None)
+            main_app.cancel_events.pop(job_id, None)
+
     def test_public_content_job_rewrites_legacy_highlight_completion_copy(self) -> None:
         from app import main as main_app
 
@@ -2566,7 +3738,7 @@ class ContentConfirmationTests(unittest.TestCase):
         self.assertEqual(workflow["state"], "ready")
         self.assertEqual(
             [step["label"] for step in workflow["steps"]],
-            ["读取素材", "建立人物轨迹", "识别对白", "建立画面索引", "检索目标内容", "确认内容片段", "生成内容视频"],
+            ["读取素材", "识别人物并关联轨迹", "识别对白", "建立画面索引", "检索目标内容", "确认内容片段", "生成内容视频"],
         )
         self.assertEqual(workflow["steps"][-2]["state"], "current")
         self.assertEqual(workflow["actionRequired"]["kind"], "coverage_incomplete")
@@ -2591,7 +3763,7 @@ class ContentConfirmationTests(unittest.TestCase):
         states = {step["label"]: step["state"] for step in workflow["steps"]}
         self.assertEqual(states["读取素材"], "complete")
         self.assertEqual(states["识别对白"], "complete")
-        self.assertEqual(states["建立人物轨迹"], "current")
+        self.assertEqual(states["识别人物并关联轨迹"], "current")
         self.assertEqual(states["建立画面索引"], "pending")
         self.assertEqual(states["检索目标内容"], "pending")
 
@@ -2786,6 +3958,9 @@ class ContentConfirmationTests(unittest.TestCase):
         with patch.object(main_app, "create_vision_client_for_job", return_value=client), \
                 patch.object(main_app, "extract_frames_at_times", side_effect=frames_at_times), \
                 patch.object(main_app, "create_contact_sheet", return_value=Path("sheet.jpg")), \
+                patch.object(main_app, "settings", replace(
+                    main_app.settings, content_search_model_concurrency=1,
+                )), \
                 patch.object(main_app, "_content_progress"):
             matches = main_app._targeted_visual_chapter_matches(
                 "job_unbounded", {
@@ -2800,6 +3975,48 @@ class ContentConfirmationTests(unittest.TestCase):
         self.assertEqual(client.analyze_image.call_count, 5)
         self.assertEqual(stats["strictVisualVerifiedFrames"], 60)
         self.assertTrue(stats["strictVisualCoverageComplete"])
+
+    def test_strict_visual_schedule_never_requests_exclusive_media_end(self) -> None:
+        from app import main as main_app
+
+        values = main_app._strict_visual_sample_times(0.0, 81.567, scene_cuts=[10.0, 20.0])
+        self.assertEqual(values[0], 0.0)
+        self.assertLess(values[-1], 81.567)
+        self.assertGreaterEqual(values[-1], 81.5)
+        self.assertTrue(all(0.0 <= value < 81.567 for value in values))
+
+    def test_dense_visual_index_coverage_detects_large_holes(self) -> None:
+        from app import main as main_app
+
+        dense = {"embeddingVisualUnits": [
+            {"start": value, "end": value + .1, "evidenceTime": value}
+            for value in (0.0, 1.0, 2.0, 3.0)
+        ]}
+        sparse = {"embeddingVisualUnits": [
+            {"start": value, "end": value + .1, "evidenceTime": value}
+            for value in (0.0, 3.0)
+        ]}
+        self.assertTrue(main_app._dense_visual_index_coverage(
+            dense, start=0.0, end=3.0,
+        )["complete"])
+        self.assertFalse(main_app._dense_visual_index_coverage(
+            sparse, start=0.0, end=3.0,
+        )["complete"])
+
+    def test_adaptive_semantic_candidates_keep_strong_tail_evidence(self) -> None:
+        from app import main as main_app
+
+        units = [{"id": f"unit_{index}"} for index in range(80)]
+        recalled = [
+            {"unit": unit, "score": 90 - index, "vectorScore": .1, "lexicalScore": 0}
+            for index, unit in enumerate(units)
+        ]
+        recalled[-1].update({"vectorScore": .7, "lexicalScore": 1})
+        selected = main_app._adaptive_semantic_units(
+            units, recalled, scope_seconds=60, predicate_count=1,
+        )
+        self.assertEqual(len(selected), 49)
+        self.assertEqual(selected[-1]["id"], "unit_79")
 
     def test_strict_visual_scan_retries_failed_page_and_keeps_later_results(self) -> None:
         from app import main as main_app
@@ -2822,6 +4039,9 @@ class ContentConfirmationTests(unittest.TestCase):
         with patch.object(main_app, "create_vision_client_for_job", return_value=client), \
                 patch.object(main_app, "extract_frames_at_times", side_effect=frames_at_times), \
                 patch.object(main_app, "create_contact_sheet", return_value=Path("sheet.jpg")), \
+                patch.object(main_app, "settings", replace(
+                    main_app.settings, content_search_model_concurrency=1,
+                )), \
                 patch.object(main_app, "_content_progress"):
             matches = main_app._targeted_visual_chapter_matches(
                 "job_retry", {
@@ -2836,6 +4056,57 @@ class ContentConfirmationTests(unittest.TestCase):
         self.assertEqual(stats["strictVisualVerifiedFrames"], 12)
         self.assertFalse(stats["strictVisualCoverageComplete"])
         self.assertEqual(len(matches), 1)
+
+    def test_strict_visual_scan_uses_configured_page_concurrency(self) -> None:
+        from app import main as main_app
+
+        barrier = threading.Barrier(3)
+        state_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def analyze_image(*_args, **_kwargs):
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                barrier.wait(timeout=2)
+                return {"matches": []}
+            finally:
+                with state_lock:
+                    active -= 1
+
+        client = MagicMock()
+        client.analyze_image.side_effect = analyze_image
+        stats = {"vlmCalls": 0}
+
+        def frames_at_times(_source, _root, times, **_kwargs):
+            return [SimpleNamespace(path=Path(f"frame-{position}.jpg"), time=value)
+                    for position, value in enumerate(times)]
+
+        with patch.object(main_app, "create_vision_client_for_job", return_value=client), \
+                patch.object(main_app, "extract_frames_at_times", side_effect=frames_at_times), \
+                patch.object(main_app, "create_contact_sheet", return_value=Path("sheet.jpg")), \
+                patch.object(main_app, "settings", replace(
+                    main_app.settings, content_search_model_concurrency=3,
+                )), \
+                patch.object(main_app, "_content_progress"):
+            matches = main_app._targeted_visual_chapter_matches(
+                "job_parallel", {
+                    "sourcePath": "/tmp/source.mp4", "workDirectory": "/tmp/work",
+                    "visionConfig": {"model": "test-vlm"},
+                }, "search_parallel", "目标", [{"start": 0.0, "end": 17.5}],
+                threading.Event(), stats, [], global_scan=True, strict_scan=True,
+            )
+
+        self.assertEqual(matches, [])
+        self.assertEqual(client.analyze_image.call_count, 3)
+        self.assertEqual(stats["vlmCalls"], 3)
+        self.assertEqual(stats["strictVisualConcurrency"], 3)
+        self.assertEqual(maximum_active, 3)
+        self.assertEqual(stats["strictVisualVerifiedFrames"], 36)
+        self.assertTrue(stats["strictVisualCoverageComplete"])
 
     def test_person_appearance_direct_path_returns_all_continuous_ranges(self) -> None:
         from app import main as main_app
@@ -2897,6 +4168,260 @@ class ContentConfirmationTests(unittest.TestCase):
         plan = main_app.compile_query_plan(normalized)
         self.assertFalse(plan["clarificationRequired"])
         self.assertEqual([item["kind"] for item in plan["predicates"]], ["person.speaking"])
+
+    def test_embedded_female_speech_subject_is_promoted_to_active_speaker(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 699.84}},
+            "找到女性说话的片段",
+            {
+                "capabilityProposal": {"capabilities": ["speech"]},
+                "intent": {
+                    "action": "extract_content", "query": "找到女性说话的片段",
+                    "predicates": [{
+                        "id": "p1", "kind": "speech.semantic",
+                        "value": "女性正在说话或发言", "required": True,
+                        "subject": {
+                            "description": "女性", "type": "person", "identityPolicy": "context",
+                        },
+                    }],
+                    "logic": {"op": "predicate", "predicateId": "p1"},
+                },
+            },
+        )
+        self.assertEqual(set(intent["modalities"]), {"person", "speech", "visual"})
+        self.assertEqual(
+            [item["kind"] for item in intent["queryPlan"]["predicates"]],
+            ["person.speaking"],
+        )
+        self.assertEqual(intent["queryPlan"]["predicates"][0]["personRef"], "女性")
+        self.assertEqual(
+            set(intent["queryPlan"]["requiredOperations"]),
+            {"person.track_face", "person.active_speaker_link", "speech.semantic_search"},
+        )
+        self.assertIn(
+            "embedded_person_speech_promoted_to_active_speaker",
+            {item["code"] for item in intent.get("normalizationDiagnostics") or []},
+        )
+
+    def test_described_person_speaking_predicate_id_binding_is_executable(self) -> None:
+        from app import main as main_app
+
+        raw_intent = {
+            "action": "extract_content", "query": "找到女性说话的片段",
+            "predicates": [
+                {
+                    "id": "p1", "kind": "person.appearance", "value": "女性",
+                    "subject": {
+                        "description": "女性", "type": "person", "identityPolicy": "context",
+                    },
+                    "required": True,
+                },
+                {
+                    "id": "p2", "kind": "person.speaking", "value": "说话",
+                    "subjectPersonRef": "p1",
+                    "subject": {
+                        "description": "女性", "type": "person", "identityPolicy": "context",
+                    },
+                    "required": True,
+                },
+            ],
+            "logic": {"op": "all", "children": [
+                {"op": "predicate", "predicateId": "p1"},
+                {"op": "predicate", "predicateId": "p2"},
+            ]},
+            "relations": [{"type": "during", "left": "p2", "right": "p1"}],
+        }
+        parsed = main_app.parse_content_intent("找到女性说话的片段", raw_intent)
+        self.assertEqual(parsed["validationErrors"], [])
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 699.84}},
+            "找到女性说话的片段",
+            {
+                "capabilityProposal": {"capabilities": ["speech", "person", "visual"]},
+                "intent": parsed,
+            },
+        )
+        self.assertNotIn("_clarification", intent)
+        self.assertEqual(intent["validationErrors"], [])
+        self.assertEqual(
+            [item["kind"] for item in intent["queryPlan"]["predicates"]],
+            ["person.speaking"],
+        )
+        self.assertEqual(intent["queryPlan"]["predicates"][0]["personRef"], "女性")
+        self.assertEqual(
+            set(intent["queryPlan"]["requiredOperations"]),
+            {"person.track_face", "person.active_speaker_link", "speech.semantic_search"},
+        )
+
+    def test_persisted_described_speaker_error_upgrades_without_another_model_call(self) -> None:
+        from app import main as main_app
+
+        instruction = "找到女性说话的片段"
+        persisted = {
+            "schemaVersion": main_app.CONTENT_SEARCH_VERSION,
+            "parserVersion": main_app.CONTENT_INTENT_PARSER_VERSION,
+            "action": "extract_content", "query": instruction,
+            "modalities": ["speech", "person", "visual"],
+            "predicates": [
+                {
+                    "id": "p1", "kind": "person.appearance", "value": "女性",
+                    "subject": {"description": "女性", "type": "person", "identityPolicy": "context"},
+                    "required": True,
+                },
+                {
+                    "id": "p2", "kind": "person.speaking", "value": "说话",
+                    "subjectPersonRef": "p1",
+                    "subject": {"description": "女性", "type": "person", "identityPolicy": "context"},
+                    "required": True,
+                },
+            ],
+            "logic": {"op": "all", "children": [
+                {"op": "predicate", "predicateId": "p1"},
+                {"op": "predicate", "predicateId": "p2"},
+            ]},
+            "relations": [{"type": "during", "left": "p2", "right": "p1"}],
+            "validationErrors": [{
+                "code": "person_speaking_requires_person_ref",
+                "message": "person.speaking 必须引用人物目录中的 personRef。",
+            }],
+            "_clarification": {
+                "kind": "query_semantics", "question": "请补充这次想找的内容关系",
+                "message": "person.speaking 必须引用人物目录中的 personRef。",
+            },
+        }
+        job = {
+            "request": {
+                "searchScopeKind": "all",
+                "pendingContentIntent": {
+                    "instructionId": main_app._content_instruction_id(instruction),
+                    "intent": persisted,
+                },
+            },
+            "videoInfo": {"duration": 699.84},
+        }
+        with patch.object(main_app, "create_llm_client_for_job") as create_client:
+            upgraded = main_app._parse_content_instruction(job, instruction)
+        create_client.assert_not_called()
+        self.assertNotIn("_clarification", upgraded)
+        self.assertEqual(upgraded["validationErrors"], [])
+        self.assertEqual(upgraded["queryPlan"]["predicates"][0]["personRef"], "女性")
+
+    def test_described_speaker_expands_to_all_visually_matched_people(self) -> None:
+        from app import main as main_app
+
+        intent = {
+            "predicates": [{
+                "id": "female_speaker", "kind": "person.speaking",
+                "value": "女性正在说话", "personRef": "女性", "required": True,
+            }],
+            "logic": {"op": "predicate", "predicateId": "female_speaker"},
+        }
+        plan = main_app.compile_query_plan(intent)
+        bound = main_app._bind_described_person_speaking_targets(
+            intent, plan, "female_speaker",
+            [
+                {"id": "person_1", "label": "人物 A"},
+                {"id": "person_2", "label": "人物 B"},
+            ],
+            "女性",
+        )
+        compiled = main_app.compile_query_plan(bound)
+        self.assertFalse(compiled["clarificationRequired"])
+        self.assertEqual(compiled["personTarget"]["personIds"], ["person_1", "person_2"])
+        self.assertEqual(compiled["personTarget"]["activity"], "speaking")
+        self.assertEqual(compiled["logic"]["op"], "any")
+        self.assertEqual(
+            {item["personId"] for item in compiled["predicates"]},
+            {"person_1", "person_2"},
+        )
+
+    def test_person_description_samples_span_the_identity_track(self) -> None:
+        from app import main as main_app
+
+        samples = main_app._person_description_samples({
+            "id": "person_1", "representativeTime": 5.0,
+            "representativeBox": [1, 2, 20, 30],
+            "ranges": [{"start": 0, "end": 30}],
+        }, [
+            {"personId": "person_1", "start": 1.0, "box": [1, 1, 10, 10]},
+            {"personId": "person_1", "start": 15.0, "box": [2, 2, 11, 11]},
+            {"personId": "person_1", "start": 29.0, "box": [3, 3, 12, 12]},
+            {"personId": "person_2", "start": 20.0, "box": [4, 4, 13, 13]},
+        ], maximum=3)
+
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(samples[0]["time"], 5.0)
+        self.assertGreater(max(item["time"] for item in samples), 20.0)
+        self.assertTrue(all(item["box"] for item in samples))
+
+    def test_multi_frame_person_description_keeps_uncertain_match_for_review(self) -> None:
+        from app import main as main_app
+        from app.media import SampledFrame
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.touch()
+            frames = [SampledFrame(path=root / f"frame-{index}.jpg", time=float(index)) for index in range(6)]
+            client = MagicMock()
+            client.analyze_image.return_value = {"matches": [{
+                "personId": "person_1", "classification": "match", "confidence": .91,
+                "visiblePanels": [1, 2, 3], "matchingPanels": [1, 2, 3],
+                "conflictingPanels": [], "reason": "三张画面均符合",
+            }, {
+                "personId": "person_2", "classification": "uncertain", "confidence": .56,
+                "visiblePanels": [4, 5, 6], "matchingPanels": [4],
+                "conflictingPanels": [], "reason": "仅一张画面支持",
+            }]}
+            catalog = [{
+                "id": "person_1", "label": "人物 A", "representativeTime": 0,
+                "representativeBox": [0, 0, 10, 10], "ranges": [{"start": 0, "end": 3}],
+            }, {
+                "id": "person_2", "label": "人物 B", "representativeTime": 3,
+                "representativeBox": [0, 0, 10, 10], "ranges": [{"start": 3, "end": 6}],
+            }]
+            tracks = [
+                {"personId": person_id, "start": start, "box": [0, 0, 10, 10]}
+                for person_id, starts in (("person_1", [0, 1, 2]), ("person_2", [3, 4, 5]))
+                for start in starts
+            ]
+            with (
+                patch.object(main_app, "extract_frames_at_times", return_value=frames),
+                patch.object(main_app, "create_contact_sheet", return_value=root / "sheet.jpg"),
+                patch.object(main_app, "_write_person_crop", return_value=False),
+                patch.object(main_app, "create_vision_client_for_job", return_value=client),
+                patch.object(main_app, "_content_progress"),
+            ):
+                matched, diagnostics = main_app._match_person_catalog_by_visual_description(
+                    "missing_job", {
+                        "sourcePath": str(source), "workDirectory": str(root),
+                    }, "search_1", "女性", catalog, threading.Event(), person_tracks=tracks,
+                )
+
+        self.assertEqual([item["id"] for item in matched], ["person_1", "person_2"])
+        self.assertEqual(diagnostics["reliablePersonIds"], ["person_1"])
+        self.assertEqual(diagnostics["uncertainPersonIds"], ["person_2"])
+        self.assertEqual(matched[1]["personDescriptionEvidence"]["status"], "possible")
+
+    def test_possible_person_description_marks_speaking_result_for_review(self) -> None:
+        from app import main as main_app
+
+        matches = [{
+            "id": "match_1", "matchedPersonIds": ["person_2"],
+            "activeSpeakerEvidence": {"personId": "person_2", "asdScore": .92},
+            "requiresReview": False, "confidenceTier": "reliable",
+        }]
+        main_app._attach_person_description_evidence(matches, {"evidence": [{
+            "personId": "person_2", "status": "possible", "confidence": .56,
+            "reason": "仅一张代表画面支持",
+        }]})
+
+        self.assertTrue(matches[0]["requiresReview"])
+        self.assertEqual(matches[0]["confidenceTier"], "possible")
+        self.assertEqual(matches[0]["personDescriptionEvidence"]["confidence"], .56)
+        self.assertIn("人物外观描述", matches[0]["reviewReasons"][0])
 
     def test_person_coverage_manifest_accepts_dense_scan(self) -> None:
         from app import main as main_app

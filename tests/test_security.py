@@ -27,6 +27,9 @@ def test_public_bind_requires_a_meaningful_access_token() -> None:
     with pytest.raises(SecurityConfigurationError, match="至少 16 字符"):
         validate_deployment_access("0.0.0.0", "too-short")
     validate_deployment_access("0.0.0.0", "a-secure-token-value")
+    validate_deployment_access(
+        "0.0.0.0", "", allow_unauthenticated_remote=True,
+    )
 
 
 def test_browser_session_cookie_does_not_contain_the_access_token() -> None:

@@ -1,8 +1,11 @@
 FROM python:3.10-slim-bookworm
 
+ARG CLIPTALK_INSTALL_PROFILE=cpu
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    CLIPTALK_INSTALL_PROFILE=${CLIPTALK_INSTALL_PROFILE} \
     HIGHLIGHT_HOST=0.0.0.0 \
     HIGHLIGHT_PORT=5180 \
     HIGHLIGHT_DATA_ROOT=/app/data
@@ -10,16 +13,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgomp1 libsndfile1 \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-wqy-zenhei libgomp1 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-speech-common.txt requirements-audiovisual.txt ./
+COPY requirements-cpu.txt requirements-gpu.txt ./
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements-audiovisual.txt
+    && if [ "$CLIPTALK_INSTALL_PROFILE" = "cpu" ]; then \
+         python -m pip install -r requirements-cpu.txt; \
+       elif [ "$CLIPTALK_INSTALL_PROFILE" = "gpu" ]; then \
+         python -m pip install -r requirements-gpu.txt; \
+       else \
+         echo "Unsupported CLIPTALK_INSTALL_PROFILE=$CLIPTALK_INSTALL_PROFILE" >&2; exit 2; \
+       fi
 
 COPY app ./app
 COPY static ./static
 COPY tools/prepare_speech_models.py ./tools/prepare_speech_models.py
+COPY tools/container_smoke.py ./tools/container_smoke.py
 
 RUN useradd --create-home --uid 10001 cliptalk \
     && mkdir -p /app/data \

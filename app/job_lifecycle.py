@@ -29,18 +29,30 @@ WAITING_USER_STATUSES = frozenset({
 
 CANCELLABLE_STATUSES = ACTIVE_EXECUTION_STATUSES | WAITING_USER_STATUSES
 TERMINAL_STATUSES = frozenset({COMPLETED, CANCELLED, FAILED})
+BACKGROUND_ACTIVE_STATUSES = frozenset({"queued", "running", "cancelling"})
 
 
 def job_status(job: dict[str, Any]) -> str:
     return str(job.get("status") or "")
 
 
+def background_status(job: dict[str, Any]) -> str:
+    auto = job.get("autoComposition")
+    if not isinstance(auto, dict):
+        return ""
+    return str(auto.get("status") or "")
+
+
+def has_background_execution(job: dict[str, Any]) -> bool:
+    return background_status(job) in BACKGROUND_ACTIVE_STATUSES
+
+
 def has_active_execution(job: dict[str, Any]) -> bool:
-    return job_status(job) in ACTIVE_EXECUTION_STATUSES
+    return job_status(job) in ACTIVE_EXECUTION_STATUSES or has_background_execution(job)
 
 
 def can_cancel(job: dict[str, Any]) -> bool:
-    return job_status(job) in CANCELLABLE_STATUSES
+    return has_active_execution(job) or job_status(job) in CANCELLABLE_STATUSES
 
 
 def can_delete(job: dict[str, Any]) -> bool:

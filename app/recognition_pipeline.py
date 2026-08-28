@@ -17,6 +17,7 @@ from .recognition import (
     cluster_person_tracks,
     conservative_face_speaker_links,
     dense_person_sample_times,
+    link_body_tracklets,
     merge_ocr_detections,
     normalize_recognition_profile,
     shot_sample_times,
@@ -162,6 +163,7 @@ def enrich_multimodal_index(
     speech_analysis_complete: bool = False,
     scope_start: float = 0.0, scope_end: float | None = None,
     progress: ProgressCallback | None = None, cancelled: Callable[[], bool] | None = None,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     """Build optional v4 evidence without making an unavailable model fatal."""
     report = progress or (lambda _value, _detail: None)
@@ -205,23 +207,66 @@ def enrich_multimodal_index(
             shots, start=bounded_start, end=bounded_end, interval=1.0,
         )
     person_times = dense_person_sample_times(
-        shots, start=bounded_start, end=bounded_end, interval=.5,
+        shots, start=bounded_start, end=bounded_end,
+        interval=.25 if algorithm_version == "editing-algorithm-v2" else .5,
     ) if work["needsPersons"] else []
     # Person recognition has an exhaustive coverage contract. Keep it on its
     # own dense frame stream so a person-only request does not inherit the
     # sparse visual/OCR probe budget, and so adding person retrieval does not
     # accidentally make every visual embedding task run at 2 FPS.
     selected_times = person_times if work["needsPersons"] and not (work["needsOcr"] or work["needsVisualEmbeddings"]) else generic_times
+    person_only_frames = bool(
+        work["needsPersons"]
+        and not (work["needsOcr"] or work["needsVisualEmbeddings"])
+    )
+
+    def frame_progress_reporter(
+        label: str, *, start: float, span: float,
+    ) -> Callable[[int, int], None]:
+        def report_progress(completed: int, total: int) -> None:
+            fraction = max(0.0, min(1.0, completed / max(1, total)))
+            report(
+                start + span * fraction,
+                f"{label}（{completed}/{total} 帧）",
+            )
+
+        return report_progress
+
     if selected_times:
-        report(.05, f"正在准备 {len(selected_times)} 个候选画面")
+        frame_label = (
+            "人物识别 1/2 · 正在准备解码分析帧"
+            if person_only_frames else "正在准备多模态采样帧"
+        )
+        report(
+            .05,
+            f"{frame_label} · 共 {len(selected_times)} 帧，首批完成后显示进度",
+        )
     frames = (
-        extract_frames_at_times(source, root / "recognition-frames", selected_times, ffmpeg=ffmpeg)
+        extract_frames_at_times(
+            source,
+            root / "recognition-frames",
+            selected_times,
+            ffmpeg=ffmpeg,
+            progress_callback=frame_progress_reporter(
+                "人物识别 1/2 · 正在解码分析帧"
+                if person_only_frames else "正在抽取多模态采样帧",
+                start=.05,
+                span=.3 if person_only_frames else .14,
+            ),
+        )
         if selected_times else []
     )
     person_frames = frames
     if work["needsPersons"] and selected_times is not person_times:
+        report(
+            .2,
+            f"人物识别 1/2 · 正在准备解码分析帧 · 共 {len(person_times)} 帧，首批完成后显示进度",
+        )
         person_frames = extract_frames_at_times(
             source, root / "person-frames", person_times, ffmpeg=ffmpeg,
+            progress_callback=frame_progress_reporter(
+                "人物识别 1/2 · 正在解码分析帧", start=.2, span=.16,
+            ),
         )
     if is_cancelled():
         raise RuntimeError("任务已取消")
@@ -231,7 +276,7 @@ def enrich_multimodal_index(
         "shots": shots if work["needsFrames"] else [], "embeddingIndexes": {},
         "recognitionProfile": profile, "degradedReasons": [], "recognitionFrameCount": len(frames),
         "personSampling": {
-            "intervalSeconds": .5 if work["needsPersons"] else None,
+            "intervalSeconds": (.25 if algorithm_version == "editing-algorithm-v2" else .5) if work["needsPersons"] else None,
             "requestedFrameCount": len(person_times),
             "extractedFrameCount": len(person_frames),
             "coverageMode": "continuous_sampled" if work["needsPersons"] else "not_requested",
@@ -273,17 +318,82 @@ def enrich_multimodal_index(
         result["recognitionAttemptedModalities"].append("person")
         result.update({"personTracks": [], "persons": [], "faceSpeakerLinks": []})
         try:
-            report(.38, "正在关联画面中的匿名人物")
-            from .recognition_models import AnonymousFaceEngine
+            report(.38, "人物识别 2/2 · 正在初始化人物检测与身份关联模型")
+            from .recognition_models import AnonymousBodyEngine, AnonymousFaceEngine
 
             face_engine = AnonymousFaceEngine(settings.recognition_yunet_model, settings.recognition_sface_model, device=device)
+            use_body_pipeline = bool(
+                algorithm_version == "editing-algorithm-v2"
+                and Path(settings.recognition_yolox_model).is_file()
+                and Path(settings.recognition_youtureid_model).is_file()
+            )
+            body_engine = AnonymousBodyEngine(
+                settings.recognition_yolox_model, settings.recognition_youtureid_model, device=device,
+            ) if use_body_pipeline else None
             tracks: list[dict[str, Any]] = []
             person_paths = [Path(frame.path) for frame in person_frames]
             person_times_actual = [float(frame.time) for frame in person_frames]
-            for frame_path, time_value in zip(person_paths, person_times_actual):
-                tracks.extend(face_engine.detect(frame_path, time_value=time_value))
-            result["personTracks"] = [{key: value for key, value in item.items() if key != "embedding"} for item in tracks]
-            result["persons"] = cluster_person_tracks(tracks, scene_cuts=scene_cuts)
+            person_scene_cuts = sorted(float(value) for value in scene_cuts or [])
+            person_frame_total = len(person_paths)
+            report_stride = max(1, person_frame_total // 50)
+            for frame_position, (frame_path, time_value) in enumerate(
+                zip(person_paths, person_times_actual), 1,
+            ):
+                if body_engine is None:
+                    tracks.extend(face_engine.detect(frame_path, time_value=time_value))
+                else:
+                    bodies = body_engine.detect(frame_path, time_value=time_value)
+                    # Face normally runs at 2 FPS. Always run it at shot
+                    # boundaries as well: the first identity observation after
+                    # an edit must not be assigned solely from a similarly
+                    # positioned body box in a fixed-camera interview.
+                    near_scene_cut = any(
+                        abs(time_value - cut) <= .26 for cut in person_scene_cuts
+                    )
+                    faces = face_engine.detect(
+                        frame_path, time_value=time_value,
+                    ) if frame_position % 2 or near_scene_cut else []
+                    for body in bodies:
+                        body["identityStatus"] = "body_tracked"
+                    for face in faces:
+                        face_box = list(face.get("box") or [])
+                        if len(face_box) < 4:
+                            continue
+                        center_x = (float(face_box[0]) + float(face_box[2])) / 2
+                        center_y = (float(face_box[1]) + float(face_box[3])) / 2
+                        containing = [body for body in bodies if (
+                            float(body["box"][0]) <= center_x <= float(body["box"][2])
+                            and float(body["box"][1]) <= center_y <= float(body["box"][3])
+                        )]
+                        if containing:
+                            target = min(containing, key=lambda body: (
+                                float(body["box"][2]) - float(body["box"][0])
+                            ) * (float(body["box"][3]) - float(body["box"][1])))
+                            target["identityStatus"] = "face_confirmed"
+                            target["faceConfidence"] = float(face.get("confidence") or 0)
+                            target["faceEmbedding"] = list(face.get("embedding") or [])
+                    tracks.extend(bodies)
+                if (
+                    frame_position == 1
+                    or frame_position == person_frame_total
+                    or frame_position % report_stride == 0
+                ):
+                    report(
+                        .38 + .14 * frame_position / max(1, person_frame_total),
+                        f"人物识别 2/2 · 正在检测人物并关联轨迹（{frame_position}/{person_frame_total} 帧）",
+                    )
+            report(.53, "人物识别 2/2 · 正在合并同一人物的连续轨迹")
+            if body_engine is not None:
+                tracks = link_body_tracklets(tracks, scene_cuts=scene_cuts)
+            result["personTracks"] = [{
+                key: value for key, value in item.items() if key not in {"embedding", "faceEmbedding"}
+            } for item in tracks]
+            result["persons"] = cluster_person_tracks(
+                tracks, scene_cuts=scene_cuts,
+                similarity_threshold=.68 if body_engine is not None else .42,
+                maximum_gap=.8 if body_engine is not None else 2.0,
+                algorithm_version=algorithm_version,
+            )
             person_for_track = {
                 track_id: person["id"]
                 for person in result["persons"] for track_id in person.get("trackIds") or []
@@ -296,6 +406,12 @@ def enrich_multimodal_index(
             result["faceSpeakerLinks"] = conservative_face_speaker_links(result["persons"], speech_units)
             result["recognitionCompletedModalities"].append("person")
             result["recognitionAvailableModalities"].append("person")
+            result["personIdentityPipeline"] = (
+                "yolox-youtureid-sface-anchor-v3" if body_engine is not None else "yunet-sface-fallback-v1"
+            )
+            if algorithm_version == "editing-algorithm-v2" and body_engine is None:
+                result["degradedReasons"].append("person_body_models_unavailable_face_only_fallback")
+            report(.54, f"人物识别完成 · {len(result['persons'])} 个人物簇")
         except Exception as error:
             result["degradedReasons"].append(f"anonymous_persons_unavailable:{str(error)[:160]}")
 
@@ -382,6 +498,7 @@ def enrich_multimodal_index_isolated(
     scope_start: float = 0.0, scope_end: float | None = None,
     progress: ProgressCallback | None = None,
     cancelled: Callable[[], bool] | None = None,
+    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     """Run native optional models outside the API process when configured."""
     report = progress or (lambda _value, _detail: None)
@@ -397,11 +514,14 @@ def enrich_multimodal_index_isolated(
         "requestedModalities": sorted(requested_modalities or RECOGNITION_MODALITIES),
         "speechAnalysisComplete": bool(speech_analysis_complete),
         "scopeStart": float(scope_start), "scopeEnd": scope_end,
+        "algorithmVersion": algorithm_version,
         "ffmpeg": ffmpeg,
         "settings": {
             "recognition_ocr_enabled": bool(settings.recognition_ocr_enabled),
             "recognition_yunet_model": str(settings.recognition_yunet_model),
             "recognition_sface_model": str(settings.recognition_sface_model),
+            "recognition_yolox_model": str(settings.recognition_yolox_model),
+            "recognition_youtureid_model": str(settings.recognition_youtureid_model),
             "recognition_siglip_model": settings.recognition_siglip_model,
             "recognition_text_model": settings.recognition_text_model,
             "recognition_clap_model": settings.recognition_clap_model,

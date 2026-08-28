@@ -6,7 +6,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.observability import JsonLogFormatter, RequestMetrics, RequestObservabilityMiddleware
+from app.api_schemas import ClientErrorReportRequest
+from app.observability import JobStageMetrics, JsonLogFormatter, RequestMetrics, RequestObservabilityMiddleware, client_error_log_fields, process_resource_snapshot
 
 
 def test_json_log_formatter_keeps_structured_fields() -> None:
@@ -31,6 +32,29 @@ def test_request_metrics_tracks_active_status_and_duration() -> None:
     assert snapshot["averageDurationMilliseconds"] == 25
 
 
+def test_job_stage_metrics_aggregate_without_job_content(monkeypatch) -> None:
+    clock = iter([1.0, 1.4, 2.0])
+    monkeypatch.setattr("app.observability.time.perf_counter", lambda: next(clock))
+    metrics = JobStageMetrics()
+    metrics.transition("job-secret-id", "speech_recognition")
+    metrics.transition("job-secret-id", "coarse_vlm")
+    metrics.finish("job-secret-id")
+    snapshot = metrics.snapshot()
+    assert snapshot["activeJobs"] == 0
+    assert snapshot["stages"]["speech_recognition"] == {
+        "samples": 1,
+        "averageDurationMilliseconds": 400.0,
+        "maximumDurationMilliseconds": 400.0,
+    }
+    assert "job-secret-id" not in json.dumps(snapshot)
+
+
+def test_process_resource_snapshot_reports_memory_and_data_disk(tmp_path) -> None:
+    snapshot = process_resource_snapshot(str(tmp_path))
+    assert snapshot["peakResidentMemoryBytes"] > 0
+    assert snapshot["dataDiskFreeBytes"] > 0
+
+
 def test_observability_middleware_returns_request_id() -> None:
     metrics = RequestMetrics()
     logger = logging.getLogger("cliptalk-test-observability")
@@ -47,3 +71,21 @@ def test_observability_middleware_returns_request_id() -> None:
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] == "browser:test-1"
     assert metrics.snapshot()["requestsTotal"] == 1
+
+
+def test_client_error_fields_remove_queries_and_bound_untrusted_text() -> None:
+    report = ClientErrorReportRequest(
+        kind="unhandledrejection",
+        name="ReferenceError",
+        message="subtitleDraftId is not defined" + "x" * 900,
+        stack="\n".join(f"frame-{index}" for index in range(30)),
+        pagePath="https://example.test/workspace?token=secret#fragment",
+        scriptPath="https://example.test/static/app.js?v=secret",
+        jobId="job_123",
+    )
+    fields = client_error_log_fields(report)
+    assert fields["pagePath"] == "/workspace"
+    assert fields["scriptPath"] == "/static/app.js"
+    assert "secret" not in json.dumps(fields)
+    assert len(fields["clientErrorMessage"]) == 700
+    assert len(fields["clientErrorStack"].splitlines()) == 16

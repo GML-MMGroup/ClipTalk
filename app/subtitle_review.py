@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -191,11 +193,100 @@ def has_pending_suggestions(draft: dict[str, Any]) -> bool:
     return any(str(cue.get("suggestionStatus") or "") == "pending" for cue in draft.get("cues") or [])
 
 
+_SUBTITLE_PUNCTUATION = re.compile(r"[\s，。！？；：、,.!?;:'\"“”‘’（）()《》〈〉【】\[\]—…·-]+")
+
+
+def normalize_correction_profile(value: Any) -> dict[str, Any]:
+    """Keep the global LLM context useful without treating it as ground truth."""
+    raw = value if isinstance(value, dict) else {}
+    terms: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw.get("terms") or []:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or item.get("canonical") or "").strip()[:80]
+        key = re.sub(r"\s+", "", term).casefold()
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        try:
+            confidence = max(0.0, min(1.0, float(item.get("confidence") or 0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        sources = [
+            str(source)[:40] for source in item.get("sources") or []
+            if str(source) in {"transcript_repeat", "screen_text", "filename", "context"}
+        ]
+        terms.append({
+            "term": term,
+            "variants": [str(variant).strip()[:80] for variant in item.get("variants") or [] if str(variant).strip()][:8],
+            "confidence": round(confidence, 3),
+            "sources": list(dict.fromkeys(sources)),
+            "evidence": str(item.get("evidence") or "")[:240],
+        })
+        if len(terms) >= 32:
+            break
+    return {
+        "summary": str(raw.get("summary") or "")[:500],
+        "terms": terms,
+        "uncertainTerms": [str(item).strip()[:80] for item in raw.get("uncertainTerms") or [] if str(item).strip()][:24],
+    }
+
+
+def evaluate_subtitle_suggestion(cue: dict[str, Any], item: Any) -> dict[str, Any] | None:
+    """Validate a text-only correction and assign risk independently of the LLM."""
+    if not isinstance(item, dict):
+        return None
+    original = str(cue.get("text") or "").strip()
+    proposed = str(item.get("text") or "").strip()
+    if not original or not proposed or proposed == original or len(proposed) > 500:
+        return None
+    original_plain = _SUBTITLE_PUNCTUATION.sub("", original)
+    proposed_plain = _SUBTITLE_PUNCTUATION.sub("", proposed)
+    similarity = difflib.SequenceMatcher(None, original_plain.casefold(), proposed_plain.casefold()).ratio()
+    length_delta = abs(len(proposed_plain) - len(original_plain))
+    # A subtitle checker may repair recognition, not paraphrase or invent a sentence.
+    if similarity < .56 or length_delta > max(8, math.ceil(len(original_plain) * .45)):
+        return None
+    try:
+        confidence = max(0.0, min(1.0, float(item.get("confidence") or 0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    digits_changed = re.findall(r"\d+(?:\.\d+)?", original) != re.findall(r"\d+(?:\.\d+)?", proposed)
+    latin_changed = [value.casefold() for value in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", original)] != [
+        value.casefold() for value in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", proposed)
+    ]
+    punctuation_only = original_plain == proposed_plain
+    changed_size = max(len(original_plain), len(proposed_plain)) * (1 - similarity)
+    if digits_changed or latin_changed:
+        risk = "high"
+    elif punctuation_only or (confidence >= .9 and similarity >= .72 and changed_size <= max(2, len(original_plain) * .18)):
+        risk = "low"
+    else:
+        risk = "medium"
+    evidence = [str(value).strip()[:180] for value in item.get("evidence") or [] if str(value).strip()][:6]
+    return {
+        "suggestedText": proposed,
+        "suggestionReason": str(item.get("reason") or "根据完整逐字稿发现可能的识别问题")[:300],
+        "suggestionConfidence": round(confidence, 3),
+        "suggestionStatus": "pending",
+        "suggestionBasis": "global_context_and_local_cues",
+        "suggestionRisk": risk,
+        "suggestionEvidence": evidence,
+        "suggestionMetrics": {
+            "similarity": round(similarity, 3),
+            "digitsChanged": digits_changed,
+            "latinTermsChanged": latin_changed,
+        },
+    }
+
+
 def parse_style_command(
     command: str,
     current_style: dict[str, Any],
     *,
     cue_id: str | None = None,
+    frame_width: float | None = None,
     frame_height: float = 1080,
 ) -> dict[str, Any]:
     text = str(command or "").strip().lower()
@@ -217,10 +308,11 @@ def parse_style_command(
     pixel_size = re.search(r"(?:字号|字体(?:大小)?)\s*(?:改成|设为|调到|为|:)?\s*(\d+(?:\.\d+)?)\s*(?:px|像素|号)?", text)
     if percent_size:
         style["fontSizeRatio"] = max(.012, min(.080, float(percent_size.group(1)) / 100))
-        changes.append(f"字号设为画面高度的 {style['fontSizeRatio'] * 100:.1f}%")
+        changes.append(f"字号设为画面短边的 {style['fontSizeRatio'] * 100:.1f}%")
     elif pixel_size:
         pixels = float(pixel_size.group(1))
-        style["fontSizeRatio"] = max(.012, min(.080, pixels / max(1.0, frame_height)))
+        short_edge = min(float(frame_width or frame_height), float(frame_height))
+        style["fontSizeRatio"] = max(.012, min(.080, pixels / max(1.0, short_edge)))
         changes.append(f"字号设为约 {pixels:.0f}px")
     elif re.search(r"(更大|放大|调大|大一点|bigger|larger)", text):
         style["fontSizeRatio"] = min(.080, style["fontSizeRatio"] * 1.1)

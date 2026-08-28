@@ -16,10 +16,10 @@ from .content_query import (
 from .recognition import MULTIMODAL_INDEX_VERSION, evidence_ref
 
 CONTENT_INDEX_VERSION = MULTIMODAL_INDEX_VERSION
-CONTENT_SEARCH_VERSION = "content-search-v35-recall-first-20260820"
+CONTENT_SEARCH_VERSION = "content-search-v39-described-person-speaking-20260827"
 CONTENT_INTENT_SCHEMA_VERSION = "content-intent-v2-typed-logic-20260820"
-CONTENT_INTENT_PARSER_VERSION = "content-intent-parser-v2-20260820"
-CONTENT_INTENT_PROMPT_VERSION = "content-intent-prompt-v2-20260820"
+CONTENT_INTENT_PARSER_VERSION = "content-intent-parser-v3-described-person-speaking-20260827"
+CONTENT_INTENT_PROMPT_VERSION = "content-intent-prompt-v3-described-person-speaking-20260827"
 
 SEARCH_SCOPE_KINDS = frozenset({
     "all", "opening", "front_half", "middle", "back_half", "ending", "custom",
@@ -39,7 +39,8 @@ EVIDENCE_MODE_CAPABILITIES = {
 
 
 CONTENT_CHAT_ACTIONS = frozenset({
-    "editorial_discussion", "content_search", "editing_action", "clarification",
+    "editorial_discussion", "content_search", "highlight_generation", "highlight_replan",
+    "content_assembly", "editing_action", "clarification",
 })
 
 
@@ -127,6 +128,8 @@ def content_chat_router_prompt(
         "这是用户从‘内容探索’任务表单提交的明确检索请求，action 必须为 content_search。"
         if forced_action == "content_search" else
         "当前是内容探索工作区，默认把可执行的定位、查找、筛选、截取要求理解为 content_search；"
+        "要求重新分析全片并自动挑选高光时使用 highlight_generation；"
+        "要求合并两次或多次历史检索结果时使用 content_assembly；"
         "只有用户明确在询问知识或剪辑思路时才使用 editorial_discussion，明确修改已有对象时才使用 editing_action。"
     )
     return f"""你是视频内容探索助手的意图路由器和剪辑顾问。一次完成意图判断、必要回答与检索参数解析。
@@ -142,6 +145,9 @@ def content_chat_router_prompt(
 action 只能是：
 - editorial_discussion：知识询问、分类判断、剪辑思路或方案讨论，不要求查视频；
 - content_search：要求从当前视频定位、查找、筛选或截取源内容；
+- highlight_generation：要求从整个源视频重新发现、筛选并编排高光或精彩内容；
+- highlight_replan：当前已是高光任务，要求改变时长、风格、侧重或版本数并重新生成，复用已发现的全部候选与事件重新取舍和渲染；
+- content_assembly：要求选择并合并两次或多次当前/历史内容检索的结果；
 - editing_action：要求修改、排列、删除、确认或合成已有候选；
 - clarification：上下文不足，无法可靠区分讨论、检索或具体操作。
 
@@ -161,6 +167,15 @@ top-level personRefs 必须列出用户明确指定的所有人物表达；只�
 如果 action 是 editorial_discussion，直接在 answer 回答，并最多追问一个影响剪辑方案的问题。
 如果 action 是 content_search，只填写语义 intent。识别能力会由系统根据谓词和关系确定性编译，
 不要决定、推荐或授权 speech、visual、ocr、audio、person，也不得猜测真实姓名或编造视频时间码。
+如果当前已是高光任务且“可引用剪辑对象”中已有高光候选或事件，“重新生成/重剪/换一版/改成 N 秒”默认使用 highlight_replan：
+它必须从现有的全部证据池重新取舍，不是只排列上一条成片。只有用户明确要求“重新分析/重新扫描/重新发现高光/不要旧候选/从头分析”时，才使用 highlight_generation。
+当前是内容探索等其他任务，要求从整个源视频做高光时也使用 highlight_generation；不能使用当前内容检索候选。
+如果 action 是 highlight_generation 或 highlight_replan，填写 highlightRequest，不能生成 select_content_matches 或 compose 操作。
+highlightRequest.targetSeconds 仅在用户明确给出目标时长时填写；theme 只保留用户明确提出的高光侧重点，没有则为空；scope 固定为 all。
+如果 action 是 content_assembly，填写 assemblyRequest。根据“可引用剪辑对象”中的 contentSearches 使用真实 searchIds；
+“全部/所有/多次检索结果”设置 includeAllSearches=true；“成片清单/已加入的片段”设置 includeBasket=true；
+只说“合并”时先形成可审核的合并预览，不直接渲染。不要把历史检索的片段改写成当前检索的 matchIds。
+orderMode 使用 source|selection|ai_plan，outputMode 使用 single_reel|separate_events；用户未指定时分别使用 source 和 single_reel。
 如果 action 是 editing_action，intent.action 使用 adjust_selection、compose、update_style 或 exclude_content，并生成 editProposal。
 editProposal.operations 只能使用以下操作：
 - select_content_matches：matchIds；
@@ -180,13 +195,17 @@ confidence 是 0 到 1，仅表示你对所选 action 的把握，不会被系�
 每个 predicate 必须包含 sourceSpan={{"start":起始字符下标,"end":结束字符下标,"text":"用户原文中的连续片段"}}，并保留 subject.type。
 logic 节点只能是 {{"op":"predicate","predicateId":"p1"}}、{{"op":"any|all","children":[...]}}、{{"op":"not","child":...}}。
 不要用 required=false 表示“也可以”；备选证据来源必须用 any，必须同时满足用 all，排除条件必须用 not。
-当用户只说“与某主题/对象相关”且没有限定证据来源时，retrievalScope=broad_multisource，并建立 visual.semantic、speech.semantic、screen_text.text 三个等价分支，以 logic:any 合并；这表示任一来源命中即可，不是三个条件同时出现。
+当用户只说“与某主题/对象相关、关于某主题、讨论某主题”且没有限定证据来源时，retrievalScope=broad_multisource，并建立 visual.semantic、speech.semantic、screen_text.text 三个等价分支，以 logic:any 合并；这表示任一来源命中即可，不是三个条件同时出现。
+具体可见动作必须使用 visual.action；具体物体出现、展示或使用必须使用 visual.object 或 visual.semantic，并设置 retrievalScope=explicit_source。不要仅因为用户没有说“画面中”就把明确动作或物体出现扩成对白和屏幕文字分支。
+只有主证据来源无法形成可靠结果时，执行器才会自动扩大到兼容的备用证据；意图阶段不要预先堆叠与语义不相符的证据类型。
 当用户明确说“画面中”“对白里”“屏幕文字中”时 retrievalScope=explicit_source，只使用对应来源。
 “问题”作为普通名词（例如“质量问题”“讨论这个问题”）属于主题语义；只有用户明确要求采访问题、提问、问句、题目时才使用 question.evidence。
 predicate.kind 只能是 speech.semantic、speech.exact、speech.dialogue_role、question.evidence、screen_text.text、visual.semantic、visual.object、visual.action、audio.event、audio.semantic、person.appearance、person.speaking。
 speech.dialogue_role 使用 role=questioner|answerer|instructor|student|speaker，可带 dialogueMode=question_only|answer_only|qa_pair|qa_split、segmentUnit=turn|response_block、includePrompt、requirePromptRelation 和 interruptionPolicy。
 当用户要求某个已标记匿名人物的发言时使用 person.speaking，并在 personRef 中原样引用人物标签。
 person.speaking 仅用于人物目录中已有的明确匿名人物，必须填写 personRef；不得用于尚未识别身份的关系角色。
+当“女性、男性、穿某种衣服的人”等可见人物描述是“说话、发言、讲话”的主体时，不得只返回 speech.semantic；
+必须额外返回 person.appearance 描述该人物，并用 person.speaking 表达由同一人物发言，系统会先从匿名人物目录中解析全部匹配对象。
 当用户要求“某个外观描述的人说了某主题/原话”时，必须保留 speech.semantic 或 speech.exact，
 并给该 speech predicate 填写 subjectPersonRef；不得降级为“人物出镜”和“任意 Speaker 对白”时间重合。
 当用户要求“某个外观描述的人执行动作”时，必须保留 visual.action，并给该 predicate 填写 subjectPersonRef；
@@ -195,11 +214,12 @@ relation.type 只能是 overlaps、before、after、within、contains、during�
 responds_to 的 left 是问题条件，right 是回答条件，只能由对话图中的真实问答边验证。
 within 只有在用户给出明确时间窗口时才能使用，并必须填写 maximumGapSeconds；否则 action=clarification。
 same_shot/same_event 只用于用户明确要求同一镜头/同一事件的情况，不能用普通时间接近替代。
-用户没有指定数量时 resultMode=exhaustive；只有固定数量或“最佳、最相关、精选”等排序型要求才使用 resultMode=top_k。
+普通“查找/找到某内容”使用 resultMode=top_k，即使素材范围是全片也只表示检索范围，不表示逐帧穷举。
+只有用户明确要求“全部、所有、每一次、不要遗漏、完整扫描”等完整性目标时才使用 resultMode=exhaustive；固定数量或“最佳、最相关、精选”等排序型要求也使用 top_k。
 contextPolicy 默认 fresh：当前消息形成新的检索，不继承上一轮人物、问答模式或证据来源。只有用户明确说“继续按刚才的条件/在上次结果中”时才使用 inherit，并填写真实 referencedSearchIds 或 referencedMessageIds。
 
-仅返回 JSON：
-{{"action":"editorial_discussion|content_search|editing_action|clarification","confidence":0.0,"reason":"简短理由","answer":"讨论回答或操作理解","clarificationQuestion":"仅 clarification 使用","intent":{{"action":"extract_content","query":"检索核心内容","retrievalScope":"broad_multisource|explicit_source","contextPolicy":"fresh|inherit","referencedSearchIds":[],"referencedMessageIds":[],"predicates":[{{"id":"p1","kind":"speech.semantic","value":"发言主题","sourceSpan":{{"start":0,"end":4,"text":"用户原文"}},"concepts":["当前查询动态提炼的概念"],"retrievalVariants":["当前查询动态生成的表达变体"],"subject":{{"description":"用户原始对象或角色描述","type":"topic","identityPolicy":"context"}},"required":true}}],"logic":{{"op":"predicate","predicateId":"p1"}},"relations":[],"entities":[],"actions":[],"speechQuotes":[],"temporalRelations":[],"includeRules":[],"excludeRules":[],"speakerRefs":[],"personRefs":[],"requestedCount":null,"resultMode":"top_k|exhaustive","targetSeconds":null,"assemblyMode":"single_reel"}},"editProposal":{{"title":"修改名称","summary":"修改摘要","operations":[{{"type":"reorder_segments","groupId":"真实ID","segmentIds":["真实ID"]}}]}}}}"""
+仅返回 JSON：下方 action 枚举中同样允许 highlight_replan。
+{{"action":"editorial_discussion|content_search|highlight_generation|highlight_replan|content_assembly|editing_action|clarification","confidence":0.0,"reason":"简短理由","answer":"讨论回答或操作理解","clarificationQuestion":"仅 clarification 使用","intent":{{"action":"extract_content","query":"检索核心内容","retrievalScope":"broad_multisource|explicit_source","contextPolicy":"fresh|inherit","referencedSearchIds":[],"referencedMessageIds":[],"predicates":[{{"id":"p1","kind":"speech.semantic","value":"发言主题","sourceSpan":{{"start":0,"end":4,"text":"用户原文"}},"concepts":["当前查询动态提炼的概念"],"retrievalVariants":["当前查询动态生成的表达变体"],"subject":{{"description":"用户原始对象或角色描述","type":"topic","identityPolicy":"context"}},"required":true}}],"logic":{{"op":"predicate","predicateId":"p1"}},"relations":[],"entities":[],"actions":[],"speechQuotes":[],"temporalRelations":[],"includeRules":[],"excludeRules":[],"speakerRefs":[],"personRefs":[],"requestedCount":null,"resultMode":"top_k|exhaustive","targetSeconds":null,"assemblyMode":"single_reel"}},"highlightRequest":{{"targetSeconds":30,"theme":"明确的高光侧重点或空字符串","scope":"all","variantCount":3}},"assemblyRequest":{{"searchIds":["真实searchId"],"searchQueries":["用户引用的检索名称"],"includeAllSearches":false,"includeBasket":false,"targetSeconds":null,"outputMode":"single_reel|separate_events","orderMode":"source|selection|ai_plan","subtitleMode":"none|burn"}},"editProposal":{{"title":"修改名称","summary":"修改摘要","operations":[{{"type":"reorder_segments","groupId":"真实ID","segmentIds":["真实ID"]}}]}}}}"""
 
 
 def parse_content_chat_decision(text: str, model_result: dict[str, Any] | None) -> dict[str, Any]:
@@ -207,6 +227,25 @@ def parse_content_chat_decision(text: str, model_result: dict[str, Any] | None) 
     action = str(raw.get("action") or "clarification").strip().lower()
     if action not in CONTENT_CHAT_ACTIONS:
         action = "clarification"
+    full_source_highlight = bool(
+        re.search(r"(?:整个|整条|全部|全片|全程).{0,8}(?:视频|源视频|素材|片子)|从头到尾", str(text or ""), re.I)
+        and re.search(r"高光|精彩(?:片段|内容|瞬间)?|精华|highlight", str(text or ""), re.I)
+        and not re.search(r"(?:当前|这些|上述|已选).{0,6}(?:候选|片段|内容)", str(text or ""), re.I)
+    )
+    # A full-source highlight request changes workflow. It must never be
+    # silently downgraded into composing the currently visible search cards.
+    if full_source_highlight and action == "editing_action":
+        action = "highlight_generation"
+    cross_search_assembly = bool(
+        re.search(r"合并|组合|拼接|汇总", str(text or ""), re.I)
+        and re.search(
+            r"多次检索|多轮检索|历史检索|前\s*[一二两三四五六七八九十\d]+\s*次|"
+            r"(?:全部|所有).{0,6}检索|(?:和|与|、).{1,24}检索结果|成片清单|待合并片段",
+            str(text or ""), re.I,
+        )
+    )
+    if cross_search_assembly and action in {"editing_action", "content_search", "clarification"}:
+        action = "content_assembly"
     try:
         confidence = min(1.0, max(0.0, float(raw.get("confidence") or 0)))
     except (TypeError, ValueError):
@@ -240,6 +279,46 @@ def parse_content_chat_decision(text: str, model_result: dict[str, Any] | None) 
         copy.deepcopy(item) for item in proposal_raw.get("operations") or []
         if isinstance(item, dict) and str(item.get("type") or "") in allowed_operation_types
     ][:24]
+    if action in {"highlight_generation", "highlight_replan"}:
+        operations = []
+    if action == "content_assembly":
+        operations = []
+    highlight_raw = raw.get("highlightRequest") if isinstance(raw.get("highlightRequest"), dict) else {}
+    try:
+        highlight_target = float(highlight_raw.get("targetSeconds"))
+        if highlight_target < 4:
+            highlight_target = None
+    except (TypeError, ValueError):
+        highlight_target = None
+    if action in {"highlight_generation", "highlight_replan"} and highlight_target is None:
+        target_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:秒|s(?=\s|$|[^A-Za-z0-9_]))",
+            str(text or ""), re.I,
+        )
+        if target_match and float(target_match.group(1)) >= 4:
+            highlight_target = float(target_match.group(1))
+    try:
+        highlight_variant_count = max(1, min(4, int(highlight_raw.get("variantCount") or 3)))
+    except (TypeError, ValueError):
+        highlight_variant_count = 3
+    assembly_raw = raw.get("assemblyRequest") if isinstance(raw.get("assemblyRequest"), dict) else {}
+    assembly_output_mode = str(assembly_raw.get("outputMode") or "single_reel")
+    if assembly_output_mode not in {"single_reel", "separate_events"}:
+        assembly_output_mode = "single_reel"
+    assembly_order_mode = str(assembly_raw.get("orderMode") or "source")
+    if assembly_order_mode == "llm_recommend":
+        assembly_order_mode = "ai_plan"
+    if assembly_order_mode not in {"source", "selection", "ai_plan"}:
+        assembly_order_mode = "source"
+    assembly_subtitle_mode = str(assembly_raw.get("subtitleMode") or "none")
+    if assembly_subtitle_mode not in {"none", "burn"}:
+        assembly_subtitle_mode = "none"
+    try:
+        assembly_target = float(assembly_raw.get("targetSeconds"))
+        if assembly_target < 4:
+            assembly_target = None
+    except (TypeError, ValueError):
+        assembly_target = None
     return {
         "schemaVersion": CONTENT_SEARCH_VERSION,
         "action": action,
@@ -258,6 +337,24 @@ def parse_content_chat_decision(text: str, model_result: dict[str, Any] | None) 
             "reason": str(proposal.get("reason") or "")[:500],
         },
         "intent": intent,
+        "highlightRequest": {
+            "targetSeconds": highlight_target,
+            "theme": str(highlight_raw.get("theme") or "").strip()[:500],
+            "scope": "all",
+            "variantCount": highlight_variant_count,
+        },
+        "assemblyRequest": {
+            "searchIds": list(dict.fromkeys(_strings(assembly_raw.get("searchIds"))))[:40],
+            "searchQueries": list(dict.fromkeys(_strings(assembly_raw.get("searchQueries"))))[:40],
+            "includeAllSearches": bool(assembly_raw.get("includeAllSearches") or (
+                action == "content_assembly" and re.search(r"(?:全部|所有|多次|多轮).{0,6}检索", str(text or ""))
+            )),
+            "includeBasket": bool(assembly_raw.get("includeBasket") or re.search(r"成片清单|待合并片段", str(text or ""))),
+            "targetSeconds": assembly_target,
+            "outputMode": assembly_output_mode,
+            "orderMode": assembly_order_mode,
+            "subtitleMode": assembly_subtitle_mode,
+        },
         "editProposal": {
             "title": str(proposal_raw.get("title") or "AI 剪辑提案")[:80],
             "summary": str(proposal_raw.get("summary") or raw.get("answer") or "")[:800],
@@ -510,10 +607,9 @@ def fallback_content_intent(text: str) -> dict[str, Any]:
     """Build non-semantic defaults plus deterministic quantity modifiers."""
     message = str(text or "").strip()
     requested = re.search(r"(?:最多|找出|截取|剪出)?\s*([1-9]\d*)\s*(?:个|条|段)", message)
-    exhaustive = not requested and not bool(re.search(
-        r"(?:最佳|最相关|最典型|精选|推荐|高光|top\s*\d*)", message, flags=re.I,
-    )) or bool(re.search(
-        r"(?:全部|所有|每一(?:个|条|段)?|完整(?:地)?(?:找出|检索|扫描)|\ball\b|\bevery\b)",
+    exhaustive = bool(re.search(
+        r"(?:全部|所有|每一(?:个|条|段|次)?|每次|不要遗漏|不能遗漏|别漏掉|"
+        r"完整(?:地)?(?:找出|检索|扫描)|逐帧(?:检查|扫描)|\ball\b|\bevery\b)",
         message, flags=re.I,
     )) and not bool(re.search(r"(?:最多|至多|不超过)\s*[1-9]\d*", message))
     duration = re.search(r"(?:每段|每条|控制在|大约|约)?\s*(\d+(?:\.\d+)?)\s*秒", message)
@@ -605,16 +701,9 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
     output_mode = str(raw.get("assemblyMode") or fallback["assemblyMode"])
     if output_mode not in {"single_reel", "separate_events"}:
         output_mode = "single_reel"
-    result_mode = str(raw.get("resultMode") or fallback.get("resultMode") or "top_k").strip().lower()
-    if result_mode not in {"top_k", "exhaustive"}:
-        result_mode = "top_k"
-    if requested_count is not None and raw.get("resultMode") in (None, "", "auto"):
-        result_mode = "top_k"
-    ranked_only_request = bool(re.search(
-        r"(?:最佳|最相关|最典型|精选|推荐|高光|top\s*\d*)", str(text or ""), flags=re.I,
-    ))
-    if requested_count is None and not ranked_only_request:
-        result_mode = "exhaustive"
+    # Quantity/completeness is deterministic user syntax. A model must not
+    # turn a normal full-source lookup into an expensive exhaustive VLM scan.
+    result_mode = str(fallback.get("resultMode") or "top_k")
     if result_mode == "exhaustive":
         requested_count = None
     dialogue_mode = str(raw.get("dialogueMode") or "").strip().lower()
@@ -705,6 +794,35 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
     retrieval_scope = str(raw.get("retrievalScope") or "explicit_source").strip().lower()
     if retrieval_scope not in {"broad_multisource", "explicit_source"}:
         retrieval_scope = "explicit_source"
+    # Models occasionally widen a concrete object/action request into three
+    # equivalent visual/speech/OCR predicates.  That makes a simple visual
+    # lookup build every index and scan the whole source.  Keep true topic
+    # wording broad, but collapse an unqualified concrete-object union back to
+    # its visual branch.  This is type/provenance normalization, not a catalog
+    # of domain objects or actions.
+    breadth_wording = bool(re.search(
+        r"相关|关于|围绕|讨论|谈论|提到|说到|涉及|主题|内容|related|about|discuss|mention|topic",
+        str(text or ""), flags=re.I,
+    ))
+    broad_kinds = {str(item.get("kind") or "") for item in predicates}
+    broad_visual = next((item for item in predicates if str(item.get("kind") or "").startswith("visual.")), None)
+    broad_subject = broad_visual.get("subject") if isinstance((broad_visual or {}).get("subject"), dict) else {}
+    concrete_subject = str(broad_subject.get("type") or "").strip().lower() in {"object", "entity", "place"}
+    equivalent_union = (
+        retrieval_scope == "broad_multisource"
+        and {"visual.semantic", "speech.semantic", "screen_text.text"} <= broad_kinds
+        and str((raw.get("logic") or {}).get("op") or "").strip().lower() == "any"
+    )
+    if equivalent_union and concrete_subject and not breadth_wording and broad_visual is not None:
+        predicates = [copy.deepcopy(broad_visual)]
+        visual_id = str(predicates[0].get("id") or "visual")
+        raw = {
+            **raw,
+            "logic": {"op": "predicate", "predicateId": visual_id},
+            "relations": [],
+        }
+        retrieval_scope = "explicit_source"
+        modalities = ["visual"]
     parsed = {
         "schemaVersion": CONTENT_SEARCH_VERSION,
         "intentSchemaVersion": CONTENT_INTENT_SCHEMA_VERSION,
@@ -743,8 +861,10 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
         validation_errors.append({"code": "missing_predicates", "message": "检索意图缺少 predicates。"})
     if retrieval_scope == "broad_multisource":
         kinds = {str(item.get("kind") or "") for item in parsed["queryPlan"].get("predicates") or []}
-        required_kinds = {"visual.semantic", "speech.semantic", "screen_text.text"}
-        if not required_kinds <= kinds or str((parsed["queryPlan"].get("logic") or {}).get("op") or "") != "any":
+        has_visual = any(value.startswith("visual.") for value in kinds)
+        has_speech = any(value.startswith("speech.") for value in kinds)
+        has_screen_text = any(value.startswith("screen_text.") for value in kinds)
+        if not (has_visual and has_speech and has_screen_text) or str((parsed["queryPlan"].get("logic") or {}).get("op") or "") != "any":
             validation_errors.append({
                 "code": "broad_multisource_requires_union",
                 "message": "宽泛相关性检索必须把画面、对白和屏幕文字作为并集执行。",
@@ -757,11 +877,34 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
             "message": "继承上一轮条件时必须引用具体检索或消息。",
         })
     validation_errors.extend(parsed["queryPlan"].get("validationErrors") or [])
-    for predicate in parsed["queryPlan"].get("predicates") or []:
-        if predicate.get("kind") == "person.speaking" and not str(predicate.get("personRef") or "").strip():
+    compiled_predicates = [
+        item for item in parsed["queryPlan"].get("predicates") or [] if isinstance(item, dict)
+    ]
+    compiled_by_id = {
+        str(item.get("id") or ""): item for item in compiled_predicates if str(item.get("id") or "")
+    }
+    for predicate in compiled_predicates:
+        if predicate.get("kind") == "person.speaking":
+            linked_id = str(
+                predicate.get("subjectPersonPredicateId")
+                or predicate.get("linkedPersonPredicateId")
+                or ""
+            ).strip()
+            subject_reference = str(predicate.get("subjectPersonRef") or "").strip()
+            if not linked_id and subject_reference in compiled_by_id:
+                # Routers may refer to a person.appearance predicate by ID in
+                # subjectPersonRef. This is a valid described-person binding,
+                # not a missing anonymous-person catalog label.
+                linked_id = subject_reference
+            linked_person = compiled_by_id.get(linked_id)
+            has_described_person_link = bool(
+                linked_person and linked_person.get("kind") == "person.appearance"
+            )
+            if str(predicate.get("personRef") or "").strip() or has_described_person_link:
+                continue
             validation_errors.append({
                 "code": "person_speaking_requires_person_ref",
-                "message": "person.speaking 必须引用人物目录中的 personRef。",
+                "message": "系统还不能确定由哪个人物说话，请补充人物描述或选择人物。",
             })
         if predicate.get("kind") == "speech.dialogue_role" and str(predicate.get("role") or "") not in {
             "questioner", "answerer", "instructor", "student", "speaker",
@@ -888,6 +1031,12 @@ def normalized_intent_payload(intent: dict[str, Any]) -> dict[str, Any]:
             "relations": plan.get("relations") or [],
             "logic": plan.get("logic") or {},
             "branches": plan.get("branches") or [],
+            # The generic logic tree intentionally treats a multi-person
+            # selector as one collapsed condition.  Its internal ANY/ALL and
+            # appearance/speaking semantics live in personTarget, so omitting
+            # this field made both choices share one query-cache key.  A
+            # cached ALL result (often empty) could then be returned for ANY.
+            "personTarget": plan.get("personTarget") or {},
             "requiredOperations": plan.get("requiredOperations") or [],
         },
     }
@@ -1838,7 +1987,18 @@ def _match_predicate_ids(match: dict[str, Any]) -> set[str]:
     return {value for value in values if value}
 
 
-def _matches_can_merge(previous: dict[str, Any], item: dict[str, Any]) -> bool:
+def _match_speakers(match: dict[str, Any]) -> set[str]:
+    values = {
+        str(match.get("speakerRef") or match.get("speaker") or "").strip(),
+        *(str(value.get("speakerRef") or value.get("speaker") or "").strip()
+          for value in match.get("speechUnits") or [] if isinstance(value, dict)),
+    }
+    return {value for value in values if value}
+
+
+def _matches_can_merge(
+    previous: dict[str, Any], item: dict[str, Any], *, algorithm_version: str = "editing-algorithm-v1",
+) -> bool:
     """Merge only evidence that can still represent one source occurrence."""
     previous_end = _number(previous.get("end"))
     item_start = _number(item.get("start"))
@@ -1861,6 +2021,16 @@ def _matches_can_merge(previous: dict[str, Any], item: dict[str, Any]) -> bool:
     item_type = str(item.get("evidenceType") or "")
     if previous_type != item_type:
         return False
+    if algorithm_version == "editing-algorithm-v2":
+        if previous_type == "speech":
+            previous_speakers, item_speakers = _match_speakers(previous), _match_speakers(item)
+            # Completing one utterance is safe only when speaker identity is
+            # known and stable. Unknown or intervening speakers stay separate.
+            return bool(previous_speakers and previous_speakers == item_speakers)
+        if previous_type in {"visual", "ocr", "audio"}:
+            return bool(
+                previous_events & item_events or previous_shots & item_shots
+            )
     if previous_type in {"speech", "ocr", "audio"}:
         return True
     if previous_events and item_events:
@@ -1870,7 +2040,10 @@ def _matches_can_merge(previous: dict[str, Any], item: dict[str, Any]) -> bool:
     return not (previous_shots or item_shots or previous_events or item_events)
 
 
-def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float = 1.0) -> list[dict[str, Any]]:
+def merge_content_matches(
+    matches: list[dict[str, Any]], *, maximum_gap: float = 1.0,
+    algorithm_version: str = "editing-algorithm-v1",
+) -> list[dict[str, Any]]:
     ordered = sorted(matches, key=lambda item: (_number(item.get("start")), _number(item.get("end"))))
     merged: list[dict[str, Any]] = []
     for source in ordered:
@@ -1878,7 +2051,7 @@ def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float =
         if (
             not merged
             or _number(item.get("start")) - _number(merged[-1].get("end")) > maximum_gap
-            or not _matches_can_merge(merged[-1], item)
+            or not _matches_can_merge(merged[-1], item, algorithm_version=algorithm_version)
         ):
             merged.append(item)
             continue
@@ -1943,6 +2116,8 @@ def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float =
                 **(previous_by_person if isinstance(previous_by_person, dict) else {}),
                 **(copy.deepcopy(item_by_person) if isinstance(item_by_person, dict) else {}),
             }
+        previous_modalities = list(previous.get("matchedModalities") or [previous.get("evidenceType")])
+        item_modalities = list(item.get("matchedModalities") or [item.get("evidenceType")])
         if previous.get("matchType") != item.get("matchType"):
             previous["matchType"] = "multi_evidence"
         if previous.get("boundarySource") != item.get("boundarySource"):
@@ -1970,8 +2145,7 @@ def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float =
         elif not isinstance(previous_active, dict) and isinstance(item_active, dict):
             previous["activeSpeakerEvidence"] = copy.deepcopy(item_active)
         previous["matchedModalities"] = list(dict.fromkeys([
-            *(previous.get("matchedModalities") or [previous.get("evidenceType")]),
-            *(item.get("matchedModalities") or [item.get("evidenceType")]),
+            *previous_modalities, *item_modalities,
         ]))
         previous["evidenceRefs"] = list({
             (str(ref.get("type") or ""), str(ref.get("id") or "")): ref
@@ -2006,7 +2180,10 @@ def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float =
         reliable = (
             str(item.get("confidenceTier") or "") == "reliable"
             or "explicit" in grounding
-            or (len(modalities) >= 2 and len(item.get("evidenceItems") or []) >= 2)
+            or (
+                algorithm_version != "editing-algorithm-v2"
+                and len(modalities) >= 2 and len(item.get("evidenceItems") or []) >= 2
+            )
         )
         item["confidenceTier"] = "reliable" if reliable else "possible"
         item["groundingStatus"] = "explicit" if "explicit" in grounding else "contextual"
@@ -2014,6 +2191,16 @@ def merge_content_matches(matches: list[dict[str, Any]], *, maximum_gap: float =
             item["requiresReview"] = not reliable
             item["reviewStatus"] = "confirmed" if reliable else "pending"
         item["selected"] = bool(item.get("selected")) if item.get("reviewStatus") == "kept" else reliable
+        occurrence_parts = [
+            *sorted(_match_predicate_ids(item)),
+            *sorted(_match_memberships(item, "eventIds")),
+            *sorted(_match_memberships(item, "shotIds")),
+            f"{_number(item.get('start')):.3f}", f"{_number(item.get('end')):.3f}",
+        ]
+        item["occurrenceId"] = str(item.get("occurrenceId") or f"occ_{hashlib.sha1('|'.join(occurrence_parts).encode()).hexdigest()[:14]}")
+        item["sourceOccurrenceIds"] = list(dict.fromkeys([
+            *(item.get("sourceOccurrenceIds") or []), item["occurrenceId"],
+        ]))
         item["position"] = position
     return merged
 

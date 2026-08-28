@@ -11,6 +11,7 @@ ANALYSIS_ROUTES = (
     ("create_auto_edit_plans", "/api/jobs/{job_id}/auto-plans", "POST", 202),
     ("create_llm_order", "/api/jobs/{job_id}/llm-order", "POST", 202),
     ("derive_job", "/api/jobs/{job_id}/derive", "POST", 202),
+    ("create_same_source_task_job", "/api/jobs/{job_id}/tasks", "POST", 202),
     ("resolve_analysis_decision", "/api/jobs/{job_id}/analysis-decision", "POST", 202),
     ("reanalyze_cancelled_job", "/api/jobs/{job_id}/reanalyze", "POST", 202),
 )

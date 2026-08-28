@@ -24,10 +24,10 @@ from .quality_gate import deduplicate_issues
 
 
 REVIEW_DIMENSIONS = ("content", "narrative", "rhythm", "continuity", "audiovisual", "goalMatch")
-REVIEW_CALIBRATION_VERSION = "composition-calibration-v3-user-intent"
+REVIEW_CALIBRATION_VERSION = "composition-calibration-v7-root-cause-balanced"
 REPAIR_ACTIONS = {
     "adjust_bounds", "remove_segment", "replace_segment", "insert_segment", "reorder_segments",
-    "set_transition", "set_audio_bridge", "set_speed",
+    "set_transition", "set_audio_bridge", "set_audio_fade", "set_speed",
 }
 
 
@@ -71,11 +71,13 @@ def composition_review_timeline(
             "role": str(segment.get("role") or "精彩镜头")[:80],
             "sourceStart": round(start, 3), "sourceEnd": round(end, 3),
             "outputStart": timing["outputStart"], "outputEnd": timing["outputEnd"],
+            "transitionOverlap": timing.get("transitionOverlap", 0.0),
             "score": round(_number(segment.get("score"), 50), 2),
             "reason": str(segment.get("reason") or "")[:300],
             "playbackRate": normalize_playback_rate(segment.get("playbackRate")),
             "transitionIn": normalize_transition(segment.get("transitionIn"), first=index == 1),
             "audioBridge": normalize_audio_bridge(segment.get("audioBridge"), first=index == 1),
+            "audioEdgeFadeSeconds": round(max(.06, min(.35, _number(segment.get("audioEdgeFadeSeconds"), .06))), 3),
             "silenceCuts": list(segment.get("silenceCuts") or [])[:8],
             "actionComplete": bool(segment.get("actionComplete", True)),
             "uncertainty": dict(segment.get("uncertainty") or {}),
@@ -271,10 +273,12 @@ def rendered_visual_metrics(frames: list[Any]) -> dict[str, Any]:
 
 def review_cache_key(
     *, version_signature: str, goal: dict[str, Any], visual_model: str, llm_model: str,
+    prompt_version: str = "",
 ) -> str:
     payload = json.dumps({
         "signature": version_signature, "goal": goal, "visualModel": visual_model,
-        "llmModel": llm_model, "calibration": REVIEW_CALIBRATION_VERSION,
+        "llmModel": llm_model, "promptVersion": prompt_version,
+        "calibration": REVIEW_CALIBRATION_VERSION,
     }, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
@@ -332,6 +336,7 @@ def normalize_review_report(
             "playbackRate": _number(raw.get("playbackRate"), 1.0),
             "transitionIn": raw.get("transitionIn") if isinstance(raw.get("transitionIn"), dict) else {},
             "audioBridge": raw.get("audioBridge") if isinstance(raw.get("audioBridge"), dict) else {},
+            "audioFadeSeconds": round(max(.06, min(.35, _number(raw.get("audioFadeSeconds"), .12))), 3),
             "reason": str(raw.get("reason") or "")[:300],
         })
     return {
@@ -346,6 +351,162 @@ def normalize_review_report(
         "summary": str(editorial.get("summary") or visual.get("summary") or "成片审片完成")[:600],
         "strengths": [str(value)[:240] for value in (editorial.get("strengths") or visual.get("strengths") or [])][:5],
     }
+
+
+def sanitize_review_report(
+    report: dict[str, Any], *, timeline: dict[str, Any] | None = None,
+    target_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Remove batch-level and transition-overlap false positives before gating."""
+    cleaned = copy.deepcopy(report)
+    rows = [item for item in (timeline or {}).get("segments") or [] if isinstance(item, dict)]
+    valid_transition_overlaps: list[dict[str, Any]] = []
+    invalid_cross_event_bridges: list[dict[str, Any]] = []
+    invalid_cross_event_dissolves: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if index <= 0:
+            continue
+        previous = rows[index - 1]
+        boundary = {
+            "time": _number(row.get("outputStart")),
+            "ids": {
+                str(previous.get("segmentId") or ""),
+                str(row.get("segmentId") or ""),
+            },
+        }
+        transition_type = str((row.get("transitionIn") or {}).get("type") or "cut")
+        bridge_type = str((row.get("audioBridge") or {}).get("type") or "none")
+        if _number(row.get("transitionOverlap")) > .001 and transition_type in {"dissolve", "fade_black"}:
+            valid_transition_overlaps.append(boundary)
+        previous_event = str(previous.get("eventId") or "")
+        event_id = str(row.get("eventId") or "")
+        if previous_event and event_id and previous_event != event_id:
+            if bridge_type != "none":
+                invalid_cross_event_bridges.append(boundary)
+            if transition_type == "dissolve":
+                invalid_cross_event_dissolves.append(boundary)
+
+    timeline_has_event_ids = bool(rows) and all(str(row.get("eventId") or "") for row in rows)
+
+    def matches_boundary(item_ids: set[str], output_time: float, boundaries: list[dict[str, Any]]) -> bool:
+        return any(
+            abs(output_time - boundary["time"]) <= .4
+            or (item_ids and item_ids.issubset(boundary["ids"]))
+            for boundary in boundaries
+        )
+
+    actual = _number((timeline or {}).get("duration"))
+    target = _number(target_seconds)
+    ratio = actual / target if actual > 0 and target > 0 else None
+    issues: list[dict[str, Any]] = []
+    removed_issue_ids: set[str] = set()
+    # Model opinions are warnings by default. Only a dynamically observed,
+    # evidence-backed action truncation may remain critical here. Media,
+    # speech, duplicate-source and explicit user-constraint hard failures are
+    # added later by deterministic validators.
+    model_hard_categories = {"action"}
+    for raw in cleaned.get("issues") or []:
+        if not isinstance(raw, dict):
+            continue
+        item = copy.deepcopy(raw)
+        category = str(item.get("category") or "editorial").lower()
+        text = f"{item.get('description') or ''} {item.get('evidence') or ''}".lower()
+        item_ids = {str(value) for value in item.get("segmentIds") or [] if str(value)}
+        output_time = _number(item.get("outputTime"), -999.0)
+
+        batch_count_claim = (
+            any(token in text for token in ("仅产出1条", "只产出1条", "仅生成1条", "只生成1条"))
+            or ("未完成生成" in text and any(token in text for token in ("条视频", "个视频", "高光视频")))
+        )
+        if batch_count_claim and category not in {"duration", "duration_shortfall", "duration_overflow"}:
+            removed_issue_ids.add(str(item.get("id") or ""))
+            continue
+
+        cross_event_claim = any(token in text for token in ("不同事件", "独立事件", "跨事件", "跨章节", "章节间"))
+        bridge_claim = cross_event_claim and any(token in text for token in (
+            "j-cut", "jcut", "l-cut", "lcut", "声音桥", "audio bridge", "audio_bridge",
+        ))
+        if bridge_claim and timeline_has_event_ids and not matches_boundary(
+            item_ids, output_time, invalid_cross_event_bridges,
+        ):
+            # A bridge belongs to the incoming row.  Models occasionally read a
+            # valid J-cut on shot N as if it continued from N into N+1.
+            removed_issue_ids.add(str(item.get("id") or ""))
+            continue
+        dissolve_claim = cross_event_claim and any(token in text for token in ("溶解", "叠化", "dissolve"))
+        if dissolve_claim and timeline_has_event_ids and not matches_boundary(
+            item_ids, output_time, invalid_cross_event_dissolves,
+        ):
+            removed_issue_ids.add(str(item.get("id") or ""))
+            continue
+
+        overlap_claim = any(token in text for token in (
+            "时间重叠", "时间线重叠", "时间码冲突", "outputend", "transitionoverlap",
+        ))
+        valid_overlap = overlap_claim and any(
+            abs(output_time - overlap["time"]) <= .4
+            or (item_ids and item_ids.issubset(overlap["ids"]))
+            for overlap in valid_transition_overlaps
+        )
+        if valid_overlap:
+            removed_issue_ids.add(str(item.get("id") or ""))
+            continue
+
+        if category in {"duration", "duration_shortfall", "duration_overflow"} and ratio is not None:
+            item["outputTime"] = round(actual, 3)
+            if ratio < .70:
+                item.update({
+                    "severity": "critical", "category": "duration_shortfall",
+                    "description": f"本条样片 {actual:.1f} 秒，低于目标 {target:.1f} 秒的 70%，不满足最低展示时长",
+                })
+            elif ratio < .90:
+                item.update({
+                    "severity": "major", "category": "duration_shortfall",
+                    "description": f"本条样片 {actual:.1f} 秒，低于目标 {target:.1f} 秒；可作为偏短备选，但不进入推荐",
+                })
+            elif ratio > 1.25:
+                item.update({
+                    "severity": "critical", "category": "duration_overflow",
+                    "description": f"本条样片 {actual:.1f} 秒，超过目标 {target:.1f} 秒的 125%，不满足最高展示时长",
+                })
+            elif ratio > 1.10:
+                item.update({
+                    "severity": "major", "category": "duration_overflow",
+                    "description": f"本条样片 {actual:.1f} 秒，超过目标 {target:.1f} 秒；可作为偏长备选，但不进入推荐",
+                })
+            elif batch_count_claim:
+                removed_issue_ids.add(str(item.get("id") or ""))
+                continue
+
+        if str(item.get("severity") or "") == "critical":
+            evidence_backed_action = (
+                category in model_hard_categories
+                and bool(item_ids)
+                and bool(str(item.get("evidence") or "").strip())
+                and any(token in text for token in ("截断", "未完成", "不完整", "动作中途", "操作中途"))
+            )
+            if not evidence_backed_action:
+                item["severity"] = "major"
+        issues.append(item)
+
+    actions = []
+    for action in cleaned.get("repairActions") or []:
+        if not isinstance(action, dict):
+            continue
+        reason = str(action.get("reason") or "").lower()
+        if any(token in reason for token in ("时间重叠", "时间码冲突", "outputend")):
+            continue
+        actions.append(action)
+    issues = deduplicate_issues(issues)
+    cleaned.update({
+        "issues": issues[:18],
+        "criticalCount": sum(item.get("severity") == "critical" for item in issues),
+        "majorCount": sum(item.get("severity") == "major" for item in issues),
+        "minorCount": sum(item.get("severity") == "minor" for item in issues),
+        "repairActions": actions[:3],
+        "sanitizedIssueIds": sorted(value for value in removed_issue_ids if value),
+    })
+    return cleaned
 
 
 def calibrate_review_report(
@@ -381,15 +542,25 @@ def calibrate_review_report(
         deterministic.append({"severity": "major", "category": "freeze", "description": "成片连续画面疑似长时间冻结", "source": "rendered_video"})
     if target_seconds and actual_seconds:
         signed_ratio = (float(actual_seconds) - float(target_seconds)) / max(1.0, float(target_seconds))
-        if signed_ratio > .15:
+        if signed_ratio > .25:
             deterministic.append({
                 "severity": "critical", "category": "duration_overflow",
-                "description": f"实际时长超过目标 {signed_ratio * 100:.0f}%（允许上限 15%）", "source": "rendered_timeline",
+                "description": f"实际时长超过目标 {signed_ratio * 100:.0f}%（最高展示上限 25%）", "source": "rendered_timeline",
             })
-        elif signed_ratio < -.20:
+        elif signed_ratio > .10:
+            deterministic.append({
+                "severity": "major", "category": "duration_overflow",
+                "description": f"实际时长超过目标 {signed_ratio * 100:.0f}%，可展示但不进入推荐", "source": "rendered_timeline",
+            })
+        elif signed_ratio < -.30:
+            deterministic.append({
+                "severity": "critical", "category": "duration_shortfall",
+                "description": f"实际时长低于目标 {abs(signed_ratio) * 100:.0f}%（最低展示比例 70%）", "source": "rendered_timeline",
+            })
+        elif signed_ratio < -.10:
             deterministic.append({
                 "severity": "major", "category": "duration_shortfall",
-                "description": f"实际时长低于目标 {abs(signed_ratio) * 100:.0f}%", "source": "rendered_timeline",
+                "description": f"实际时长低于目标 {abs(signed_ratio) * 100:.0f}%，可展示但不进入推荐", "source": "rendered_timeline",
             })
     for item in intent.get("issues") or []:
         if not isinstance(item, dict):
@@ -399,25 +570,23 @@ def calibrate_review_report(
             "severity": str(item.get("severity") or "major"),
             "source": "user_intent_validator",
         })
-    model_issues = list(calibrated.get("issues") or [])
+    model_issues = deduplicate_issues(list(calibrated.get("issues") or []))
+    deterministic = deduplicate_issues(deterministic)
     combined_issues = deduplicate_issues(model_issues, deterministic)
-    model_keys = {
-        (str(item.get("category") or ""), tuple(sorted(str(value) for value in item.get("segmentIds") or [])))
-        for item in model_issues if isinstance(item, dict)
+    counts = {
+        severity: sum(item.get("severity") == severity for item in combined_issues)
+        for severity in ("critical", "major", "minor")
     }
-    deterministic = [
-        item for item in combined_issues
-        if (str(item.get("category") or ""), tuple(sorted(str(value) for value in item.get("segmentIds") or []))) not in model_keys
-    ]
-    model_issues = [
-        item for item in combined_issues
-        if (str(item.get("category") or ""), tuple(sorted(str(value) for value in item.get("segmentIds") or []))) in model_keys
-    ]
-    severity_penalty = {"critical": 12.0, "major": 5.0, "minor": 1.25}
-    penalty = sum(severity_penalty.get(str(item.get("severity") or "minor"), 1.25) for item in combined_issues)
-    # Avoid double counting many warnings from adjacent cuts while preserving
-    # a meaningful ceiling for technically broken outputs.
-    penalty = min(38.0, penalty)
+    # Dimension scores already express the visible impact of an issue. Apply
+    # a bounded root-cause penalty here to enforce confidence without charging
+    # the same bad cut once as content, once as continuity and again as an
+    # unverified fact. Critical issues still fail the hard gate independently.
+    penalty = min(
+        15.0,
+        min(10.0, counts["critical"] * 5.0)
+        + min(6.0, counts["major"] * 1.5)
+        + min(2.0, counts["minor"] * .5),
+    )
     score = max(0.0, min(100.0, base - penalty))
     calibrated.update({
         "schemaVersion": 2,
@@ -427,11 +596,11 @@ def calibrate_review_report(
         "calibratedScore": round(score, 1),
         "calibrationVersion": REVIEW_CALIBRATION_VERSION,
         "deterministicChecks": deterministic[:16],
-        "issues": model_issues[:18],
+        "issues": combined_issues[:18],
         "deterministicPenalty": round(penalty, 2),
-        "criticalCount": sum(item.get("severity") == "critical" for item in [*model_issues, *deterministic]),
-        "majorCount": sum(item.get("severity") == "major" for item in [*model_issues, *deterministic]),
-        "minorCount": sum(item.get("severity") == "minor" for item in [*model_issues, *deterministic]),
+        "criticalCount": counts["critical"],
+        "majorCount": counts["major"],
+        "minorCount": counts["minor"],
     })
     return calibrated
 
@@ -477,7 +646,7 @@ def apply_review_repairs(
                     reason = "替换候选已在成片中"
                 else:
                     start, end = _number(replacement.get("start")), _number(replacement.get("end"))
-                    if end - start < .2:
+                    if end - start + 1e-6 < .2:
                         reason = "替换候选时长无效"
                     else:
                         original_order = result[index].get("editOrder", index)
@@ -522,7 +691,10 @@ def apply_review_repairs(
                 if not candidate:
                     reason = "缺少候选安全边界"
                 else:
-                    lower, upper = _number(candidate.get("start")), _number(candidate.get("end"))
+                    candidate_start = _number(candidate.get("start"))
+                    candidate_end = _number(candidate.get("end"))
+                    lower = max(candidate_start, _number(candidate.get("safeStart"), candidate_start))
+                    upper = min(candidate_end, _number(candidate.get("safeEnd"), candidate_end))
                     start = max(lower, _number(action.get("start"), _number(item.get("start"))))
                     end = min(upper, _number(action.get("end"), _number(item.get("end"))))
                     minimum = max(.35, _number(candidate.get("minimumKeepSeconds"), .35))
@@ -550,6 +722,14 @@ def apply_review_repairs(
                 result[index]["audioBridge"] = normalize_audio_bridge(action.get("audioBridge"))
                 if result[index]["audioBridge"]["type"] != "none":
                     result[index]["transitionIn"] = normalize_transition({"type": "cut"})
+        elif action_type == "set_audio_fade":
+            if index is None:
+                reason = "镜头不存在，不能平滑音频切点"
+            else:
+                fade = max(.06, min(.35, _number(action.get("audioFadeSeconds"), .12)))
+                result[index]["audioEdgeFadeSeconds"] = round(fade, 3)
+                if index > 0:
+                    result[index - 1]["audioEdgeFadeSeconds"] = round(fade, 3)
         elif action_type == "set_speed":
             if index is None:
                 reason = "镜头不存在"

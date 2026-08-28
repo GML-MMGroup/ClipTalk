@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CLIPTALK_INSTALL_PROFILE: ${CLIPTALK_INSTALL_PROFILE:-cpu}
     env_file:
       - .env
     ports:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from fastapi import FastAPI
+
 from app.jobs_api import build_jobs_router
 
 
@@ -29,3 +31,10 @@ def test_jobs_router_owns_core_lifecycle_routes() -> None:
         ("/api/jobs/{job_id}", "DELETE"),
     }
     assert routes[("/api/jobs", "POST")].status_code == 202
+
+    app = FastAPI()
+    app.include_router(router)
+    schemas = app.openapi()["components"]["schemas"]
+    assert "JobDocumentResponse" in schemas
+    assert "JobRequestResponse" in schemas
+    assert "OutputVersionResponse" in schemas

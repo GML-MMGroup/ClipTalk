@@ -8,10 +8,48 @@ import pytest
 from fastapi import HTTPException
 
 from app.job_creation import (
+    infer_highlight_target_seconds,
+    infer_highlight_variant_count,
+    infer_result_strategy,
     parse_job_creation_options,
     persist_upload,
+    resolve_creation_routing,
     storage_usage_bytes,
 )
+
+
+@pytest.mark.parametrize(("instruction", "expected"), [
+    ("生成一条 60 秒高光", 60),
+    ("剪成1.5分钟的产品集锦", 90),
+    ("只查找视频前 30 秒的冰箱", None),
+    ("把视频前 30 秒做成高光", None),
+    ("找出所有洗衣机片段", None),
+])
+def test_infer_highlight_target_seconds_only_reads_final_duration(instruction, expected) -> None:
+    assert infer_highlight_target_seconds(instruction) == expected
+
+
+@pytest.mark.parametrize(("instruction", "expected"), [
+    ("把整个视频做成高光", 3),
+    ("生成一个高光成片", 1),
+    ("给我两个不同的剪辑方案", 2),
+    ("输出4个高光版本", 4),
+    ("生成两个30s的高光视频", 2),
+    ("生成两条30秒高光视频", 2),
+    ("生成2条30秒高光视频", 2),
+    ("输出两版30秒高光", 2),
+    ("做一个30秒短片", 1),
+])
+def test_infer_highlight_variant_count_keeps_multi_cut_default(instruction, expected) -> None:
+    assert infer_highlight_variant_count(instruction) == expected
+
+
+def test_infer_result_strategy_uses_task_defaults_and_explicit_language() -> None:
+    assert infer_result_strategy("找出冰箱片段", "content_extract") == ("review", "system_default")
+    assert infer_result_strategy("生成比赛高光", "highlight") == ("smart", "system_default")
+    assert infer_result_strategy("先让我审核候选", "highlight") == ("review", "instruction")
+    assert infer_result_strategy("不要自动生成，先给我看候选", "content_extract") == ("review", "instruction")
+    assert infer_result_strategy("直接生成冰箱片段", "content_extract") == ("auto", "instruction")
 
 
 def valid_options(**overrides):
@@ -50,6 +88,16 @@ def test_creation_options_accept_one_off_storage() -> None:
     assert valid_options(storage_mode="one_off").storage_mode == "one_off"
 
 
+def test_creation_options_accept_universal_source_scope_and_result_strategy() -> None:
+    options = valid_options(
+        source_scope_kind="custom", source_scope_start="12.5", source_scope_end="95",
+        result_strategy="review",
+    )
+    assert options.source_scope_kind == "custom"
+    assert (options.source_scope_start, options.source_scope_end) == (12.5, 95.0)
+    assert options.result_strategy == "review"
+
+
 def test_content_search_options_are_normalized() -> None:
     options = valid_options(
         task_mode="content_extract", instruction="找出产品演示", search_scope_kind="custom",
@@ -73,6 +121,69 @@ def test_content_search_defaults_to_all_reliable_results() -> None:
     assert options.search_result_limit == 12
 
 
+def test_creation_routing_uses_model_for_obvious_single_input_workflows() -> None:
+    calls = []
+
+    def classifier(text):
+        calls.append(text)
+        return {
+            "workflowKind": "highlight" if "高光" in text else "content_search",
+            "confidence": .96,
+            "reason": "模型判断",
+        }
+
+    assert resolve_creation_routing("生成一条比赛高光集锦", classifier=classifier).task_mode == "highlight"
+    assert resolve_creation_routing(
+        "找出嘉宾介绍离线功能的全部发言", classifier=classifier,
+    ).task_mode == "content_extract"
+    assert calls == ["生成一条比赛高光集锦", "找出嘉宾介绍离线功能的全部发言"]
+
+
+def test_creation_routing_requires_inline_confirmation_before_upload() -> None:
+    with pytest.raises(HTTPException) as captured:
+        resolve_creation_routing("帮我剪一下这个视频")
+    assert captured.value.status_code == 409
+    assert captured.value.detail["code"] == "intent_confirmation_required"
+    assert {item["id"] for item in captured.value.detail["options"]} == {
+        "highlight", "content_search", "person_edit", "speaker_edit",
+    }
+
+
+def test_explicit_creation_routing_remains_compatible() -> None:
+    decision = resolve_creation_routing("帮我剪一下这个视频", task_mode="highlight")
+    assert decision.task_mode == "highlight"
+    assert decision.source == "explicit"
+
+
+def test_ambiguous_creation_routing_uses_high_confidence_primary_model() -> None:
+    decision = resolve_creation_routing(
+        "做得适合发出去",
+        classifier=lambda _text: {"taskMode": "highlight", "confidence": .91, "reason": "要求交付成片"},
+    )
+    assert decision.task_mode == "highlight"
+    assert decision.source == "model_primary_v2"
+
+
+def test_low_confidence_model_fallback_still_requires_confirmation() -> None:
+    with pytest.raises(HTTPException) as captured:
+        resolve_creation_routing(
+            "做得适合发出去",
+            classifier=lambda _text: {"taskMode": "highlight", "confidence": .6},
+        )
+    assert captured.value.status_code == 409
+
+
+def test_creation_routing_supports_english_instructions() -> None:
+    assert resolve_creation_routing(
+        "Find all mentions of offline mode",
+        classifier=lambda _text: {"workflowKind": "content_search", "confidence": .95},
+    ).task_mode == "content_extract"
+    assert resolve_creation_routing(
+        "Create a highlight reel of the best moments",
+        classifier=lambda _text: {"workflowKind": "highlight", "confidence": .95},
+    ).task_mode == "highlight"
+
+
 @pytest.mark.parametrize("overrides,status", [
     ({"filename": "source.txt"}, 400),
     ({"task_mode": "content_extract", "instruction": ""}, 400),
@@ -82,6 +193,9 @@ def test_content_search_defaults_to_all_reliable_results() -> None:
     ({"auto_variant_count": "5"}, 400),
     ({"search_scope_kind": "unknown"}, 400),
     ({"search_scope_kind": "custom", "search_scope_start": "20", "search_scope_end": "10"}, 400),
+    ({"source_scope_kind": "unknown"}, 400),
+    ({"source_scope_kind": "custom", "source_scope_start": "20", "source_scope_end": "10"}, 400),
+    ({"result_strategy": "instant"}, 400),
     ({"search_result_limit": "5"}, 400),
     ({"search_boundary_mode": "loose"}, 400),
     ({"search_evidence_mode": "everything"}, 400),

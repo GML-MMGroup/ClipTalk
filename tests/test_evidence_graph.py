@@ -87,6 +87,17 @@ def test_refinement_budget_is_duration_aware_and_bounded() -> None:
     assert values == [2, 4, 5, 6]
 
 
+def test_v2_refinement_budget_uses_half_of_adaptive_recall_pool() -> None:
+    assert refinement_candidate_limit(
+        discovery_only=True, total_target_seconds=60, target_seconds=8,
+        count=6, video_duration=7200, algorithm_version="editing-algorithm-v2",
+    ) == 20
+    assert refinement_candidate_limit(
+        discovery_only=True, total_target_seconds=600, target_seconds=8,
+        count=6, video_duration=120, algorithm_version="editing-algorithm-v2",
+    ) == 24
+
+
 def test_local_boundary_alignment_completes_intersecting_speech_turn() -> None:
     candidate = HighlightCandidate(
         start=10.0, end=13.0, score=80, title="回答", reason="候选", evidence=[],

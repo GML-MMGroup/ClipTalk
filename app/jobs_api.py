@@ -5,6 +5,8 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from .api_responses import JobEnvelopeResponse, JobsResponse
+
 
 def build_jobs_router(
     *,
@@ -19,9 +21,12 @@ def build_jobs_router(
 ) -> APIRouter:
     """Own the core job collection and lifecycle URL surface."""
     router = APIRouter(prefix="/api/jobs", tags=["jobs"])
-    router.add_api_route("", list_jobs, methods=["GET"])
-    router.add_api_route("", create_job, methods=["POST"], status_code=202)
-    router.add_api_route("/{job_id}", get_job, methods=["GET"])
+    router.add_api_route("", list_jobs, methods=["GET"], response_model=JobsResponse)
+    router.add_api_route(
+        "", create_job, methods=["POST"], status_code=202,
+        response_model=JobEnvelopeResponse,
+    )
+    router.add_api_route("/{job_id}", get_job, methods=["GET"], response_model=JobEnvelopeResponse)
     router.add_api_route("/{job_id}/status", get_job_status, methods=["GET"])
     router.add_api_route("/{job_id}/cancel", cancel_job, methods=["POST"])
     router.add_api_route("/{job_id}/finalize-one-off", finalize_one_off_job, methods=["POST"])

@@ -4,6 +4,7 @@ from app import main as main_module
 from app.api_schemas import (
     ChatRequest,
     ContentSearchBoundaryRequest,
+    ContentSearchManualRangeRequest,
     ContentSearchFeedbackRequest,
     ContentSearchOrderRequest,
     LlmOrderRequest,
@@ -16,6 +17,7 @@ def test_main_reexports_request_models_for_compatibility() -> None:
     assert main_module.LlmOrderRequest is LlmOrderRequest
     assert main_module.ContentSearchFeedbackRequest is ContentSearchFeedbackRequest
     assert main_module.ContentSearchBoundaryRequest is ContentSearchBoundaryRequest
+    assert main_module.ContentSearchManualRangeRequest is ContentSearchManualRangeRequest
     assert main_module.ContentSearchOrderRequest is ContentSearchOrderRequest
 
 
@@ -52,6 +54,13 @@ def test_manual_content_boundary_request_carries_explicit_trim() -> None:
     )
     assert request.operation == "save"
     assert (request.start, request.end) == (2.04, 37.64)
+
+
+def test_manual_content_range_request_carries_source_selection() -> None:
+    request = ContentSearchManualRangeRequest(
+        searchId="search_1", start=12.0, end=18.5, title="补充回答",
+    )
+    assert (request.start, request.end, request.title) == (12.0, 18.5, "补充回答")
 
 
 def test_chat_request_can_carry_content_search_options() -> None:

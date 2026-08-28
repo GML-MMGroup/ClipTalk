@@ -1,5 +1,0 @@
--r requirements-recognition-common.txt
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.0+cpu
-torchaudio==2.2.0+cpu
-paddlepaddle>=3.0,<4

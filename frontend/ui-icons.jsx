@@ -1,12 +1,18 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { PaperPlaneTilt } from "@phosphor-icons/react";
+import { ArrowRight, FilmSlate, PaperPlaneTilt } from "@phosphor-icons/react";
 
 const roots = new Map();
 
 function iconFor(name) {
   if (name === "send") {
     return <PaperPlaneTilt size={17} weight="bold" mirrored={false} aria-hidden="true" />;
+  }
+  if (name === "film-slate") {
+    return <FilmSlate size={28} weight="duotone" mirrored={false} aria-hidden="true" />;
+  }
+  if (name === "arrow-right") {
+    return <ArrowRight size={18} weight="bold" mirrored={false} aria-hidden="true" />;
   }
   return null;
 }

@@ -45,6 +45,10 @@ def test_runtime_metrics_counts_statuses_without_job_payloads() -> None:
         analysis_queue={"queued": 1},
         render_queue={"running": 1},
         analysis_workers=3,
+        stage_metrics={"activeJobs": 1, "stages": {"rendering": {"samples": 2}}},
+        resources={"peakResidentMemoryBytes": 1024},
     )
     assert metrics["jobs"] == {"completed": 1, "running": 2, "unknown": 1}
     assert metrics["workers"] == {"analysis": 3, "render": 2, "preview": 1}
+    assert metrics["stagePerformance"]["activeJobs"] == 1
+    assert metrics["resources"]["peakResidentMemoryBytes"] == 1024

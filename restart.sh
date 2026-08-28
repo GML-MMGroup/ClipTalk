@@ -2,11 +2,16 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$PROJECT_ROOT/vlm-highlight.pid"
+LEGACY_PID_FILE="$PROJECT_ROOT/vlm-highlight.pid"
+LEGACY_LOG_FILE="$PROJECT_ROOT/vlm-highlight.log"
 
 cd "$PROJECT_ROOT"
 
-LOG_FILE="${HIGHLIGHT_LOG_FILE:-$PROJECT_ROOT/vlm-highlight.log}"
+DATA_ROOT="${HIGHLIGHT_DATA_ROOT:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().data_root)')}"
+RUNTIME_DIR="${HIGHLIGHT_RUNTIME_DIR:-$DATA_ROOT/runtime}"
+mkdir -p "$RUNTIME_DIR"
+PID_FILE="${HIGHLIGHT_PID_FILE:-$RUNTIME_DIR/vlm-highlight.pid}"
+LOG_FILE="${HIGHLIGHT_LOG_FILE:-$RUNTIME_DIR/vlm-highlight.log}"
 HOST="${HIGHLIGHT_HOST:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().host)')}"
 PORT="${HIGHLIGHT_PORT:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().port)')}"
 
@@ -54,6 +59,8 @@ stop_project_server() {
 OLD_PID=""
 if [ -f "$PID_FILE" ]; then
   OLD_PID="$(tr -dc '0-9' < "$PID_FILE")"
+elif [ "$PID_FILE" != "$LEGACY_PID_FILE" ] && [ -f "$LEGACY_PID_FILE" ]; then
+  OLD_PID="$(tr -dc '0-9' < "$LEGACY_PID_FILE")"
 fi
 PORT_PID="$(listener_pid || true)"
 
@@ -66,6 +73,13 @@ for candidate_pid in "$OLD_PID" "$PORT_PID"; do
   fi
 done
 rm -f "$PID_FILE"
+if [ "$PID_FILE" != "$LEGACY_PID_FILE" ]; then
+  rm -f "$LEGACY_PID_FILE"
+fi
+
+if [ "$LOG_FILE" != "$LEGACY_LOG_FILE" ] && [ -f "$LEGACY_LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; then
+  mv "$LEGACY_LOG_FILE" "$LOG_FILE"
+fi
 
 if PORT_PID="$(listener_pid || true)"; then
   if [ -n "$PORT_PID" ]; then

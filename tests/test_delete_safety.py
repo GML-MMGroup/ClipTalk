@@ -66,7 +66,6 @@ def test_delete_requires_one_time_intent_bound_to_revision(tmp_path: Path) -> No
         main_module.analysis_task_store = DurableTaskStore(tmp_path / "analysis.sqlite3")
         main_module.render_task_store = DurableTaskStore(tmp_path / "render.sqlite3", one_active_per_job=False)
         main_module.delete_intents.clear()
-        main_module.delete_attempts.clear()
         job = _job(tmp_path, job_id)
         main_module.jobs[job_id] = job
         main_module.save_job(job)
@@ -91,10 +90,29 @@ def test_delete_requires_one_time_intent_bound_to_revision(tmp_path: Path) -> No
                 DeleteJobRequest(revision=intent["revision"], deleteIntent=intent["deleteIntent"]),
                 _request(),
             )
+
+        # Deleting many completed tasks in one cleanup session remains allowed.
+        # Every target still needs its own short-lived, one-time intent.
+        for index in range(5):
+            extra_job_id = f"job_delete_without_rate_limit_{index}"
+            extra_job = _job(tmp_path, extra_job_id)
+            main_module.jobs[extra_job_id] = extra_job
+            main_module.save_job(extra_job)
+            extra_intent = main_module.create_job_delete_intent(extra_job_id, _request())
+            extra_result = main_module.delete_job(
+                extra_job_id,
+                DeleteJobRequest(
+                    revision=extra_intent["revision"],
+                    deleteIntent=extra_intent["deleteIntent"],
+                ),
+                _request(),
+            )
+            assert extra_result["deleted"] is True
     finally:
         main_module.jobs.pop(job_id, None)
+        for index in range(5):
+            main_module.jobs.pop(f"job_delete_without_rate_limit_{index}", None)
         main_module.delete_intents.clear()
-        main_module.delete_attempts.clear()
         main_module.settings = original_settings
         main_module.job_store = original_store
         main_module.analysis_task_store = original_analysis_store

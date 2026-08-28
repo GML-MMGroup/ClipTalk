@@ -10,12 +10,15 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
+
+from .process_supervisor import process_supervisor
 
 from .editing_techniques import (
     composition_effective_duration,
@@ -101,6 +104,43 @@ SUBTITLE_STYLES: dict[str, dict[str, str | int]] = {
         "y": "h-text_h-72",
     },
 }
+
+
+def subtitle_font_pixels(frame_width: float, frame_height: float, size_ratio: float) -> float:
+    """Resolve subtitle size against the short edge for orientation-safe typography."""
+    width = max(1.0, float(frame_width or 0))
+    height = max(1.0, float(frame_height or 0))
+    ratio = max(.012, min(.080, float(size_ratio or .040)))
+    return min(width, height) * ratio
+
+
+def _subtitle_character_units(character: str) -> float:
+    if character.isspace():
+        return .35
+    return 1.0 if unicodedata.east_asian_width(character) in {"W", "F", "A"} else .56
+
+
+def wrap_subtitle_text(value: str, maximum_units: float) -> str:
+    """Wrap drawtext input to the same 90% safe width used by the browser preview."""
+    limit = max(6.0, float(maximum_units or 0))
+    lines: list[str] = []
+    for paragraph in str(value or "").replace("\r", "").split("\n"):
+        if not paragraph:
+            lines.append("")
+            continue
+        current: list[str] = []
+        units = 0.0
+        for character in paragraph:
+            character_units = _subtitle_character_units(character)
+            if current and units + character_units > limit:
+                lines.append("".join(current).rstrip())
+                current = []
+                units = 0.0
+            current.append(character)
+            units += character_units
+        if current:
+            lines.append("".join(current).rstrip())
+    return "\n".join(lines)
 
 
 def normalize_subtitle_style(value: str | None) -> str:
@@ -426,7 +466,7 @@ def _extract_uniform_frames_uncached(
     batch_size = max(1, int(progress_batch_size))
     first_batch_size = max(1, int(progress_first_batch_size or batch_size))
     try:
-        process = subprocess.Popen(
+        process = process_supervisor.start(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -528,8 +568,18 @@ def extract_frames_at_times(
     # Each input still seeks independently, but process startup and Python
     # scheduling overhead are paid once per batch.
     batch_size = 16
-    for batch_start in range(0, len(requested), batch_size):
-        batch = requested[batch_start:batch_start + batch_size]
+    # Publish the first measured result quickly. A full 16-input FFmpeg batch
+    # can take long enough to look stalled on network storage; a four-frame
+    # warm-up costs only one extra process and lets counted progress begin much
+    # sooner. Later batches keep the more efficient size.
+    first_batch_size = min(4, len(requested))
+    batch_starts = (
+        [0, *range(first_batch_size, len(requested), batch_size)]
+        if requested else []
+    )
+    for batch_start in batch_starts:
+        current_batch_size = first_batch_size if batch_start == 0 else batch_size
+        batch = requested[batch_start:batch_start + current_batch_size]
         command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
         for second in batch:
             command.extend(["-ss", f"{second:.3f}", "-i", str(source)])
@@ -657,7 +707,7 @@ def extract_audio_waveform(
                 continue
 
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = process_supervisor.start(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         progress_reader = threading.Thread(target=read_progress, name="waveform-progress", daemon=True)
         progress_reader.start()
         def watch_cancellation() -> None:
@@ -1110,7 +1160,7 @@ def render_clip(
     if has_audio:
         command.extend(["-c:a", "aac", "-b:a", "160k"])
     command.extend(["-movflags", "+faststart", "-avoid_negative_ts", "make_zero", "-y", str(temporary)])
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = process_supervisor.start(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     while process.poll() is None:
         if cancelled and cancelled():
             process.terminate()
@@ -1141,6 +1191,8 @@ def render_composition(
     subtitle_style: str = "clean",
     subtitle_layout: dict[str, Any] | None = None,
     subtitle_cue_styles: dict[str, dict[str, Any]] | None = None,
+    subtitle_frame_width: int | None = None,
+    subtitle_frame_height: int | None = None,
     cutaways: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[float], None] | None = None,
     strict_source_boundaries: bool = False,
@@ -1267,13 +1319,21 @@ def render_composition(
                 # sound enters.  Video is already visible during this interval.
                 output_start += bridge["duration"]
             audio_duration = input_duration / rate
-            fade = min(.06, audio_duration / 6)
+            fallback_fade = max(0.0, min(.35, float(segment.get("audioEdgeFadeSeconds") or .06)))
+            fade_in = min(max(0.0, float(segment.get("audioFadeIn", fallback_fade))), audio_duration / 3)
+            fade_out = min(max(0.0, float(segment.get("audioFadeOut", fallback_fade))), audio_duration / 3)
+            gain = 0.0 if segment.get("muted") else max(0.0, min(2.0, float(segment.get("audioGain", 1.0))))
             delay_ms = max(0, round(output_start * 1000))
+            fade_filters = ""
+            if fade_in > 0:
+                fade_filters += f"afade=t=in:st=0:d={fade_in:.3f},"
+            if fade_out > 0:
+                fade_filters += f"afade=t=out:st={max(0.0, audio_duration - fade_out):.3f}:d={fade_out:.3f},"
             filters.append(
                 f"{audio_source}atrim=duration={input_duration:.3f},asetpts=PTS-STARTPTS,"
                 f"atempo={rate:.3f},aresample=async=1:first_pts=0,"
-                f"afade=t=in:st=0:d={fade:.3f},"
-                f"afade=t=out:st={max(0.0, audio_duration - fade):.3f}:d={fade:.3f},"
+                f"volume={gain:.3f},"
+                f"{fade_filters}"
                 f"adelay={delay_ms}|{delay_ms}[a{index}]"
             )
     video_current = "v0"
@@ -1317,7 +1377,7 @@ def render_composition(
         source_start = max(0.0, float(cutaway.get("sourceStart") or 0))
         source_end = max(source_start + .2, float(cutaway.get("sourceEnd") or source_start))
         duration = min(source_end - source_start, max(.2, composed_duration - cutaway_start))
-        if duration < .2:
+        if duration + 1e-6 < .2:
             continue
         input_index = count + cutaway_input_count
         cutaway_input_count += 1
@@ -1360,10 +1420,10 @@ def render_composition(
         subtitle_dir.mkdir(parents=True, exist_ok=True)
         for cue_index, cue in enumerate(subtitle_cues):
             text_path = subtitle_dir / f"{cue_index:04d}.txt"
-            text_path.write_text(str(cue.get("text") or "").replace("\n", " "), encoding="utf-8")
-            escaped_text_path = str(text_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            escaped_font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc".replace(":", "\\:")
-            next_label = f"vsub{cue_index}"
+            speaker_prefix = (
+                f"{str(cue.get('speakerLabel') or '')}："
+                if cue.get("showSpeakerLabel") and cue.get("speakerLabel") else ""
+            )
             layout = cue_style_lookup.get(str(cue.get("id") or "")) or default_layout
             try:
                 size_ratio = max(.012, min(.080, float(layout.get("fontSizeRatio") or .040)))
@@ -1371,6 +1431,18 @@ def render_composition(
                 offset_y = max(-.40, min(.40, float(layout.get("offsetYRatio") or 0)))
             except (AttributeError, TypeError, ValueError):
                 size_ratio, offset_x, offset_y = .040, 0.0, 0.0
+            reference_width = max(1, int(subtitle_frame_width or 1920))
+            reference_height = max(1, int(subtitle_frame_height or 1080))
+            font_pixels = subtitle_font_pixels(reference_width, reference_height, size_ratio)
+            maximum_units = reference_width * .90 / max(1.0, font_pixels)
+            rendered_text = wrap_subtitle_text(
+                speaker_prefix + str(cue.get("text") or "").replace("\n", " "),
+                maximum_units,
+            )
+            text_path.write_text(rendered_text, encoding="utf-8")
+            escaped_text_path = str(text_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            escaped_font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc".replace(":", "\\:")
+            next_label = f"vsub{cue_index}"
             horizontal = str(layout.get("horizontal") or "center")
             vertical = str(layout.get("vertical") or "bottom")
             x_anchor = {"left": "w*0.05", "right": "w-text_w-w*0.05"}.get(horizontal, "(w-text_w)/2")
@@ -1379,10 +1451,12 @@ def render_composition(
             y_expression = f"max(h*0.05\\,min(h-text_h-h*0.05\\,{y_anchor}+h*{offset_y:.5f}))"
             style = {
                 **visual_style,
-                "fontsize": f"h*{size_ratio:.5f}",
+                "fontsize": f"min(w\\,h)*{size_ratio:.5f}",
                 "x": x_expression,
                 "y": y_expression,
             }
+            if cue.get("speakerColor"):
+                style["fontcolor"] = str(cue["speakerColor"])
             style_options = ":".join(f"{key}={value}" for key, value in style.items())
             filters.append(
                 f"[{output_video_label}]drawtext=fontfile='{escaped_font_path}':textfile='{escaped_text_path}':"
@@ -1403,7 +1477,7 @@ def render_composition(
         "-movflags", "+faststart", "-shortest",
         "-progress", "pipe:1", "-nostats", "-y", str(temporary),
     ])
-    process = subprocess.Popen(
+    process = process_supervisor.start(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
     )
     progress_lines: queue.Queue[str | None] = queue.Queue()

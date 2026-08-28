@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download and validate the speech models used by ClipTalk.
 
-Run this once after installing requirements-audiovisual.txt.  FunASR performs
+Run this once after installing requirements-cpu.txt or requirements-gpu.txt. FunASR performs
 the actual ModelScope downloads; loading every configured component also
 proves that the selected PyTorch runtime can execute on the chosen device.
 """
@@ -72,8 +72,8 @@ def main() -> int:
         import torch
     except ImportError:
         print(
-            "error: PyTorch is not installed; use requirements-audiovisual.txt "
-            "for CPU or requirements-audiovisual-cu121.txt for CUDA 12.1",
+            "error: PyTorch is not installed; use requirements-cpu.txt "
+            "for CPU or requirements-gpu.txt for NVIDIA CUDA",
             file=sys.stderr,
         )
         return 2

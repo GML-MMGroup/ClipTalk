@@ -20,6 +20,7 @@ node_modules/
 
 # Runtime media, models, task state and generated outputs
 data/
+local-artifacts/
 *.log
 *.pid
 *.sqlite3

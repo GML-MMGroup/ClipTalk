@@ -40,12 +40,24 @@ def _positive_float(name: str, default: float) -> float:
     return max(1.0, value)
 
 
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return min(maximum, max(minimum, value))
+
+
 def _nonnegative_int(name: str, default: int) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
     except ValueError:
         return default
     return max(0, value)
+
+
+def _bounded_positive_int(name: str, default: int, maximum: int) -> int:
+    return min(maximum, _positive_int(name, default))
 
 
 def _boolean(name: str, default: bool) -> bool:
@@ -87,7 +99,9 @@ class Settings:
     ffprobe: str
     maximum_upload_bytes: int
     maximum_workers: int
+    content_search_model_concurrency: int
     access_token: str
+    allow_unauthenticated_remote: bool
     allow_private_model_endpoints: bool
     maximum_storage_bytes: int
     retention_days: int
@@ -101,6 +115,12 @@ class Settings:
     sensevoice_spk_model: str
     sensevoice_diarization: bool
     speech_model_cache: Path
+    voiceprint_encryption_key: str
+    voiceprint_model: str
+    voiceprint_device: str
+    voiceprint_review_threshold: float
+    voiceprint_accept_threshold: float
+    voiceprint_margin_threshold: float
     recognition_enabled: bool
     recognition_profile: str
     recognition_model_cache: Path
@@ -111,6 +131,8 @@ class Settings:
     recognition_grounding_model: str
     recognition_yunet_model: Path
     recognition_sface_model: Path
+    recognition_yolox_model: Path
+    recognition_youtureid_model: Path
     recognition_ocr_enabled: bool
     content_search_dialogue_v2: bool
     active_speaker_mode: str
@@ -166,7 +188,11 @@ class Settings:
             ffprobe=os.environ.get("FFPROBE_BIN", "/usr/bin/ffprobe"),
             maximum_upload_bytes=_positive_int("HIGHLIGHT_MAX_UPLOAD_BYTES", 8 * 1024**3),
             maximum_workers=min(4, _positive_int("HIGHLIGHT_MAX_WORKERS", 1)),
+            content_search_model_concurrency=_bounded_positive_int(
+                "CONTENT_SEARCH_MODEL_CONCURRENCY", 3, 4,
+            ),
             access_token=os.environ.get("HIGHLIGHT_ACCESS_TOKEN", "").strip(),
+            allow_unauthenticated_remote=_boolean("HIGHLIGHT_ALLOW_UNAUTHENTICATED_REMOTE", False),
             allow_private_model_endpoints=_boolean("HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS", False),
             maximum_storage_bytes=_positive_int("HIGHLIGHT_MAX_STORAGE_BYTES", 50 * 1024**3),
             retention_days=_nonnegative_int("HIGHLIGHT_RETENTION_DAYS", 0),
@@ -186,6 +212,14 @@ class Settings:
             # speaker-based editing, unless explicitly configured otherwise.
             sensevoice_diarization=_boolean("HIGHLIGHT_SENSEVOICE_DIARIZATION", False),
             speech_model_cache=Path(os.environ.get("HIGHLIGHT_SPEECH_MODEL_CACHE", data_root / "models")).resolve(),
+            voiceprint_encryption_key=os.environ.get("HIGHLIGHT_VOICEPRINT_ENCRYPTION_KEY", "").strip(),
+            voiceprint_model=os.environ.get(
+                "HIGHLIGHT_VOICEPRINT_MODEL", "iic/speech_campplus_sv_zh-cn_16k-common",
+            ).strip(),
+            voiceprint_device=os.environ.get("HIGHLIGHT_VOICEPRINT_DEVICE", "cpu").strip().lower(),
+            voiceprint_review_threshold=_bounded_float("HIGHLIGHT_VOICEPRINT_REVIEW_THRESHOLD", .31, -1.0, 1.0),
+            voiceprint_accept_threshold=_bounded_float("HIGHLIGHT_VOICEPRINT_ACCEPT_THRESHOLD", .38, -1.0, 1.0),
+            voiceprint_margin_threshold=_bounded_float("HIGHLIGHT_VOICEPRINT_MARGIN_THRESHOLD", .05, 0.0, 2.0),
             recognition_enabled=_boolean("HIGHLIGHT_RECOGNITION_V4", True),
             recognition_profile=(os.environ.get("HIGHLIGHT_RECOGNITION_PROFILE", "auto").strip().lower() or "auto"),
             recognition_model_cache=Path(os.environ.get("HIGHLIGHT_RECOGNITION_MODEL_CACHE", data_root / "models" / "recognition")).resolve(),
@@ -196,6 +230,14 @@ class Settings:
             recognition_grounding_model=os.environ.get("HIGHLIGHT_GROUNDING_MODEL", "IDEA-Research/grounding-dino-tiny").strip(),
             recognition_yunet_model=Path(os.environ.get("HIGHLIGHT_YUNET_MODEL", data_root / "models" / "recognition" / "face_detection_yunet_2023mar.onnx")).resolve(),
             recognition_sface_model=Path(os.environ.get("HIGHLIGHT_SFACE_MODEL", data_root / "models" / "recognition" / "face_recognition_sface_2021dec.onnx")).resolve(),
+            recognition_yolox_model=Path(os.environ.get(
+                "HIGHLIGHT_YOLOX_MODEL",
+                data_root / "models" / "recognition" / "object_detection_yolox_2022nov.onnx",
+            )).resolve(),
+            recognition_youtureid_model=Path(os.environ.get(
+                "HIGHLIGHT_YOUTUREID_MODEL",
+                data_root / "models" / "recognition" / "person_reid_youtu_2021nov.onnx",
+            )).resolve(),
             recognition_ocr_enabled=_boolean("HIGHLIGHT_OCR_ENABLED", True),
             content_search_dialogue_v2=_boolean("CONTENT_SEARCH_DIALOGUE_V2", True),
             active_speaker_mode=(os.environ.get("HIGHLIGHT_ACTIVE_SPEAKER_MODE", "primary").strip().lower() or "primary"),
@@ -208,13 +250,16 @@ class Settings:
         )
 
     def ensure_directories(self) -> None:
-        for child in ("jobs", "uploads", "work", "outputs", "kept", "cache", "models"):
+        for child in ("jobs", "uploads", "work", "outputs", "kept", "cache", "models", "voiceprints", "runtime/voiceprint-temp"):
             (self.data_root / child).mkdir(parents=True, exist_ok=True)
         self.speech_model_cache.mkdir(parents=True, exist_ok=True)
         self.recognition_model_cache.mkdir(parents=True, exist_ok=True)
 
     def validate_deployment_security(self) -> None:
-        validate_deployment_access(self.host, self.access_token)
+        validate_deployment_access(
+            self.host, self.access_token,
+            allow_unauthenticated_remote=self.allow_unauthenticated_remote,
+        )
 
     def validate_vision(self) -> None:
         missing = [name for name, value in (

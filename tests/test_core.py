@@ -33,8 +33,11 @@ from app.composition_review import (
     composition_review_timeline,
     normalize_review_report,
     rendered_visual_metrics,
+    review_cache_key,
     review_improved,
+    sanitize_review_report,
 )
+from app.composition_assets import validate_render_selections
 from app.vision_settings import LlmConfigurationStore, VisionConfigurationStore, discover_llm_models, discover_models
 from app.main import (
     analysis_cache_reuse_allowed,
@@ -43,10 +46,13 @@ from app.main import (
     automatic_composition_similarity,
     build_output_editing_explanation,
     distinct_event_replacement_plans,
+    execution_snapshot,
+    _build_quality_recovery_sequence,
     _content_selection_fidelity,
     _normalise_edit_plans,
     _edit_plan_candidates,
     _semantic_safe_selections,
+    _synthesise_review_repairs,
     parse_candidate_adjustment,
     parse_absolute_time_range,
     parse_manual_selection_adjustment,
@@ -113,11 +119,13 @@ from app.prompts import (
     llm_edit_plan_prompt,
 )
 from app.store import JobStore
-from app.event_groups import allocate_event_group_budget, build_event_groups, build_final_reel, composition_duration, event_groups_total, split_event_groups_at_scene_cuts
+from app.event_groups import allocate_event_group_budget, build_event_groups, build_final_reel, composition_duration, event_groups_total, normalize_output_event_hierarchy, split_event_groups_at_scene_cuts
 from app.edit_boundaries import annotate_candidate_boundaries, semantic_safe_range
 from app.edl_optimizer import optimize_edl
 from app.speech import (
+    _cluster_short_speaker_embeddings,
     _sensevoice_model_options,
+    enforce_speaker_turn_contract,
     normalize_sensevoice_result,
     parse_rich_tags,
     speech_evidence,
@@ -368,6 +376,66 @@ class EditPlanTests(unittest.TestCase):
         self.assertEqual(source_pieces(segment), [{"start": 0.0, "end": 3.2}, {"start": 5.0, "end": 10.0}])
         self.assertAlmostEqual(composition_effective_duration([segment]), 6.56, places=2)
 
+    def test_quiet_visual_action_is_not_treated_as_disposable_silence(self) -> None:
+        segment = {
+            "id": "cooking", "start": 0, "end": 20, "hasSpeech": True,
+            "speechUnits": [{"start": 18, "end": 19, "text": "完成了"}],
+            "role": "事件发展", "actionComplete": True,
+        }
+        plan = plan_editing_techniques(
+            [segment], target_seconds=20,
+            policy={"preset": "tight", "allowSilenceCompression": True},
+            silences=[{"start": 2, "end": 12}, {"start": 13, "end": 17}],
+        )
+        self.assertEqual(plan["segments"][0]["silenceCuts"], [])
+        self.assertEqual(plan["effectiveDuration"], 20.0)
+
+    def test_speech_dominant_segment_compresses_only_bounded_pause_budget(self) -> None:
+        segment = {
+            "id": "answer", "start": 0, "end": 10, "hasSpeech": True,
+            "speechUnits": [{"start": 0, "end": 8, "text": "完整回答"}],
+            "role": "回答",
+        }
+        plan = plan_editing_techniques(
+            [segment], target_seconds=8,
+            policy={"preset": "tight", "allowSilenceCompression": True},
+            silences=[{"start": 2, "end": 4}, {"start": 5, "end": 9}],
+        )
+        removed = 10 - plan["segments"][0]["effectiveDuration"]
+        self.assertGreater(removed, 0)
+        self.assertLessEqual(removed, 3.5)
+
+    def test_all_pool_uses_full_verified_candidate_before_budget_preview(self) -> None:
+        segment = {
+            "id": "same", "candidateId": "candidate_1", "semanticUnitId": "semantic_1",
+            "start": 0, "end": 12, "duration": 12, "score": 90,
+        }
+        available = {**segment, "start": 0, "end": 24, "duration": 24}
+        job = {"eventGroups": [{
+            "id": "event_1", "title": "完整做饭过程", "score": 90,
+            "segments": [segment], "availableSegments": [available],
+        }]}
+        rows = _edit_plan_candidates(job, ["event_1"], None, "all_pool")
+        self.assertEqual([(row["start"], row["end"]) for row in rows], [(0.0, 24.0)])
+
+    def test_legacy_detector_group_never_enters_edit_plan_pool(self) -> None:
+        job = {"eventGroups": [{
+            "id": "raw", "title": "画面变化热点", "score": 99,
+            "segments": [{"id": "raw_1", "start": 0, "end": 8, "score": 99}],
+        }, {
+            "id": "semantic", "title": "人物完成煎蛋", "score": 88,
+            "segments": [{"id": "semantic_1", "start": 10, "end": 18, "score": 88}],
+        }]}
+        rows = _edit_plan_candidates(job, ["raw", "semantic"], None, "all_pool")
+        self.assertEqual([row["groupId"] for row in rows], ["semantic"])
+
+    def test_automatic_render_blocks_duration_outside_ten_percent(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "目标时长"):
+            validate_render_selections(
+                [{"segments": [{"id": "short", "start": 0, "end": 18}]}],
+                editing_intent={}, target_seconds=30, automatic=True,
+            )
+
     def test_normalise_edit_plan_clamps_subrange_and_rejects_overlap(self) -> None:
         rows = _edit_plan_candidates(self.job, ["event_1"], None, "selected_only")
         plans = _normalise_edit_plans({"plans": [{"label": "测试", "sequence": [
@@ -375,10 +443,11 @@ class EditPlanTests(unittest.TestCase):
             {"candidate_id": "segment_1", "source_start": 17, "source_end": 24, "role": "climax"},
         ]}]}, rows, scope="selected_only", selected_group_ids=["event_1"], target=20)
         self.assertEqual(len(plans), 1)
-        self.assertEqual(len(plans[0]["sequence"]), 2)
+        self.assertEqual(len(plans[0]["sequence"]), 1)
         self.assertEqual(plans[0]["sequence"][0]["start"], 10.0)
+        self.assertEqual(plans[0]["sequence"][0]["end"], 30.0)
         self.assertAlmostEqual(plans[0]["sourceDuration"], 20.0, places=2)
-        self.assertAlmostEqual(plans[0]["estimatedDuration"], 19.78, places=2)
+        self.assertAlmostEqual(plans[0]["estimatedDuration"], 20.0, places=2)
 
     def test_edit_plan_prompt_requires_local_subranges(self) -> None:
         prompt = llm_edit_plan_prompt(content_profile={}, theme="情绪", target_seconds=60, scope="selected_only", selected_group_ids=["event_1"], variants=["叙事完整版"], candidates=[], transcript_context="")
@@ -471,6 +540,19 @@ class EditPlanTests(unittest.TestCase):
         )
         self.assertEqual(optimized["semanticDeduplication"], [])
 
+    def test_exact_point_two_second_confirmed_person_match_survives_float_roundoff(self) -> None:
+        segment = {
+            "id": "person_match", "candidateId": "match_person", "userConfirmed": True,
+            "semanticUnitId": "match_person", "start": 24.42, "end": 24.62, "score": 90,
+        }
+        optimized = optimize_edl(
+            [segment], target_seconds=None, order_mode="source", allow_fill=False,
+            video_duration=63.73,
+        )
+        self.assertEqual(optimized["shotCount"], 1)
+        self.assertEqual(optimized["segments"][0]["candidateId"], "match_person")
+        self.assertAlmostEqual(optimized["segments"][0]["duration"], .2, places=3)
+
     def test_content_selection_fidelity_counts_merged_confirmed_ranges(self) -> None:
         fidelity = _content_selection_fidelity([{"segments": [
             {"candidateId": "m1", "contributingMatchIds": ["m1", "m2"]},
@@ -523,7 +605,7 @@ class EditPlanTests(unittest.TestCase):
         self.assertGreaterEqual(automatic_composition_similarity(left, right), .85)
         self.assertEqual(automatic_composition_similarity(left, distinct), 0.0)
 
-    def test_duplicate_auto_plans_are_replaced_with_other_events(self) -> None:
+    def test_duplicate_auto_plans_use_full_pool_until_user_confirms_events(self) -> None:
         def group(group_id: str, start: float, end: float, score: float) -> dict:
             segment = {
                 "id": f"segment_{group_id}", "candidateId": f"candidate_{group_id}",
@@ -546,12 +628,14 @@ class EditPlanTests(unittest.TestCase):
         existing = [automatic_composition_signature([{"id": "segment_event_a", "start": 0, "end": 30}])]
         plans = distinct_event_replacement_plans(job, existing, 2, 30)
 
-        self.assertEqual(len(plans), 2)
-        self.assertEqual({plan["sequence"][0]["groupId"] for plan in plans}, {"event_b", "event_c"})
-        self.assertTrue(all(plan["autoMeta"]["sourceLabel"] == "事件替选" for plan in plans))
-        signatures = [automatic_composition_signature(plan["sequence"]) for plan in plans]
-        self.assertEqual(automatic_composition_similarity(existing[0], signatures[0]), 0.0)
-        self.assertEqual(automatic_composition_similarity(signatures[0], signatures[1]), 0.0)
+        self.assertTrue(plans)
+        self.assertTrue(all(
+            str(segment.get("groupId")) in {"event_b", "event_c"}
+            for plan in plans for segment in plan.get("sequence") or []
+        ))
+
+        job["confirmedGroupIds"] = ["event_a"]
+        self.assertEqual(distinct_event_replacement_plans(job, existing, 2, 30), [])
 
     def test_render_validation_preserves_reviewed_edl_over_target(self) -> None:
         selections = [{
@@ -572,6 +656,89 @@ class EditPlanTests(unittest.TestCase):
 
 
 class CompositionReviewTests(unittest.TestCase):
+    def test_review_cache_key_changes_with_prompt_version(self) -> None:
+        common = {
+            "version_signature": "shots", "goal": {"objective": "高光"},
+            "visual_model": "vlm", "llm_model": "llm",
+        }
+        self.assertNotEqual(
+            review_cache_key(**common, prompt_version="prompt-v1"),
+            review_cache_key(**common, prompt_version="prompt-v2"),
+        )
+
+    def test_review_sanitizer_ignores_batch_count_and_valid_transition_overlap(self) -> None:
+        timeline = {
+            "duration": 23.016,
+            "segments": [
+                {"segmentId": "a", "outputStart": 0, "outputEnd": 19.566, "transitionOverlap": 0, "transitionIn": {"type": "cut"}},
+                {"segmentId": "b", "outputStart": 19.216, "outputEnd": 23.016, "transitionOverlap": .35, "transitionIn": {"type": "fade_black"}},
+            ],
+        }
+        cleaned = sanitize_review_report({
+            "issues": [
+                {"id": "duration", "severity": "critical", "category": "duration", "outputTime": 23.016, "description": "成片仅23秒，且未完成生成两个30s高光视频的目标，仅产出1条视频"},
+                {"id": "overlap", "severity": "major", "category": "continuity", "segmentIds": ["a", "b"], "outputTime": 19.216, "description": "outputEnd为19.566但下一镜头19.216开始，时间重叠"},
+                {"id": "climax", "severity": "critical", "category": "climax", "outputTime": 18, "description": "高潮不够明确"},
+            ],
+            "repairActions": [],
+        }, timeline=timeline, target_seconds=30)
+        self.assertEqual(len(cleaned["issues"]), 2)
+        self.assertNotIn("overlap", {item["id"] for item in cleaned["issues"]})
+        duration = next(item for item in cleaned["issues"] if item["id"] == "duration")
+        self.assertEqual(duration["severity"], "major")
+        self.assertNotIn("两个", duration["description"])
+        self.assertEqual(next(item for item in cleaned["issues"] if item["id"] == "climax")["severity"], "major")
+
+    def test_review_sanitizer_only_keeps_evidence_backed_action_as_model_critical(self) -> None:
+        cleaned = sanitize_review_report({
+            "issues": [
+                {"id": "content", "severity": "critical", "category": "content", "segmentIds": ["a"], "description": "内容不够精彩", "evidence": "主观判断"},
+                {"id": "ending", "severity": "critical", "category": "ending", "segmentIds": ["b"], "description": "结尾不够有力", "evidence": "主观判断"},
+                {"id": "action", "severity": "critical", "category": "action", "segmentIds": ["c"], "description": "动作中途被截断", "evidence": "动态画面显示手仍在移动"},
+            ],
+            "repairActions": [],
+        }, timeline={"duration": 10, "segments": []})
+        severity = {item["id"]: item["severity"] for item in cleaned["issues"]}
+        self.assertEqual(severity, {"content": "major", "ending": "major", "action": "critical"})
+
+    def test_review_sanitizer_uses_incoming_clip_semantics_for_audio_bridges(self) -> None:
+        timeline = {
+            "duration": 30,
+            "segments": [
+                {"segmentId": "setup", "eventId": "magic", "outputStart": 0, "audioBridge": {"type": "none"}},
+                {"segmentId": "climax", "eventId": "magic", "outputStart": 10, "audioBridge": {"type": "j_cut"}},
+                {"segmentId": "reaction", "eventId": "reaction", "outputStart": 20, "audioBridge": {"type": "none"}},
+            ],
+        }
+        cleaned = sanitize_review_report({
+            "issues": [{
+                "id": "false_bridge", "severity": "major", "category": "audiovisual",
+                "segmentIds": ["climax", "reaction"], "outputTime": 20,
+                "description": "J-cut 从高潮延续到下一独立事件，形成跨事件声音桥",
+            }],
+            "repairActions": [],
+        }, timeline=timeline)
+        self.assertEqual(cleaned["issues"], [])
+        self.assertEqual(cleaned["sanitizedIssueIds"], ["false_bridge"])
+
+    def test_review_sanitizer_keeps_an_actual_cross_event_audio_bridge(self) -> None:
+        timeline = {
+            "duration": 20,
+            "segments": [
+                {"segmentId": "a", "eventId": "event_a", "outputStart": 0, "audioBridge": {"type": "none"}},
+                {"segmentId": "b", "eventId": "event_b", "outputStart": 10, "audioBridge": {"type": "j_cut"}},
+            ],
+        }
+        cleaned = sanitize_review_report({
+            "issues": [{
+                "id": "real_bridge", "severity": "major", "category": "audiovisual",
+                "segmentIds": ["a", "b"], "outputTime": 10,
+                "description": "不同事件之间使用 J-cut 声音桥",
+            }],
+            "repairActions": [],
+        }, timeline=timeline)
+        self.assertEqual([item["id"] for item in cleaned["issues"]], ["real_bridge"])
+
     def test_review_timeline_maps_source_to_rendered_time(self) -> None:
         timeline = composition_review_timeline([
             {"id": "s1", "start": 10, "end": 14, "playbackRate": 1.0},
@@ -617,6 +784,15 @@ class CompositionReviewTests(unittest.TestCase):
         self.assertEqual(len(repaired["appliedActions"]), 1)
         self.assertEqual(repaired["rejectedActions"][0]["rejectedReason"], "对白、高潮、反应或结尾镜头禁止自动变速")
 
+    def test_repairs_prefer_verified_safe_boundaries_over_broad_candidate_window(self) -> None:
+        repaired = apply_review_repairs(
+            [{"id": "s1", "candidateId": "c1", "start": 10, "end": 14}],
+            [{"type": "adjust_bounds", "segmentId": "s1", "start": 5, "end": 20, "reason": "补完整动作"}],
+            [{"id": "c1", "start": 5, "end": 20, "safeStart": 8.5, "safeEnd": 16.25, "minimumKeepSeconds": 2}],
+        )
+        self.assertEqual(repaired["segments"][0]["start"], 8.5)
+        self.assertEqual(repaired["segments"][0]["end"], 16.25)
+
     def test_review_can_insert_a_real_unused_candidate(self) -> None:
         repaired = apply_review_repairs(
             [{"id": "s1", "candidateId": "c1", "start": 1, "end": 4}],
@@ -628,6 +804,56 @@ class CompositionReviewTests(unittest.TestCase):
         )
         self.assertEqual([item["candidateId"] for item in repaired["segments"]], ["c1", "c2"])
         self.assertEqual(len(repaired["appliedActions"]), 1)
+
+    def test_review_can_smooth_both_sides_of_an_audio_cut(self) -> None:
+        repaired = apply_review_repairs(
+            [
+                {"id": "s1", "candidateId": "c1", "start": 1, "end": 4},
+                {"id": "s2", "candidateId": "c2", "start": 8, "end": 12},
+            ],
+            [{"type": "set_audio_fade", "segmentId": "s2", "audioFadeSeconds": .18, "reason": "平滑突变"}],
+            [{"id": "c1", "start": 1, "end": 4}, {"id": "c2", "start": 8, "end": 12}],
+        )
+        self.assertEqual(repaired["segments"][0]["audioEdgeFadeSeconds"], .18)
+        self.assertEqual(repaired["segments"][1]["audioEdgeFadeSeconds"], .18)
+
+    def test_missing_editorial_actions_are_synthesized_from_measured_issues(self) -> None:
+        segments = [
+            {"id": "s1", "candidateId": "c1", "start": 0, "end": 5},
+            {"id": "s2", "candidateId": "c2", "start": 10, "end": 15},
+        ]
+        actions = _synthesise_review_repairs(segments, {"issues": [
+            {"severity": "major", "category": "audio_cut", "outputTime": 5, "description": "切点音量和波形突变"},
+            {"severity": "critical", "category": "content", "segmentIds": ["s2"], "description": "动作未完整，操作中途结束，缺少结果状态"},
+        ]}, [
+            {"id": "c1", "start": 0, "end": 5, "safeStart": 0, "safeEnd": 5},
+            {"id": "c2", "start": 8, "end": 18, "safeStart": 9, "safeEnd": 17},
+        ])
+        self.assertIn(("set_audio_fade", "s2"), {(item["type"], item["segmentId"]) for item in actions})
+        self.assertIn(("adjust_bounds", "s2"), {(item["type"], item["segmentId"]) for item in actions})
+
+    def test_quality_recovery_replaces_an_unavailable_problem_candidate(self) -> None:
+        job = {
+            "videoInfo": {"duration": 40}, "request": {"totalTargetSeconds": 8},
+            "eventGroups": [{
+                "id": "event", "title": "事件", "segments": [
+                    {"id": "bad", "start": 0, "end": 4, "duration": 4, "score": 95, "actionComplete": False},
+                    {"id": "good1", "start": 10, "end": 14, "duration": 4, "score": 90, "actionComplete": True},
+                    {"id": "good2", "start": 20, "end": 24, "duration": 4, "score": 88, "actionComplete": True},
+                ], "availableSegments": [],
+            }],
+            "brief": {"techniquePolicy": {"allowTransitions": False, "allowAudioBridges": False}},
+        }
+        result = _build_quality_recovery_sequence(
+            job,
+            {"targetSeconds": 8, "segments": [{"id": "bad", "candidateId": "bad", "groupId": "event", "start": 0, "end": 4, "actionComplete": False}]},
+            {"issues": [{"severity": "critical", "category": "action", "segmentIds": ["bad"], "description": "动作未完整"}]},
+            {"attempted": 1, "recovered": {}, "unavailable": ["bad"]},
+            set(),
+        )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("bad", {item.get("candidateId") for item in result["segments"]})
+        self.assertGreaterEqual(result["duration"], 6.4)
 
     def test_repair_is_only_preferred_for_real_improvement(self) -> None:
         before = {"overallScore": 72, "criticalCount": 0, "majorCount": 2}
@@ -645,8 +871,23 @@ class CompositionReviewTests(unittest.TestCase):
             "visualMetrics": {"blackFrameRatio": .12, "freezePairRatio": 0},
         }, target_seconds=30, actual_seconds=15)
         self.assertLess(calibrated["overallScore"], calibrated["modelOverallScore"])
-        self.assertEqual(calibrated["calibrationVersion"], "composition-calibration-v3-user-intent")
+        self.assertEqual(calibrated["calibrationVersion"], "composition-calibration-v7-root-cause-balanced")
         self.assertGreaterEqual(calibrated["majorCount"], 2)
+
+    def test_review_calibration_penalizes_one_incomplete_action_only_once(self) -> None:
+        report = normalize_review_report(
+            {"scores": {key: 80 for key in ("content", "narrative", "rhythm", "continuity", "audiovisual", "goalMatch")}},
+            {"overallScore": 80, "scores": {}, "issues": [
+                {"severity": "major", "category": "action", "segmentIds": ["s1"], "description": "动作未完整呈现"},
+                {"severity": "major", "category": "content", "segmentIds": ["s1"], "description": "动作在中途截断，缺少结果状态"},
+                {"severity": "critical", "category": "unverified_evidence", "segmentIds": ["s1"], "description": "动作未完成，边界未验证"},
+            ]},
+        )
+        calibrated = calibrate_review_report(report)
+        self.assertEqual(calibrated["criticalCount"], 1)
+        self.assertEqual(calibrated["majorCount"], 0)
+        self.assertEqual(calibrated["deterministicPenalty"], 5.0)
+        self.assertEqual(calibrated["overallScore"], 75.0)
 
 
 class PublicJobPayloadTests(unittest.TestCase):
@@ -699,6 +940,7 @@ class PublicJobPayloadTests(unittest.TestCase):
             "autoComposition": {
                 "status": "running", "phase": "rendering", "progress": .42,
                 "completedVersions": 1, "totalVersions": 3, "currentVersion": 2,
+                "plannedVariantCount": 3, "generatedVariantCount": 1, "repairVersionCount": 0,
                 "currentVersionProgress": .26, "renderedSeconds": 7.8, "renderTotalSeconds": 30,
             },
             "messages": [{"text": "正在分析"}], "outputVersions": [],
@@ -712,6 +954,44 @@ class PublicJobPayloadTests(unittest.TestCase):
         self.assertNotIn("autoPlans", status)
         self.assertEqual(status["autoComposition"]["currentVersionProgress"], .26)
         self.assertEqual(status["autoComposition"]["renderedSeconds"], 7.8)
+        self.assertEqual(status["autoComposition"]["plannedVariantCount"], 3)
+        self.assertEqual(status["autoComposition"]["generatedVariantCount"], 1)
+        self.assertTrue(summary["execution"]["active"])
+        self.assertEqual(summary["execution"]["operation"], "auto_composition")
+        self.assertEqual(status["execution"]["status"], "running")
+        self.assertEqual(status["execution"]["progress"]["completed"], 1)
+
+    def test_execution_counts_independent_rejections_separately_from_repairs(self) -> None:
+        snapshot = execution_snapshot({
+            "id": "quality_counts", "status": "awaiting_confirmation", "stage": "auto_composition",
+            "outputs": [], "outputVersions": [],
+            "autoComposition": {
+                "status": "completed", "phase": "done",
+                "plannedVariantCount": 3, "generatedVariantCount": 3,
+                "qualityPassedCount": 0, "rejectedVersionCount": 5,
+                "qualityRejectedVariantCount": 3, "qualityRejectedRepairCount": 2,
+            },
+        })
+        self.assertEqual(snapshot["result"]["qualityRejectedCount"], 3)
+        self.assertEqual(snapshot["result"]["qualityRejectedRepairCount"], 2)
+
+    def test_manual_review_draft_keeps_no_acceptable_output_outcome(self) -> None:
+        snapshot = execution_snapshot({
+            "id": "quality_manual", "status": "awaiting_confirmation", "stage": "auto_composition",
+            "outputs": [{"filename": "draft.mp4"}],
+            "outputVersions": [{
+                "id": "v001", "previewOnly": True, "manualReviewRequired": True,
+                "outputs": [{"filename": "draft.mp4"}],
+                "qualityGate": {"passed": False},
+            }],
+            "autoComposition": {
+                "status": "completed", "phase": "done", "qualityPassedCount": 0,
+                "rejectedVersionCount": 1, "qualityRejectedVariantCount": 1,
+                "manualReviewRequired": True,
+            },
+        })
+        self.assertEqual(snapshot["outcome"], "no_acceptable_output")
+        self.assertEqual(snapshot["result"]["qualityPassedCount"], 0)
 
     def test_public_preview_output_uses_sample_directly_and_stays_marked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -732,6 +1012,142 @@ class PublicJobPayloadTests(unittest.TestCase):
         self.assertTrue(output["previewOnly"])
         self.assertTrue(output["previewReady"])
         self.assertEqual(output["previewUrl"], "/api/jobs/job_preview/outputs/sample.mp4")
+
+    def test_public_highlight_job_hides_legacy_raw_signal_candidates_and_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.touch()
+            job = main_module.new_job_record(
+                job_id="job_signal_gate", source=source, filename="source.mp4",
+                size=0, count="auto", target_seconds="auto", theme="",
+            )
+            concrete = {
+                "id": "event_concrete", "title": "男子打开冰箱", "summary": "取出食材",
+                "assemblyStrategy": "adaptive", "segments": [{"start": 5, "end": 9}],
+            }
+            raw = {
+                "id": "event_signal", "title": "画面变化热点", "summary": "变化强度高",
+                "assemblyStrategy": "source_order", "segments": [{"start": 12, "end": 18}],
+            }
+            job.update({
+                "taskMode": "highlight", "eventGroups": [concrete, raw],
+                "recommendedGroupIds": ["event_signal", "event_concrete"],
+                "recommendedIndices": [0, 1],
+                "outputs": [{
+                    "filename": "legacy.mp4", "segments": [{
+                        "id": "legacy_segment", "candidateId": "candidate_1",
+                        "chapterId": "event_signal", "chapterTitle": "画面变化热点",
+                        "start": 12, "end": 18, "role": "核心镜头",
+                    }],
+                }],
+                "candidates": [{
+                    "index": 0, "title": "声音能量热点", "start": 12, "end": 18,
+                    "candidateOrigin": "waveform", "semanticStatus": "recall_only",
+                }, {
+                    "index": 1, "title": "男子打开冰箱", "start": 5, "end": 9,
+                    "candidateOrigin": "vlm", "semanticStatus": "verified",
+                }],
+            })
+            visible = main_module.public_job(job)
+        self.assertEqual([group["id"] for group in visible["eventGroups"]], ["event_concrete"])
+        self.assertEqual(visible["recommendedGroupIds"], ["event_concrete"])
+        self.assertEqual(visible["recommendedIndices"], [1])
+        self.assertEqual([item["title"] for item in visible["candidates"]], ["男子打开冰箱"])
+        self.assertEqual(visible["eventGroupCount"], 1)
+        self.assertEqual(visible["candidateCount"], 1)
+        output_segment = visible["outputs"][0]["segments"][0]
+        self.assertTrue(output_segment["eventGroupId"].startswith("legacy_unclassified_"))
+        self.assertIn("待重新分析", output_segment["eventTitle"])
+        self.assertNotIn("热点", output_segment["eventTitle"])
+
+    def test_public_job_exposes_retained_manual_review_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.touch()
+            (root / "draft.mp4").touch()
+            job = main_module.new_job_record(
+                job_id="job_manual_preview", source=source, filename="source.mp4",
+                size=0, count="auto", target_seconds="auto", theme="",
+            )
+            version = {
+                "id": "v001", "number": 1, "previewOnly": True,
+                "manualReviewRequired": True, "reviewStatus": "needs_user_review",
+                "qualityGate": {"passed": False, "score": 48},
+                "outputs": [{"filename": "draft.mp4", "previewOnly": True}],
+            }
+            job.update({
+                "status": "awaiting_confirmation", "stage": "auto_composition",
+                "outputDirectory": str(root), "outputVersions": [version],
+                "outputs": list(version["outputs"]), "currentOutputVersionId": "v001",
+                "autoComposition": {
+                    "status": "completed", "phase": "done", "qualityPassedCount": 0,
+                    "rejectedVersionCount": 1, "qualityRejectedVariantCount": 1,
+                    "manualReviewRequired": True, "manualReviewVersionId": "v001",
+                },
+            })
+            visible = main_module.public_job(job)
+        self.assertEqual(len(visible["outputVersions"]), 1)
+        self.assertEqual(len(visible["outputs"]), 1)
+        self.assertTrue(visible["outputVersions"][0]["manualReviewRequired"])
+        self.assertEqual(visible["execution"]["outcome"], "no_acceptable_output")
+
+    def test_recoverable_auto_render_keeps_review_state_and_retries_clean_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "old.mp4"
+            interrupted = root / "interrupted.mp4"
+            old.touch()
+            interrupted.touch()
+            job = {
+                "id": "job_recover_auto", "status": "awaiting_confirmation",
+                "stage": "auto_composition", "outputDirectory": str(root),
+                "outputVersions": [
+                    {"id": "v001", "number": 1, "outputs": [{"filename": old.name}]},
+                    {"id": "v002", "number": 2, "previewOnly": True, "outputs": [{"filename": interrupted.name}]},
+                ],
+                "outputs": [{"filename": interrupted.name}], "currentOutputVersionId": "v002",
+                "autoComposition": {
+                    "status": "running", "phase": "llm_plan",
+                    "generatedVariantCount": 1, "completedVersions": 1,
+                },
+            }
+            main_module._prepare_recoverable_render_job(job)
+            self.assertEqual(job["status"], "awaiting_confirmation")
+            self.assertEqual(job["autoComposition"]["status"], "queued")
+            self.assertTrue(job["autoComposition"]["recovering"])
+            files = main_module._discard_interrupted_automatic_previews(job)
+            self.assertEqual(files, [interrupted])
+            self.assertEqual([item["id"] for item in job["outputVersions"]], ["v001"])
+            self.assertEqual(job["currentOutputVersionId"], "v001")
+            self.assertNotIn("recovering", job["autoComposition"])
+
+    def test_interrupted_partial_preview_becomes_visible_manual_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preview = root / "interrupted.mp4"
+            source = root / "source.mp4"
+            preview.touch()
+            source.touch()
+            version = {
+                "id": "v001", "number": 1, "previewOnly": True,
+                "outputs": [{"filename": preview.name, "previewOnly": True}],
+            }
+            job = main_module.new_job_record(
+                job_id="job_interrupted_preview", source=source, filename="source.mp4",
+                size=0, count="auto", target_seconds="auto", theme="",
+            )
+            job.update({
+                "status": "awaiting_confirmation", "outputDirectory": str(root),
+                "outputVersions": [version], "outputs": list(version["outputs"]),
+                "currentOutputVersionId": "v001", "autoComposition": {"status": "partial"},
+            })
+            self.assertTrue(main_module._retain_interrupted_auto_previews(job))
+            visible = main_module.public_job(job)
+        self.assertTrue(job["outputVersions"][0]["manualReviewRequired"])
+        self.assertEqual(len(visible["outputVersions"]), 1)
+        self.assertEqual(len(visible["outputs"]), 1)
 
     def test_accepts_literal_control_character_in_json_string(self) -> None:
         parsed = parse_json_object('{"reason":"line one\nline two"}')
@@ -933,7 +1349,7 @@ class PromptContractTests(unittest.TestCase):
             content_profile=profile, theme="人物反应", requested_count=1,
             total_target_seconds=30, transcript_available=False,
         )
-        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v12-evidence-graph"))
+        self.assertTrue(PROMPT_VERSION.startswith("highlight-director-v13-semantic-signal-gate"))
         self.assertIn("不得虚构", COMMON_SYSTEM_PROMPT)
         self.assertIn('"primary_type"', classification)
         self.assertIn('"center_seconds"', discovery)
@@ -943,6 +1359,8 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn('"event_groups"', director)
         self.assertIn("START、PEAK、END", director)
         self.assertIn("requires_candidate_indices", director)
+        self.assertIn("召回线索，不是事件", director)
+        self.assertIn("无法确认具体内容时必须 keep=false", refinement)
 
 
 class EditingIntentTests(unittest.TestCase):
@@ -1025,6 +1443,34 @@ class EditingIntentTests(unittest.TestCase):
 
 
 class SenseVoiceParsingTests(unittest.TestCase):
+    @staticmethod
+    def _speaker_vector(axis: int, blend: float = 0.0) -> list[float]:
+        vector = [0.0] * 192
+        vector[axis] = 1.0
+        if blend:
+            vector[(axis + 1) % 192] = blend
+        return vector
+
+    def test_short_diarization_does_not_force_distinct_voices_into_one_speaker(self) -> None:
+        rows = [
+            self._speaker_vector(0, .03), self._speaker_vector(0, .07),
+            self._speaker_vector(0, .11), self._speaker_vector(0, .15),
+            self._speaker_vector(8, .03), self._speaker_vector(8, .07),
+            self._speaker_vector(8, .11), self._speaker_vector(8, .15),
+        ]
+        labels = _cluster_short_speaker_embeddings(rows)
+        self.assertEqual(len(set(int(value) for value in labels)), 2)
+
+    def test_short_diarization_keeps_one_compact_voice_together(self) -> None:
+        rows = [self._speaker_vector(0, value) for value in (.01, .03, .05, .07, .09, .11)]
+        labels = _cluster_short_speaker_embeddings(rows)
+        self.assertEqual(len(set(int(value) for value in labels)), 1)
+
+    def test_expected_speaker_count_overrides_automatic_clustering(self) -> None:
+        rows = [self._speaker_vector(0, value) for value in (.01, .02, .03, .04)]
+        labels = _cluster_short_speaker_embeddings(rows, oracle_num=2)
+        self.assertEqual(len(set(int(value) for value in labels)), 2)
+
     def test_native_punctuation_does_not_download_external_punc_model(self) -> None:
         options = _sensevoice_model_options(
             model_name="iic/SenseVoiceSmall",
@@ -1049,6 +1495,25 @@ class SenseVoiceParsingTests(unittest.TestCase):
         self.assertEqual(options["punc_model"], "ct-punc")
         self.assertEqual(options["spk_model"], "cam++")
         self.assertEqual(options["spk_mode"], "vad_segment")
+
+    def test_v2_speaker_vad_uses_three_second_chunks(self) -> None:
+        options = _sensevoice_model_options(
+            model_name="iic/SenseVoiceSmall", device="cpu", vad_model="fsmn-vad",
+            punc_model="", spk_model="cam++", diarization=True,
+            algorithm_version="editing-algorithm-v2",
+        )
+        self.assertEqual(options["vad_kwargs"]["max_single_segment_time"], 3000)
+
+    def test_v2_overlapping_turns_are_cannot_linked_and_reviewable(self) -> None:
+        turns = enforce_speaker_turn_contract([
+            {"start": 0, "end": 2, "speaker": "Speaker 1", "text": "第一个人在说话", "words": [{"text": "一"}]},
+            {"start": 1.5, "end": 3, "speaker": "Speaker 1", "text": "另一个重叠声音", "words": [{"text": "二"}]},
+        ])
+        self.assertNotEqual(turns[0]["speaker"], turns[1]["speaker"])
+        self.assertEqual(turns[1]["overlapStatus"], "separated_overlap")
+        self.assertTrue(turns[1]["requiresReview"])
+        self.assertIn("clusterConfidence", turns[0])
+        self.assertIn("boundaryConfidence", turns[0])
 
     def test_normalizes_rich_tags_speakers_and_timestamps(self) -> None:
         result = normalize_sensevoice_result([{
@@ -1160,10 +1625,11 @@ class JobCancellationTests(unittest.TestCase):
         }
 
     def tearDown(self) -> None:
-        for job_id in ("job_cancel_queued", "job_cancel_running", "job_cancel_orphan", "job_cancel_brief"):
+        for job_id in ("job_cancel_queued", "job_cancel_running", "job_cancel_orphan", "job_cancel_brief", "job_cancel_auto"):
             main_module.jobs.pop(job_id, None)
             main_module.cancel_events.pop(job_id, None)
             main_module.analysis_futures.pop(job_id, None)
+            main_module.render_futures.pop(job_id, None)
             main_module.active_ark_clients.pop(job_id, None)
 
     def test_queued_future_is_removed_and_becomes_cancelled_immediately(self) -> None:
@@ -1216,6 +1682,26 @@ class JobCancellationTests(unittest.TestCase):
         self.assertNotEqual(main_module.jobs[job_id]["stage"], "brief_confirmation")
         self.assertNotIn(job_id, main_module.cancel_events)
 
+    def test_cancelling_background_auto_composition_preserves_review_state(self) -> None:
+        job_id = "job_cancel_auto"
+        job = self._job(job_id, "awaiting_confirmation")
+        job["eventGroups"] = [{"id": "event_1", "segments": []}]
+        job["autoComposition"] = {"status": "queued", "phase": "vlm_render"}
+        event = main_module.threading.Event()
+        future: Future = Future()
+        main_module.jobs[job_id] = job
+        main_module.cancel_events[job_id] = event
+        main_module.render_futures[job_id] = {future}
+        with patch.object(main_module, "save_job"), patch.object(main_module, "schedule_cancel_finalization"):
+            result = main_module.cancel_job(job_id)["job"]
+            self.assertEqual(result["status"], "cancelling")
+            main_module.finalize_operation_cancellation(job_id)
+        self.assertTrue(event.is_set())
+        self.assertTrue(future.cancelled())
+        self.assertEqual(main_module.jobs[job_id]["status"], "awaiting_confirmation")
+        self.assertEqual(main_module.jobs[job_id]["autoComposition"]["status"], "cancelled")
+        self.assertEqual(len(main_module.jobs[job_id]["eventGroups"]), 1)
+
 
 class ModelClientCancellationTests(unittest.TestCase):
     def test_cancelled_vision_request_does_not_retry(self) -> None:
@@ -1233,6 +1719,123 @@ class ModelClientCancellationTests(unittest.TestCase):
                 client.complete_json("analyze")
         self.assertEqual(factory.call_count, 1)
         transport.close.assert_called_once_with()
+
+
+class AutomaticCompositionSafetyTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        main_module.jobs.pop("job_auto_confirm_guard", None)
+        main_module.active_automatic_compositions.discard("job_auto_confirm_guard")
+        main_module.jobs.pop("job_review_draft", None)
+
+    def test_manual_confirmation_is_blocked_while_auto_composition_runs(self) -> None:
+        job_id = "job_auto_confirm_guard"
+        main_module.jobs[job_id] = {
+            "id": job_id, "status": "awaiting_confirmation",
+            "autoComposition": {"status": "running", "phase": "vlm_render"},
+            "eventGroups": [{"id": "event_1", "title": "事件", "segments": [{
+                "id": "segment_1", "start": 0.0, "end": 2.0, "duration": 2.0,
+            }]}],
+            "recommendedGroupIds": ["event_1"],
+        }
+        with self.assertRaises(main_module.HTTPException) as raised:
+            main_module.confirm_job_candidates(
+                job_id, main_module.ConfirmCandidatesRequest(groupIds=["event_1"]),
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("后台自动成片仍在运行", raised.exception.detail)
+
+    def test_best_failed_auto_version_is_retained_as_manual_review_draft(self) -> None:
+        job_id = "job_review_draft"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "draft.mp4"
+            output.write_bytes(b"preview")
+            version = {
+                "id": "version_1", "number": 1, "previewOnly": True,
+                "displayName": "完整事件版", "outputs": [{
+                    "filename": output.name,
+                    "sequenceValidation": {"passed": True, "issues": []},
+                }],
+            }
+            main_module.jobs[job_id] = {
+                "id": job_id, "status": "awaiting_confirmation",
+                "outputDirectory": directory, "sourcePath": "source.mp4",
+                "outputVersions": [version], "outputs": list(version["outputs"]),
+                "currentOutputVersionId": "version_1", "autoComposition": {},
+            }
+            report = {
+                "summary": "动作结尾不完整",
+                "qualityGate": {
+                    "passed": False, "score": 48.0,
+                    "criticalCount": 0, "majorCount": 1,
+                    "reasons": ["动作结尾不完整"], "issues": [],
+                },
+            }
+            with patch.object(main_module, "save_job"):
+                result = main_module._finalize_review_quality_gates(
+                    job_id, [("version_1", report)],
+                )
+            retained = main_module.jobs[job_id]["outputVersions"][0]
+            self.assertEqual(result["passed"], 0)
+            self.assertEqual(result["manualReviewVersionId"], "version_1")
+            self.assertTrue(retained["manualReviewRequired"])
+            self.assertEqual(retained["reviewStatus"], "needs_user_review")
+            self.assertTrue(output.is_file())
+            self.assertEqual(main_module.jobs[job_id]["outputs"][0]["filename"], output.name)
+
+    def test_failed_variant_remains_reviewable_when_another_variant_passes(self) -> None:
+        job_id = "job_mixed_quality_versions"
+        self.addCleanup(main_module.jobs.pop, job_id, None)
+        with tempfile.TemporaryDirectory() as directory:
+            passed_output = Path(directory) / "passed.mp4"
+            review_output = Path(directory) / "review.mp4"
+            passed_output.write_bytes(b"passed preview")
+            review_output.write_bytes(b"review preview")
+            versions = [{
+                "id": "version_passed", "number": 1, "previewOnly": True,
+                "displayName": "连贯版", "outputs": [{"filename": passed_output.name}],
+            }, {
+                "id": "version_review", "number": 2, "previewOnly": True,
+                "displayName": "节奏版", "outputs": [{"filename": review_output.name}],
+            }]
+            main_module.jobs[job_id] = {
+                "id": job_id, "status": "awaiting_confirmation",
+                "outputDirectory": directory, "sourcePath": "source.mp4",
+                "outputVersions": versions, "outputs": list(versions[0]["outputs"]),
+                "currentOutputVersionId": "version_passed", "autoComposition": {},
+            }
+            reports = [("version_passed", {
+                "summary": "结构完整",
+                "qualityGate": {
+                    "passed": True, "recommended": True, "score": 86.0,
+                    "criticalCount": 0, "majorCount": 0, "reasons": [], "issues": [],
+                },
+            }), ("version_review", {
+                "summary": "节奏仍需确认",
+                "qualityGate": {
+                    "passed": False, "recommended": False, "score": 68.0,
+                    "criticalCount": 0, "majorCount": 1,
+                    "reasons": ["节奏仍需确认"], "issues": [],
+                },
+            })]
+            with patch.object(main_module, "save_job"):
+                result = main_module._finalize_review_quality_gates(job_id, reports)
+            retained = main_module.jobs[job_id]["outputVersions"]
+            self.assertEqual(result["passed"], 1)
+            self.assertEqual(result["reviewable"], 1)
+            self.assertEqual(len(retained), 2)
+            self.assertFalse(retained[0].get("manualReviewRequired", False))
+            self.assertTrue(retained[1]["manualReviewRequired"])
+            self.assertEqual(retained[1]["reviewStatus"], "needs_user_review")
+            self.assertEqual(
+                main_module.jobs[job_id]["autoComposition"]["manualReviewVersionIds"],
+                ["version_review"],
+            )
+            self.assertTrue(passed_output.is_file())
+            self.assertTrue(review_output.is_file())
+            self.assertEqual(
+                main_module.jobs[job_id]["outputs"][0]["filename"],
+                passed_output.name,
+            )
 
 
 class EventGroupEditingTests(unittest.TestCase):
@@ -1959,7 +2562,7 @@ class OutputVersionTests(unittest.TestCase):
                 main_module.jobs.pop(job_id, None)
                 main_module.settings, main_module.job_store = original_settings, original_store
 
-    def test_finalizing_preview_attaches_master_to_same_logical_version(self) -> None:
+    def test_finalizing_preview_keeps_sample_and_appends_master_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             original_settings, original_store = main_module.settings, main_module.job_store
             root = Path(directory)
@@ -2010,18 +2613,22 @@ class OutputVersionTests(unittest.TestCase):
                         }, finalize_source_version_id="v001",
                     )
                 current = main_module.jobs[job_id]
-                self.assertEqual(len(current["outputVersions"]), 1)
-                version = current["outputVersions"][0]
-                self.assertEqual(version["id"], "v001")
-                self.assertEqual(version["number"], 1)
+                self.assertEqual(len(current["outputVersions"]), 2)
+                sample, version = current["outputVersions"]
+                self.assertEqual(sample["id"], "v001")
+                self.assertTrue(sample["previewOnly"])
+                self.assertEqual(version["id"], "v002")
+                self.assertEqual(version["number"], 2)
                 self.assertFalse(version["previewOnly"])
                 self.assertTrue(version["masterReady"])
+                self.assertEqual(version["sourceVersionId"], "v001")
+                self.assertEqual(version["variantKind"], "formal_export")
                 self.assertEqual(version["displayName"], "情绪集中版")
                 self.assertTrue(version["recommended"])
                 self.assertEqual(version["previewOutputs"][0]["filename"], sample_filename)
-                self.assertEqual(current["currentOutputVersionId"], "v001")
+                self.assertEqual(current["currentOutputVersionId"], "v002")
                 master_filename = version["outputs"][0]["filename"]
-                self.assertTrue(master_filename.startswith("v001-master-"))
+                self.assertTrue(master_filename.startswith("v002-master-"))
                 self.assertEqual((output_directory / master_filename).read_bytes(), b"high-resolution-master")
                 self.assertEqual((output_directory / sample_filename).read_bytes(), b"review-sample")
                 sample_context = main_module.output_download_context(current, sample_filename)
@@ -2029,6 +2636,156 @@ class OutputVersionTests(unittest.TestCase):
                 self.assertTrue(sample_context[0]["previewOnly"])
             finally:
                 main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_legacy_auto_versions_gain_batch_and_recovery_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = self._job(root, "job_legacy_batch")
+            preview = Path(job["outputDirectory"]) / "legacy-preview.mp4"
+            formal = Path(job["outputDirectory"]) / "manual-master.mp4"
+            preview.write_bytes(b"preview")
+            formal.write_bytes(b"master")
+            job.update({
+                "status": "awaiting_confirmation", "taskMode": "highlight",
+                "autoComposition": {"status": "completed", "plannedVariantCount": 3},
+                "outputVersions": [{
+                    "id": "v001", "number": 1, "previewOnly": True,
+                    "strategyKey": "vlm", "qualityStatus": "passed",
+                    "outputs": [{"filename": preview.name, "previewOnly": True}],
+                }, {
+                    "id": "v002", "number": 2, "previewOnly": False,
+                    "generationBatchId": "batch_formal_legacy", "variantKind": "formal_export",
+                    "qualityStatus": "passed", "outputs": [{"filename": formal.name}],
+                }],
+                "outputs": [{"filename": preview.name, "previewOnly": True}],
+                "currentOutputVersionId": "v001",
+            })
+
+            main_module.normalize_output_versions(job)
+            batch = job["autoComposition"]["batches"][0]
+            self.assertEqual(batch["generatedVariantCount"], 1)
+            self.assertEqual(batch["missingVariantCount"], 2)
+            self.assertNotIn("generationBatchId", job["outputVersions"][1])
+            visible = main_module.public_job(job)
+            self.assertTrue(visible["autoComposition"]["recovery"]["canRegenerateMissingVariants"])
+            self.assertEqual(visible["autoComposition"]["recovery"]["missingVariantCount"], 2)
+
+    def test_risky_preview_requires_explicit_export_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_risky_export"
+            job = self._job(root, job_id)
+            filename = "risky-preview.mp4"
+            (Path(job["outputDirectory"]) / filename).write_bytes(b"preview")
+            output = {"filename": filename, "previewOnly": True, "segments": [{"id": "s", "start": 1, "end": 5}]}
+            job.update({
+                "status": "awaiting_confirmation", "taskMode": "highlight",
+                "outputs": [output], "currentOutputVersionId": "v001",
+                "outputVersions": [{
+                    "id": "v001", "number": 1, "previewOnly": True,
+                    "qualityStatus": "needs_review", "manualReviewRequired": True,
+                    "qualityGate": {"passed": False, "reasons": ["时长不足"]},
+                    "outputs": [output],
+                }],
+            })
+            main_module.jobs[job_id] = job
+            try:
+                with self.assertRaises(main_module.HTTPException) as captured:
+                    main_module.finalize_preview_output_version(
+                        job_id, "v001", main_module.FinalizeOutputVersionRequest(),
+                    )
+                self.assertEqual(captured.exception.status_code, 409)
+                with patch.object(main_module, "submit_render_task") as submit:
+                    main_module.finalize_preview_output_version(
+                        job_id, "v001",
+                        main_module.FinalizeOutputVersionRequest(acknowledgeQualityRisk=True),
+                    )
+                submit.assert_called_once()
+            finally:
+                main_module.cancel_events.pop(job_id, None)
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_batch_deletion_removes_only_preview_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_delete_batch"
+            job = self._job(root, job_id)
+            output_directory = Path(job["outputDirectory"])
+            preview_path = output_directory / "sample.mp4"
+            master_path = output_directory / "master.mp4"
+            preview_path.write_bytes(b"preview")
+            master_path.write_bytes(b"master")
+            job.update({
+                "status": "completed", "taskMode": "highlight",
+                "autoComposition": {"status": "completed", "currentBatchId": "batch_1", "batches": [{"id": "batch_1", "status": "completed", "targetVariantCount": 1}]},
+                "outputVersions": [
+                    {"id": "v001", "number": 1, "previewOnly": True, "generationBatchId": "batch_1", "variantKind": "independent", "outputs": [{"filename": preview_path.name}]},
+                    {"id": "v002", "number": 2, "previewOnly": False, "generationBatchId": "batch_1", "variantKind": "formal_export", "sourceVersionId": "v001", "outputs": [{"filename": master_path.name}]},
+                ],
+                "currentOutputVersionId": "v002", "outputs": [{"filename": master_path.name}],
+            })
+            main_module.jobs[job_id] = job
+            try:
+                result = main_module.delete_auto_composition_batch(job_id, "batch_1")
+                self.assertEqual(result["deletedVersionCount"], 1)
+                self.assertFalse(preview_path.exists())
+                self.assertTrue(master_path.exists())
+                self.assertEqual([version["id"] for version in main_module.jobs[job_id]["outputVersions"]], ["v002"])
+            finally:
+                main_module.jobs.pop(job_id, None)
+                main_module.settings, main_module.job_store = original_settings, original_store
+
+    def test_regeneration_is_noop_when_complete_and_queues_only_missing_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings, original_store = main_module.settings, main_module.job_store
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            main_module.job_store = JobStore(root / "jobs.sqlite3")
+            job_id = "job_regenerate_missing"
+            job = self._job(root, job_id)
+            preview_path = Path(job["outputDirectory"]) / "sample.mp4"
+            preview_path.write_bytes(b"preview")
+            output = {"filename": preview_path.name, "previewOnly": True, "segments": [{"id": "s", "start": 1, "end": 5}]}
+            job.update({
+                "status": "awaiting_confirmation", "taskMode": "highlight",
+                "recommendedGroupIds": ["event_1"],
+                "autoComposition": {"status": "completed", "plannedVariantCount": 3},
+                "outputVersions": [{
+                    "id": "v001", "number": 1, "previewOnly": True,
+                    "strategyKey": "vlm", "qualityStatus": "passed", "outputs": [output],
+                }],
+                "currentOutputVersionId": "v001", "outputs": [output],
+            })
+            main_module.jobs[job_id] = job
+            try:
+                complete = main_module.regenerate_auto_composition(
+                    job_id, main_module.RegenerateAutoCompositionRequest(targetVariantCount=1),
+                )
+                self.assertFalse(complete["queued"])
+                with patch.object(main_module, "submit_render_task") as submit:
+                    queued = main_module.regenerate_auto_composition(
+                        job_id, main_module.RegenerateAutoCompositionRequest(targetVariantCount=3),
+                    )
+                self.assertTrue(queued["queued"])
+                self.assertEqual(queued["missingVariantCount"], 2)
+                submit.assert_called_once_with(
+                    job_id, main_module.run_missing_auto_variants, queued["batchId"],
+                )
+                batch = next(item for item in main_module.jobs[job_id]["autoComposition"]["batches"] if item["id"] == queued["batchId"])
+                self.assertEqual(batch["requestedAdditionalCount"], 2)
+            finally:
                 main_module.jobs.pop(job_id, None)
                 main_module.settings, main_module.job_store = original_settings, original_store
 
@@ -2112,6 +2869,23 @@ class AnalysisCachePolicyTests(unittest.TestCase):
         self.assertFalse(analysis_cache_reuse_allowed(reusable, "retry"))
         self.assertFalse(analysis_cache_reuse_allowed({**reusable, "excludedRanges": [{"start": 1, "end": 2}]}))
 
+    def test_analysis_cache_rejects_legacy_output_manifest_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings = main_module.settings
+            main_module.settings = replace(original_settings, data_root=Path(directory))
+            try:
+                cache_path = main_module.analysis_cache_path("legacy")
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps({
+                    "cacheVersion": main_module.ANALYSIS_CACHE_VERSION,
+                    "schemaVersion": 1,
+                    "candidates": [{"id": "shot_1"}],
+                    "outputs": [{"filename": "legacy.mp4"}],
+                }), encoding="utf-8")
+                self.assertIsNone(main_module.load_analysis_cache("legacy"))
+            finally:
+                main_module.settings = original_settings
+
 
 class SourceProxySchedulingTests(unittest.TestCase):
     def test_on_demand_proxy_is_deduplicated(self) -> None:
@@ -2190,7 +2964,11 @@ class CandidateSelectionTests(unittest.TestCase):
         )
         self.assertTrue(visual)
         self.assertTrue(audio)
+        self.assertEqual(visual[0].candidate_origin, "visual_change")
+        self.assertEqual(visual[0].semantic_status, "recall_only")
         self.assertEqual(audio[0].audio_evidence["source"], "waveform")
+        self.assertEqual(audio[0].candidate_origin, "waveform")
+        self.assertEqual(audio[0].semantic_status, "recall_only")
 
     def test_undo_snapshot_restores_candidate_collection(self) -> None:
         job = {"candidates": [{"index": 0, "title": "新标题"}], "recommendedIndices": [0]}
@@ -2303,6 +3081,81 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(groups[0]["segments"][1]["requiresCandidateIndices"], [0])
         self.assertEqual(groups[0]["storyGraph"][0]["leadsTo"], [1])
 
+    def test_raw_signal_omitted_by_director_does_not_become_fallback_event(self) -> None:
+        candidates = [{
+            "index": 0, "start": 10, "end": 18, "score": 91,
+            "title": "画面变化热点", "reason": "变化强度高",
+            "candidateOrigin": "visual_change", "semanticStatus": "recall_only",
+        }]
+        self.assertEqual(build_event_groups(candidates, {"event_groups": []}), [])
+
+    def test_director_can_turn_raw_signal_into_concrete_event(self) -> None:
+        candidates = [{
+            "index": 0, "start": 10, "end": 18, "score": 91,
+            "title": "声音能量热点", "reason": "音量峰值",
+            "candidateOrigin": "waveform", "semanticStatus": "recall_only",
+        }]
+        groups = build_event_groups(candidates, {"event_groups": [{
+            "title": "观众鼓掌庆祝", "summary": "掌声与现场反应形成事件落点",
+            "moments": [{"candidate_index": 0, "role": "人物反应"}],
+        }]})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["title"], "观众鼓掌庆祝")
+        self.assertEqual(groups[0]["semanticStatus"], "verified")
+
+    def test_reusable_anchor_does_not_create_second_selectable_event(self) -> None:
+        candidates = [
+            {"index": 0, "start": 0, "end": 12, "score": 92, "title": "打开冰箱取出食材"},
+            {"index": 1, "start": 20, "end": 28, "score": 86, "title": "完成备菜"},
+        ]
+        groups = build_event_groups(candidates, {"event_groups": [{
+            "title": "准备晚餐", "moments": [{"candidate_index": 0, "reusable_anchor": True}],
+        }]})
+        represented = [
+            segment.get("candidateIndex")
+            for group in groups for segment in group.get("availableSegments") or []
+        ]
+        self.assertEqual(represented.count(0), 1)
+        self.assertEqual(represented.count(1), 1)
+
+    def test_generic_director_group_for_raw_signal_is_rejected(self) -> None:
+        candidates = [{
+            "index": 0, "start": 10, "end": 18, "score": 91,
+            "title": "画面变化热点", "reason": "变化强度高",
+            "candidateOrigin": "visual_change", "semanticStatus": "recall_only",
+        }]
+        groups = build_event_groups(candidates, {"event_groups": [{
+            "title": "视觉变化热点", "moments": [{"candidate_index": 0}],
+        }]})
+        self.assertEqual(groups, [])
+
+    def test_output_hierarchy_recovers_semantic_events_and_quarantines_legacy_signals(self) -> None:
+        groups = [{
+            "id": "event_cooking", "title": "男子完成煎蛋",
+            "segments": [{"id": "shot_1", "candidateId": "candidate_1", "start": 10, "end": 15}],
+        }, {
+            "id": "event_signal", "title": "画面变化热点",
+            "segments": [{"id": "shot_2", "candidateId": "candidate_2", "start": 20, "end": 24}],
+        }]
+        output = normalize_output_event_hierarchy({
+            "segments": [{
+                "id": "rendered_1", "candidateId": "candidate_1", "start": 10, "end": 15,
+                "role": "事件结果",
+            }, {
+                "id": "rendered_2", "candidateId": "candidate_2", "chapterId": "event_signal",
+                "chapterTitle": "画面变化热点", "start": 20, "end": 24, "role": "核心镜头",
+            }],
+            "chapters": [{"id": "event_signal", "title": "画面变化热点"}],
+        }, groups)
+        self.assertEqual(output["timelineHierarchyVersion"], 1)
+        self.assertEqual(output["segments"][0]["eventGroupId"], "event_cooking")
+        self.assertEqual(output["segments"][0]["eventTitle"], "男子完成煎蛋")
+        self.assertEqual(output["segments"][0]["shotTitle"], "事件结果")
+        self.assertTrue(output["segments"][1]["eventGroupId"].startswith("legacy_unclassified_"))
+        self.assertIn("待重新分析", output["segments"][1]["eventTitle"])
+        self.assertNotIn("热点", output["segments"][1]["eventTitle"])
+        self.assertEqual(len(output["timelineEvents"]), 2)
+
     def test_scene_cuts_expose_multiple_shots_inside_one_event(self) -> None:
         candidates = [{"index": 0, "start": 10, "end": 20, "score": 92, "title": "连续事件", "reason": ""}]
         groups = build_event_groups(candidates, {"event_groups": [{
@@ -2338,6 +3191,65 @@ class CandidateSelectionTests(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertLessEqual(sum(group["actualDuration"] for group in allocated if group["id"] in ids), 33.01)
 
+    def test_default_recommendation_removes_refined_overlap_before_review(self) -> None:
+        candidates = [
+            {"index": 0, "start": 0, "end": 8, "score": 96, "title": "动作开始", "reason": ""},
+            {"index": 1, "start": 7, "end": 12, "score": 94, "title": "动作结果", "reason": ""},
+            {"index": 2, "start": 7.5, "end": 14, "score": 92, "title": "重复结果", "reason": ""},
+            {"index": 3, "start": 20, "end": 24, "score": 91, "title": "另一事件", "reason": ""},
+        ]
+        groups = build_event_groups(candidates, {"event_groups": [
+            {"title": "事件一", "score": 96, "moments": [
+                {"candidate_index": 0, "essential": True},
+                {"candidate_index": 1},
+            ]},
+            {"title": "事件二", "score": 92, "moments": [
+                {"candidate_index": 2, "essential": True},
+                {"candidate_index": 3},
+            ]},
+        ]})
+
+        allocated, ids = allocate_event_group_budget(
+            groups, total_target_seconds=None, requested_count=2,
+        )
+
+        selected = [group for group in allocated if group["id"] in ids]
+        ranges = [
+            (segment["start"], segment["end"])
+            for group in selected for segment in group["segments"]
+            if not segment.get("reusableAnchor")
+        ]
+        self.assertTrue(all(
+            max(left[0], right[0]) >= min(left[1], right[1])
+            for index, left in enumerate(ranges)
+            for right in ranges[index + 1:]
+        ))
+        self.assertTrue(any(group.get("selectionOverlapResolutions") for group in selected))
+
+    def test_default_recommendation_trims_tiny_boundary_overlap(self) -> None:
+        candidates = [
+            {"index": 0, "start": 43.746, "end": 51.746, "score": 96, "title": "动作", "reason": ""},
+            {"index": 1, "start": 51.715, "end": 55.715, "score": 94, "title": "结果", "reason": ""},
+        ]
+        groups = build_event_groups(candidates, {"event_groups": [{
+            "title": "连续事件", "score": 96, "moments": [
+                {"candidate_index": 0, "essential": True},
+                {"candidate_index": 1},
+            ],
+        }]})
+
+        allocated, ids = allocate_event_group_budget(
+            groups, total_target_seconds=None, requested_count=1,
+        )
+
+        selected = next(group for group in allocated if group["id"] in ids)
+        self.assertEqual(len(selected["segments"]), 2)
+        self.assertEqual(selected["segments"][1]["start"], 51.746)
+        self.assertTrue(any(
+            item.get("action") == "trimmed_subframe_overlap"
+            for item in selected.get("selectionOverlapResolutions") or []
+        ))
+
     def test_prefers_three_complete_events_when_they_fit_dynamic_limit(self) -> None:
         candidates = [
             {"index": index, "start": index * 20, "end": index * 20 + 10, "score": 95 - index,
@@ -2348,6 +3260,26 @@ class CandidateSelectionTests(unittest.TestCase):
         allocated, ids = allocate_event_group_budget(groups, total_target_seconds=30, requested_count=None)
         self.assertEqual(len(ids), 3)
         self.assertAlmostEqual(event_groups_total(allocated, ids), 30.0)
+
+    def test_allocator_ignores_legacy_hotspots_and_hits_target_with_semantic_events(self) -> None:
+        candidates = [
+            {"index": 0, "start": 0, "end": 24, "score": 90, "title": "回家后整理厨房"},
+            {"index": 1, "start": 30, "end": 36, "score": 86, "title": "清洗餐具"},
+            {"index": 2, "start": 40, "end": 44, "score": 82, "title": "坐下休息"},
+        ]
+        groups = build_event_groups(candidates, {"event_groups": []})
+        groups.insert(0, {
+            "id": "raw_signal", "index": 0, "title": "声音能量热点", "score": 99,
+            "preferredDuration": 8, "actualDuration": 8,
+            "segments": [{"id": "raw", "start": 50, "end": 58, "duration": 8}],
+            "availableSegments": [{"id": "raw", "start": 50, "end": 58, "duration": 8}],
+        })
+        allocated, ids = allocate_event_group_budget(
+            groups, total_target_seconds=30, requested_count=None,
+        )
+        self.assertNotIn("raw_signal", ids)
+        self.assertGreaterEqual(event_groups_total(allocated, ids), 27.0)
+        self.assertLessEqual(event_groups_total(allocated, ids), 33.0)
 
     def test_reduces_event_count_instead_of_cutting_dialogue(self) -> None:
         candidates = [
@@ -2362,6 +3294,48 @@ class CandidateSelectionTests(unittest.TestCase):
         selected = [group for group in allocated if group["id"] in ids]
         self.assertTrue(all(group["segments"][0]["duration"] == 15 for group in selected))
         self.assertTrue(selected[0]["eventReductionReason"])
+
+    def test_rechecks_actual_fitted_duration_when_complete_speech_units_expand_budget(self) -> None:
+        durations = [31.99, 16.07, 12.70, 11.69, 10.17]
+        groups = []
+        cursor = 0.0
+        for index, duration in enumerate(durations):
+            segment = {
+                "id": f"segment_{index}", "candidateId": f"candidate_{index}",
+                "semanticUnitId": f"semantic_{index}", "start": cursor,
+                "end": cursor + duration, "duration": duration,
+                "score": 96 - index, "essential": True, "hasSpeech": True,
+                "minimumKeepSeconds": 3.0,
+                # The theoretical minimum is short, but the sentence containing
+                # the peak is indivisible and therefore expands during fitting.
+                "speechUnits": [{
+                    "id": f"speech_{index}", "start": cursor,
+                    "end": cursor + duration,
+                }],
+                "peakStart": cursor + duration / 2 - .1,
+                "peakEnd": cursor + duration / 2 + .1,
+            }
+            groups.append({
+                "id": f"event_{index}", "index": index,
+                "title": f"产品发布事件 {index + 1}", "summary": "完整发布对白",
+                "score": 96 - index, "segments": [copy.deepcopy(segment)],
+                "availableSegments": [copy.deepcopy(segment)],
+                "preferredDuration": duration, "actualDuration": duration,
+            })
+            cursor += duration + 5
+
+        allocated, ids = allocate_event_group_budget(
+            groups, total_target_seconds=60, requested_count=None,
+        )
+
+        selected_duration = event_groups_total(allocated, ids)
+        self.assertLess(len(ids), len(groups))
+        self.assertLessEqual(selected_duration, 66.001)
+        self.assertGreaterEqual(selected_duration, 54.0)
+        self.assertTrue(all(
+            "按完整语音和动作边界复核后" in str(group.get("eventReductionReason") or "")
+            for group in allocated if group["id"] in ids
+        ))
 
     def test_semantic_boundary_uses_silence_inside_long_speech_segment(self) -> None:
         safe = semantic_safe_range(
@@ -2386,6 +3360,7 @@ class CandidateSelectionTests(unittest.TestCase):
         annotated = annotate_candidate_boundaries(
             [{
                 "id": "candidate_1", "start": 0, "end": 30,
+                "title": "受访者完整说明核心观点",
                 "peakStart": 11, "peakEnd": 13, "minimumKeepSeconds": 5,
             }],
             speech_segments=[
@@ -2678,6 +3653,7 @@ class MediaIntegrationTests(unittest.TestCase):
                     count=2, target_seconds=8, theme="动作", progress=lambda *_: None,
                     cancelled=lambda: False, automatic_duration=True, discovery_only=True,
                     total_target_seconds=20, requested_count=1,
+                    analysis_start=1.0, analysis_end=4.0,
                 )
             self.assertEqual(raised.exception.stage, "content_classification")
             self.assertEqual(client.system_prompt, COMMON_SYSTEM_PROMPT)
@@ -2685,6 +3661,7 @@ class MediaIntegrationTests(unittest.TestCase):
             self.assertEqual(checkpoint["decisionStage"], "content_classification")
             self.assertTrue(Path(checkpoint["overviewSheet"]).is_file())
             self.assertGreaterEqual(len(checkpoint["frames"]), 2)
+            self.assertTrue(all(1.0 <= float(item["time"]) <= 4.0 for item in checkpoint["frames"]))
 
     def test_pipeline_builds_multi_shot_event_without_real_api(self) -> None:
         import subprocess
@@ -2894,6 +3871,13 @@ class MediaIntegrationTests(unittest.TestCase):
                 source, advanced, segments=advanced_segments, has_audio=True,
                 ffmpeg="/usr/bin/ffmpeg",
                 preview_width=160,
+                subtitle_cues=[{
+                    "id": "advanced-cue", "start": .1, "end": 1.6,
+                    "text": "调速转场字幕同步测试",
+                }],
+                subtitle_style="clean",
+                subtitle_frame_width=160,
+                subtitle_frame_height=90,
                 cutaways=[{
                     "primarySegmentId": "b", "sourceStart": .1, "sourceEnd": .55,
                     "outputOffset": .35, "duration": .45, "muted": True,

@@ -21,7 +21,9 @@ def source_duration_meets_minimum(start: Any, end: Any, minimum: float = MIN_SOU
     return math.isfinite(duration) and duration + SOURCE_DURATION_EPSILON >= minimum
 
 
-ALLOWED_RATES = (1.0, 1.1, 1.25, 1.5)
+# Automatic editing policies still cap themselves at 1.5x, but the secondary
+# editor may deliberately choose a wider, renderer-safe range.
+ALLOWED_RATES = (0.5, 0.75, 1.0, 1.1, 1.25, 1.5, 2.0)
 ALLOWED_TRANSITIONS = {"cut", "dissolve", "fade_black"}
 ALLOWED_BRIDGES = {"none", "j_cut", "l_cut"}
 
@@ -220,8 +222,39 @@ def _silence_cuts_for_segment(segment: dict[str, Any], silences: list[dict[str, 
     if _protected_emotion(segment) or _protected_role(segment):
         return []
     start, end = _number(segment.get("start")), _number(segment.get("end"))
+    has_speech = _has_speech(segment)
+    source_duration = max(.001, end - start)
+    speech_duration = sum(
+        max(0.0, min(end, _number(unit.get("end"))) - max(start, _number(unit.get("start"))))
+        for unit in segment.get("speechUnits") or [] if isinstance(unit, dict)
+    )
+    role_text = str(segment.get("storyFunction") or segment.get("role") or "").lower()
+    speech_dominant = has_speech and (
+        speech_duration / source_duration >= .45
+        or any(token in role_text for token in (
+            "对白", "发言", "回答", "提问", "观点", "口播", "dialogue", "speech", "answer", "question",
+        ))
+        or bool((segment.get("audioEvidence") or {}).get("speechDominant"))
+    )
+    explicit_inactive = [
+        item for item in (
+            segment.get("compressibleSilenceRanges")
+            or segment.get("inactiveRanges")
+            or []
+        )
+        if isinstance(item, dict)
+    ]
+    # Low audio energy only proves that a range is quiet.  It does not prove
+    # that a silent visual action, reaction, establishing shot or result is
+    # disposable.  Visual-only material may be compressed only when semantic
+    # analysis explicitly marks the range inactive.
+    if not speech_dominant and not explicit_inactive:
+        return []
+    source_ranges = silences if speech_dominant else explicit_inactive
     cuts: list[dict[str, Any]] = []
-    for item in silences:
+    removed_budget = max(0.0, (end - start) * .35)
+    removed = 0.0
+    for item in source_ranges:
         if not isinstance(item, dict):
             continue
         left = max(start, _number(item.get("start")))
@@ -229,11 +262,20 @@ def _silence_cuts_for_segment(segment: dict[str, Any], silences: list[dict[str, 
         duration = right - left
         if duration < .45:
             continue
+        retained = .2 if duration <= 1.2 else .15
+        removable = max(0.0, duration - retained)
+        if removed + removable > removed_budget + .001:
+            continue
         cuts.append({
             "start": round(left, 3), "end": round(right, 3),
-            "retained": .2 if duration <= 1.2 else .15,
-            "reason": "压缩普通停顿，保留自然语气间隔",
+            "retained": retained,
+            "reason": (
+                "压缩对白中的已检测停顿，保留自然语气间隔"
+                if speech_dominant else
+                "压缩语义分析确认无动作、无对白的停顿"
+            ),
         })
+        removed += removable
     return cuts
 
 
@@ -357,7 +399,7 @@ def plan_editing_techniques(
                     result[index]["transitionIn"] = {"type": "cut", "duration": 0.0, "reason": "声音桥接使用直接画面切换"}
                     bridge_count += 1
 
-    tolerance = max(4.0, _number(target_seconds) * .1) if target_seconds else 0.0
+    tolerance = _number(target_seconds) * .1 if target_seconds else 0.0
     target_upper = _number(target_seconds) + tolerance if target_seconds else None
     if normalized_policy["allowSpeed"] and target_upper and composition_effective_duration(result) > target_upper:
         eligible = [
@@ -420,6 +462,10 @@ def plan_editing_techniques(
         warnings.append(
             f"安全精剪和最高 {normalized_policy['maxSpeed']:.2g}× 变速后仍为 {actual:.1f} 秒；"
             + ("手动选择不会被自动删除" if manual_selection else "需要减少低优先级完整镜头")
+        )
+    elif duration_status == "under_target":
+        warnings.append(
+            f"剪辑技法应用后有效时长为 {actual:.1f} 秒，仍低于目标；自动方案必须返回候选选择器补齐后才能渲染"
         )
     return {
         "segments": result,
