@@ -18,6 +18,7 @@
 
 ## 📰 News
 
+* **[2026-08-28]** 🎬 Upgraded the **multimodal editing workspace** with reusable content-search results, person/speaker workflows, voiceprint-based clipping, and an editable fine-cut timeline; also streamlined CPU/GPU deployment.
 * **[2026-08-20]** 🎯 Added **Face-Matched Editing** and **Topic-Based Editing**, enabling target-person retrieval and topic-driven clip extraction.
 * **[2026-08-12]** 🚀 Optimized the timeline display and added support for switching to **vertical creation mode**.
 * **[2026-07-20]** ✨ Added the **Highlight Editing Agent** for automatic highlight clip extraction.
