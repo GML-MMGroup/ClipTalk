@@ -34,9 +34,9 @@ ClipTalk is actively evolving toward a more powerful conversational video editin
 * [x] 💬 **Conversational Editing Infrastructure**
 * [x] ⚡ **Highlight Editing Agent**
 * [x] 👤 **Face-Matched Editing** — Find a target person and extract the segments where they appear on screen.
-* [ ] 🔊 **Voiceprint-Based Editing** — Identify a target speaker and extract the segments where they are speaking.
+* [x] 🔊 **Voiceprint-Based Editing** — Identify a target speaker and extract the segments where they are speaking.
 * [x] 🧭 **Topic-Based Editing** — Understand the content and extract segments around a specific topic.
-* [ ] 🎞️ **Editable Timeline** — Further edit and fine-tune AI-generated results directly on the timeline.
+* [x] 🎞️ **Editable Timeline** — Further edit and fine-tune AI-generated results directly on the timeline.
 
 
 ---
