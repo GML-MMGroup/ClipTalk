@@ -141,6 +141,8 @@
   function renderNavigationBadges() {
     const currentId = String(window.ClipTalkCurrentJobId?.() || "");
     const currentTask = $("#sidebarCurrentTask");
+    const sidebar = $("#appSidebar");
+    sidebar?.classList.toggle("has-current-task", Boolean(currentId));
     if (currentTask) {
       currentTask.disabled = !currentId;
       currentTask.title = currentId ? "返回当前任务" : "暂无当前任务";
@@ -172,7 +174,7 @@
     $("#sidebarTaskCount").textContent = String(jobs.length);
     root.innerHTML = jobs.length
       ? jobs.map((job) => taskCard(job)).join("")
-      : `<div class="app-sidebar-empty">${state.query || state.filter !== "all" ? "没有符合条件的任务" : "还没有历史任务"}</div>`;
+      : `<div class="app-sidebar-empty">${state.query || state.filter !== "all" ? "没有符合条件的任务" : "还没有任务"}</div>`;
     $("#sidebarLoadMore")?.classList.toggle("hidden", !state.hasMore);
     renderNavigationBadges();
   }
@@ -285,6 +287,8 @@
   function renderLibrary() {
     const root = $("#libraryOutputList");
     if (!root) return;
+    const returnButton = $("[data-library-return]");
+    if (returnButton) returnButton.textContent = window.ClipTalkCurrentJobId?.() ? "返回当前任务" : "返回首页";
     const query = state.libraryQuery.toLocaleLowerCase();
     const filtered = state.outputs.filter((item) => !query || [item.title, item.displayName, item.sourceFilename, item.filename]
       .some((value) => String(value || "").toLocaleLowerCase().includes(query)));
@@ -343,7 +347,12 @@
   }
 
   function updateNav(view) {
-    $$('.app-sidebar [data-shell-view]').forEach((button) => button.classList.toggle("active", button.dataset.shellView === view));
+    $$('.app-sidebar [data-shell-view]').forEach((button) => {
+      const active = button.dataset.shellView === view;
+      button.classList.toggle("active", active);
+      if (active) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
   }
 
   function setSidebarMode(view) {
@@ -425,9 +434,17 @@
       const ready = Boolean((health.visionConfigured ?? health.arkConfigured) && health.ffmpeg && health.ffprobe);
       button?.classList.toggle("offline", !ready);
       if (label) label.textContent = ready ? "服务正常" : "服务需配置";
+      if (button) {
+        button.title = ready ? "服务正常，点击查看运行环境" : "服务需要配置，点击查看详情";
+        button.setAttribute("aria-label", button.title);
+      }
     } catch {
       button?.classList.add("offline");
       if (label) label.textContent = "服务离线";
+      if (button) {
+        button.title = "服务离线，点击查看详情";
+        button.setAttribute("aria-label", button.title);
+      }
     }
   }
 

@@ -181,6 +181,20 @@ async function startStubServer() {
       response.end(JSON.stringify({ detail: "browser test stops after request capture" }));
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/jobs/job_stale_content_a/content-search/history/search_stale") {
+      requests.push({ path: url.pathname, method: request.method });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 180));
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ search: {
+        id: "search_stale", status: "confirmed", candidateDetailsLoaded: true,
+        candidates: [{
+          id: "stale_match", title: "旧任务片段", start: 8, end: 12, duration: 4,
+          score: 90, confidenceTier: "reliable", reviewStatus: "confirmed",
+          evidenceType: "visual", matchedModalities: ["visual"], selected: true,
+        }],
+      } }));
+      return;
+    }
     let path;
     if (url.pathname === "/") {
       path = join(staticRoot, "index.html");
@@ -289,7 +303,7 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
     assert.equal(await page.locator("#briefInstruction").count(), 0);
     assert.equal(await page.locator("[data-workflow-choice]").count(), 4);
     assert.equal(await page.locator("#taskSetupView").isVisible(), true);
-    assert.match(await page.locator("#taskSetupView > header").textContent(), /任务开始后.*AI 助手.*后续修改/s);
+    assert.match(await page.locator("#taskSetupView > header").textContent(), /确认后.*上传.*开始分析.*继续补充要求/s);
     assert.equal(await page.locator("#briefAutoInstruction").isVisible(), true);
     assert.equal(await page.locator("#taskSetupPortal > .brief-card").count(), 1);
     assert.equal(await page.locator("#chatMessages .brief-card").count(), 0);
@@ -531,9 +545,27 @@ test("compact navigation rail opens a focused history drawer", async () => {
     await page.locator("#accessTokenDialog button[type=submit]").click();
     await page.waitForFunction(() => document.querySelector("#homeView")?.dataset.homeState === "ready");
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
-    assert.equal(await page.locator("#appSidebar").evaluate((node) => getComputedStyle(node).width), "72px");
-    assert.equal(await page.locator(".app-sidebar-primary .app-sidebar-action").count(), 4);
+    assert.equal(await page.locator("#appSidebar").evaluate((node) => getComputedStyle(node).width), "88px");
+    assert.equal(await page.locator(".app-sidebar-brand-wordmark").textContent(), "ClipTalk");
+    assert.equal(await page.locator(".app-sidebar-brand-wordmark").isVisible(), true);
+    const brandFitsRail = await page.locator(".app-sidebar-brand button").evaluate((node) => {
+      const brand = node.getBoundingClientRect();
+      const rail = node.closest(".app-sidebar").getBoundingClientRect();
+      const header = node.closest(".app-sidebar-brand").getBoundingClientRect();
+      return brand.left >= rail.left && brand.right <= rail.right
+        && brand.top >= header.top && brand.bottom <= header.bottom;
+    });
+    assert.equal(brandFitsRail, true);
+    assert.equal(await page.locator(".app-sidebar-primary .app-sidebar-action").count(), 6);
+    assert.equal(await page.locator(".topbar").count(), 0);
+    assert.equal(await page.locator("#engineState").evaluate((node) => node.closest(".app-sidebar-utility") !== null), true);
+    assert.equal(await page.locator("#settingsButton").evaluate((node) => node.closest(".app-sidebar-utility") !== null), true);
     assert.equal(await page.locator("#sidebarCurrentTask").isDisabled(), true);
+    assert.equal(await page.locator("#sidebarCurrentTask").isVisible(), false);
+    assert.equal(await page.locator('.app-sidebar-brand [data-shell-view="home"]').getAttribute("aria-current"), "page");
+    assert.deepEqual(await page.locator(".app-sidebar-primary > .app-sidebar-action").evaluateAll((nodes) => nodes
+      .filter((node) => getComputedStyle(node).display !== "none")
+      .map((node) => node.querySelector("span")?.textContent || "")), ["新建", "任务", "成片"]);
     assert.equal(await page.locator(".app-sidebar-footer, #sidebarCollapse, #sidebarTaskRefresh").count(), 0);
     await page.locator("#sidebarHistoryToggle").click();
     await page.locator("#sidebarHistoryList .shell-task-card").first().waitFor({ state: "visible" });
@@ -545,6 +577,12 @@ test("compact navigation rail opens a focused history drawer", async () => {
     assert.equal(await page.locator("#homeTaskCount").textContent(), "3");
     assert.equal(await page.locator("#homeOutputCount").textContent(), "0");
     assert.equal(await page.locator("#homeTaskGrid .shell-task-card").count(), 1);
+    const homeTaskPalette = await page.locator("#homeTaskGrid .home-shell-task").evaluate((card) => ({
+      background: getComputedStyle(card).backgroundColor,
+      title: getComputedStyle(card.querySelector(".shell-task-heading > strong")).color,
+    }));
+    assert.equal(homeTaskPalette.background, "rgba(255, 255, 255, 0.76)");
+    assert.equal(homeTaskPalette.title, "rgb(32, 42, 48)");
     assert.equal(await page.locator("#sidebarAttentionCount").textContent(), "1");
     const rows = await page.locator("#sidebarHistoryList .shell-task-card").evaluateAll((nodes) => nodes.map((node) => ({
       openId: node.querySelector("[data-shell-open]")?.dataset.shellOpen || "",
@@ -565,7 +603,9 @@ test("compact navigation rail opens a focused history drawer", async () => {
       window.ClipTalkAppShell.syncCurrentJob({ id: "task-running" });
     });
     assert.equal(await page.locator("#sidebarCurrentTask").isEnabled(), true);
+    assert.equal(await page.locator("#sidebarCurrentTask").isVisible(), true);
     assert.equal(await page.locator("#sidebarCurrentTask").getAttribute("title"), "返回当前任务");
+    assert.deepEqual(await page.locator(".app-sidebar-primary > .app-sidebar-action > span").allTextContents(), ["当前任务", "新建", "任务", "成片"]);
     await page.keyboard.press("Escape");
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "false");
@@ -629,6 +669,21 @@ test("upload workflow entries reveal only relevant controls and highlight starts
       input.dispatchEvent(new Event("change", { bubbles: true }));
       Object.defineProperty(document.querySelector("#localPreviewVideo"), "duration", { configurable: true, value: 90 });
     });
+    assert.equal(await page.locator("#replaceVideoButton").isVisible(), true);
+    assert.match(await page.locator("#briefWorkflowHelp").textContent(), /让 AI 推荐处理方式.*不会直接开始任务/s);
+    assert.equal(await page.locator(".workflow-entry-card svg").count(), 4);
+    await page.setViewportSize({ width: 720, height: 900 });
+    await page.waitForTimeout(120);
+    const narrowCreationLayout = await page.evaluate(() => ({
+      bodyWidth: document.body.scrollWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }));
+    assert.ok(
+      narrowCreationLayout.documentWidth <= narrowCreationLayout.viewportWidth + 1,
+      `task creation overflowed its narrow viewport: ${JSON.stringify(narrowCreationLayout)}`,
+    );
+    await page.setViewportSize({ width: 1280, height: 720 });
     await page.locator('[data-workflow-choice="content_search"]').click();
     assert.equal(await page.locator("#briefContentSettings").isVisible(), true);
     assert.equal(await page.locator("#briefHighlightSettings").isVisible(), false);
@@ -811,6 +866,61 @@ test("speaker panel clears the previous video and ignores its late response", as
     assert.match(finalText, /视频 B 的人物/);
     assert.equal(finalText.includes("视频 A 的人物"), false);
     assert.equal(await page.evaluate(() => currentVoiceJobId), "job-video-b");
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("content preview ignores detail responses from the task that is no longer active", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      const candidate = {
+        id: "stale_match", title: "等待详情的旧任务片段", start: 8, end: 12, duration: 4,
+        score: 90, confidenceTier: "reliable", reviewStatus: "confirmed",
+        evidenceType: "visual", matchedModalities: ["visual"], selected: true,
+      };
+      const search = {
+        id: "search_stale", status: "confirmed", candidateDetailsLoaded: false,
+        instruction: "查找旧任务片段", candidates: [candidate], defaultSelectedIds: [candidate.id],
+        executionPlan: { allowedCapabilities: ["visual"] },
+      };
+      const jobA = {
+        id: "job_stale_content_a", taskMode: "content_extract", workflowKind: "content_search",
+        status: "awaiting_content_confirmation", stage: "content_confirmation", filename: "旧任务.mp4",
+        videoInfo: { duration: 60, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+        contentSearch: search, contentSearchRecords: [search],
+        contentSearchSession: { activeSearchId: search.id, state: "ready" },
+        messages: [{ id: "stale_result", role: "assistant", kind: "content-search", contentSearchId: search.id, text: "旧任务检索完成" }],
+        outputs: [], outputVersions: [], candidates: [],
+      };
+      currentJob = jobA;
+      renderConversation(jobA);
+      window.__staleReplacementJob = {
+        id: "job_stale_content_b", taskMode: "highlight", workflowKind: "highlight",
+        status: "awaiting_confirmation", stage: "review", filename: "当前任务.mp4",
+        videoInfo: { duration: 30, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+        messages: [], candidates: [], eventGroups: [], outputs: [], outputVersions: [],
+      };
+    });
+    const preview = page.locator('[data-content-preview="stale_match"]');
+    await preview.waitFor({ state: "attached" });
+    await preview.evaluate((button) => button.click());
+    await page.evaluate(() => {
+      currentJob = window.__staleReplacementJob;
+      currentCandidate = null;
+    });
+    await page.waitForTimeout(260);
+    assert.equal(await page.evaluate(() => currentJob?.id), "job_stale_content_b");
+    assert.equal(await page.evaluate(() => currentCandidate), null);
+    assert.equal(stub.requests.filter((item) => item.path.endsWith("/content-search/history/search_stale")).length, 1);
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -1113,6 +1223,87 @@ test("content match cards remain readable in a narrow review rail", async () => 
       await confirmationPromise;
       reviewJob.speechAnalysis.segments = [];
       syncContentSearchSubtitleControls(host, reviewJob);
+      const savedJobForBoundaryEntry = currentJob;
+      const savedCandidateForBoundaryEntry = currentCandidate;
+      const savedPreviewSearchId = currentContentPreviewSearchId;
+      const entryButton = document.querySelector("#contentBoundaryEntryButton");
+      currentJob = reviewJob;
+      currentCandidate = reviewJob.contentSearch.candidates[0];
+      currentContentPreviewSearchId = reviewJob.contentSearch.id;
+      syncContentBoundaryEntry();
+      const editableBoundaryEntry = {
+        label: entryButton.textContent,
+        kind: entryButton.dataset.boundaryEntryKind,
+        disabled: entryButton.disabled,
+      };
+      currentJob = { ...reviewJob, status: "completed", outputs: [{ filename: "content-v1.mp4" }] };
+      syncContentBoundaryEntry();
+      const completedBoundaryEntry = {
+        label: entryButton.textContent,
+        kind: entryButton.dataset.boundaryEntryKind,
+        disabled: entryButton.disabled,
+        title: entryButton.title,
+      };
+      const historicalSearch = { ...reviewJob.contentSearch, id: "search_history" };
+      currentJob = {
+        ...reviewJob,
+        status: "completed",
+        outputs: [{ filename: "content-v1.mp4" }],
+        contentSearchRecords: [reviewJob.contentSearch, historicalSearch],
+      };
+      currentCandidate = historicalSearch.candidates[0];
+      currentContentPreviewSearchId = historicalSearch.id;
+      syncContentBoundaryEntry();
+      const historicalBoundaryEntry = {
+        label: entryButton.textContent,
+        kind: entryButton.dataset.boundaryEntryKind,
+        disabled: entryButton.disabled,
+        searchId: entryButton.dataset.boundarySearchId,
+      };
+      currentJob = { ...reviewJob, status: "running" };
+      currentCandidate = reviewJob.contentSearch.candidates[0];
+      currentContentPreviewSearchId = reviewJob.contentSearch.id;
+      syncContentBoundaryEntry();
+      updateTimeline();
+      const runningBoundaryEntry = {
+        label: entryButton.textContent,
+        kind: entryButton.dataset.boundaryEntryKind,
+        disabled: entryButton.disabled,
+      };
+      const runningTimelineTrim = {
+        label: document.querySelector("#timelineContentTrim")?.textContent || "",
+        disabled: Boolean(document.querySelector("#timelineContentTrim")?.disabled),
+      };
+      const runningHistoricalDocument = new DOMParser().parseFromString(contentSearchReviewMarkup({
+        ...reviewJob,
+        status: "running",
+        execution: { schemaVersion: 1, active: true, status: "running", capabilities: {} },
+        contentSearchSession: { activeSearchId: reviewJob.contentSearch.id, state: "running" },
+      }, historicalSearch, { historicalExpanded: true }), "text/html");
+      const runningRestoreButton = runningHistoricalDocument.querySelector("[data-content-search-restore]");
+      renderContentSelectionBasket({
+        ...reviewJob,
+        status: "running",
+        execution: { schemaVersion: 1, active: true, status: "running", capabilities: {} },
+        contentSelectionBasket: {
+          schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true,
+          items: [{
+            searchId: "search_test", matchId: "match_1", title: "整理桌面物品",
+            sourceQuery: "找整理桌面的片段", start: 76.2, end: 78, duration: 1.8,
+          }],
+        },
+      });
+      const runningBasketAudit = {
+        summary: document.querySelector("#contentSelectionBasket")?.textContent || "",
+        removeDisabled: Boolean(document.querySelector("[data-content-basket-remove]")?.disabled),
+        outputDisabled: Boolean(document.querySelector("[data-content-basket-output]")?.disabled),
+        confirmDisabled: Boolean(document.querySelector("[data-content-basket-confirm]")?.disabled),
+        confirmLabel: document.querySelector("[data-content-basket-confirm]")?.textContent || "",
+      };
+      currentJob = savedJobForBoundaryEntry;
+      currentCandidate = savedCandidateForBoundaryEntry;
+      currentContentPreviewSearchId = savedPreviewSearchId;
+      syncContentBoundaryEntry();
       return {
         rowColumns: getComputedStyle(row).gridTemplateColumns,
         copyWidth: copy.getBoundingClientRect().width,
@@ -1183,6 +1374,23 @@ test("content match cards remain readable in a narrow review rail", async () => 
         boundaryFrameText: boundaryEditor.querySelector("[data-boundary-frame-rate]").textContent,
         boundaryFrameDelta: adjustedBoundaryEnd - originalBoundaryEnd,
         boundaryHasManualActions: ["开始秒数", "结束秒数", "前一帧", "后一帧", "前一秒", "后一秒", "预览片段", "取消", "保存修改"].every((label) => boundaryEditor.textContent.includes(label)),
+        editableBoundaryEntry,
+        completedBoundaryEntry,
+        historicalBoundaryEntry,
+        runningBoundaryEntry,
+        runningTimelineTrim,
+        runningRestoreButton: {
+          disabled: Boolean(runningRestoreButton?.disabled),
+          label: runningRestoreButton?.textContent || "",
+        },
+        runningBasketAudit,
+        boundaryPanelPalette: {
+          switchBackground: getComputedStyle(document.querySelector("#evidencePanel .content-detail-mode-switch")).backgroundColor,
+          activeBackground: getComputedStyle(document.querySelector('#evidencePanel [data-content-detail-mode="edit"]')).backgroundColor,
+          fieldsetBackground: getComputedStyle(boundaryEditor.querySelector("fieldset")).backgroundColor,
+          buttonBackground: getComputedStyle(boundaryEditor.querySelector('[data-boundary-adjust="start:-frame"]')).backgroundColor,
+          primaryBackground: getComputedStyle(boundaryEditor.querySelector("button.primary")).backgroundColor,
+        },
       };
     });
     await page.screenshot({ path: join(projectRoot, "test-results/subtitle-availability.png") });
@@ -1276,6 +1484,48 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.match(audit.boundaryFrameText, /25 fps.*40.0 ms/);
     assert.ok(Math.abs(audit.boundaryFrameDelta - .04) < 1e-6);
     assert.equal(audit.boundaryHasManualActions, true);
+    assert.deepEqual(audit.editableBoundaryEntry, {
+      label: "调整边界",
+      kind: "edit",
+      disabled: false,
+    });
+    assert.deepEqual(audit.completedBoundaryEntry, {
+      label: "返回确认后调整",
+      kind: "reedit",
+      disabled: false,
+      title: "返回片段确认并调整边界；不会重新分析视频，已有成片仍会保留",
+    });
+    assert.deepEqual(audit.historicalBoundaryEntry, {
+      label: "恢复此检索后调整",
+      kind: "restore",
+      disabled: false,
+      searchId: "search_history",
+    });
+    assert.deepEqual(audit.runningBoundaryEntry, {
+      label: "生成中，暂不可调整",
+      kind: "unavailable",
+      disabled: true,
+    });
+    assert.deepEqual(audit.runningTimelineTrim, {
+      label: "生成中，暂不可调整",
+      disabled: true,
+    });
+    assert.deepEqual(audit.runningRestoreButton, {
+      disabled: true,
+      label: "任务处理中，暂不能恢复",
+    });
+    assert.equal(audit.runningBasketAudit.removeDisabled, true);
+    assert.equal(audit.runningBasketAudit.outputDisabled, true);
+    assert.equal(audit.runningBasketAudit.confirmDisabled, true);
+    assert.equal(audit.runningBasketAudit.confirmLabel, "任务完成后生成");
+    assert.match(audit.runningBasketAudit.summary, /任务完成后可继续修改和生成/);
+    assert.deepEqual(audit.boundaryPanelPalette, {
+      switchBackground: "rgb(237, 242, 244)",
+      activeBackground: "rgb(255, 244, 237)",
+      fieldsetBackground: "rgba(255, 255, 255, 0.78)",
+      buttonBackground: "rgb(255, 255, 255)",
+      primaryBackground: "rgb(242, 160, 121)",
+    });
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -1303,6 +1553,16 @@ test("confirmation dialog keeps every selected item and wraps long labels", asyn
     assert.match(await page.locator("#actionConfirmDetails li").last().textContent(), /片段 25/);
     assert.equal(await page.locator("#actionConfirmOrderList > div").count(), 25);
     assert.equal(await page.locator("#actionConfirmOrderList > div > span").first().evaluate((node) => getComputedStyle(node).whiteSpace), "normal");
+    const dialogPalette = await page.evaluate(() => ({
+      background: getComputedStyle(document.querySelector(".action-confirm-card")).backgroundImage,
+      backgroundColor: getComputedStyle(document.querySelector(".action-confirm-card")).backgroundColor,
+      title: getComputedStyle(document.querySelector(".action-confirm-card strong")).color,
+      footer: getComputedStyle(document.querySelector(".action-confirm-card > footer")).backgroundColor,
+    }));
+    assert.match(dialogPalette.background, /rgba\(255, 239, 229, 0\.68\)/);
+    assert.equal(dialogPalette.backgroundColor, "rgba(255, 255, 255, 0.97)");
+    assert.equal(dialogPalette.title, "rgb(38, 49, 56)");
+    assert.match(dialogPalette.footer, /255, 255, 255/);
     await page.locator("#actionConfirmCancel").click();
   } finally {
     await browser.close();
@@ -2120,6 +2380,9 @@ test("subtitle review drawer supports readable cue editing and split controls", 
       contextText: document.querySelector("#subtitleCorrectionContext").textContent,
       safeButtonText: document.querySelector("#subtitleAcceptSafeButton").textContent,
       riskText: document.querySelector(".subtitle-suggestion-head span").textContent,
+      panelBackground: getComputedStyle(document.querySelector(".subtitle-review-panel")).backgroundImage,
+      cueBackground: getComputedStyle(document.querySelector(".subtitle-cue")).backgroundColor,
+      cueText: getComputedStyle(document.querySelector(".subtitle-cue textarea")).color,
     }));
     await page.locator("#subtitleAcceptSafeButton").click();
     assert.equal(await page.locator(".subtitle-suggestion").count(), 0);
@@ -2136,6 +2399,9 @@ test("subtitle review drawer supports readable cue editing and split controls", 
     assert.match(initial.contextText, /ClipTalk/);
     assert.match(initial.safeButtonText, /1/);
     assert.match(initial.riskText, /低风险/);
+    assert.match(initial.panelBackground, /rgb\(244, 247, 248\)/);
+    assert.match(initial.cueBackground, /255, 255, 255/);
+    assert.equal(initial.cueText, "rgb(52, 65, 72)");
     assert.deepEqual(pageErrors, []);
     await panel.screenshot({ path: join(projectRoot, "test-results/subtitle-review-drawer.png") });
   } finally {
@@ -2763,6 +3029,34 @@ test("completed highlight alternatives use the one-click background render actio
   assert.doesNotMatch(source, /data-prompt="基于当前成片换一种剪法/);
 });
 
+test("legacy outputs without segment metadata do not expose a dead fine-edit action", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      const job = {
+        id: "legacy-output-job", status: "completed", taskMode: "content_extract",
+        outputVersions: [{
+          id: "version_legacy", number: 1,
+          outputs: [{ filename: "legacy.mp4", duration: 12.4, segmentCount: 0, segments: [] }],
+        }],
+      };
+      currentJob = job;
+      renderOutputs(job);
+    });
+    const edit = page.locator(".clip-version-edit");
+    assert.equal(await edit.textContent(), "无可精剪时间线");
+    assert.equal(await edit.isDisabled(), true);
+    assert.match(await edit.getAttribute("title"), /没有保存可编辑片段信息/);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
 test("generated output versions open a persistent secondary editor", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
@@ -2966,6 +3260,20 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.equal(outputActionColors.explanation, "rgb(62, 75, 82)");
     await page.locator("#secondaryEditCurrentButton").click();
     await page.locator("#secondaryEditor").waitFor({ state: "visible" });
+    const editorPalette = await page.evaluate(() => {
+      delete document.body.dataset.shellMode;
+      return {
+        main: getComputedStyle(document.querySelector(".secondary-editor-main")).backgroundColor,
+        timeline: getComputedStyle(document.querySelector(".secondary-editor-timeline-section")).backgroundColor,
+        inspector: getComputedStyle(document.querySelector(".secondary-editor-inspector")).backgroundColor,
+        library: getComputedStyle(document.querySelector(".secondary-editor-library")).backgroundImage,
+      };
+    });
+    assert.equal(editorPalette.main, "rgb(248, 249, 250)");
+    assert.equal(editorPalette.timeline, "rgb(248, 249, 250)");
+    assert.equal(editorPalette.inspector, "rgb(248, 249, 250)");
+    assert.match(editorPalette.library, /rgb\(20, 33, 42\)/);
+    await page.evaluate(() => { document.body.dataset.shellMode = "workspace"; });
     assert.equal(await page.locator("#secondarySubtitleAdd").isVisible(), true);
     assert.equal(await page.locator("#secondarySubtitleAdd").textContent(), "＋ 文本");
     assert.equal(await page.locator('[data-secondary-inspector-tab="clip"]').getAttribute("aria-pressed"), "true");
@@ -3565,6 +3873,16 @@ test("highlight review reveals only settings relevant to the current selection",
     await page.locator("#reviewPanelReviewTab").click();
     assert.equal(await page.locator("#candidateDrawer").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#reviewPanelReviewTab").getAttribute("aria-pressed"), "true");
+    await page.locator("#reviewWorkbench .event-group-row").first().waitFor({ state: "visible" });
+    const highlightReviewPalette = await page.locator("#reviewWorkbench .event-group-row").first().evaluate((row) => ({
+      background: getComputedStyle(row).backgroundColor,
+      title: getComputedStyle(row.querySelector("header strong")).color,
+      button: getComputedStyle(row.querySelector("button")).backgroundColor,
+    }));
+    assert.equal(highlightReviewPalette.background, "rgb(255, 246, 241)");
+    assert.equal(highlightReviewPalette.title, "rgb(48, 61, 68)");
+    assert.equal(highlightReviewPalette.button, "rgb(255, 242, 234)");
+    await page.screenshot({ path: join(projectRoot, "test-results/highlight-review-light-events.png"), fullPage: true });
     await page.locator("#openCandidateDrawer").click();
     await page.locator("#reviewPanelTimelineTab").click();
     assert.equal(await page.locator("#candidateDrawer").getAttribute("aria-hidden"), "true");
@@ -3596,10 +3914,10 @@ test("highlight review reveals only settings relevant to the current selection",
     assert.ok(precisionLayout.timeline.top - precisionLayout.player.bottom <= 50, JSON.stringify(precisionLayout));
     assert.ok(precisionLayout.timeline.height >= 250, JSON.stringify(precisionLayout));
     assert.ok(precisionLayout.timeline.bottom <= precisionLayout.view.bottom + 1, JSON.stringify(precisionLayout));
-    assert.match(precisionLayout.colors.timeline, /linear-gradient/);
+    assert.equal(precisionLayout.colors.timeline, "none");
     assert.match(precisionLayout.colors.viewport, /linear-gradient/);
     assert.match(precisionLayout.colors.track, /linear-gradient/);
-    assert.match(precisionLayout.colors.switcher, /linear-gradient/);
+    assert.equal(precisionLayout.colors.switcher, "none");
     assert.equal(precisionLayout.colors.trackLabel, "rgb(83, 97, 105)");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-highlight.png"), fullPage: true });
     await page.evaluate(() => setTimelineExpanded(false));
@@ -3879,6 +4197,8 @@ test("person workflow uses a dedicated workspace and stable source-time person t
       document.querySelector("#homeView")?.classList.add("hidden");
       switchWorkspaceJob(job);
     }, personJob);
+    await page.waitForFunction(() => Boolean(window.ClipTalkAppShell?.showView));
+    await page.evaluate(() => window.ClipTalkAppShell.showView("workspace", { route: false }));
     assert.equal(await page.locator("[data-open-person-workspace]").isVisible(), false);
     assert.equal(await page.locator("#reviewPanelSubjectTab").isVisible(), true);
     assert.equal(await page.locator("#reviewPanelSubjectLabel").textContent(), "画面人物");
@@ -3889,6 +4209,23 @@ test("person workflow uses a dedicated workspace and stable source-time person t
     await page.locator(".current-person-card").first().waitFor({ state: "visible" });
     assert.equal(await page.locator("#reviewPanelSubjectTab").getAttribute("aria-expanded"), "true");
     assert.equal(await page.locator("#reviewPanelSubjectTab").evaluate((button) => button.classList.contains("active")), true);
+    await page.waitForTimeout(220);
+    const pearlDeck = await page.evaluate(() => ({
+      switchBackground: getComputedStyle(document.querySelector("#reviewPanelSwitch")).backgroundImage,
+      workbenchBackground: getComputedStyle(document.querySelector("#reviewWorkbench")).backgroundImage,
+      cardBackground: getComputedStyle(document.querySelector(".current-person-card")).backgroundColor,
+      cardText: getComputedStyle(document.querySelector(".current-person-copy strong")).color,
+      stepBackground: getComputedStyle(document.querySelector("#personReviewModeSwitch")).backgroundColor,
+      activeStepBackground: getComputedStyle(document.querySelector("#personReviewModeSwitch button.active")).backgroundColor,
+      activeStepText: getComputedStyle(document.querySelector("#personReviewModeSwitch button.active")).color,
+    }));
+    assert.match(pearlDeck.switchBackground, /linear-gradient/);
+    assert.match(pearlDeck.workbenchBackground, /linear-gradient/);
+    assert.equal(pearlDeck.cardBackground, "rgba(255, 255, 255, 0.76)");
+    assert.equal(pearlDeck.cardText, "rgb(45, 57, 64)");
+    assert.equal(pearlDeck.stepBackground, "rgb(237, 242, 244)");
+    assert.equal(pearlDeck.activeStepBackground, "rgb(255, 247, 242)");
+    assert.equal(pearlDeck.activeStepText, "rgb(132, 56, 24)");
     await page.locator("#reviewPanelSubjectTab").click();
     assert.equal(await page.locator("#personProfilePanel").evaluate((panel) => panel.classList.contains("hidden")), true);
     assert.equal(await page.locator("#reviewPanelSubjectTab").getAttribute("aria-expanded"), "false");
@@ -3984,6 +4321,18 @@ test("person workflow uses a dedicated workspace and stable source-time person t
     await page.locator("#reviewPanelTimelineTab").click();
     assert.equal(await page.locator("#timelinePersonTrack").isVisible(), true);
     assert.equal(await page.locator("#timelineViewport").isVisible(), false);
+    const precisionPalette = await page.evaluate(() => ({
+      panel: getComputedStyle(document.querySelector("#timelinePanel")).backgroundColor,
+      header: getComputedStyle(document.querySelector("#timelinePanel > header")).backgroundColor,
+      personTrack: getComputedStyle(document.querySelector("#timelinePersonTrack")).backgroundImage,
+      personTrackLabel: getComputedStyle(document.querySelector("#timelinePersonTrack .timeline-person-track-label")).backgroundColor,
+      personTrackContent: getComputedStyle(document.querySelector("#timelinePersonTrack .timeline-person-track-content")).backgroundImage,
+    }));
+    assert.equal(precisionPalette.panel, "rgba(250, 252, 253, 0.96)");
+    assert.equal(precisionPalette.header, "rgba(255, 255, 255, 0.96)");
+    assert.match(precisionPalette.personTrack, /linear-gradient/);
+    assert.equal(precisionPalette.personTrackLabel, "rgb(237, 241, 243)");
+    assert.match(precisionPalette.personTrackContent, /rgb\(241, 244, 245\)/);
     assert.equal(await page.locator("[data-timeline-person-row]").count(), 5);
     assert.equal(await page.locator('[data-timeline-person-row="person_1"] [data-timeline-person-range]').count(), 2);
     assert.equal(await page.locator('[data-timeline-person-row="person_2"] [data-timeline-person-range]').count(), 1);
@@ -4015,11 +4364,13 @@ test("person workflow uses a dedicated workspace and stable source-time person t
         startsNearPanelTop: track.top - panel.top < 70,
         lastPersonInsideTrack: lastPerson.bottom <= track.bottom + 1,
         lastPersonInsideViewport: lastPerson.bottom <= window.innerHeight + 1,
+        panelOverflowY: getComputedStyle(document.querySelector("#timelinePanel")).overflowY,
       };
     });
     assert.equal(personTrackFit.startsNearPanelTop, true);
     assert.equal(personTrackFit.lastPersonInsideTrack, true);
     assert.equal(personTrackFit.lastPersonInsideViewport, true);
+    assert.equal(personTrackFit.panelOverflowY, "auto");
     await page.screenshot({ path: join(projectRoot, "test-results/person-workspace-dock.png"), fullPage: true });
     await page.setViewportSize({ width: 900, height: 820 });
     const narrowPrecision = await page.evaluate(() => ({
@@ -4410,6 +4761,34 @@ test("content review stays in the review stage and generated versions follow the
         reviewDockPrimary: document.querySelector("#reviewActionPrimary")?.textContent || "",
         embeddedActionHidden: getComputedStyle(rail.querySelector(".content-search-actions")).display === "none",
       };
+      reviewState.palette = {
+        rowBackground: getComputedStyle(rail.querySelector(".content-match-row")).backgroundColor,
+        selectionBackground: getComputedStyle(rail.querySelector(".content-selection-summary")).backgroundColor,
+        settingsBackground: getComputedStyle(rail.querySelector(".content-generation-settings")).backgroundColor,
+        titleColor: getComputedStyle(rail.querySelector(".content-match-title strong")).color,
+      };
+      const liveReviewRoot = rail.querySelector('.content-search-review[data-content-search-id="search_timeline"]');
+      const hiddenDuplicate = liveReviewRoot.cloneNode(true);
+      hiddenDuplicate.classList.add("hidden");
+      document.body.prepend(hiddenDuplicate);
+      reviewState.rootResolution = {
+        matchingRoots: contentReviewRootsForSearch(job).length,
+        drawerUsesLiveRoot: currentContentReviewRoot(job) === liveReviewRoot,
+        timelineUsesLiveRoot: contentTimelineReviewContext(candidate)?.root === liveReviewRoot,
+        activeUsesLiveRoot: activeContentReviewRoot(job) === liveReviewRoot,
+      };
+      rail.querySelector('[data-content-boundary-open="match_1"]')?.click();
+      const directEditor = document.querySelector('#contentBoundaryInspector [data-content-boundary-editor="match_1"]');
+      reviewState.directTrim = {
+        panelVisible: getComputedStyle(document.querySelector("#evidencePanel")).display !== "none",
+        editMode: document.querySelector("#evidencePanel").classList.contains("content-boundary-view"),
+        editTabActive: document.querySelector('[data-content-detail-mode="edit"]')?.getAttribute("aria-pressed"),
+        editorMounted: Boolean(directEditor),
+        editorVisible: Boolean(directEditor && !directEditor.classList.contains("hidden")),
+        sourceRowActive: rail.querySelector('[data-content-match-row="match_1"]')?.classList.contains("boundary-open"),
+      };
+      directEditor?.querySelector("[data-boundary-cancel]")?.click();
+      hiddenDuplicate.remove();
       setTimelineExpanded(true);
       reviewState.precisionHostHidden = getComputedStyle(document.querySelector("#chatStageHost")).display === "none";
       reviewState.precisionDockVisible = getComputedStyle(document.querySelector("#reviewActionDock")).display !== "none";
@@ -4422,6 +4801,8 @@ test("content review stays in the review stage and generated versions follow the
         buttonVisible: Boolean(precisionSettingsButton && getComputedStyle(precisionSettingsButton).display !== "none"),
         drawerVisible: getComputedStyle(document.querySelector("#timelinePrecisionDrawer")).display !== "none",
         subtitleToggle: Boolean(document.querySelector("[data-precision-content-subtitle]")),
+        background: getComputedStyle(document.querySelector("#timelinePrecisionDrawer")).backgroundColor,
+        titleColor: getComputedStyle(document.querySelector("#timelinePrecisionDrawerTitle")).color,
       };
       document.querySelector("#timelinePrecisionDrawerClose")?.click();
       setTimelineExpanded(false);
@@ -4463,6 +4844,26 @@ test("content review stays in the review stage and generated versions follow the
     assert.match(audit.reviewDockTitle, /已核对 1 个片段/);
     assert.equal(audit.reviewDockPrimary, "生成所选片段");
     assert.equal(audit.embeddedActionHidden, true);
+    assert.deepEqual(audit.palette, {
+      rowBackground: "rgb(255, 246, 241)",
+      selectionBackground: "rgba(255, 255, 255, 0.76)",
+      settingsBackground: "rgba(255, 255, 255, 0.76)",
+      titleColor: "rgb(47, 59, 66)",
+    });
+    assert.deepEqual(audit.directTrim, {
+      panelVisible: true,
+      editMode: true,
+      editTabActive: "true",
+      editorMounted: true,
+      editorVisible: true,
+      sourceRowActive: true,
+    });
+    assert.deepEqual(audit.rootResolution, {
+      matchingRoots: 2,
+      drawerUsesLiveRoot: true,
+      timelineUsesLiveRoot: true,
+      activeUsesLiveRoot: true,
+    });
     assert.equal(audit.precisionHostHidden, true);
     assert.equal(audit.precisionDockVisible, true, JSON.stringify(audit));
     assert.equal(audit.precisionToggleLabel, "返回审核列表");
@@ -4470,10 +4871,11 @@ test("content review stays in the review stage and generated versions follow the
     assert.equal(audit.precisionWorkbenchHidden, true);
     assert.deepEqual(audit.precisionSettingsDrawer, {
       buttonVisible: true, drawerVisible: true, subtitleToggle: true,
+      background: "rgba(251, 252, 253, 0.984)", titleColor: "rgb(51, 65, 72)",
     });
     assert.equal(audit.completedChatActions, 0);
     assert.equal(audit.outputButtons, 2);
-    assert.match(audit.outputActions, /重新选择素材.*修改查找条件/);
+    assert.match(audit.outputActions, /返回片段确认.*修改查找条件/);
     assert.equal(audit.reviewDockHiddenAfterCompose, true);
     assert.equal(audit.outputPrecision.selectParent, "timelinePrecisionContext");
     assert.equal(audit.outputPrecision.optionCount, 3);
@@ -4513,6 +4915,14 @@ test("content review stays in the review stage and generated versions follow the
       updateTimeline();
       setTimelineExpanded(true);
     });
+    const timelinePalette = await page.evaluate(() => ({
+      trackBackground: getComputedStyle(document.querySelector("#timelineThumbnails")).backgroundImage,
+      loaderBackground: getComputedStyle(document.querySelector("#timelineThumbnails .timeline-media-loader")).backgroundColor,
+      loaderColor: getComputedStyle(document.querySelector("#timelineThumbnails .timeline-media-loader")).color,
+    }));
+    assert.match(timelinePalette.trackBackground, /rgb\(237, 241, 243\)/);
+    assert.equal(timelinePalette.loaderBackground, "rgb(244, 247, 248)");
+    assert.equal(timelinePalette.loaderColor, "rgb(212, 123, 83)");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-content.png"), fullPage: true });
     await page.evaluate(() => setTimelineExpanded(false));
   } finally {
@@ -4541,7 +4951,10 @@ test("a second content search keeps the previous result visible and reusable", a
         id: "search_melon", status: "ready", createdAt: "2026-08-26T17:19:00Z",
         instruction: "找出切西瓜的片段", candidateCount: 1, candidateDetailsLoaded: true,
         defaultSelectedIds: ["melon_1"],
-        candidates: [{ id: "melon_1", title: "切西瓜", start: 30, end: 36, reviewStatus: "confirmed" }],
+        candidates: [{
+          id: "melon_1", title: "切西瓜", start: 8, end: 36, reviewStatus: "confirmed",
+          containmentCount: 2, containedCandidateIds: ["local_1", "local_2"],
+        }],
         retrievalStats: {}, executionPlan: { allowedCapabilities: ["visual"] },
       };
       const job = {
@@ -4553,7 +4966,7 @@ test("a second content search keeps the previous result visible and reusable", a
           schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true, items: [],
         },
       };
-      const summary = new DOMParser().parseFromString(contentSearchHistorySummaryMarkup(previous), "text/html");
+      const summary = new DOMParser().parseFromString(contentSearchHistorySummaryMarkup(previous, { job }), "text/html");
       const review = new DOMParser().parseFromString(contentSearchReviewMarkup(job, current), "text/html");
       currentJob = job;
       const button = document.createElement("button");
@@ -4581,6 +4994,13 @@ test("a second content search keeps the previous result visible and reusable", a
         retainedTimelineLabels: timelineLabels.filter((item) => item.classList.contains("retained-search")).map((item) => item.textContent),
         currentTimelineLabels: timelineLabels.filter((item) => !item.classList.contains("retained-search")).map((item) => item.textContent),
         retainedTimelineSearchIds: timelineLabels.filter((item) => item.classList.contains("retained-search")).map((item) => item.dataset.contentSearchId),
+        retainedTimelineTops: timelineLabels.filter((item) => item.classList.contains("retained-search")).map((item) => item.style.getPropertyValue("--timeline-label-top")),
+        currentTimelineTop: timelineLabels.find((item) => !item.classList.contains("retained-search"))?.style.getPropertyValue("--timeline-label-top") || "",
+        currentContainsRetained: timelineLabels.find((item) => !item.classList.contains("retained-search"))?.classList.contains("contains-retained") || false,
+        nestedRetainedCount: timelineLabels.filter((item) => item.classList.contains("contained-by-current")).length,
+        timelineTrackLayout: document.querySelector("#timelineViewport")?.dataset.trackLayout || "",
+        timelineTrackNames: [...document.querySelectorAll("#timelineTrackLabels > span")].map((item) => item.textContent),
+        containmentChip: review.querySelector(".content-containment-match")?.textContent || "",
         timelineLegend: document.querySelector("#timelinePanel > footer")?.textContent || "",
       };
     });
@@ -4599,6 +5019,12 @@ test("a second content search keeps the previous result visible and reusable", a
     assert.deepEqual(audit.retainedTimelineSearchIds, ["search_water", "search_water"]);
     assert.equal(audit.currentTimelineLabels.length, 1);
     assert.match(audit.currentTimelineLabels[0], /切西瓜/);
+    assert.equal(audit.timelineTrackLayout, "content-review-history");
+    assert.deepEqual(audit.timelineTrackNames, ["当前检索", "已保留", "画面", "音频"]);
+    assert.ok(audit.retainedTimelineTops.every((top) => Number.parseFloat(top) > Number.parseFloat(audit.currentTimelineTop)));
+    assert.equal(audit.currentContainsRetained, true);
+    assert.equal(audit.nestedRetainedCount, 2);
+    assert.match(audit.containmentChip, /已归并 2 个局部命中/);
     assert.match(audit.timelineLegend, /当前检索.*已保留检索/s);
   } finally {
     await browser.close();
@@ -4632,6 +5058,16 @@ test("person result drawer plays every track clip and exposes one-click composit
       const search = {
         id: "search_person_drawer", status: "confirmed", instruction: "提取所选画面人物的所有出镜片段",
         resultMode: "exhaustive", coverageComplete: true, candidates,
+        candidateEvents: candidates.map((candidate, index) => ({
+          id: `person_event_${index + 1}`,
+          number: index + 1,
+          title: candidate.title,
+          start: candidate.start,
+          end: candidate.end,
+          matchIds: [candidate.id],
+          segmentCount: 1,
+          clipDuration: candidate.duration,
+        })),
         defaultSelectedIds: candidates.map((item) => item.id),
         completeness: { status: "complete", occurrenceCount: 3, clipCount: 3, channels: [] },
         executionPlan: { allowedCapabilities: ["person"] },
@@ -4691,6 +5127,30 @@ test("person result drawer plays every track clip and exposes one-click composit
     assert.equal(playerGeometry.controlsBackground, "none");
     await page.locator("#reviewPanelReviewTab").click();
     assert.match(await page.locator(".person-review-handoff").textContent(), /3 个出镜片段就在下方.*更换人物/s);
+    await page.locator(".content-match-row").first().waitFor({ state: "visible" });
+    const personReviewPalette = await page.evaluate(() => {
+      const event = document.querySelector("#reviewWorkbench .content-candidate-event");
+      const summary = event?.querySelector(":scope > summary");
+      const row = document.querySelector("#reviewWorkbench .content-match-row");
+      const title = row?.querySelector(".content-match-title strong");
+      const evidence = row?.querySelector(".content-evidence-count");
+      const preview = row?.querySelector(".content-match-preview");
+      return {
+        eventBackground: event ? getComputedStyle(event).backgroundColor : "",
+        summaryBackground: summary ? getComputedStyle(summary).backgroundColor : "",
+        rowBackground: row ? getComputedStyle(row).backgroundColor : "",
+        titleColor: title ? getComputedStyle(title).color : "",
+        evidenceBackground: evidence ? getComputedStyle(evidence).backgroundColor : "",
+        previewBackground: preview ? getComputedStyle(preview).backgroundColor : "",
+      };
+    });
+    assert.equal(personReviewPalette.eventBackground, "rgba(255, 255, 255, 0.72)");
+    assert.equal(personReviewPalette.summaryBackground, "rgb(243, 246, 247)");
+    assert.equal(personReviewPalette.rowBackground, "rgb(255, 246, 241)");
+    assert.equal(personReviewPalette.titleColor, "rgb(47, 59, 66)");
+    assert.equal(personReviewPalette.evidenceBackground, "rgba(0, 0, 0, 0)");
+    assert.equal(personReviewPalette.previewBackground, "rgb(255, 244, 237)");
+    await page.screenshot({ path: "test-results/person-review-light-rows.png", fullPage: true });
     assert.equal(await page.locator(".person-edit-mini-flow li").count(), 3);
     assert.match(await page.locator(".person-edit-mini-flow").textContent(), /选择人物.*核对出镜.*合成视频/s);
     assert.match(await page.locator(".person-edit-mini-flow .current").textContent(), /核对出镜/);
@@ -4738,6 +5198,16 @@ test("person result drawer plays every track clip and exposes one-click composit
     assert.equal(await page.locator("[data-drawer-content-candidate]").count(), 3);
     assert.equal(await page.locator("[data-drawer-content-check]:checked").count(), 3);
     assert.match(await page.locator("[data-drawer-content-compose]").textContent(), /合成所选 3 段/);
+    const drawerPalette = await page.evaluate(() => ({
+      background: getComputedStyle(document.querySelector("#candidateDrawer")).backgroundImage,
+      card: getComputedStyle(document.querySelector("[data-drawer-content-candidate]")).backgroundColor,
+      title: getComputedStyle(document.querySelector("#candidateDrawerTitle")).color,
+      primary: getComputedStyle(document.querySelector("[data-drawer-content-compose]")).backgroundColor,
+    }));
+    assert.match(drawerPalette.background, /rgba\(246, 248, 249, 0\.984\)/);
+    assert.match(drawerPalette.card, /255, 255, 255/);
+    assert.equal(drawerPalette.title, "rgb(45, 57, 64)");
+    assert.equal(drawerPalette.primary, "rgb(234, 145, 103)");
     await page.locator("[data-drawer-content-candidate]").nth(1).locator("[data-drawer-content-preview]").click();
     await page.waitForFunction(() => window.__contentPreviewPlayTimes.length > 0);
     let preview = await page.evaluate(() => ({ currentTime: mainVideo.currentTime, previewEnd: candidatePreviewEnd, title: reviewTitle.textContent }));
@@ -5064,6 +5534,7 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
         bodyBackground: getComputedStyle(document.body).backgroundImage,
         homeBackground: getComputedStyle(home).backgroundColor,
         sidebarBackground: getComputedStyle(sidebar).backgroundImage,
+        sidebarBackgroundColor: getComputedStyle(sidebar).backgroundColor,
         studioBackground: getComputedStyle(studio).backgroundImage,
         headingFamily: getComputedStyle(heading).fontFamily,
         assistantFamily: getComputedStyle(assistantCopy).fontFamily,
@@ -5082,8 +5553,8 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
     assert.match(audit.bodyBackground, /rgb\(7, 16, 23\)/);
     assert.match(audit.bodyBackground, /rgb\(255, 255, 255\)/);
     assert.equal(audit.homeBackground, "rgba(0, 0, 0, 0)");
-    assert.match(audit.sidebarBackground, /linear-gradient/);
-    assert.match(audit.sidebarBackground, /rgb\(7, 16, 23\)/);
+    assert.equal(audit.sidebarBackground, "none");
+    assert.equal(audit.sidebarBackgroundColor, "rgb(10, 21, 28)");
     assert.match(audit.studioBackground, /linear-gradient/);
     assert.match(audit.studioBackground, /rgb\(255, 255, 255\)/);
     assert.match(audit.headingFamily, /VP Editorial Song/);
@@ -5138,19 +5609,69 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
       const frame = document.querySelector(".viewer-shell > .media-frame");
       const video = document.querySelector("#mainVideo");
       const controls = document.querySelector(".viewer-shell > .player-controls");
+      const workspaceShellBackground = getComputedStyle(shell).backgroundImage;
+      document.body.dataset.shellMode = "page";
+      const transitionShellBackground = getComputedStyle(shell).backgroundImage;
+      const transitionFrameBackground = getComputedStyle(frame).backgroundImage;
+      setPlayerSurfaceState("loading");
+      const loadingState = shell.dataset.mediaState;
+      showPlayerNotice("读取视频数据失败，请重新加载。", "视频播放失败");
+      const errorState = shell.dataset.mediaState;
+      const errorNoticeBackground = getComputedStyle(document.querySelector("#playerNotice")).backgroundImage;
+      clearPlayerNotice();
+      setPlayerSurfaceState("ready");
+      document.body.dataset.shellMode = "workspace";
       return {
-        shellBackground: getComputedStyle(shell).backgroundImage,
+        shellBackground: workspaceShellBackground,
+        shellBackgroundColor: getComputedStyle(shell).backgroundColor,
         frameBackground: getComputedStyle(frame).backgroundImage,
+        frameBackgroundColor: getComputedStyle(frame).backgroundColor,
         videoBackground: getComputedStyle(video).backgroundColor,
         controlsBackground: getComputedStyle(controls).backgroundColor,
         controlsColor: getComputedStyle(controls).color,
+        transitionShellBackground,
+        transitionFrameBackground,
+        loadingState,
+        errorState,
+        finalMediaState: shell.dataset.mediaState,
+        errorNoticeBackground,
+        assistantTitle: document.querySelector(".chat-panel .director strong")?.textContent || "",
+        assistantAvatarDisplay: getComputedStyle(document.querySelector(".chat-message.assistant > .avatar")).display,
+        assistantRoleDisplay: getComputedStyle(document.querySelector(".chat-message.assistant > .bubble > small")).display,
+        taskSummaryRadius: getComputedStyle(document.querySelector("#directorTaskSummary")).borderRadius,
+        fileIconRadius: getComputedStyle(document.querySelector(".review-header .file-icon")).borderRadius,
+        timelineTrackBackground: getComputedStyle(document.querySelector("#timelineViewport .timeline-track-content")).backgroundColor,
+        timelineTrackBackgroundImage: getComputedStyle(document.querySelector("#timelineViewport .timeline-track-content")).backgroundImage,
+        timelineTrackInsidePanel: Boolean(document.querySelector("#timelineViewport .timeline-track-content")?.closest("#timelinePanel")),
+        timelineThumbnailLaneBackground: getComputedStyle(document.querySelector("#timelineViewport .timeline-thumbnails")).backgroundColor,
       };
     });
+    assert.match(mediaAudit.shellBackground, /radial-gradient/);
     assert.match(mediaAudit.shellBackground, /linear-gradient/);
+    assert.equal(mediaAudit.shellBackgroundColor, "rgba(0, 0, 0, 0)");
+    assert.match(mediaAudit.frameBackground, /radial-gradient/);
     assert.match(mediaAudit.frameBackground, /linear-gradient/);
+    assert.equal(mediaAudit.frameBackgroundColor, "rgba(0, 0, 0, 0)");
     assert.equal(mediaAudit.videoBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(mediaAudit.controlsBackground, "rgba(250, 251, 252, 0.94)");
-    assert.equal(mediaAudit.controlsColor, "rgb(38, 49, 56)");
+    assert.equal(mediaAudit.controlsBackground, "rgba(249, 251, 252, 0.97)");
+    assert.equal(mediaAudit.controlsColor, "rgb(53, 66, 73)");
+    assert.match(mediaAudit.transitionShellBackground, /radial-gradient/);
+    assert.match(mediaAudit.transitionShellBackground, /linear-gradient/);
+    assert.match(mediaAudit.transitionFrameBackground, /radial-gradient/);
+    assert.deepEqual(
+      [mediaAudit.loadingState, mediaAudit.errorState, mediaAudit.finalMediaState],
+      ["loading", "error", "ready"],
+    );
+    assert.match(mediaAudit.errorNoticeBackground, /radial-gradient/);
+    assert.equal(mediaAudit.assistantTitle, "剪辑助理");
+    assert.equal(mediaAudit.assistantAvatarDisplay, "none");
+    assert.equal(mediaAudit.assistantRoleDisplay, "none");
+    assert.equal(mediaAudit.taskSummaryRadius, "10px");
+    assert.equal(mediaAudit.fileIconRadius, "8px");
+    assert.equal(mediaAudit.timelineTrackInsidePanel, true);
+    assert.match(mediaAudit.timelineTrackBackgroundImage, /rgb\(241, 244, 245\)/);
+    assert.doesNotMatch(mediaAudit.timelineTrackBackgroundImage, /rgb\(11, 20, 27\)/);
+    assert.equal(mediaAudit.timelineThumbnailLaneBackground, "rgba(0, 0, 0, 0)");
   } finally {
     await browser.close();
     await stub.close();

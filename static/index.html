@@ -13,6 +13,9 @@
     <link rel="stylesheet" href="/static/visual-system.css?v=20260828-typography-surfaces-2" />
     <link rel="stylesheet" href="/static/workspace-polish.css?v=20260828-workflow-polish-1" />
     <link rel="stylesheet" href="/static/app-shell.css?v=20260828-current-task-1" />
+    <link rel="stylesheet" href="/static/workspace-glass.css?v=20260828-sidebar-brand-center-4" />
+    <link rel="stylesheet" href="/static/workspace-reference.css?v=20260831-media-surface-2" />
+    <link rel="stylesheet" href="/static/sidebar-redesign.css?v=20260831-task-first-1" />
   </head>
   <body data-shell-view="home" data-shell-mode="page" data-sidebar-overlay="false">
     <a class="skip-link" href="#workspace">跳到剪辑工作区</a>
@@ -21,31 +24,40 @@
       <header class="app-sidebar-brand">
         <button type="button" data-shell-view="home" aria-label="返回首页" title="首页">
           <img src="/static/assets/cliptalk-director-icon.png?v=20260812-brand-unified-1" alt="" aria-hidden="true" />
+          <span class="app-sidebar-brand-wordmark" aria-hidden="true"><b>Clip</b><i>Talk</i></span>
         </button>
       </header>
       <nav class="app-sidebar-primary" aria-label="主要功能">
+        <button id="sidebarCurrentTask" class="app-sidebar-action app-sidebar-current" type="button" data-shell-view="workspace" aria-label="当前任务" title="暂无当前任务" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v13H4zM4 9.5h16M7.5 13.5h2.5M12.5 12v4.5M16 13.5h1.5" /></svg><span>当前任务</span><i class="app-sidebar-current-dot" aria-hidden="true"></i>
+        </button>
         <button id="sidebarNewTask" class="app-sidebar-action app-sidebar-new" type="button" aria-label="新建任务" title="新建任务">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>新建任务</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span>新建</span>
         </button>
-        <button id="sidebarHistoryToggle" class="app-sidebar-action app-sidebar-rail-history" type="button" aria-label="打开历史任务" aria-controls="sidebarHistoryDrawer" aria-expanded="false" title="历史任务">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.2-5.7L3.5 8.5M3.5 4.5v4h4M12 7.5V12l3 2" /></svg><span>历史任务</span><b id="sidebarAttentionCount" class="hidden">0</b>
+        <button id="sidebarHistoryToggle" class="app-sidebar-action app-sidebar-tasks" type="button" aria-label="打开任务列表" aria-controls="sidebarHistoryDrawer" aria-expanded="false" title="任务列表">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5h12v14H6zM3.5 7.5H6M3.5 7.5v12h12v-1M9 8.5h6M9 11.5h6M9 14.5h4" /></svg><span>任务</span><b id="sidebarAttentionCount" class="hidden">0</b>
         </button>
-        <button id="sidebarCurrentTask" class="app-sidebar-action" type="button" data-shell-view="workspace" aria-label="当前任务" title="暂无当前任务" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 9h16M8 13h8M8 16h5M7 7h.01M10 7h.01" /></svg><span>当前任务</span><i class="app-sidebar-current-dot" aria-hidden="true"></i>
+        <button class="app-sidebar-action app-sidebar-outputs" type="button" data-shell-view="library" aria-label="打开成片库" title="成片库">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 9h16M8 5v4M16 5v4M9.5 12l5 2.5-5 2.5z" /></svg><span>成片</span><b id="sidebarOutputCount" class="hidden">0</b>
         </button>
-        <button class="app-sidebar-action" type="button" data-shell-view="library" aria-label="成片库" title="成片库">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4zM7 4.5h10M9.5 11l5 2.5-5 2.5z" /></svg><span>成片库</span><b id="sidebarOutputCount" class="hidden">0</b>
-        </button>
+        <div class="app-sidebar-utility" aria-label="系统功能">
+          <button id="engineState" class="app-sidebar-action app-sidebar-service" type="button" data-shell-action="status" aria-label="查看服务状态" title="正在检查服务状态">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12h4l2-4 3.2 8 2.1-4H20.5M6 5.5h12M6 18.5h12" /></svg><span>检查服务</span><i aria-hidden="true"></i>
+          </button>
+          <button id="settingsButton" class="app-sidebar-action app-sidebar-settings" type="button" data-shell-view="settings" aria-label="打开设置" title="设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.04.08H9.92L9.88 20a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.04V9.92L4 9.88a1.7 1.7 0 0 0 .6-1A1.7 1.7 0 0 0 4.26 7l-.06-.06L7.06 4.08l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.04-.08h4.04l.04.08a1.7 1.7 0 0 0 1 .6A1.7 1.7 0 0 0 17 4.26l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19.4 9c.1.4.31.75.6 1l.08.04v4.04L20 14.12a1.7 1.7 0 0 0-.6.88z" /></svg><span>设置</span>
+          </button>
+        </div>
       </nav>
     </aside>
     <section id="sidebarHistoryDrawer" class="app-sidebar-drawer" role="dialog" aria-modal="true" aria-labelledby="sidebarHistoryTitle" aria-hidden="true" inert>
       <header class="app-sidebar-drawer-header">
-        <div><small>CLIPTALK TASKS</small><h2 id="sidebarHistoryTitle">历史任务 <span id="sidebarTaskCount">0</span></h2></div>
-        <button id="sidebarHistoryClose" type="button" aria-label="关闭历史任务" title="关闭">×</button>
+        <div><small>WORKSPACE TASKS</small><h2 id="sidebarHistoryTitle">任务列表 <span id="sidebarTaskCount">0</span></h2></div>
+        <button id="sidebarHistoryClose" type="button" aria-label="关闭任务列表" title="关闭">×</button>
       </header>
       <section class="app-sidebar-catalog">
         <div class="app-sidebar-search-row">
-          <label><span class="sr-only">搜索历史任务</span><i aria-hidden="true">⌕</i><input id="sidebarTaskSearch" type="search" maxlength="120" placeholder="搜索视频或任务" autocomplete="off" /></label>
+          <label><span class="sr-only">搜索任务</span><i aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 4.5 4.5" /></svg></i><input id="sidebarTaskSearch" type="search" maxlength="120" placeholder="搜索视频或任务" autocomplete="off" /></label>
         </div>
         <div class="app-sidebar-filters" role="group" aria-label="任务状态筛选">
           <button class="active" type="button" data-sidebar-filter="all" aria-pressed="true">全部</button>
@@ -56,14 +68,7 @@
         <button id="sidebarLoadMore" class="app-sidebar-load-more hidden" type="button">加载更多任务</button>
       </section>
     </section>
-    <button id="appSidebarScrim" class="app-sidebar-scrim hidden" type="button" aria-label="关闭历史任务"></button>
-    <header class="topbar">
-      <div class="top-actions">
-        <button id="engineState" class="engine" type="button" data-shell-action="status" title="查看服务状态"><i></i><span>正在检查服务状态</span><b>⌄</b></button>
-        <button id="settingsButton" class="top-button settings-button" type="button" aria-label="打开设置"><span aria-hidden="true">⚙</span> 设置</button>
-      </div>
-    </header>
-
+    <button id="appSidebarScrim" class="app-sidebar-scrim hidden" type="button" aria-label="关闭任务列表"></button>
     <main id="workspace" class="studio home-mode">
       <section id="homeView" class="home-view" data-home-state="loading" aria-label="首页" aria-busy="true">
         <header class="home-heading">
@@ -79,7 +84,7 @@
       </section>
       <aside class="chat-panel glass-panel">
         <header class="panel-header">
-          <div class="director"><img class="director-brand-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><strong>AI 视频剪辑助手</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
+          <div class="director"><img class="director-brand-icon" src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><strong>剪辑助理</strong><small><i id="directorDot"></i><b id="directorState">等待素材</b></small></div></div>
           <button id="assistantPanelToggle" class="assistant-panel-toggle" type="button" aria-expanded="true" aria-controls="chatMessages" title="收起 AI 助手"><span aria-hidden="true">‹</span><b>助手</b></button>
           <ol id="directorStageNav" class="director-stage-flow" aria-label="智能剪辑流程">
             <li data-director-flow="brief"><span class="stage-segment" aria-hidden="true"><i></i></span><div><strong>准备</strong><small>确认要求并准备媒体</small></div></li>
@@ -129,11 +134,11 @@
             </label>
             <div id="localPreviewPanel" class="local-preview hidden">
               <video id="localPreviewVideo" controls preload="auto" playsinline></video>
-              <div><strong>源视频已就绪</strong><small>请在任务设置中选择处理方式并确认范围</small></div>
+              <div><span><strong>源视频已就绪</strong><small>请在任务设置中选择处理方式并确认范围</small></span><button id="replaceVideoButton" type="button">更换视频</button></div>
             </div>
           </form>
           <section id="taskSetupView" class="task-setup-view hidden" aria-label="创建剪辑任务">
-            <header><div><small>创建任务</small><strong>选择处理方式并确认本次范围</strong></div><span>任务开始后，AI 助手会显示进度并接收后续修改</span></header>
+            <header><div><small>创建任务</small><strong>确定处理方式与素材范围</strong></div><span>确认后才会上传并开始分析，任务进行中仍可继续补充要求</span></header>
             <div id="taskSetupPortal" class="task-setup-portal"></div>
           </section>
         </div>
@@ -146,16 +151,25 @@
           </header>
 
           <div id="reviewStage" class="review-stage">
-            <div class="viewer-shell" id="viewerShell">
+            <div class="viewer-shell" id="viewerShell" data-media-state="empty">
               <div class="media-frame" id="mediaFrame">
                 <video id="mainVideo" preload="metadata" playsinline></video>
                 <span id="viewerBadge">源视频</span>
                 <div id="playerNotice" class="player-notice hidden" role="status"><span id="playerMediaLoader" class="player-media-loader hidden" data-generative-loader="image" data-loader-active="false" data-loader-variant="scan" data-loader-size="84" data-loader-radius="12" data-loader-label="正在准备视频预览"></span><strong>视频暂时无法播放</strong><p></p><button id="playerRetry" type="button">重新加载</button></div>
               </div>
               <div class="player-controls" aria-label="视频播放控制">
+                <div class="player-transport-group" role="group" aria-label="播放与片段跳转">
                   <button id="playerPlay" class="player-primary-play" type="button" aria-label="播放" data-state="paused" data-tooltip="播放" ></button>
-                  <button id="playerPrevious" class="player-segment-nav" type="button" aria-label="跳转到上一段高光" aria-keyshortcuts="P" data-tooltip="上一段高光 · 只切换预览，不展开详情" disabled>‹</button>
-                  <button id="playerNext" class="player-segment-nav" type="button" aria-label="跳转到下一段高光" aria-keyshortcuts="N" data-tooltip="下一段高光 · 只切换预览，不展开详情" disabled>›</button>
+                  <span class="player-segment-group">
+                    <button id="playerPrevious" class="player-segment-nav" type="button" aria-label="跳转到上一段高光" aria-keyshortcuts="P" data-tooltip="上一段高光 · 只切换预览，不展开详情" disabled>‹</button>
+                    <button id="playerNext" class="player-segment-nav" type="button" aria-label="跳转到下一段高光" aria-keyshortcuts="N" data-tooltip="下一段高光 · 只切换预览，不展开详情" disabled>›</button>
+                  </span>
+                </div>
+                <div class="player-progress-group">
+                  <input id="playerSeek" class="player-seek" type="range" min="0" max="1000" value="0" aria-label="播放进度" />
+                  <span id="playerClock">00:00 / 00:00</span>
+                </div>
+                <div class="player-sound-group" role="group" aria-label="音量控制">
                   <button id="playerMute" class="player-mute-button" type="button" aria-label="静音" aria-pressed="false" data-state="on" data-tooltip="静音">
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path class="speaker-shape" d="M4 9h4l5-4v14l-5-4H4z"></path>
@@ -165,9 +179,8 @@
                     </svg>
                   </button>
                   <input id="playerVolume" class="player-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" />
-                  <span id="playerClock">00:00 / 00:00</span>
-                  <input id="playerSeek" class="player-seek" type="range" min="0" max="1000" value="0" aria-label="播放进度" />
-                  <button id="playerRate" type="button">1.0×</button>
+                </div>
+                  <button id="playerRate" type="button" aria-label="切换播放速度" data-tooltip="切换播放速度">1.0×</button>
                   <button id="playerFullscreen" class="player-fullscreen-button" type="button" aria-label="进入全屏" aria-pressed="false" data-state="enter" data-tooltip="进入全屏">
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <g class="fullscreen-enter-icon">
@@ -189,7 +202,7 @@
               <header><div><small id="clipTime">审核说明</small><h3 id="clipTitle">选择事件或镜头</h3></div><div class="evidence-header-actions"><b id="clipScore"></b><button id="closeEvidenceButton" type="button" aria-label="清空当前详情">×</button></div></header>
               <nav id="contentDetailModeSwitch" class="content-detail-mode-switch hidden" aria-label="内容片段详情模式">
                 <button type="button" data-content-detail-mode="evidence" aria-pressed="true">片段证据</button>
-                <button type="button" data-content-detail-mode="edit" aria-pressed="false">调整边界</button>
+                <button id="contentBoundaryEntryButton" type="button" data-content-detail-mode="edit" data-boundary-entry-kind="edit" aria-pressed="false">调整边界</button>
               </nav>
               <p id="clipReason">点击下方时间轴中的事件或镜头，在这里查看内容说明、时间范围和判断依据。</p>
               <section id="outputExplanation" class="output-explanation hidden" aria-label="AI 成片解释"></section>
@@ -367,7 +380,7 @@
 
     <section id="libraryView" class="app-library-page hidden" aria-labelledby="libraryTitle">
       <header><div><small>OUTPUT LIBRARY</small><h1 id="libraryTitle">成片库</h1><p>查看、下载和管理已经保存的成片版本。</p></div><button type="button" data-library-return>返回当前任务</button></header>
-      <div class="app-library-toolbar"><label><span class="sr-only">搜索成片</span><i aria-hidden="true">⌕</i><input id="librarySearch" type="search" maxlength="120" placeholder="搜索成片" autocomplete="off" /></label><select id="librarySort" aria-label="成片排序"><option value="newest">创建时间 · 最新</option><option value="oldest">创建时间 · 最早</option><option value="duration">时长 · 最长</option></select></div>
+      <div class="app-library-toolbar"><label><span class="sr-only">搜索成片</span><i aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 4.5 4.5" /></svg></i><input id="librarySearch" type="search" maxlength="120" placeholder="搜索成片" autocomplete="off" /></label><select id="librarySort" aria-label="成片排序"><option value="newest">创建时间 · 最新</option><option value="oldest">创建时间 · 最早</option><option value="duration">时长 · 最长</option></select></div>
       <div id="libraryOutputList" class="app-library-list" aria-live="polite"><div class="app-library-loading" role="status">正在读取成片库</div></div>
     </section>
 
@@ -692,8 +705,8 @@
     <script src="/static/review-actions.js?v=20260821-review-actions-1" defer></script>
     <script src="/static/workspace-state.js?v=20260828-canonical-state-1" defer></script>
     <script src="/static/ui-copy.js?v=20260828-copy-contract-1" defer></script>
-    <script src="/static/task-creation.js?v=20260827-guided-workspace-6" defer></script>
-    <script src="/static/app.js?v=20260828-settings-workspace-3" defer></script>
-    <script src="/static/app-shell.js?v=20260828-current-task-1" defer></script>
+    <script src="/static/task-creation.js?v=20260831-guided-workspace-7" defer></script>
+    <script src="/static/app.js?v=20260831-media-surface-3" defer></script>
+    <script src="/static/app-shell.js?v=20260831-interface-coherence-3" defer></script>
   </body>
 </html>

@@ -17,6 +17,7 @@ from app.content_search import (
     build_inverted_index,
     build_macro_chapters,
     content_query_cache_key,
+    collapse_contained_content_matches,
     content_chat_router_prompt,
     content_matches_to_segments,
     content_evidence_plan,
@@ -1041,6 +1042,58 @@ class ContentRankingTests(unittest.TestCase):
         self.assertEqual(set(merged[0]["matchedModalities"]), {"speech", "visual"})
         self.assertTrue(merged[0]["occurrenceId"].startswith("occ_"))
         self.assertEqual(merged[0]["position"], 1)
+
+    def test_contained_matches_become_provenance_instead_of_peer_candidates(self) -> None:
+        collapsed = collapse_contained_content_matches([
+            {
+                "id": "complete", "start": 10, "end": 30, "duration": 20,
+                "score": 78, "confidence": .78, "evidenceType": "visual",
+                "matchedModalities": ["visual"], "predicateId": "action",
+                "evidenceRefs": [{"id": "broad", "type": "visual"}],
+            },
+            {
+                "id": "precise", "start": 13, "end": 16, "duration": 3,
+                "score": 91, "confidence": .91, "evidenceType": "visual",
+                "matchedModalities": ["visual"], "predicateId": "action",
+                "evidenceRefs": [{"id": "precise-evidence", "type": "visual"}],
+            },
+            {
+                "id": "later", "start": 40, "end": 43, "duration": 3,
+                "score": 84, "confidence": .84, "evidenceType": "visual",
+                "matchedModalities": ["visual"], "predicateId": "action",
+            },
+        ])
+        self.assertEqual([item["id"] for item in collapsed], ["complete", "later"])
+        self.assertEqual(collapsed[0]["containedCandidateIds"], ["precise"])
+        self.assertEqual(collapsed[0]["containmentCount"], 1)
+        self.assertEqual(collapsed[0]["score"], 91.0)
+        self.assertEqual(
+            {item["id"] for item in collapsed[0]["evidenceRefs"]},
+            {"broad", "precise-evidence"},
+        )
+
+    def test_containment_keeps_different_or_branch_results_separate(self) -> None:
+        collapsed = collapse_contained_content_matches([
+            {
+                "id": "outer", "start": 10, "end": 30, "evidenceType": "visual",
+                "predicateId": "pouring", "eventIds": ["event_a"],
+            },
+            {
+                "id": "inner", "start": 13, "end": 16, "evidenceType": "visual",
+                "predicateId": "washing", "eventIds": ["event_b"],
+            },
+        ])
+        self.assertEqual([item["id"] for item in collapsed], ["outer", "inner"])
+
+    def test_exact_boundary_search_removes_broad_recall_container(self) -> None:
+        matches = [
+            {"id": "outer", "start": 10, "end": 30, "evidenceType": "speech"},
+            {"id": "inner", "start": 13, "end": 16, "evidenceType": "speech"},
+        ]
+        collapsed = collapse_contained_content_matches(matches, boundary_mode="exact")
+        self.assertEqual([item["id"] for item in collapsed], ["inner"])
+        self.assertEqual(collapsed[0]["containingCandidateIds"], ["outer"])
+        self.assertEqual(collapsed[0]["containmentCount"], 1)
 
     def test_adjacent_visual_matches_from_different_shots_stay_separate(self) -> None:
         merged = merge_content_matches([
@@ -3680,7 +3733,8 @@ class ContentConfirmationTests(unittest.TestCase):
             source_hash="manual-boundary-invalid-hash",
         )
         job.update({
-            "taskMode": "content_extract", "videoInfo": {"duration": 30, "frame_rate": 25},
+            "taskMode": "content_extract", "status": "awaiting_content_confirmation",
+            "videoInfo": {"duration": 30, "frame_rate": 25},
             "contentSearch": {"id": "search_1", "candidates": [{"id": "m1", "start": 1, "end": 2}]},
         })
         main_app.jobs[job_id] = job

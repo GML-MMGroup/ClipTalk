@@ -2205,6 +2205,196 @@ def merge_content_matches(
     return merged
 
 
+def _containment_semantics_compatible(
+    outer: dict[str, Any], inner: dict[str, Any],
+) -> bool:
+    """Return whether nested ranges are alternate boundaries for one result.
+
+    A source interval may legitimately contain an unrelated hit from another
+    OR branch.  Collapse only when the available subject/predicate metadata
+    does not prove that the two rows describe different occurrences.
+    """
+    outer_predicates = _match_predicate_ids(outer)
+    inner_predicates = _match_predicate_ids(inner)
+    if outer_predicates and inner_predicates and outer_predicates.isdisjoint(inner_predicates):
+        shared_context = bool(
+            _match_memberships(outer, "eventIds") & _match_memberships(inner, "eventIds")
+            or _match_memberships(outer, "shotIds") & _match_memberships(inner, "shotIds")
+        )
+        if not shared_context:
+            return False
+    outer_people = _match_memberships(outer, "matchedPersonIds")
+    inner_people = _match_memberships(inner, "matchedPersonIds")
+    if outer_people and inner_people and outer_people.isdisjoint(inner_people):
+        return False
+    outer_speakers, inner_speakers = _match_speakers(outer), _match_speakers(inner)
+    if outer_speakers and inner_speakers and outer_speakers.isdisjoint(inner_speakers):
+        return False
+    outer_modalities = {
+        str(value) for value in outer.get("matchedModalities") or [outer.get("evidenceType")]
+        if value
+    }
+    inner_modalities = {
+        str(value) for value in inner.get("matchedModalities") or [inner.get("evidenceType")]
+        if value
+    }
+    return bool(
+        not outer_modalities or not inner_modalities
+        or outer_modalities & inner_modalities
+        or outer_predicates & inner_predicates
+    )
+
+
+def collapse_contained_content_matches(
+    matches: list[dict[str, Any]], *, boundary_mode: str = "complete",
+    minimum_coverage: float = .96,
+) -> list[dict[str, Any]]:
+    """Remove nested peer candidates after their final boundaries are known.
+
+    Complete/context searches keep the complete outer occurrence and preserve
+    every nested hit as provenance on that occurrence. Exact-boundary searches
+    do the inverse: they retain the precise inner rows and remove their broad
+    recall containers.
+    """
+    normalized_mode = str(boundary_mode or "complete")
+    if len(matches) < 2:
+        return [copy.deepcopy(item) for item in matches]
+    candidates = [copy.deepcopy(item) for item in matches]
+    protected = {
+        index for index, item in enumerate(candidates)
+        if str(item.get("reviewStatus") or "") in {"kept", "rejected"}
+        or bool(item.get("manualBoundary") or item.get("manual"))
+    }
+    containers: dict[int, list[int]] = {}
+    for child_index, child in enumerate(candidates):
+        if child_index in protected:
+            continue
+        child_start = _number(child.get("start"))
+        child_end = _number(child.get("end"))
+        child_duration = child_end - child_start
+        if child_duration <= 0:
+            continue
+        for outer_index, outer in enumerate(candidates):
+            if outer_index == child_index or outer_index in protected:
+                continue
+            outer_start = _number(outer.get("start"))
+            outer_end = _number(outer.get("end"))
+            outer_duration = outer_end - outer_start
+            if outer_duration <= child_duration + .2:
+                continue
+            overlap = max(0.0, min(outer_end, child_end) - max(outer_start, child_start))
+            if overlap / max(.001, child_duration) < minimum_coverage:
+                continue
+            if not _containment_semantics_compatible(outer, child):
+                continue
+            containers.setdefault(child_index, []).append(outer_index)
+
+    if normalized_mode == "exact":
+        broad_containers = {
+            outer_index for outer_indexes in containers.values() for outer_index in outer_indexes
+        }
+        result = []
+        for index, candidate in enumerate(candidates):
+            if index in broad_containers:
+                continue
+            parent_indexes = containers.get(index, [])
+            candidate["containingCandidateIds"] = list(dict.fromkeys(
+                str(candidates[parent_index].get("id") or "") for parent_index in parent_indexes
+                if candidates[parent_index].get("id")
+            ))
+            candidate["containmentCount"] = len(candidate["containingCandidateIds"])
+            if parent_indexes:
+                candidate["recallChannels"] = list(dict.fromkeys([
+                    *(candidate.get("recallChannels") or []), "broad_container_removed",
+                ]))
+            result.append(candidate)
+        result.sort(key=lambda item: (_number(item.get("start")), _number(item.get("end"))))
+        for position, item in enumerate(result, 1):
+            item["position"] = position
+        return result
+
+    absorbed = set(containers)
+    roots = [index for index in range(len(candidates)) if index not in absorbed]
+    for child_index in sorted(absorbed, key=lambda value: -(
+        _number(candidates[value].get("end")) - _number(candidates[value].get("start"))
+    )):
+        child = candidates[child_index]
+        compatible_roots = [
+            root_index for root_index in roots
+            if root_index in containers.get(child_index, [])
+            or (
+                _number(candidates[root_index].get("start")) <= _number(child.get("start")) + .05
+                and _number(candidates[root_index].get("end")) >= _number(child.get("end")) - .05
+                and _containment_semantics_compatible(candidates[root_index], child)
+            )
+        ]
+        if not compatible_roots:
+            absorbed.discard(child_index)
+            roots.append(child_index)
+            continue
+        parent_index = min(
+            compatible_roots,
+            key=lambda value: _number(candidates[value].get("end")) - _number(candidates[value].get("start")),
+        )
+        parent = candidates[parent_index]
+        summary = {
+            key: copy.deepcopy(child.get(key)) for key in (
+                "id", "title", "start", "end", "duration", "score", "confidence",
+                "evidenceType", "matchType", "boundarySource",
+            ) if child.get(key) is not None
+        }
+        parent["containedMatches"] = [
+            *(parent.get("containedMatches") or []), summary,
+            *(child.get("containedMatches") or []),
+        ]
+        parent["containedCandidateIds"] = list(dict.fromkeys([
+            *(parent.get("containedCandidateIds") or []), str(child.get("id") or ""),
+            *(child.get("containedCandidateIds") or []),
+        ]))
+        for field in (
+            "matchedUnitIds", "sourceOccurrenceIds", "recallChannels", "matchedSegmentIds",
+            "matchedPersonIds", "matchedPersonLabels", "personTrackIds", "shotIds", "eventIds",
+            "matchedModalities", "evidenceTimes",
+        ):
+            parent[field] = list(dict.fromkeys([
+                *(parent.get(field) or []), *(child.get(field) or []),
+            ]))
+        for field in ("evidenceRefs", "evidenceItems", "predicateResults", "speechUnits"):
+            combined = [
+                *(parent.get(field) or []), *(child.get(field) or []),
+            ]
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for value in combined:
+                if not isinstance(value, dict):
+                    continue
+                identity = str(
+                    value.get("id") or value.get("predicateId")
+                    or f"{value.get('start')}:{value.get('end')}:{value.get('type')}"
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                unique.append(copy.deepcopy(value))
+            parent[field] = unique
+        parent["score"] = round(max(_number(parent.get("score")), _number(child.get("score"))), 1)
+        parent["confidence"] = round(max(
+            _number(parent.get("confidence")), _number(child.get("confidence")),
+        ), 3)
+        parent["selected"] = bool(parent.get("selected") or child.get("selected"))
+        parent["requiresReview"] = bool(parent.get("requiresReview") or child.get("requiresReview"))
+        parent["recallChannels"] = list(dict.fromkeys([
+            *(parent.get("recallChannels") or []), "containment_collapsed",
+        ]))
+
+    result = [candidates[index] for index in range(len(candidates)) if index not in absorbed]
+    result.sort(key=lambda item: (_number(item.get("start")), _number(item.get("end"))))
+    for position, item in enumerate(result, 1):
+        item["containmentCount"] = len(item.get("containedCandidateIds") or [])
+        item["position"] = position
+    return result
+
+
 def content_matches_to_segments(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     for position, match in enumerate(sorted(matches, key=lambda item: _number(item.get("start")))):

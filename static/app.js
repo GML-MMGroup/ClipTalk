@@ -217,6 +217,7 @@ window.ClipTalkCurrentJobId = () => String(currentJob?.id || "");
 window.ClipTalkCurrentJobSnapshot = () => currentJob;
 let currentOutput = null;
 let currentCandidate = null;
+let currentContentPreviewSearchId = "";
 let currentEventGroup = null;
 let currentEventSegment = null;
 let pollTimer = null;
@@ -1376,6 +1377,26 @@ function reviewDockContentRoot() {
   return $("#chatStageHost")?.querySelector(".content-search-review:not(.historical)") || null;
 }
 
+function contentReviewRootsForSearch(job = currentJob, searchId = "") {
+  const targetSearchId = String(
+    searchId || job?.contentSearchSession?.activeSearchId || job?.contentSearch?.id || "",
+  );
+  if (!targetSearchId) return [];
+  return [...document.querySelectorAll(".content-search-review[data-content-search-id]")]
+    .filter((root) => String(root.dataset.contentSearchId || "") === targetSearchId);
+}
+
+function activeContentReviewRoot(job = currentJob, { searchId = "", preferredRoot = null } = {}) {
+  const roots = contentReviewRootsForSearch(job, searchId);
+  if (preferredRoot?.isConnected && roots.includes(preferredRoot)) return preferredRoot;
+  return roots.find((root) => root.closest("#chatStageHost") && !root.classList.contains("historical"))
+    || roots.find((root) => root.closest("#reviewWorkbench") && !root.classList.contains("historical"))
+    || roots.find((root) => !root.hidden && !root.classList.contains("hidden") && !root.closest(".hidden"))
+    || roots.find((root) => !root.classList.contains("historical"))
+    || roots[0]
+    || null;
+}
+
 function selectedHighlightReviewGroups(job = currentJob, host = $("#chatStageHost")) {
   if (!job || !host) return [];
   const railInputs = [...host.querySelectorAll(".rail-event-check")];
@@ -1870,6 +1891,26 @@ function executionForJob(job = currentJob) {
       canDelete: !active,
     },
   };
+}
+
+function interactionCapabilitiesForJob(job = currentJob) {
+  const active = Boolean(executionForJob(job).active);
+  const contentTask = String(job?.taskMode || "") === "content_extract";
+  const waitingForContentReview = String(job?.status || "") === "awaiting_content_confirmation";
+  const reason = active ? "当前任务正在处理，完成后即可操作" : "";
+  return {
+    active,
+    reason,
+    canRestoreContentSearch: contentTask && !active,
+    canMutateContentBasket: contentTask && !active,
+    canEditContentBoundary: contentTask && !active && waitingForContentReview,
+    canCorrectPerson: !active,
+    canCorrectVoice: !active,
+  };
+}
+
+function unavailableInteractionMessage(job = currentJob, fallback = "当前操作暂不可用") {
+  return interactionCapabilitiesForJob(job).reason || fallback;
 }
 
 function executionCancelLabel(job = currentJob) {
@@ -2593,12 +2634,12 @@ function bindReviewWorkbenchResizer() {
   });
 }
 
-function setReviewLowerPanelMode(mode, { scroll = false } = {}) {
+function setReviewLowerPanelMode(mode, { scroll = false, compact = false } = {}) {
   const normalized = ["collapsed", "review", "timeline"].includes(mode) ? mode : "collapsed";
-  if (normalized === "timeline" && currentJob) updateTimeline();
+  if (normalized === "timeline" && currentJob && !compact) updateTimeline();
   if (normalized === "timeline" && $("#timelinePanel")?.classList.contains("hidden")) return reviewLowerPanelMode;
   reviewLowerPanelMode = normalized;
-  timelineExpanded = normalized === "timeline";
+  timelineExpanded = normalized === "timeline" && !compact;
   document.body.dataset.timelineExpanded = String(timelineExpanded);
   document.body.dataset.precisionEditing = String(timelineExpanded);
   const toggle = $("#timelineExpandToggle");
@@ -2836,6 +2877,14 @@ function stopSourcePreviewPolling() {
   sourcePreviewPollTimer = null;
 }
 
+function setPlayerSurfaceState(state) {
+  if (!viewerShell) return;
+  const nextState = ["empty", "loading", "ready", "error"].includes(String(state))
+    ? String(state)
+    : "empty";
+  viewerShell.dataset.mediaState = nextState;
+}
+
 function switchToReadySourcePreview() {
   if (!currentJob?.previewReady || !["source", "candidate", "segment"].includes(viewerMediaKind)) return;
   const resumeTime = Number(mainVideo.currentTime || 0);
@@ -2892,6 +2941,7 @@ function showPlayerNotice(message, title = "视频暂时无法播放") {
   $("#playerNotice strong") && ($("#playerNotice strong").textContent = title);
   $("#playerNotice p") && ($("#playerNotice p").textContent = message);
   const loading = /正在|准备|等待.+(?:生成|完成)|切换.+代理|恢复.+预览/.test(`${title} ${message}`);
+  setPlayerSurfaceState(loading ? "loading" : "error");
   const loader = $("#playerMediaLoader");
   if (loader) {
     loader.dataset.loaderActive = String(loading);
@@ -2920,6 +2970,7 @@ function setMainVideoSource(source, { force = false } = {}) {
   if (!mainVideo) return false;
   const nextSource = String(source || "").trim();
   if (!nextSource) {
+    setPlayerSurfaceState("empty");
     if (mainVideo.getAttribute("src")) {
       playbackRequestToken += 1;
       mainVideoAutoplayToken += 1;
@@ -2931,6 +2982,7 @@ function setMainVideoSource(source, { force = false } = {}) {
   }
   const currentSource = mainVideo.getAttribute("src") || mainVideo.currentSrc || "";
   if (!force && mediaSourceIdentity(currentSource) === mediaSourceIdentity(nextSource)) return false;
+  setPlayerSurfaceState("loading");
   playbackRequestToken += 1;
   mainVideoAutoplayToken += 1;
   mainVideo.src = nextSource;
@@ -3740,7 +3792,13 @@ function updatePlayerChrome() {
     fullscreen.setAttribute("aria-pressed", String(active));
   }
   if (clock) clock.textContent = `${formatClock(current)} / ${formatClock(duration)}`;
-  if (seek) seek.value = duration > 0 ? String(Math.round(current / duration * 1000)) : "0";
+  if (seek) {
+    const progress = duration > 0 ? Math.max(0, Math.min(1, current / duration)) : 0;
+    seek.value = String(Math.round(progress * 1000));
+    seek.style.setProperty("--player-progress", `${progress * 100}%`);
+  }
+  const volume = $("#playerVolume");
+  if (volume) volume.style.setProperty("--player-volume", `${Math.max(0, Math.min(1, Number(mainVideo.volume || 0))) * 100}%`);
 }
 
 function timelineDurationValue() {
@@ -3836,7 +3894,8 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
       audioHeight,
     };
   }
-  const singleContentRow = layoutKind === "content-review";
+  const singleContentRow = ["content-review", "content-review-history"].includes(layoutKind);
+  const splitContentRows = layoutKind === "content-review-history";
   const pictureHeight = clampTimelineValue(
     Math.round(height * (singleContentRow ? .29 : .2)),
     profile.pictureMinimum,
@@ -3850,7 +3909,7 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
     profile.audioMinimum,
     singleContentRow ? Math.round(profile.audioMaximum * 1.7) : profile.audioMaximum,
   );
-  const hierarchyHeight = Math.max(singleContentRow ? 70 : 96, height - pictureHeight - audioHeight);
+  const hierarchyHeight = Math.max(singleContentRow ? (splitContentRows ? 92 : 70) : 96, height - pictureHeight - audioHeight);
   const eventRowHeight = singleContentRow ? hierarchyHeight : Math.round(hierarchyHeight * .55);
   const shotRowHeight = singleContentRow ? 0 : hierarchyHeight - eventRowHeight;
   const eventLabelsHeight = Math.max(32, eventRowHeight - (singleContentRow ? 4 : profile.relationHeight));
@@ -4715,12 +4774,25 @@ function timelinePresentationModel(job = currentJob, outputComparison = null) {
       ariaLabel: "人物出镜时间线",
     };
   }
+  const activeSearchId = String(job?.contentSearchSession?.activeSearchId || job?.contentSearch?.id || "");
+  const hasRetainedSearchResults = contentSearchRecordsForJob(job).some((record) => {
+    const retainedCount = Math.max(
+      Number(record?.candidateCount || 0),
+      Number(record?.candidates?.length || 0),
+      Number(record?.timelineCandidates?.length || 0),
+    );
+    return String(record?.id || "") !== activeSearchId && retainedCount > 0;
+  });
   return {
     contentMode: true,
-    layoutKind: "content-review",
+    layoutKind: hasRetainedSearchResults ? "content-review-history" : "content-review",
     title: "内容检索时间轴",
-    trackLabels: ["匹配片段", "画面", "音频"],
-    hint: "点击匹配片段查看内容与证据",
+    trackLabels: hasRetainedSearchResults
+      ? ["当前检索", "已保留", "画面", "音频"]
+      : ["匹配片段", "画面", "音频"],
+    hint: hasRetainedSearchResults
+      ? "当前结果与以前保留的结果分轨显示；点击片段查看对应检索与证据"
+      : "点击匹配片段查看内容与证据",
     emptyTitle: "选择匹配片段",
     emptyReason: "点击下方时间轴中的匹配片段，在这里查看时间范围、命中内容和判断证据。",
     ariaLabel: "内容检索时间轴",
@@ -5038,8 +5110,12 @@ async function loadTimelineTranscript(job) {
       if (currentCandidate) renderClipEvidence(currentCandidate, "candidate");
       else if (currentEventSegment) renderClipEvidence(currentEventSegment, "segment");
       else if (currentEventGroup) renderClipEvidence(currentEventGroup, "event");
-      const contentSearchRoot = document.querySelector(".content-search-review");
-      if (contentSearchRoot) syncContentSearchSubtitleControls(contentSearchRoot, currentJob);
+      contentReviewRootsForSearch(currentJob).forEach((contentSearchRoot) => {
+        syncContentSearchSubtitleControls(
+          contentSearchRoot,
+          contentSearchJobForRoot(contentSearchRoot, currentJob),
+        );
+      });
     }
   } catch {
     if (currentJob?.id === job.id) {
@@ -5191,7 +5267,7 @@ function renderTimelineProposalPreview(job = currentJob) {
 
 function contentSearchTimelineItems(job = currentJob) {
   const activeSearchId = String(job?.contentSearchSession?.activeSearchId || job?.contentSearch?.id || "");
-  return contentSearchRecordsForJob(job).flatMap((record, searchIndex) => {
+  const items = contentSearchRecordsForJob(job).flatMap((record, searchIndex) => {
     const candidates = Array.isArray(record?.candidates) && record.candidates.length
       ? record.candidates
       : Array.isArray(record?.timelineCandidates) ? record.timelineCandidates : [];
@@ -5209,6 +5285,20 @@ function contentSearchTimelineItems(job = currentJob) {
       _contentSearchHistorical: historical,
     }));
   });
+  const currentItems = items.filter((item) => !item._contentSearchHistorical);
+  const retainedItems = items.filter((item) => item._contentSearchHistorical);
+  currentItems.forEach((current) => {
+    const contained = retainedItems.filter((retained) => (
+      Number(current.start) <= Number(retained.start) + .05
+      && Number(current.end) >= Number(retained.end) - .05
+    ));
+    current._containedHistoricalCount = contained.length;
+    current._containedHistoricalIds = contained.map((item) => String(item.id || ""));
+    contained.forEach((retained) => {
+      retained._containedByCurrentId = String(current.id || "");
+    });
+  });
+  return items;
 }
 
 function updateTimeline() {
@@ -5220,19 +5310,18 @@ function updateTimeline() {
   timelinePanel.classList.remove("hidden");
   const duration = timelineDurationValue();
   const contentMode = String(currentJob.taskMode || "") === "content_extract";
-  const currentContentMatch = contentMode && currentCandidate?.id
-    ? (currentJob.contentSearch?.candidates || []).find((item) => String(item.id) === String(currentCandidate.id))
-    : null;
   const contentTrimGroup = $("#timelineContentTrimGroup");
   const contentTrimButton = $("#timelineContentTrim");
-  const contentTrimAvailable = Boolean(currentContentMatch && !currentOutput);
-  contentTrimGroup?.classList.toggle("hidden", !contentTrimAvailable);
+  const contentTrimState = contentMode && currentCandidate?.id && !currentOutput
+    ? contentBoundaryEntryState(currentCandidate)
+    : null;
+  contentTrimGroup?.classList.toggle("hidden", !contentTrimState);
   if (contentTrimButton) {
-    contentTrimButton.disabled = !contentTrimAvailable;
-    contentTrimButton.textContent = "调整当前片段";
-    contentTrimButton.title = currentContentMatch
-      ? `调整「${currentContentMatch.title || "当前片段"}」的开始和结束位置`
-      : "请先预览一个内容片段";
+    contentTrimButton.disabled = !contentTrimState || contentTrimState.disabled || actionBusy;
+    contentTrimButton.textContent = contentTrimState?.kind === "edit" ? "调整当前片段" : (contentTrimState?.label || "调整当前片段");
+    contentTrimButton.title = contentTrimState?.reason || "请先预览一个内容片段";
+    contentTrimButton.dataset.boundaryEntryKind = contentTrimState?.kind || "unavailable";
+    contentTrimButton.dataset.boundarySearchId = contentTrimState?.searchId || "";
   }
   const durationNode = $("#timelineDuration");
   if (durationNode) durationNode.textContent = formatTime(duration);
@@ -5244,7 +5333,8 @@ function updateTimeline() {
   const dedicatedSourceTracks = !outputComparison
     && ["speaker_edit", "person_edit"].includes(workflowKindForJob(currentJob));
   const timelinePresentation = timelinePresentationModel(currentJob, outputComparison);
-  const contentReviewSingleLayer = timelinePresentation.layoutKind === "content-review";
+  const contentReviewSingleLayer = ["content-review", "content-review-history"].includes(timelinePresentation.layoutKind);
+  const contentHistorySplit = timelinePresentation.layoutKind === "content-review-history";
   applyTimelinePresentation(timelinePresentation);
   timelineViewport?.setAttribute("data-coordinate-space", "source");
   timelineViewport?.removeAttribute("data-composed-hierarchy");
@@ -5460,12 +5550,16 @@ function updateTimeline() {
     };
   }).filter(Boolean).sort((left, right) => Number(left.item.start) - Number(right.item.start)) : [];
 
-  const maximumLabelLanes = densityProfile.maximumLabelLanes;
+  const maximumLabelLanes = contentHistorySplit ? 2 : densityProfile.maximumLabelLanes;
   const laneEnds = [];
   labelEntries.forEach((entry) => {
+    const fixedLane = contentHistorySplit ? (entry.item?._contentSearchHistorical ? 1 : 0) : null;
     const place = () => {
       let best = null;
-      for (let lane = 0; lane < maximumLabelLanes; lane += 1) {
+      const lanes = fixedLane == null
+        ? Array.from({ length: maximumLabelLanes }, (_, lane) => lane)
+        : [fixedLane];
+      for (const lane of lanes) {
         const occupied = Number(laneEnds[lane] || -6);
         const left = Math.max(entry.left, occupied + 6);
         if (left + entry.width > trackWidth) continue;
@@ -5489,14 +5583,19 @@ function updateTimeline() {
       placement = place();
     }
     if (!placement) {
-      const lane = laneEnds.length < maximumLabelLanes ? laneEnds.length : laneEnds.indexOf(Math.min(...laneEnds));
+      const lane = fixedLane == null
+        ? (laneEnds.length < maximumLabelLanes ? laneEnds.length : laneEnds.indexOf(Math.min(...laneEnds)))
+        : fixedLane;
       placement = { lane: Math.max(0, lane), left: Math.max(0, Math.min(trackWidth - entry.width, entry.left)), shift: 0 };
     }
     entry.lane = placement.lane;
     entry.left = placement.left;
     laneEnds[entry.lane] = Math.max(laneEnds[entry.lane] || 0, entry.left + entry.width);
   });
-  const labelLanes = Math.max(1, Math.min(maximumLabelLanes, laneEnds.length || 1));
+  const labelLanes = contentHistorySplit
+    ? 2
+    : Math.max(1, Math.min(maximumLabelLanes, laneEnds.length || 1));
+  const labelVerticalOffset = contentHistorySplit ? 0 : -4;
   const hasSourceReviewItems = items.some((item) => !item._output);
   const numberedShots = contentReviewSingleLayer
     ? []
@@ -5611,7 +5710,7 @@ function updateTimeline() {
     }).join("");
     const curveMarkup = contentMode ? "" : labelEntries.flatMap((entry) => {
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
-      const labelTop = Math.max(0, entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) - 4);
+      const labelTop = Math.max(0, entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) + labelVerticalOffset);
       const startX = Math.max(0, Math.min(trackWidth, entry.left + entry.width / 2));
       const startY = labelTop + layout.eventCardHeight;
       return relationTargets.filter((target) => target.relationKey === entry.relationKey).map((target) => {
@@ -5625,7 +5724,7 @@ function updateTimeline() {
       const targets = relationTargets.filter((target) => target.relationKey === entry.relationKey);
       if (!targets.length) return [];
       const stateClasses = `${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : ""}`;
-      const labelTop = Math.max(0, entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) - 4);
+      const labelTop = Math.max(0, entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) + labelVerticalOffset);
       const startX = Math.max(0, Math.min(trackWidth, entry.left + entry.width / 2));
       const startY = labelTop + layout.eventCardHeight;
       const eventPoint = `<circle class="timeline-connection-point event-point${stateClasses}" data-timeline-relation="${entry.relationKey}" cx="${startX.toFixed(2)}" cy="${startY.toFixed(2)}" r="3.6"></circle>`;
@@ -5662,7 +5761,12 @@ function updateTimeline() {
       ? retainedSearch ? `已保留检索“${retainedQuery}”的匹配片段` : `当前检索匹配片段 ${sequenceLabel}`
       : entry.eventNumber ? `事件 ${sequenceLabel}` : `候选 ${sequenceLabel}`;
     const duplicateFact = entry.duplicateCount ? `已折叠 ${entry.duplicateCount} 个重复分析结果` : "";
-    const labelTop = entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) - 4;
+    const containmentFact = retainedSearch && entry.item?._containedByCurrentId
+      ? "位于当前检索片段的时间范围内"
+      : Number(entry.item?._containedHistoricalCount || 0) > 0
+        ? `时间范围覆盖 ${Number(entry.item._containedHistoricalCount)} 个已保留片段`
+        : "";
+    const labelTop = entry.lane * labelLaneHeight + Math.max(0, (labelLaneHeight - layout.eventCardHeight) / 2) + labelVerticalOffset;
     const comparisonClass = outputComparison ? (entry.usedInOutput ? " used-in-output" : " unused-in-output") : "";
     const statusBadge = retainedSearch
       ? `<em title="${escapeHtml(retainedQuery)}">上次 · ${escapeHtml(retainedQueryShort)}</em>`
@@ -5670,7 +5774,7 @@ function updateTimeline() {
       ? (entry.usedInOutput && !entry.compact && !entry.narrow ? "<em>已采用</em>" : "")
       : (entry.isRecommendedEvent && !entry.compact && !entry.narrow ? `<em>${contentMode ? "已选" : "推荐"}</em>` : "");
     const countFact = contentMode ? "" : `${entry.shotCount} 个镜头`;
-    return `<button type="button" class="timeline-label${contentMode ? " content-match" : ""}${retainedSearch ? " retained-search" : ""}${entry.narrow ? " narrow" : ""}${entry.compact ? " compact" : ""}${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${comparisonClass}" data-timeline-label-position="${entry.position}" data-timeline-relation="${entry.relationKey}"${entry.item?._contentSearchId ? ` data-content-search-id="${escapeHtml(entry.item._contentSearchId)}"` : ""} style="--timeline-label-left:${entry.left}px;--timeline-label-width:${entry.width}px;--timeline-label-top:${Math.max(0, labelTop)}px;--timeline-label-anchor:${anchorOffset}px" title="${escapeHtml([kindLabel, entry.title, countFact, outputComparison ? (entry.usedInOutput ? `当前${contentMode ? "内容视频" : "成片"}已采用` : `当前${contentMode ? "内容视频" : "成片"}未采用`) : "", range, duplicateFact, entry.detail].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([kindLabel, entry.title, retainedSearch ? "已保留但未自动加入本次生成" : outputComparison ? (entry.usedInOutput ? "当前版本已采用" : "当前版本未采用") : (entry.isRecommendedEvent ? (contentMode ? "已选" : "AI 推荐") : "备选"), duplicateFact, entry.detail].filter(Boolean).join("，"))}"><b>${sequenceLabel}</b><span>${escapeHtml(entry.title)}</span>${statusBadge}</button>`;
+    return `<button type="button" class="timeline-label${contentMode ? " content-match" : ""}${retainedSearch ? " retained-search" : ""}${entry.item?._containedByCurrentId ? " contained-by-current" : ""}${Number(entry.item?._containedHistoricalCount || 0) > 0 ? " contains-retained" : ""}${entry.narrow ? " narrow" : ""}${entry.compact ? " compact" : ""}${entry.isRecommendedEvent ? " recommended" : ""}${entry.active ? " active" : ""}${comparisonClass}" data-timeline-label-position="${entry.position}" data-timeline-relation="${entry.relationKey}" data-timeline-search-track="${retainedSearch ? "retained" : "current"}"${entry.item?._contentSearchId ? ` data-content-search-id="${escapeHtml(entry.item._contentSearchId)}"` : ""} style="--timeline-label-left:${entry.left}px;--timeline-label-width:${entry.width}px;--timeline-label-top:${Math.max(0, labelTop)}px;--timeline-label-anchor:${anchorOffset}px" title="${escapeHtml([kindLabel, entry.title, countFact, outputComparison ? (entry.usedInOutput ? `当前${contentMode ? "内容视频" : "成片"}已采用` : `当前${contentMode ? "内容视频" : "成片"}未采用`) : "", range, containmentFact, duplicateFact, entry.detail].filter(Boolean).join(" · "))}" aria-label="${escapeHtml([kindLabel, entry.title, retainedSearch ? "已保留但未自动加入本次生成" : outputComparison ? (entry.usedInOutput ? "当前版本已采用" : "当前版本未采用") : (entry.isRecommendedEvent ? (contentMode ? "已选" : "AI 推荐") : "备选"), containmentFact, duplicateFact, entry.detail].filter(Boolean).join("，"))}"><b>${sequenceLabel}</b><span>${escapeHtml(entry.title)}</span>${statusBadge}</button>`;
   }).join("");
   const highlightTimelineRelation = (relationKey, highlighted) => {
     timelineTrackContent?.querySelectorAll("[data-timeline-relation]").forEach((element) => {
@@ -5688,7 +5792,7 @@ function updateTimeline() {
     const item = items[Number(button.dataset.timelineLabelPosition)];
     timelineFrameSelectionTime = null;
     if (contentMode && !item?._group && !item?._output) {
-      previewContentEvidence(item, { autoplay: true });
+      previewContentEvidence(item, { autoplay: true, searchId: item?._contentSearchId || "" });
     }
     else if (item?._group) outputComparison || contentMode
       ? previewEventSegment(item._group, item)
@@ -7312,6 +7416,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
   const historicalSearchToggle = isCurrentSearch
     ? ""
     : `<button type="button" class="content-history-toggle" data-content-search-history-toggle aria-expanded="true">收起已保留结果</button>`;
+  const restoreButtonMarkup = contentRestoreButtonMarkup(job, search?.id || "");
   const candidates = Array.isArray(search.candidates) ? search.candidates : [];
   const candidateEvents = Array.isArray(search.candidateEvents) ? search.candidateEvents : [];
   const candidateById = new Map(candidates.map((candidate) => [String(candidate.id), candidate]));
@@ -7564,7 +7669,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
       : Number.isFinite(Number(search.scanProgress?.coveredPercent))
       ? `正在扫描本次范围 · ${activeScanPercent.toFixed(1)}%`
       : "正在准备并扫描本次检索范围";
-    return `<article class="chat-message assistant content-search-message" data-conversation-key="search:${escapeHtml(search.id || "")}"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="content-search-review empty${historicalSearchClass}" data-content-search-id="${escapeHtml(search.id || "")}"><header><div><small>${isCurrentSearch ? "当前检索" : "已保留结果"}</small><strong>${activelyScanning ? scanTitle : blockedByInvalidPlan ? "检索条件需要调整" : search.status === "needs_clarification" ? escapeHtml(clarification?.question || "需要确认查找依据") : needsPersonConfirmation ? "请确认目标人物" : "没有可靠匹配"}</strong><p>${escapeHtml(search.intent?.query || search.instruction || "")}</p>${scopeMarkup}${dialogueInterpretation}${historicalSearchToggle}</div></header>${blockedStateMarkup}${retainedSearchesMarkup}${diagnosticsMarkup}${isCurrentSearch ? personMarkup : ""}<p>${escapeHtml(guidance)}</p>${isCurrentSearch && !activelyScanning ? `<div class="content-search-secondary">${search.status === "needs_clarification" ? clarificationButtons : `${expansionButtons}${denseButton}`}</div>${capabilityAlternativeHint}` : !isCurrentSearch ? `<footer class="content-history-actions"><button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>` : ""}${historyMarkup}</section></div></article>`;
+    return `<article class="chat-message assistant content-search-message" data-conversation-key="search:${escapeHtml(search.id || "")}"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="content-search-review empty${historicalSearchClass}" data-content-search-id="${escapeHtml(search.id || "")}"><header><div><small>${isCurrentSearch ? "当前检索" : "已保留结果"}</small><strong>${activelyScanning ? scanTitle : blockedByInvalidPlan ? "检索条件需要调整" : search.status === "needs_clarification" ? escapeHtml(clarification?.question || "需要确认查找依据") : needsPersonConfirmation ? "请确认目标人物" : "没有可靠匹配"}</strong><p>${escapeHtml(search.intent?.query || search.instruction || "")}</p>${scopeMarkup}${dialogueInterpretation}${historicalSearchToggle}</div></header>${blockedStateMarkup}${retainedSearchesMarkup}${diagnosticsMarkup}${isCurrentSearch ? personMarkup : ""}<p>${escapeHtml(guidance)}</p>${isCurrentSearch && !activelyScanning ? `<div class="content-search-secondary">${search.status === "needs_clarification" ? clarificationButtons : `${expansionButtons}${denseButton}`}</div>${capabilityAlternativeHint}` : !isCurrentSearch ? `<footer class="content-history-actions">${restoreButtonMarkup}</footer>` : ""}${historyMarkup}</section></div></article>`;
   }
   const recoveryAvailable = isCurrentSearch && allowedCapabilities.includes("visual")
     && (exhaustive ? !coverageComplete : !denseSearchCompleted);
@@ -7644,7 +7749,14 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
         const subjectChip = match.subjectDescription
           ? `<i class="subject-${escapeHtml(String(match.subjectStatus || "unverified"))}" title="${escapeHtml((subjectStatusLabels[String(match.subjectStatus || "unverified")] || "对象证据") + "：" + String(match.subjectDescription))}">${escapeHtml(subjectStatusLabels[String(match.subjectStatus || "unverified")] || "对象证据")}</i>`
           : "";
-        const evidenceChips = `<span class="content-evidence-chips">${questionSourceChip}${subjectChip}${appearanceChip}${activeSpeakerChip}${matchedPeople.map((value) => `<i class="person">${escapeHtml(value)}</i>`).join("")}${evidenceKinds.map((value) => `<i>${escapeHtml(({speech:"对白",visual:"画面",ocr:"屏幕文字",audio:"声音",person:"匿名人物"})[String(value).toLowerCase()] || value)}</i>`).join("")}<button type="button" class="content-evidence-count" data-content-evidence="${escapeHtml(match.id)}">${evidenceCount ? `查看证据（${evidenceCount}）` : "查看相关证据"}</button></span>`;
+        const containedLocalCount = Number(match.containedCandidateIds?.length || 0);
+        const removedBroadCount = Number(match.containingCandidateIds?.length || 0);
+        const containmentChip = containedLocalCount > 0
+          ? `<i class="content-containment-match" title="较小的重复命中已作为此完整片段的证据保留，不再重复列为可选片段">已归并 ${containedLocalCount} 个局部命中</i>`
+          : removedBroadCount > 0
+            ? `<i class="content-containment-match" title="宽泛召回区间已移除，当前保留精确命中的边界">已排除 ${removedBroadCount} 个宽泛区间</i>`
+            : "";
+        const evidenceChips = `<span class="content-evidence-chips">${questionSourceChip}${subjectChip}${appearanceChip}${activeSpeakerChip}${containmentChip}${matchedPeople.map((value) => `<i class="person">${escapeHtml(value)}</i>`).join("")}${evidenceKinds.map((value) => `<i>${escapeHtml(({speech:"对白",visual:"画面",ocr:"屏幕文字",audio:"声音",person:"匿名人物"})[String(value).toLowerCase()] || value)}</i>`).join("")}<button type="button" class="content-evidence-count" data-content-evidence="${escapeHtml(match.id)}">${evidenceCount ? `查看证据（${evidenceCount}）` : "查看相关证据"}</button></span>`;
         const inputId = `content-match-${String(search.id || "search").replace(/[^a-zA-Z0-9_-]/g, "-")}-${index}`;
         const reviewReasons = (Array.isArray(match.reviewReasons) ? match.reviewReasons : []).filter(Boolean);
         const transcriptIsContext = (match.speechUnits || []).some((unit) => Number(unit.start) < Number(match.start) - .5 || Number(unit.end) > Number(match.end) + .5);
@@ -7675,7 +7787,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
       }).join("")}</div>${candidates.length > 50 ? `<button type="button" class="content-show-more" data-content-show-more>再显示 50 段</button>` : ""}
       ${bulkControlsMarkup}
       ${historyMarkup}
-      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "生成当前检索视频"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" data-content-search-restore="${escapeHtml(search.id || "")}">恢复为当前检索并编辑</button></footer>`}
+      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "生成当前检索视频"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}${restoreButtonMarkup}</footer>`}
       <p class="content-search-safety">人物仅使用画面描述或匿名 Speaker 标签，不进行实名识别。也可以直接在对话中输入新要求继续检索。</p>
     </section></div></article>`;
 }
@@ -7690,10 +7802,10 @@ function contentOutputResultMarkup(job, selectedVersions = null, { historical = 
     const label = separate ? `${versionLabel} · 内容片段 ${outputIndex + 1}` : `${versionLabel} · 内容视频`;
     const segmentCount = Number(output.segmentCount || output.segments?.length || 0);
     const sourceQuery = String(version.contentSearchInstruction || version.sourceLabel || "").trim();
-    return `<div class="auto-version-entry"><button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}"><span>${escapeHtml(label)} <em>人工确认</em></span><small>${sourceQuery ? `${escapeHtml(sourceQuery)} · ` : ""}${segmentCount ? `${segmentCount} 个已确认片段 · ` : ""}${Number(output.duration || 0).toFixed(1)} 秒 · 点击预览</small></button>${outputVersionDownloadLinkMarkup(version, output, { className: "auto-version-download" })}</div>`;
+    return `<div class="auto-version-entry"><button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}"><span>${escapeHtml(label)} <em>已核对</em></span><small>${sourceQuery ? `${escapeHtml(sourceQuery)} · ` : ""}${segmentCount ? `${segmentCount} 个已确认片段 · ` : ""}${Number(output.duration || 0).toFixed(1)} 秒 · 点击预览</small></button>${outputVersionDownloadLinkMarkup(version, output, { className: "auto-version-download" })}</div>`;
   }));
   const singleVersion = versions.length === 1 ? `V${Number(versions[0].number || 1)}` : "";
-  return `<section class="auto-compose-result-card content-output-result-card${historical ? " historical" : ""}${compact ? " compact" : ""}"><strong>${compact && singleVersion ? `${singleVersion} 已生成` : `${historical ? "以前生成的内容视频" : "内容视频已生成"} · ${versions.length} 个版本`}</strong><p>${compact ? "这个版本对应上方这次确认的片段。" : historical ? "这些版本来自之前确认的片段，不会随本次新检索自动改变。" : "视频只包含你最终确认的时间范围。"} 点击版本即可在播放器中预览${compact ? "。" : "，也可以下载高清 MP4。"}</p><div>${buttons.join("")}</div></section>`;
+  return `<section class="auto-compose-result-card content-output-result-card${historical ? " historical" : ""}${compact ? " compact" : ""}"><strong>${compact && singleVersion ? `${singleVersion} 已生成` : `${historical ? "以前生成的内容视频" : "内容视频已生成"} · ${versions.length} 个版本`}</strong><p>${compact ? "对应本次确认的片段。" : historical ? "来自之前确认的片段，不会被本次检索覆盖。" : "仅包含最终确认的时间范围。"} 点击版本可预览${compact ? "。" : "或下载高清 MP4。"}</p><div>${buttons.join("")}</div></section>`;
 }
 
 function contentSearchRecordsForJob(job = currentJob) {
@@ -7705,7 +7817,15 @@ function contentSearchRecordsForJob(job = currentJob) {
   });
 }
 
-function contentSearchHistorySummaryMarkup(search, { current = false, expandable = true } = {}) {
+function contentRestoreButtonMarkup(job, searchId) {
+  const capabilities = interactionCapabilitiesForJob(job);
+  const disabled = !capabilities.canRestoreContentSearch;
+  const label = disabled ? "任务处理中，暂不能恢复" : "恢复为当前检索并编辑";
+  const reason = disabled ? capabilities.reason : "将这次历史结果恢复为当前检索并继续编辑";
+  return `<button type="button" data-content-search-restore="${escapeHtml(searchId || "")}" ${disabled ? "disabled aria-disabled=\"true\"" : ""} title="${escapeHtml(reason)}">${label}</button>`;
+}
+
+function contentSearchHistorySummaryMarkup(search, { current = false, expandable = true, job = currentJob } = {}) {
   const count = Number(search?.candidateCount ?? search?.candidates?.length ?? 0);
   const created = search?.createdAt ? new Date(search.createdAt) : null;
   const time = created && Number.isFinite(created.getTime())
@@ -7718,7 +7838,8 @@ function contentSearchHistorySummaryMarkup(search, { current = false, expandable
   const recordLabel = current ? "当前检索" : search?.recordType === "assembly" ? "合并生成" : "已保留结果";
   const title = search?.recordType === "assembly" ? `来自 ${Number(search?.basketSnapshot?.sourceQueries?.length || 0) || "多"} 次检索` : (search?.intent?.query || search?.instruction || "未命名检索");
   if (!current && expandable && search?.recordType !== "assembly") {
-    return `<article class="chat-message assistant content-search-message content-search-history-message retained" data-conversation-key="search:${escapeHtml(search?.id || "")}"><div class="recommendation-wrap"><section class="content-search-history-summary retained" data-content-search-id="${escapeHtml(search?.id || "")}"><div class="content-retained-search-copy"><small>${escapeHtml(time)} · ${recordLabel}</small><strong>${escapeHtml(title)}</strong><span>${escapeHtml(statusLabel)} · 不会被后续检索覆盖</span></div><div class="content-retained-search-actions"><button type="button" data-content-history-open="${escapeHtml(search?.id || "")}">查看片段</button>${count ? `<button type="button" class="primary" data-content-history-add="${escapeHtml(search?.id || "")}">加入成片清单</button>` : ""}</div></section></div></article>`;
+    const basketLocked = !interactionCapabilitiesForJob(job).canMutateContentBasket;
+    return `<article class="chat-message assistant content-search-message content-search-history-message retained" data-conversation-key="search:${escapeHtml(search?.id || "")}"><div class="recommendation-wrap"><section class="content-search-history-summary retained" data-content-search-id="${escapeHtml(search?.id || "")}"><div class="content-retained-search-copy"><small>${escapeHtml(time)} · ${recordLabel}</small><strong>${escapeHtml(title)}</strong><span>${escapeHtml(statusLabel)} · 不会被后续检索覆盖</span></div><div class="content-retained-search-actions"><button type="button" data-content-history-open="${escapeHtml(search?.id || "")}">查看片段</button>${count ? `<button type="button" class="primary" data-content-history-add="${escapeHtml(search?.id || "")}" ${basketLocked ? `disabled aria-disabled="true" title="${escapeHtml(unavailableInteractionMessage(job))}"` : ""}>${basketLocked ? "任务处理中" : "加入成片清单"}</button>` : ""}</div></section></div></article>`;
   }
   return `<article class="chat-message assistant content-search-message content-search-history-message${current ? " current" : ""}" data-conversation-key="search:${escapeHtml(search?.id || "")}"><div class="recommendation-wrap"><section class="content-search-history-summary" data-content-search-id="${escapeHtml(search?.id || "")}"><button type="button" ${expandable ? `data-content-history-open="${escapeHtml(search?.id || "")}"` : "data-content-review-focus"} aria-expanded="false"><span><small>${escapeHtml(time)} · ${recordLabel}</small><strong>${escapeHtml(title)}</strong></span><b>${escapeHtml(statusLabel)}</b><em>${expandable ? "查看片段" : "正在核对"}</em></button></section></div></article>`;
 }
@@ -7731,10 +7852,11 @@ function contentRetainedSearchesMarkup(job = currentJob, currentSearchId = "") {
   ));
   if (!retained.length) return "";
   const total = retained.reduce((sum, record) => sum + Number(record?.candidateCount ?? record?.candidates?.length ?? 0), 0);
+  const basketLocked = !interactionCapabilitiesForJob(job).canMutateContentBasket;
   return `<section class="content-retained-searches" aria-label="已保留的检索结果"><header><div><small>已保留的检索</small><strong>之前的结果仍然可用</strong><span>本次检索不会覆盖它们；可以查看，也可以加入成片清单一起生成。</span></div><b>${retained.length} 次 · ${total} 段</b></header><div class="content-retained-search-list">${[...retained].reverse().map((record) => {
     const count = Number(record?.candidateCount ?? record?.candidates?.length ?? 0);
     const query = record?.intent?.query || record?.instruction || "未命名检索";
-    return `<article data-retained-search-id="${escapeHtml(record?.id || "")}"><span><strong>${escapeHtml(query)}</strong><small>已保留 ${count} 段</small></span><div><button type="button" data-content-history-open="${escapeHtml(record?.id || "")}">查看片段</button><button type="button" data-content-history-add="${escapeHtml(record?.id || "")}">加入成片清单</button></div></article>`;
+    return `<article data-retained-search-id="${escapeHtml(record?.id || "")}"><span><strong>${escapeHtml(query)}</strong><small>已保留 ${count} 段</small></span><div><button type="button" data-content-history-open="${escapeHtml(record?.id || "")}">查看片段</button><button type="button" data-content-history-add="${escapeHtml(record?.id || "")}" ${basketLocked ? `disabled aria-disabled="true" title="${escapeHtml(unavailableInteractionMessage(job))}"` : ""}>${basketLocked ? "任务处理中" : "加入成片清单"}</button></div></article>`;
   }).join("")}</div></section>`;
 }
 
@@ -7770,6 +7892,10 @@ function contentBasketTimingSummary(items = []) {
 }
 
 function setContentBasketLocal(job, searchId, matchId, selected, candidate = null) {
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) {
+    showToast(unavailableInteractionMessage(job, "当前不能修改成片清单"), "error");
+    return;
+  }
   const items = [...contentBasketItems(job)];
   const index = items.findIndex((item) => String(item.searchId) === String(searchId) && String(item.matchId) === String(matchId));
   if (selected && index < 0) items.push({
@@ -7791,10 +7917,14 @@ function setContentBasketLocal(job, searchId, matchId, selected, candidate = nul
 function syncContentBasketAddButton(root, job = currentJob, searchId = "") {
   const button = root?.querySelector?.("[data-content-basket-add]");
   if (!button) return;
+  const capabilities = interactionCapabilitiesForJob(job);
   const selectedIds = [...root.querySelectorAll("[data-content-match]:checked:not(:disabled)")].map((input) => String(input.value));
   const newCount = selectedIds.filter((matchId) => !contentBasketHas(job, searchId, matchId)).length;
-  button.disabled = !selectedIds.length || !newCount;
-  button.textContent = !selectedIds.length
+  button.disabled = !capabilities.canMutateContentBasket || !selectedIds.length || !newCount;
+  button.title = capabilities.canMutateContentBasket ? "" : capabilities.reason;
+  button.textContent = !capabilities.canMutateContentBasket
+    ? "任务处理中，暂不能加入"
+    : !selectedIds.length
     ? "选择片段后加入合并生成"
     : newCount
       ? `加入合并生成 · ${newCount} 段`
@@ -7808,6 +7938,10 @@ function syncVisibleContentBasketAddButtons(job = currentJob) {
 }
 
 function addSelectedContentToBasket(root, job, searchId, findMatch) {
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) {
+    showToast(unavailableInteractionMessage(job, "当前不能修改成片清单"), "error");
+    return;
+  }
   const selectedInputs = [...root.querySelectorAll("[data-content-match]:checked:not(:disabled)")];
   if (!selectedInputs.length) {
     showToast("请先选择要加入合并生成的片段");
@@ -7828,6 +7962,7 @@ function addSelectedContentToBasket(root, job, searchId, findMatch) {
 }
 
 function appendContentMatchesToBasket(job, searchId, matchIds, findMatch) {
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) return 0;
   const items = [...contentBasketItems(job)];
   const record = contentSearchRecordsForJob(job).find((item) => String(item?.id || "") === String(searchId));
   let added = 0;
@@ -7875,6 +8010,10 @@ function contentSearchDefaultSelectionIds(search) {
 
 async function addRetainedContentSearchToBasket(searchId, button, job = currentJob) {
   if (!searchId || !job) return;
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) {
+    showToast(unavailableInteractionMessage(job, "当前不能修改成片清单"), "error");
+    return;
+  }
   button.disabled = true;
   try {
     const search = await ensureContentSearchDetails(searchId, job);
@@ -7900,6 +8039,7 @@ async function addRetainedContentSearchToBasket(searchId, button, job = currentJ
 }
 
 function scheduleContentBasketSave(job = currentJob) {
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) return;
   window.clearTimeout(contentBasketSaveTimer);
   const generation = ++contentBasketSaveGeneration;
   contentBasketSaveTimer = window.setTimeout(async () => {
@@ -7940,7 +8080,10 @@ function renderContentSelectionBasket(job = currentJob) {
   const outputMode = String(job?.contentSelectionBasket?.outputMode || "single_reel");
   const orderMode = String(job?.contentSelectionBasket?.orderMode || "source");
   const target = Number(job?.contentSelectionBasket?.targetSeconds || 0);
-  root.innerHTML = `<details class="content-basket-details"><summary><span class="content-basket-copy"><small>跨检索合并预览</small><strong>${items.length} 段 · 实际 ${timing.uniqueDuration.toFixed(1)} 秒${target > 0 ? ` · 目标约 ${target.toFixed(1)} 秒` : ""}</strong><span>来自 ${sources || 1} 次检索${timing.overlapCount ? ` · ${timing.overlapCount} 处时间重叠` : ""} · 生成成功后清空</span></span><em>查看明细</em></summary><ol>${items.map((item) => `<li><span><small>${escapeHtml(item.sourceQuery || "检索")}</small><strong>${escapeHtml(item.title || "匹配片段")}</strong><em>${formatTime(item.start)} → ${formatTime(item.end)} · ${Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0).toFixed(1)} 秒</em></span><button type="button" data-content-basket-remove data-search-id="${escapeHtml(item.searchId || "")}" data-match-id="${escapeHtml(item.matchId || "")}">移出</button></li>`).join("")}</ol></details><div class="content-basket-generation-settings"><label><span>输出方式</span><select data-content-basket-output><option value="single_reel" ${outputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${outputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label><span>排列顺序</span><select data-content-basket-order><option value="source" ${orderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${orderMode === "selection" ? "selected" : ""}>按加入顺序</option><option value="ai_plan" ${orderMode === "ai_plan" ? "selected" : ""}>AI 推荐顺序</option></select></label></div><div class="content-basket-actions"><button type="button" data-content-basket-clear>清空</button><button type="button" class="primary" data-content-basket-confirm>生成清单内容</button></div>`;
+  const capabilities = interactionCapabilitiesForJob(job);
+  const locked = !capabilities.canMutateContentBasket;
+  const lockedAttributes = locked ? `disabled aria-disabled="true" title="${escapeHtml(capabilities.reason)}"` : "";
+  root.innerHTML = `<details class="content-basket-details"><summary><span class="content-basket-copy"><small>跨检索合并预览</small><strong>${items.length} 段 · 实际 ${timing.uniqueDuration.toFixed(1)} 秒${target > 0 ? ` · 目标约 ${target.toFixed(1)} 秒` : ""}</strong><span>${locked ? "任务完成后可继续修改和生成" : `来自 ${sources || 1} 次检索${timing.overlapCount ? ` · ${timing.overlapCount} 处时间重叠` : ""} · 生成成功后清空`}</span></span><em>查看明细</em></summary><ol>${items.map((item) => `<li><span><small>${escapeHtml(item.sourceQuery || "检索")}</small><strong>${escapeHtml(item.title || "匹配片段")}</strong><em>${formatTime(item.start)} → ${formatTime(item.end)} · ${Math.max(0, Number(item.duration) || Number(item.end) - Number(item.start) || 0).toFixed(1)} 秒</em></span><button type="button" data-content-basket-remove data-search-id="${escapeHtml(item.searchId || "")}" data-match-id="${escapeHtml(item.matchId || "")}" ${lockedAttributes}>移出</button></li>`).join("")}</ol></details><div class="content-basket-generation-settings"><label><span>输出方式</span><select data-content-basket-output ${lockedAttributes}><option value="single_reel" ${outputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${outputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label><span>排列顺序</span><select data-content-basket-order ${lockedAttributes}><option value="source" ${orderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${orderMode === "selection" ? "selected" : ""}>按加入顺序</option><option value="ai_plan" ${orderMode === "ai_plan" ? "selected" : ""}>AI 推荐顺序</option></select></label></div><div class="content-basket-actions"><button type="button" data-content-basket-clear ${lockedAttributes}>清空</button><button type="button" class="primary" data-content-basket-confirm ${lockedAttributes}>${locked ? "任务完成后生成" : "生成清单内容"}</button></div>`;
   const basketLabel = root.querySelector(".content-basket-copy > small");
   if (basketLabel && !basketLabel.textContent.includes("成片清单")) basketLabel.textContent = `成片清单 · ${basketLabel.textContent}`;
   const details = root.querySelector(".content-basket-details");
@@ -8033,7 +8176,7 @@ function conversationTimelineMarkup(job, messages, assistantRoleLabel) {
     const editableCurrent = current && job.status === "awaiting_content_confirmation";
     if (editableCurrent) return contentSearchReviewMarkup(job, search);
     if (!expandedContentSearchIds.has(String(search?.id || ""))) {
-      return contentSearchHistorySummaryMarkup(search, { current });
+      return contentSearchHistorySummaryMarkup(search, { current, job });
     }
     const readonlyJob = current
       ? { ...job, contentSearchSession: { ...(job.contentSearchSession || {}), activeSearchId: "__readonly__" } }
@@ -8087,8 +8230,10 @@ function contentSearchJobForRoot(root, job = currentJob) {
 async function ensureContentSearchDetails(searchId, job = currentJob) {
   const record = contentSearchRecordsForJob(job).find((item) => String(item?.id || "") === String(searchId));
   if (!record || record.candidateDetailsLoaded !== false) return record;
-  const payload = await api(`/api/jobs/${encodeURIComponent(job.id)}/content-search/history/${encodeURIComponent(searchId)}`);
+  const requestedJobId = String(job.id || "");
+  const payload = await api(`/api/jobs/${encodeURIComponent(requestedJobId)}/content-search/history/${encodeURIComponent(searchId)}`);
   const detail = payload.search || {};
+  if (String(currentJob?.id || "") !== requestedJobId) return detail;
   const target = contentSearchRecordsForJob(currentJob).find((item) => String(item?.id || "") === String(searchId));
   if (target) Object.assign(target, detail, { candidateDetailsLoaded: true });
   return target || detail;
@@ -8548,7 +8693,7 @@ function renderConversation(job) {
     && ["auto_composition", "quality_review"].includes(execution.operation);
   if (job.autoComposition?.status === "partial" && hasGeneratedOutputs) {
     const facts = autoCompositionVersionFacts(job);
-    html += `<article class="chat-message assistant auto-compose-partial-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="auto-compose-partial"><small>AI 自动成片 · 部分完成</small><strong>已生成 ${facts.completed} 个可播放版本</strong><p>其他剪辑版本生成失败，已有成片仍可正常预览和下载。${job.autoComposition.error ? ` 原因：${escapeHtml(job.autoComposition.error)}` : ""}</p></section></div></article>`;
+    html += `<article class="chat-message assistant auto-compose-partial-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="auto-compose-partial"><small>自动成片 · 部分完成</small><strong>已生成 ${facts.completed} 个可播放版本</strong><p>其他剪辑版本生成失败，已有成片仍可正常预览和下载。${job.autoComposition.error ? ` 原因：${escapeHtml(job.autoComposition.error)}` : ""}</p></section></div></article>`;
   }
   if (execution.outcome === "no_acceptable_output") {
     const rejected = Math.max(0, Number(execution.result?.qualityRejectedCount) || 0);
@@ -8590,7 +8735,7 @@ function renderConversation(job) {
     const qualityDescription = manualDraft
       ? "所有已成功渲染的独立方案都已保留。未通过版本会明确标记为“需人工复核”，不会自动推荐或导出，但仍可逐个预览比较。"
       : "独立方案会分别审片；返修版不计入方案数量。只有无法播放或渲染失败的样片会撤回，其他版本均保留供比较。";
-    html += `<article class="chat-message assistant quality-gate-result-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="quality-gate-result-card"><small>AI 自动成片 · 质量检查完成</small><strong>${qualityHeading}</strong><p>${qualityDescription}</p>${issueMarkup}${repairCopy ? `<p class="quality-repair-state">${escapeHtml(repairCopy)}</p>` : ""}${reasons.length && issues.length ? `<details><summary>查看质量门判定</summary><ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}<div><button type="button" data-review-events-after-quality>返回事件审核</button>${recoveryAction}</div></section></div></article>`;
+    html += `<article class="chat-message assistant quality-gate-result-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="quality-gate-result-card"><small>自动成片 · 质量检查完成</small><strong>${qualityHeading}</strong><p>${qualityDescription}</p>${issueMarkup}${repairCopy ? `<p class="quality-repair-state">${escapeHtml(repairCopy)}</p>` : ""}${reasons.length && issues.length ? `<details><summary>查看质量门判定</summary><ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}<div><button type="button" data-review-events-after-quality>返回事件审核</button>${recoveryAction}</div></section></div></article>`;
   }
   if (contentMode && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !contentSearchRecordsForJob(job).length) html += contentOutputResultMarkup(job);
   if (!contentMode && ["completed", "awaiting_confirmation"].includes(job.status) && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !autoCompositionComplete) {
@@ -8717,24 +8862,39 @@ function renderConversation(job) {
       openPersonProfiles();
     });
     contentSearchRoot.querySelectorAll("[data-content-preview]").forEach((button) => button.addEventListener("click", async () => {
-      const detailed = await ensureContentSearchDetails(searchId, job).catch((error) => {
+      const requestedJobId = String(job.id || "");
+      let detailed;
+      try {
+        detailed = await ensureContentSearchDetails(searchId, job);
+      } catch (error) {
+        if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
         showToast(`读取检索详情失败：${error.message}`);
-        return scopedJob.contentSearch;
-      });
-      previewContentMatch((detailed?.candidates || []).find((item) => String(item.id) === String(button.dataset.contentPreview)));
+        detailed = scopedJob.contentSearch;
+      }
+      if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
+      previewContentMatch(
+        (detailed?.candidates || []).find((item) => String(item.id) === String(button.dataset.contentPreview)),
+        { searchId },
+      );
     }));
     contentSearchRoot.querySelectorAll("[data-content-evidence]").forEach((button) => {
       const openEvidence = async (event) => {
         if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
         event.preventDefault();
         event.stopPropagation();
-        const detailed = await ensureContentSearchDetails(searchId, job).catch((error) => {
+        const requestedJobId = String(job.id || "");
+        let detailed;
+        try {
+          detailed = await ensureContentSearchDetails(searchId, job);
+        } catch (error) {
+          if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
           showToast(`读取检索详情失败：${error.message}`);
-          return scopedJob.contentSearch;
-        });
+          detailed = scopedJob.contentSearch;
+        }
+        if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
         previewContentEvidence(
           (detailed?.candidates || []).find((item) => String(item.id) === String(button.dataset.contentEvidence)),
-          { autoplay: false },
+          { autoplay: false, searchId },
         );
       };
       button.addEventListener("click", openEvidence);
@@ -8757,6 +8917,7 @@ function renderConversation(job) {
     if (questionSourceSelect) applyQuestionSourceFilter();
     contentSearchRoot.querySelector("[data-content-dialogue-mode]")?.addEventListener("change", async (event) => {
       const select = event.currentTarget;
+      const requestedJobId = String(job.id || "");
       const previous = select.dataset.previousValue || select.value;
       select.dataset.previousValue = select.value;
       select.disabled = true;
@@ -8766,15 +8927,16 @@ function renderConversation(job) {
           headers: { "Content-Type": "application/json" },
           body: { searchId, dialogueMode: select.value },
         });
-        if (response?.job) {
+        if (response?.job && String(currentJob?.id || "") === requestedJobId && select.isConnected) {
           currentJob = response.job;
           renderJob(currentJob);
         }
       } catch (error) {
+        if (String(currentJob?.id || "") !== requestedJobId || !select.isConnected) return;
         select.value = previous;
         showToast(`问答模式切换失败：${error.message}`);
       } finally {
-        select.disabled = false;
+        if (select.isConnected) select.disabled = false;
       }
     });
     contentSearchRoot.querySelector("[data-content-order-mode]")?.addEventListener("change", () => {
@@ -8817,12 +8979,14 @@ function renderConversation(job) {
         button.textContent = next ? "取消全部" : "选择全部";
         if (next) {
           button.disabled = true;
+          const requestedJobId = String(job.id || "");
           try {
             await apiJson(`/api/jobs/${encodeURIComponent(job.id)}/content-search/bulk-keep`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: { searchId, matchIds: inputs.map((input) => input.value) },
             });
+            if (String(currentJob?.id || "") !== requestedJobId || !contentSearchRoot.isConnected) return;
             const liveSearch = contentSearchForRoot(contentSearchRoot, currentJob);
             scopedJob.contentSearch = liveSearch;
             const keptIds = new Set(inputs.map((input) => String(input.value)));
@@ -8846,6 +9010,7 @@ function renderConversation(job) {
             syncContentBasketAddButton(contentSearchRoot, currentJob, searchId);
             renderChatContextBar();
           } catch (error) {
+            if (String(currentJob?.id || "") !== requestedJobId || !contentSearchRoot.isConnected) return;
             inputs.forEach((input) => { input.checked = false; });
             button.setAttribute("aria-pressed", "false");
             button.textContent = "选择全部";
@@ -8894,9 +9059,11 @@ function renderConversation(job) {
   messagesEl.querySelectorAll("[data-content-history-open]").forEach((button) => button.addEventListener("click", async () => {
     const searchId = String(button.dataset.contentHistoryOpen || "");
     if (!searchId) return;
+    const requestedJobId = String(job.id || "");
     button.disabled = true;
     try {
       const detail = await ensureContentSearchDetails(searchId, job);
+      if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
       contentSearchDetailCache.set(`${job.id}:${searchId}`, { ...detail, candidateDetailsLoaded: true });
       expandedContentSearchIds.add(searchId);
       renderConversation(currentJob || job);
@@ -8906,6 +9073,7 @@ function renderConversation(job) {
         target?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
     } catch (error) {
+      if (String(currentJob?.id || "") !== requestedJobId || !button.isConnected) return;
       button.disabled = false;
       showToast(`读取已保留结果详情失败：${error.message}`);
     }
@@ -9692,8 +9860,8 @@ function renderOutputEditingExplanation(item, version = null) {
   const orderLabel = escapeHtml(ordering.label || "按当前剪辑顺序");
   root.innerHTML = `
     <header class="output-explanation-head">
-      <div><small>AI EDIT DECISION</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></div>
-      <span>${quality.recommended ? "AI 推荐 · " : ""}依据可追溯</span>
+      <div><small>剪辑说明</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></div>
+      <span>${quality.recommended ? "推荐版本 · " : ""}依据可查看</span>
     </header>
     <p class="output-explanation-summary">${escapeHtml(explanation.summary || "根据已验证的画面、声音和用户要求生成。")}</p>
     <div class="output-decision-summary">
@@ -9922,8 +10090,8 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
     ? `${versionIdentity} · ${outputNumber > 0 ? `内容视频 ${outputNumber}` : "内容视频"}`
     : `${versionIdentity} · ${kindLabel} · ${qualityLabel}`;
   renderOutputPreviewSelector(currentJob);
-  $("#reviewKicker").textContent = contentMode ? "CONTENT PREVIEW" : "HIGHLIGHT PREVIEW";
-  $("#reviewTitle").textContent = displayTitle;
+  $("#reviewKicker").textContent = `${versionIdentity} · ${contentMode ? "内容视频" : "高光成片"}`;
+  $("#reviewTitle").textContent = currentJob.filename || displayTitle;
   const download = $("#downloadButton");
   const previewOnly = Boolean(output.previewOnly || version.previewOnly);
   const downloadUrl = String(output.downloadUrl || "").trim();
@@ -10863,10 +11031,7 @@ function resetCandidateDrawerContext() {
 }
 
 function currentContentReviewRoot(job = currentJob) {
-  const searchId = String(job?.contentSearch?.id || "");
-  if (!searchId) return null;
-  return [...document.querySelectorAll(".content-search-review")]
-    .find((node) => String(node.dataset.contentSearchId || "") === searchId) || null;
+  return activeContentReviewRoot(job);
 }
 
 function contentDrawerSelectedIds(job = currentJob) {
@@ -11457,7 +11622,7 @@ function renderReviewRail(job) {
     }
     if (reviewMessage) {
       const template = document.createElement("template");
-      template.innerHTML = contentSearchHistorySummaryMarkup(job.contentSearch, { current: true, expandable: false }).trim();
+      template.innerHTML = contentSearchHistorySummaryMarkup(job.contentSearch, { current: true, expandable: false, job }).trim();
       const summary = template.content.firstElementChild;
       reviewMessage.replaceWith(summary);
       summary?.querySelector("[data-content-review-focus]")?.addEventListener("click", () => {
@@ -11599,18 +11764,22 @@ function renderOutputs(job) {
       const variantKind = String(version.variantKind || (version.previewOnly || output.previewOnly ? "independent" : "formal_export"));
       const kindClass = variantKind === "formal_export" ? "formal" : variantKind === "repair" ? "repair" : "sample";
       const score = Number(version.reviewReport?.overallScore ?? output.reviewReport?.overallScore ?? output.qualityReport?.score);
-      return `<div class="clip-version-entry quality-${escapeHtml(quality)} kind-${kindClass}"><button type="button" class="auto-version-button clip-version-button${selected ? " active" : ""}${version.recommended ? " recommended" : ""}" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}" aria-pressed="${selected ? "true" : "false"}"><i class="clip-version-index">${escapeHtml(versionLabel)}${separate ? `.${outputIndex + 1}` : ""}</i><span><strong>${escapeHtml(label.replace(`${versionLabel} · `, ""))}</strong><em>${escapeHtml(qualityLabel)}</em></span><small>${Number(output.segmentCount || output.segments?.length || 0)} 个片段 · ${Number(output.duration || 0).toFixed(1)} 秒${Number.isFinite(score) ? ` · ${Math.round(score)} 分` : ""}</small></button><div class="clip-version-actions">${outputVersionDownloadLinkMarkup(version, output, { className: "clip-version-download" })}<button type="button" class="clip-version-edit" data-secondary-edit-version="${escapeHtml(version.id || "")}" data-secondary-edit-output="${escapeHtml(output.filename || "")}">精剪此版本</button></div></div>`;
+      const editableSegments = (output.segments || []).filter((segment) => Number(segment?.sourceEnd ?? segment?.end) > Number(segment?.sourceStart ?? segment?.start));
+      const canFineEdit = Boolean(version.id && output.filename && editableSegments.length);
+      const editLabel = canFineEdit ? "精剪此版本" : "无可精剪时间线";
+      const editReason = canFineEdit ? "在二次精剪时间线中继续调整" : "这个旧版本没有保存可编辑片段信息，可返回片段确认后生成新版本";
+      return `<div class="clip-version-entry quality-${escapeHtml(quality)} kind-${kindClass}"><button type="button" class="auto-version-button clip-version-button${selected ? " active" : ""}${version.recommended ? " recommended" : ""}" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}" aria-pressed="${selected ? "true" : "false"}"><i class="clip-version-index">${escapeHtml(versionLabel)}${separate ? `.${outputIndex + 1}` : ""}</i><span><strong>${escapeHtml(label.replace(`${versionLabel} · `, ""))}</strong><em>${escapeHtml(qualityLabel)}</em></span><small>${Number(output.segmentCount || output.segments?.length || 0)} 个片段 · ${Number(output.duration || 0).toFixed(1)} 秒${Number.isFinite(score) ? ` · ${Math.round(score)} 分` : ""}</small></button><div class="clip-version-actions">${outputVersionDownloadLinkMarkup(version, output, { className: "clip-version-download" })}<button type="button" class="clip-version-edit" data-secondary-edit-version="${escapeHtml(version.id || "")}" data-secondary-edit-output="${escapeHtml(output.filename || "")}" ${canFineEdit ? "" : "disabled aria-disabled=\"true\""} title="${escapeHtml(editReason)}">${editLabel}</button></div></div>`;
     })).join("");
     strip.querySelectorAll("[data-auto-output]").forEach((button) => button.addEventListener("click", () => {
       strip.querySelectorAll(".auto-version-button").forEach((item) => item.classList.toggle("active", item === button));
       selectOutput(button.dataset.autoOutput, true);
     }));
-    strip.querySelectorAll("[data-secondary-edit-version]").forEach((button) => button.addEventListener("click", () => {
+    strip.querySelectorAll("[data-secondary-edit-version]:not(:disabled)").forEach((button) => button.addEventListener("click", () => {
       openSecondaryEditor(button.dataset.secondaryEditVersion, button.dataset.secondaryEditOutput);
     }));
   }
   if (reeditButton) {
-    reeditButton.textContent = "重新选择素材";
+    reeditButton.textContent = contentMode ? "返回片段确认" : "重新选择素材";
     reeditButton.classList.toggle("hidden", !["completed", "awaiting_confirmation"].includes(String(job.status || "")));
     reeditButton.onclick = reopenCurrentJobForEditing;
     const actions = reeditButton.parentElement;
@@ -11687,6 +11856,7 @@ function renderJob(job) {
   window.ClipTalkAppShell?.syncCurrentJob(job);
   rememberCurrentJob(job);
   const previousId = currentJob?.id;
+  const previousStatus = String(currentJob?.status || "");
   const previousPersonSearchId = String(currentJob?.contentSearch?.id || "");
   const previousPersonCandidateCount = Number(currentJob?.contentSearch?.candidates?.length || 0);
   const personWorkspaceWasOpen = document.body.classList.contains("person-workspace-open");
@@ -11744,6 +11914,8 @@ function renderJob(job) {
   const activeGroupId = currentEventGroup?.id;
   const activeSegmentId = currentEventSegment?.id;
   const activeCandidateIndex = currentCandidate?.index;
+  const activeContentCandidateId = String(currentCandidate?.id || "");
+  const activeContentSearchId = String(currentContentPreviewSearchId || currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
   currentJob = job;
   const nextPersonSearchId = String(job?.contentSearch?.id || "");
   const nextPersonCandidateCount = Number(job?.contentSearch?.candidates?.length || 0);
@@ -11771,7 +11943,21 @@ function renderJob(job) {
   currentEventSegment = activeSegmentId && currentEventGroup
     ? currentEventGroup.segments.find((item) => item.id === activeSegmentId) || null
     : null;
-  currentCandidate = activeCandidateIndex === undefined ? currentCandidate : (job.candidates || []).find((item) => Number(item.index) === Number(activeCandidateIndex)) || null;
+  if (String(job?.taskMode || "") === "content_extract" && activeContentCandidateId && previousId === job.id) {
+    const search = contentSearchRecordsForJob(job).find((item) => String(item?.id || "") === activeContentSearchId);
+    const candidates = Array.isArray(search?.candidates) && search.candidates.length
+      ? search.candidates
+      : Array.isArray(search?.timelineCandidates) ? search.timelineCandidates : [];
+    currentCandidate = candidates.find((item) => String(item?.id || "") === activeContentCandidateId) || null;
+    if (!currentCandidate) {
+      currentContentPreviewSearchId = "";
+      if (contentBoundaryTimelineEdit) closeContentBoundaryTimelineEdit({ restorePreview: false });
+    }
+  } else {
+    currentCandidate = activeCandidateIndex === undefined
+      ? currentCandidate
+      : (job.candidates || []).find((item) => Number(item.index) === Number(activeCandidateIndex)) || null;
+  }
   if (previousId !== job.id) {
     clearToast();
     resetCandidateDrawerContext();
@@ -11915,6 +12101,15 @@ function renderJob(job) {
     if (previousId !== job.id || !mainVideo.src) showSource();
   }
   updateTimeline();
+  const enteredCompletedWorkspace = job.status === "completed"
+    && jobOutputCount(job) > 0
+    && (previousId !== job.id || previousStatus !== "completed");
+  if (enteredCompletedWorkspace) {
+    // A completed video is an editing result, so its structure should be
+    // visible without making the user discover a hidden timeline tab first.
+    // Keep the overview compact: precision editing remains an explicit action.
+    setReviewLowerPanelMode("timeline", { compact: true });
+  }
   syncReviewWorkbench();
   if (!jobNeedsPolling(job) && !briefing && !restoringHistory) {
     clearTimeout(pollTimer);
@@ -12053,14 +12248,77 @@ function setContentDetailPanelMode(mode = "evidence", { focus = false } = {}) {
   return next === mode;
 }
 
+function contentBoundaryEntryState(match = currentCandidate) {
+  const activeSearchId = String(currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
+  const previewSearchId = String(currentContentPreviewSearchId || activeSearchId);
+  const search = contentSearchRecordsForJob(currentJob).find((item) => String(item?.id || "") === previewSearchId)
+    || (previewSearchId === String(currentJob?.contentSearch?.id || "") ? currentJob?.contentSearch : null);
+  const sourceMatch = (search?.candidates || []).find((item) => String(item?.id || "") === String(match?.id || "")) || match;
+  const reviewStatus = String(sourceMatch?.reviewStatus || (sourceMatch?.requiresReview ? "pending" : "confirmed"));
+  const historical = Boolean(previewSearchId && activeSearchId && previewSearchId !== activeSearchId);
+  const capabilities = interactionCapabilitiesForJob(currentJob);
+  if (!match?.id || String(currentJob?.taskMode || "") !== "content_extract") {
+    return { kind: "unavailable", label: "不可调整边界", reason: "当前没有可编辑的内容片段", disabled: true, searchId: previewSearchId };
+  }
+  if (reviewStatus === "rejected") {
+    return { kind: "unavailable", label: "已排除，无法调整", reason: "请先在结果列表中恢复并保留这个片段", disabled: true, searchId: previewSearchId };
+  }
+  if (capabilities.active) {
+    return { kind: "unavailable", label: "生成中，暂不可调整", reason: capabilities.reason, disabled: true, searchId: previewSearchId };
+  }
+  if (historical) {
+    return { kind: "restore", label: "恢复此检索后调整", reason: "先把这次历史检索恢复为当前结果，再调整片段入点和出点", disabled: false, searchId: previewSearchId };
+  }
+  if (capabilities.canEditContentBoundary) {
+    return { kind: "edit", label: "调整边界", reason: "调整当前片段的入点和出点", disabled: false, searchId: activeSearchId };
+  }
+  const hasOutputs = Boolean(
+    (currentJob?.outputs || []).length
+    || (currentJob?.outputVersions || []).some((version) => (version.outputs || []).length),
+  );
+  if (String(currentJob?.status || "") === "completed" && hasOutputs) {
+    return { kind: "reedit", label: "返回确认后调整", reason: "返回片段确认并调整边界；不会重新分析视频，已有成片仍会保留", disabled: false, searchId: activeSearchId };
+  }
+  const processing = capabilities.active;
+  return {
+    kind: "unavailable",
+    label: processing ? "生成中，暂不可调整" : "当前状态不可调整",
+    reason: processing ? "生成完成后可返回片段确认再调整边界" : "请先进入当前检索的片段确认阶段",
+    disabled: true,
+    searchId: activeSearchId,
+  };
+}
+
+function syncContentBoundaryEntry(match = currentCandidate) {
+  const button = $("#contentBoundaryEntryButton");
+  if (!button) return null;
+  const state = contentBoundaryEntryState(match);
+  button.dataset.boundaryEntryKind = state.kind;
+  button.dataset.boundarySearchId = state.searchId || "";
+  button.textContent = state.label;
+  button.title = state.reason;
+  button.setAttribute("aria-label", `${state.label}：${state.reason}`);
+  button.disabled = state.disabled;
+  return state;
+}
+
 function showContentDetailModeSwitch() {
   $("#contentDetailModeSwitch")?.classList.remove("hidden");
+  syncContentBoundaryEntry();
 }
 
 function hideContentDetailModeSwitch() {
   $("#contentDetailModeSwitch")?.classList.add("hidden");
   $("#evidencePanel")?.classList.remove("content-boundary-view");
   $("#contentBoundaryInspector")?.classList.add("hidden");
+  const button = $("#contentBoundaryEntryButton");
+  if (button) {
+    button.disabled = false;
+    button.dataset.boundaryEntryKind = "edit";
+    button.dataset.boundarySearchId = "";
+    button.textContent = "调整边界";
+    button.title = "调整当前片段的入点和出点";
+  }
 }
 
 function contentMatchEvidenceShell(match) {
@@ -12180,9 +12438,10 @@ function playMainVideoWhenPositioned(start, isCurrent) {
   tryStart();
 }
 
-function previewContentMatch(match, { autoplay = true, loadEvidence = true, preserveSequence = false } = {}) {
+function previewContentMatch(match, { autoplay = true, loadEvidence = true, preserveSequence = false, searchId = "" } = {}) {
   if (!currentJob || !match) return;
   if (!preserveSequence) contentPreviewSequence = null;
+  currentContentPreviewSearchId = String(searchId || currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
   const start = Math.max(0, Number(match.start) || 0);
   const end = Math.max(start, Number(match.end) || start);
   showSource({ autoplay: false, seekTime: start });
@@ -12225,12 +12484,12 @@ function previewContentMatch(match, { autoplay = true, loadEvidence = true, pres
   syncUnifiedWorkspaceView();
 }
 
-function previewContentEvidence(match, { autoplay = false } = {}) {
+function previewContentEvidence(match, { autoplay = false, searchId = "" } = {}) {
   if (!match) return;
   const editingDifferentMatch = contentBoundaryTimelineEdit?.surface === "evidence-panel"
     && String(contentBoundaryTimelineEdit.matchId || "") !== String(match.id || "");
   if (editingDifferentMatch) closeContentBoundaryTimelineEdit({ restorePreview: false });
-  previewContentMatch(match, { autoplay });
+  previewContentMatch(match, { autoplay, searchId });
   setContentDetailPanelMode("evidence");
 }
 
@@ -12280,7 +12539,11 @@ function syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge = "", pr
   }
   if (!preview) return;
   const draft = { ...match, start, end, duration: end - start, title: `${match.title || "匹配内容"} · 边界预览` };
-  previewContentMatch(draft, { autoplay: false, loadEvidence: false });
+  previewContentMatch(draft, {
+    autoplay: false,
+    loadEvidence: false,
+    searchId: contentBoundaryTimelineEdit?.searchId || currentContentPreviewSearchId,
+  });
   if (seekEdge === "end") seekSourceTime(Math.max(start, end - frame));
 }
 
@@ -12288,6 +12551,8 @@ function closeContentBoundaryTimelineEdit({ restorePreview = true } = {}) {
   const edit = contentBoundaryTimelineEdit;
   if (!edit) return;
   contentBoundaryTimelineEdit = null;
+  edit.row?.classList.remove("boundary-open");
+  edit.row?.removeAttribute("aria-current");
   if (edit.surface === "evidence-panel") {
     const origin = edit.origin;
     if (origin?.parent?.isConnected) {
@@ -12300,29 +12565,30 @@ function closeContentBoundaryTimelineEdit({ restorePreview = true } = {}) {
   }
   edit.editor?.classList.add("hidden");
   edit.editor?.closest("[data-content-match-row]")?.classList.remove("boundary-open");
-  if (restorePreview && edit.match) previewContentMatch(edit.match, { autoplay: false });
+  if (restorePreview && edit.match) previewContentMatch(edit.match, { autoplay: false, searchId: edit.searchId });
   else updateTimeline();
 }
 
-function openContentBoundaryInspector(match) {
+function openContentBoundaryInspector(match, { root: preferredRoot = null, focus = false } = {}) {
   if (!match?.id || String(currentJob?.taskMode || "") !== "content_extract") return false;
   const searchId = String(currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
-  const root = [...document.querySelectorAll(".content-search-review")].find((card) =>
-    String(card.dataset.contentSearchId || "") === searchId,
-  );
+  const root = activeContentReviewRoot(currentJob, { searchId, preferredRoot });
   const editor = root?.querySelector(`[data-content-boundary-editor="${CSS.escape(String(match.id))}"]`);
   const inspector = $("#contentBoundaryInspector");
-  if (!root || !editor || !inspector) return false;
+  const panel = $("#evidencePanel");
+  if (!root || !editor || !inspector || !panel) return false;
   if (contentBoundaryTimelineEdit && contentBoundaryTimelineEdit.editor !== editor) {
     closeContentBoundaryTimelineEdit({ restorePreview: false });
   }
   const scopedJob = contentSearchJobForRoot(root, currentJob);
   editor.dataset.boundaryStart = String(Number(match.start) || 0);
   editor.dataset.boundaryEnd = String(Number(match.end) || Number(match.start) || 0);
+  const row = editor.closest("[data-content-match-row]");
   contentBoundaryTimelineEdit = {
     jobId: String(currentJob.id || ""), searchId, matchId: String(match.id),
-    match, scopedJob, editor, surface: "evidence-panel",
+    match, scopedJob, editor, root, surface: "evidence-panel",
     origin: { parent: editor.parentElement, next: editor.nextElementSibling },
+    row,
     start: Number(match.start) || 0,
     end: Number(match.end) || Number(match.start) || 0,
   };
@@ -12335,18 +12601,81 @@ function openContentBoundaryInspector(match) {
   );
   inspector.replaceChildren(editor);
   editor.classList.remove("hidden");
+  row?.classList.add("boundary-open");
+  row?.setAttribute("aria-current", "true");
+  panel.classList.remove("hidden", "evidence-placeholder", "output-mode", "montage-mode");
+  panel.classList.add("candidate-mode");
   showContentDetailModeSwitch();
-  setContentDetailPanelMode("edit");
+  setContentDetailPanelMode("edit", { focus });
+  syncEvidencePlacement();
+  scheduleMediaFrameFit(true);
+  if (focus) window.requestAnimationFrame(() => {
+    editor.querySelector('[data-boundary-value="start"]')?.focus({ preventScroll: true });
+    inspector.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
   $("#timelineHint").textContent = "右侧详情已切换到边界调整；可随时切回片段证据";
   return true;
+}
+
+function openContentBoundaryMatchAfterTransition(matchId) {
+  const searchId = String(currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
+  const match = (currentJob?.contentSearch?.candidates || []).find((item) => String(item?.id || "") === String(matchId || ""));
+  if (!match) {
+    showToast("已进入片段确认，但原片段已不在当前结果中", "error");
+    return false;
+  }
+  setDirectorStage("events");
+  previewContentMatch(match, { autoplay: false, searchId });
+  if (openContentBoundaryInspector(match, { focus: true })) return true;
+  // A status transition can rebuild the review rail in the same frame. Retry
+  // once after rendering instead of exposing a clickable control with no body.
+  renderConversation(currentJob);
+  window.requestAnimationFrame(() => {
+    const refreshed = (currentJob?.contentSearch?.candidates || []).find((item) => String(item?.id || "") === String(matchId || ""));
+    if (!refreshed || !openContentBoundaryInspector(refreshed, { focus: true })) {
+      showToast("片段确认已打开，但边界编辑器加载失败，请重新选择该片段", "error");
+    }
+  });
+  return false;
+}
+
+async function activateContentBoundaryEntry() {
+  const state = syncContentBoundaryEntry();
+  if (!state || state.disabled || actionBusy) return;
+  const matchId = String(currentCandidate?.id || contentBoundaryTimelineEdit?.matchId || "");
+  if (!matchId) return void showToast("请先选择一个检索结果片段", "error");
+  if (state.kind === "restore") {
+    await restoreContentSearch(state.searchId, { openBoundaryMatchId: matchId });
+    return;
+  }
+  if (state.kind === "reedit") {
+    await reopenCurrentJobForEditing({ openBoundaryMatchId: matchId });
+    return;
+  }
+  const match = (currentJob?.contentSearch?.candidates || []).find((item) => String(item?.id || "") === matchId);
+  if (!match) return void showToast("当前检索中找不到这个片段，请重新选择", "error");
+  if (contentBoundaryTimelineEdit?.surface === "evidence-panel"
+      && String(contentBoundaryTimelineEdit.matchId || "") === matchId) {
+    setContentDetailPanelMode("edit");
+    return;
+  }
+  if (!openContentBoundaryInspector(match, { focus: true })) {
+    renderConversation(currentJob);
+    window.requestAnimationFrame(() => {
+      if (!openContentBoundaryInspector(match, { focus: true })) {
+        showToast("边界编辑器尚未加载，请重新选择当前检索中的片段", "error");
+      }
+    });
+  }
 }
 
 function contentTimelineReviewContext(match = currentCandidate) {
   if (!match?.id || String(currentJob?.taskMode || "") !== "content_extract") return null;
   const searchId = String(currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
-  const root = [...document.querySelectorAll(".content-search-review")].find((card) =>
-    String(card.dataset.contentSearchId || "") === searchId,
-  );
+  const root = activeContentReviewRoot(currentJob, {
+    searchId,
+    preferredRoot: contentBoundaryTimelineEdit?.root,
+  });
   const input = root?.querySelector(`[data-content-match][value="${CSS.escape(String(match.id))}"]`);
   if (!root || !input) return null;
   const search = contentSearchForRoot(root, currentJob);
@@ -12428,6 +12757,8 @@ async function saveContentBoundary(scopedJob, match, editor, operation = "save")
     });
     const activeEdit = contentBoundaryTimelineEdit?.editor === editor ? contentBoundaryTimelineEdit : null;
     if (activeEdit?.surface === "evidence-panel") {
+      activeEdit.row?.classList.remove("boundary-open");
+      activeEdit.row?.removeAttribute("aria-current");
       const origin = activeEdit.origin;
       if (origin?.parent?.isConnected) {
         if (origin.next?.parentElement === origin.parent) origin.parent.insertBefore(editor, origin.next);
@@ -12439,7 +12770,7 @@ async function saveContentBoundary(scopedJob, match, editor, operation = "save")
     if (activeEdit) contentBoundaryTimelineEdit = null;
     if (!commitJobAction(job, actionToken)) return;
     const updatedMatch = (currentJob?.contentSearch?.candidates || []).find((item) => String(item.id) === String(match.id));
-    if (updatedMatch) previewContentMatch(updatedMatch, { autoplay: false });
+    if (updatedMatch) previewContentMatch(updatedMatch, { autoplay: false, searchId: scopedJob.contentSearch.id });
     showToast(operation === "reset" ? "已恢复系统识别的原始边界" : "片段边界已保存", "success");
   } catch (error) {
     if (jobActionStillCurrent(actionToken)) showToast(`边界保存失败：${error.message}`);
@@ -12449,12 +12780,16 @@ async function saveContentBoundary(scopedJob, match, editor, operation = "save")
 }
 
 function wireContentBoundaryEditors(root, scopedJob) {
-  root.querySelectorAll("[data-content-boundary-open]").forEach((button) => button.addEventListener("click", () => {
+  root.querySelectorAll("[data-content-boundary-open]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const matchId = String(button.dataset.contentBoundaryOpen || "");
     const match = (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
     if (!match) return;
-    previewContentMatch(match, { autoplay: false });
-    if (!openContentBoundaryInspector(match)) showToast("当前片段暂时无法调整边界");
+    previewContentMatch(match, { autoplay: false, searchId: scopedJob.contentSearch?.id });
+    if (!openContentBoundaryInspector(match, { root, focus: true })) {
+      showToast("边界编辑器尚未加载，请重新选择当前检索中的片段", "error");
+    }
   }));
   root.querySelectorAll("[data-content-card-preview]").forEach((copy) => {
     const activate = (event) => {
@@ -12463,7 +12798,7 @@ function wireContentBoundaryEditors(root, scopedJob) {
       event.preventDefault();
       const matchId = String(copy.dataset.contentCardPreview || "");
       const match = (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
-      if (match) previewContentMatch(match);
+      if (match) previewContentMatch(match, { searchId: scopedJob.contentSearch?.id });
     };
     copy.addEventListener("click", activate);
     copy.addEventListener("keydown", activate);
@@ -12497,14 +12832,17 @@ function wireContentBoundaryEditors(root, scopedJob) {
     }));
     editor.querySelector("[data-boundary-preview]")?.addEventListener("click", () => {
       const draft = contentBoundaryDraft(editor, match);
-      previewContentMatch({ ...draft, duration: draft.end - draft.start }, { autoplay: true });
+      previewContentMatch(
+        { ...draft, duration: draft.end - draft.start },
+        { autoplay: true, searchId: scopedJob.contentSearch?.id },
+      );
     });
     editor.querySelector("[data-boundary-cancel]")?.addEventListener("click", () => {
       if (contentBoundaryTimelineEdit?.editor === editor) closeContentBoundaryTimelineEdit();
       else {
         editor.classList.add("hidden");
         editor.closest("[data-content-match-row]")?.classList.remove("boundary-open");
-        previewContentMatch(match, { autoplay: false });
+        previewContentMatch(match, { autoplay: false, searchId: scopedJob.contentSearch?.id });
       }
     });
     editor.querySelector("[data-boundary-save]")?.addEventListener("click", () => saveContentBoundary(scopedJob, match, editor));
@@ -12525,6 +12863,9 @@ function wireContentBoundaryEditors(root, scopedJob) {
       if (resumable.surface === "evidence-panel") {
         const inspector = $("#contentBoundaryInspector");
         resumable.origin = { parent: editor.parentElement, next: editor.nextElementSibling };
+        resumable.row = editor.closest("[data-content-match-row]");
+        resumable.row?.classList.add("boundary-open");
+        resumable.row?.setAttribute("aria-current", "true");
         inspector?.replaceChildren(editor);
         editor.classList.remove("hidden");
         setContentDetailPanelMode("edit");
@@ -12532,7 +12873,7 @@ function wireContentBoundaryEditors(root, scopedJob) {
         editor.classList.toggle("hidden", resumable.surface !== "card");
       }
       editor.closest("[data-content-match-row]")?.classList.toggle("boundary-open", resumable.surface === "card");
-      Object.assign(resumable, { match, scopedJob, editor });
+      Object.assign(resumable, { match, scopedJob, editor, root });
       syncContentBoundaryEditor(editor, scopedJob, match, { preview: false });
     }
   }
@@ -12570,22 +12911,47 @@ async function sendContentSearchFeedback(verdict, matchId = null, match = null, 
   return false;
 }
 
-async function restoreContentSearch(searchId) {
-  if (!currentJob || !searchId || actionBusy) return;
+async function restoreContentSearch(searchId, { openBoundaryMatchId = "" } = {}) {
+  openBoundaryMatchId = String(openBoundaryMatchId || "");
+  if (!currentJob || !searchId) return false;
+  if (!interactionCapabilitiesForJob(currentJob).canRestoreContentSearch) {
+    showToast(unavailableInteractionMessage(currentJob, "当前不能恢复历史检索"), "error");
+    return false;
+  }
+  if (actionBusy) {
+    showToast("另一项操作正在提交，请稍候", "neutral");
+    return false;
+  }
   const actionToken = captureJobAction();
   actionBusy = true;
+  const entryButton = $("#contentBoundaryEntryButton");
+  if (openBoundaryMatchId && entryButton) {
+    entryButton.disabled = true;
+    entryButton.textContent = "正在恢复检索…";
+  }
   try {
     const { job } = await api(`/api/jobs/${actionToken.jobId}/content-search/history/${encodeURIComponent(searchId)}/restore`, { method: "POST" });
-    commitJobAction(job, actionToken);
+    if (!commitJobAction(job, actionToken)) return false;
+    if (openBoundaryMatchId) openContentBoundaryMatchAfterTransition(openBoundaryMatchId);
+    return true;
   } catch (error) {
     if (jobActionStillCurrent(actionToken)) showToast(error.message);
+    return false;
   } finally {
-    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+    if (jobActionStillCurrent(actionToken)) {
+      actionBusy = false;
+      syncContentBoundaryEntry();
+    }
   }
 }
 
 async function updateContentPersonLabel(personId, currentLabel = "") {
-  if (!currentJob || !personId || actionBusy) return;
+  if (!currentJob || !personId) return;
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) {
+    showToast(unavailableInteractionMessage(currentJob, "当前不能修改人物标签"), "error");
+    return;
+  }
+  if (actionBusy) return void showToast("另一项人物操作正在提交，请稍候", "neutral");
   const label = await requestTextInput({
     kicker: "人物校正",
     title: currentLabel ? "修改人物标签" : "添加人物标签",
@@ -12621,7 +12987,9 @@ async function updateContentPersonLabel(personId, currentLabel = "") {
 
 async function mergeSelectedCurrentPersons() {
   const personIds = [...selectedPersonCorrectionPersons];
-  if (!currentJob?.id || personIds.length < 2 || actionBusy) return;
+  if (!currentJob?.id || personIds.length < 2) return;
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) return void showToast(unavailableInteractionMessage(currentJob), "error");
+  if (actionBusy) return void showToast("另一项人物操作正在提交，请稍候", "neutral");
   const persons = currentPersonCatalog(currentJob);
   const selected = persons.filter((person) => personIds.includes(String(person.id)));
   const target = selected[0];
@@ -12661,7 +13029,9 @@ async function mergeSelectedCurrentPersons() {
 }
 
 async function undoCurrentPersonMerge() {
-  if (!currentJob?.id || !currentJob.personMergeCanUndo || actionBusy) return;
+  if (!currentJob?.id || !currentJob.personMergeCanUndo) return;
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) return void showToast(unavailableInteractionMessage(currentJob), "error");
+  if (actionBusy) return void showToast("另一项人物操作正在提交，请稍候", "neutral");
   const actionToken = captureJobAction();
   actionBusy = true;
   try {
@@ -12683,7 +13053,9 @@ async function undoCurrentPersonMerge() {
 
 async function splitSelectedCurrentPersonRanges() {
   const rangeIds = [...selectedCurrentPersonRanges];
-  if (!currentJob?.id || !selectedCurrentPersonRangeOwner || !rangeIds.length || actionBusy) return;
+  if (!currentJob?.id || !selectedCurrentPersonRangeOwner || !rangeIds.length) return;
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) return void showToast(unavailableInteractionMessage(currentJob), "error");
+  if (actionBusy) return void showToast("另一项人物操作正在提交，请稍候", "neutral");
   const person = currentPersonCatalog(currentJob).find((item) => String(item.id) === selectedCurrentPersonRangeOwner);
   if (!person) return void showToast("人物列表已变化，请刷新后重试");
   const label = await requestTextInput({
@@ -12737,7 +13109,9 @@ async function moveSelectedCurrentPersonRanges(targetPersonId) {
   const persons = currentPersonCatalog(currentJob);
   const source = persons.find((item) => String(item.id) === selectedCurrentPersonRangeOwner);
   const target = persons.find((item) => String(item.id) === String(targetPersonId || ""));
-  if (!currentJob?.id || !source || !target || !rangeIds.length || actionBusy) return;
+  if (!currentJob?.id || !source || !target || !rangeIds.length) return;
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) return void showToast(unavailableInteractionMessage(currentJob), "error");
+  if (actionBusy) return void showToast("另一项人物操作正在提交，请稍候", "neutral");
   const confirmed = await requestActionConfirmation({
     title: "重新归属人物片段",
     summary: `把 ${rangeIds.length} 个片段从“${source.label || source.id}”移动到“${target.label || target.id}”？`,
@@ -13087,7 +13461,12 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
 
 async function confirmContentSelectionBasket(job = currentJob, acknowledgements = {}) {
   const items = contentBasketItems(job);
-  if (!job?.id || !items.length || actionBusy) return;
+  if (!job?.id || !items.length) return;
+  if (!interactionCapabilitiesForJob(job).canMutateContentBasket) {
+    showToast(unavailableInteractionMessage(job, "当前不能生成成片清单"), "error");
+    return;
+  }
+  if (actionBusy) return void showToast("另一项操作正在提交，请稍候", "neutral");
   const timing = contentBasketTimingSummary(items);
   const confirmed = await requestActionConfirmation({
     title: "生成清单内容",
@@ -13131,27 +13510,43 @@ async function confirmContentSelectionBasket(job = currentJob, acknowledgements 
   }
 }
 
-async function reopenCurrentJobForEditing() {
+async function reopenCurrentJobForEditing(options = {}) {
+  const openBoundaryMatchId = String(
+    options && typeof options === "object" && "openBoundaryMatchId" in options
+      ? options.openBoundaryMatchId || ""
+      : "",
+  );
   const hasOutputs = Boolean(
     (currentJob?.outputs || []).length
     || (currentJob?.outputVersions || []).some((version) => (version.outputs || []).length),
   );
   const canReedit = currentJob && (currentJob.status === "completed" || (currentJob.status === "awaiting_confirmation" && hasOutputs));
-  if (!canReedit || actionBusy) return;
+  if (!canReedit || actionBusy) return false;
   const actionToken = captureJobAction();
   actionBusy = true;
+  const entryButton = $("#contentBoundaryEntryButton");
+  if (openBoundaryMatchId && entryButton) {
+    entryButton.disabled = true;
+    entryButton.textContent = "正在返回片段确认…";
+  }
   try {
     const { job } = await api(`/api/jobs/${actionToken.jobId}/reedit`, { method: "POST" });
-    if (!jobActionStillCurrent(actionToken)) return;
+    if (!jobActionStillCurrent(actionToken)) return false;
     currentOutput = null;
     currentEventGroup = null;
     currentEventSegment = null;
     setDirectorStage("events");
-    commitJobAction(job, actionToken);
+    if (!commitJobAction(job, actionToken)) return false;
+    if (openBoundaryMatchId) openContentBoundaryMatchAfterTransition(openBoundaryMatchId);
+    return true;
   } catch (error) {
     if (jobActionStillCurrent(actionToken)) showToast(error.message);
+    return false;
   } finally {
-    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+    if (jobActionStillCurrent(actionToken)) {
+      actionBusy = false;
+      syncContentBoundaryEntry();
+    }
   }
 }
 
@@ -14205,6 +14600,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   mainVideo?.removeAttribute("src");
   mainVideoAutoplayToken += 1;
   mainVideo?.load();
+  setPlayerSurfaceState("empty");
   viewerShell?.classList.remove("portrait", "square");
   viewerShell?.style.setProperty("--media-aspect", "1.90476");
   if (viewerShell) viewerShell.dataset.mediaAspect = "16 / 9";
@@ -14262,6 +14658,11 @@ videoInput.addEventListener("change", () => {
   } else {
     resetWorkspace();
   }
+});
+
+$("#replaceVideoButton")?.addEventListener("click", () => {
+  if (actionBusy) return;
+  videoInput.click();
 });
 
 $("#localPreviewVideo").addEventListener("loadedmetadata", (event) => {
@@ -14426,6 +14827,7 @@ mainVideo.addEventListener("timeupdate", () => {
   }
 });
 mainVideo.addEventListener("loadedmetadata", () => {
+  setPlayerSurfaceState("ready");
   applyMediaAspect(viewerShell, mainVideo.videoWidth, mainVideo.videoHeight);
   mainVideo.style.setProperty("--decoded-media-aspect", `${mainVideo.videoWidth} / ${mainVideo.videoHeight}`);
   clearPlayerNotice();
@@ -14628,12 +15030,10 @@ $("#timelineManualSelectToggle")?.addEventListener("click", async () => {
   if (timelineManualSelectMode) timelineViewport?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 });
 $("#timelineContentTrim")?.addEventListener("click", () => {
-  const match = (currentJob?.contentSearch?.candidates || []).find((item) =>
-    String(item.id || "") === String(currentCandidate?.id || ""),
-  );
-  if (!match) return void showToast("请先点击一个检索片段进行预览");
+  const state = contentBoundaryEntryState(currentCandidate);
+  if (state.disabled) return void showToast(state.reason, "error");
   setTimelineExpanded(true);
-  if (!openContentBoundaryInspector(match)) showToast("当前检索结果尚未进入可编辑状态");
+  void activateContentBoundaryEntry();
 });
 $("#timelineExpandToggle")?.addEventListener("click", () => {
   setTimelineExpanded(!timelineExpanded);
@@ -14684,7 +15084,10 @@ $("#timelineSelection .timeline-handle.end")?.addEventListener("pointerdown", (e
 $("#timelineSelectionPreview")?.addEventListener("click", () => {
   if (contentBoundaryTimelineEdit?.editor?.isConnected) {
     const edit = contentBoundaryTimelineEdit;
-    previewContentMatch({ ...edit.match, start: edit.start, end: edit.end, duration: edit.end - edit.start }, { autoplay: true, loadEvidence: false });
+    previewContentMatch(
+      { ...edit.match, start: edit.start, end: edit.end, duration: edit.end - edit.start },
+      { autoplay: true, loadEvidence: false, searchId: edit.searchId },
+    );
     return;
   }
   const item = currentJob?.manualSelection;
@@ -14844,15 +15247,7 @@ document.querySelectorAll("[data-content-detail-mode]").forEach((button) => butt
     setContentDetailPanelMode("evidence");
     return;
   }
-  const matchId = String(currentCandidate?.id || contentBoundaryTimelineEdit?.matchId || "");
-  const match = (currentJob?.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
-  if (!match) return void showToast("请先选择一个探索结果片段");
-  if (contentBoundaryTimelineEdit?.surface === "evidence-panel"
-      && String(contentBoundaryTimelineEdit.matchId) === String(match.id)) {
-    setContentDetailPanelMode("edit");
-    return;
-  }
-  if (!openContentBoundaryInspector(match)) showToast("当前片段暂时无法调整边界");
+  activateContentBoundaryEntry();
 }));
 $("#addToChatButton")?.addEventListener("click", () => {
   const item = currentEventSegment || currentCandidate || currentJob?.manualSelection;
@@ -15476,6 +15871,8 @@ function previewCurrentPerson(person, start = null, end = null) {
 function syncCurrentPersonControls() {
   const count = selectedCurrentPersons.size;
   const correctionCount = selectedPersonCorrectionPersons.size;
+  const capabilities = interactionCapabilitiesForJob(currentJob);
+  const locked = !capabilities.canCorrectPerson;
   const summary = $("#currentPersonSelectionSummary");
   if (summary) summary.textContent = `已选 ${count} 人`;
   const modes = $("#currentPersonMatchModes");
@@ -15485,25 +15882,31 @@ function syncCurrentPersonControls() {
   if (speaking) speaking.checked = currentPersonActivity === "speaking";
   const action = $("#searchSelectedPersons");
   if (action) {
-    action.disabled = !count || actionBusy;
+    action.disabled = locked || !count || actionBusy;
+    action.title = locked ? capabilities.reason : "";
     action.textContent = currentPersonActivity === "speaking"
       ? (count ? `识别并整理发言片段（${count}）` : "识别并整理发言片段")
       : (count ? `直接整理出镜片段（${count}）` : "直接整理出镜片段");
   }
   const merge = $("#mergeSelectedPersons");
   if (merge) {
-    merge.disabled = correctionCount < 2 || actionBusy;
+    merge.disabled = locked || correctionCount < 2 || actionBusy;
+    merge.title = locked ? capabilities.reason : "";
     merge.textContent = correctionCount >= 2 ? `合并所选人物（${correctionCount}）` : "合并所选人物";
   }
   const split = $("#splitSelectedPersonRanges");
   if (split) {
-    split.disabled = !selectedCurrentPersonRanges.size || actionBusy;
+    split.disabled = locked || !selectedCurrentPersonRanges.size || actionBusy;
+    split.title = locked ? capabilities.reason : "";
     split.textContent = selectedCurrentPersonRanges.size
       ? `所选 ${selectedCurrentPersonRanges.size} 段拆为新人物`
       : "所选片段拆为新人物";
   }
   const undo = $("#undoPersonMerge");
-  if (undo) undo.disabled = !currentJob?.personMergeCanUndo || actionBusy;
+  if (undo) {
+    undo.disabled = locked || !currentJob?.personMergeCanUndo || actionBusy;
+    undo.title = locked ? capabilities.reason : "";
+  }
   const toolbar = $("#personMergeToolbar");
   toolbar?.classList.toggle("has-selection", correctionCount > 0 || selectedCurrentPersonRanges.size > 0);
   syncUnifiedWorkspaceView();
@@ -15539,6 +15942,10 @@ function renderCurrentPersons() {
   ensureCurrentPersonState(currentJob);
   const persons = currentPersonCatalog(currentJob);
   const running = executionForJob(currentJob).active;
+  const correctionLocked = !interactionCapabilitiesForJob(currentJob).canCorrectPerson;
+  const correctionLockAttributes = correctionLocked
+    ? `disabled aria-disabled="true" title="${escapeHtml(unavailableInteractionMessage(currentJob))}"`
+    : "";
   if (!persons.length) {
     count.textContent = running ? "识别中" : "尚未识别";
     actions.classList.add("hidden");
@@ -15594,7 +16001,7 @@ function renderCurrentPersons() {
     return `<article class="current-person-card${selected ? " selected" : ""}${focused ? " focused" : ""}${review ? " review" : ""}" data-current-person="${escapeHtml(personId)}" style="--person-color:${color}">
       <label class="current-person-choice"><input type="checkbox" data-current-person-select value="${escapeHtml(personId)}" ${selected ? "checked" : ""}><span class="current-person-thumbnail"><img src="${escapeHtml(person.thumbnailUrl || "")}" alt="${escapeHtml(label)}的代表画面" loading="lazy"><em>播放片段</em></span><span class="current-person-copy"><strong>${escapeHtml(label)}</strong><small>${personAppearanceSeconds(person).toFixed(1)} 秒出镜 · ${ranges.length} 段</small><small>${duplicateLabels.length ? `疑似与 ${duplicateLabels.join("、")} 为同一人 · 请复核` : review ? "短暂或不稳定人物簇 · 建议复核" : `${Number(person.trackCount || ranges.length)} 次画面观测 · 自动分组`}</small></span></label>
       ${rangeMarkup}
-      <footer><button type="button" data-current-person-preview="${escapeHtml(personId)}">播放代表片段</button><button type="button" data-current-person-label="${escapeHtml(personId)}" data-current-person-current-label="${escapeHtml(person.userLabeled ? person.label || "" : "")}">${person.userLabeled ? "修改标签" : "添加标签"}</button>${selectedCurrentPersonRanges.size && selectedCurrentPersonRangeOwner !== personId ? `<button type="button" data-current-person-range-target="${escapeHtml(personId)}">移到此人物</button>` : ""}</footer>
+      <footer><button type="button" data-current-person-preview="${escapeHtml(personId)}">播放代表片段</button><button type="button" data-current-person-label="${escapeHtml(personId)}" data-current-person-current-label="${escapeHtml(person.userLabeled ? person.label || "" : "")}" ${correctionLockAttributes}>${person.userLabeled ? "修改标签" : "添加标签"}</button>${selectedCurrentPersonRanges.size && selectedCurrentPersonRangeOwner !== personId ? `<button type="button" data-current-person-range-target="${escapeHtml(personId)}" ${correctionLockAttributes}>移到此人物</button>` : ""}</footer>
     </article>`;
   };
   const activePersonSelection = personReviewMode === "correct" ? selectedPersonCorrectionPersons : selectedCurrentPersons;
@@ -15696,6 +16103,7 @@ function closePersonProfiles() {
 }
 
 async function searchSelectedCurrentPersons() {
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectPerson) return void showToast(unavailableInteractionMessage(currentJob), "error");
   if (!selectedCurrentPersons.size) return void showToast("请至少选择一个人物");
   const button = $("#searchSelectedPersons");
   await selectContentPersonTarget(
@@ -15712,6 +16120,7 @@ let currentVoices = [];
 let currentVoiceTimeline = [];
 let currentVoiceRevision = 0;
 let currentVoiceCanUndo = false;
+let voiceCorrectionBusy = false;
 let currentVoiceJobId = "";
 let currentVoiceRequestGeneration = 0;
 let currentVoiceDiscoveryStatus = "not_started";
@@ -15733,6 +16142,36 @@ function setVoiceProfileStatus(message = "", tone = "") {
   node.dataset.tone = tone;
 }
 
+function beginCurrentVoiceMutation(label = "声音校正") {
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectVoice) {
+    setVoiceProfileStatus(unavailableInteractionMessage(currentJob, `当前不能执行${label}`), "error");
+    return false;
+  }
+  if (voiceCorrectionBusy) {
+    setVoiceProfileStatus("另一项声音操作正在保存，请稍候。", "error");
+    return false;
+  }
+  voiceCorrectionBusy = true;
+  syncCurrentVoiceControls();
+  return true;
+}
+
+function finishCurrentVoiceMutation() {
+  voiceCorrectionBusy = false;
+  const locked = !interactionCapabilitiesForJob(currentJob).canCorrectVoice;
+  document.querySelectorAll("[data-current-voice-role], [data-current-voice-label]").forEach((button) => {
+    button.disabled = locked;
+    button.title = locked ? unavailableInteractionMessage(currentJob) : "";
+  });
+  const discoveryBusy = ["running", "loading"].includes(currentVoiceDiscoveryStatus);
+  const discoverButton = $("#discoverCurrentVoices");
+  if (discoverButton) discoverButton.disabled = locked || discoveryBusy || !currentJob;
+  const expectedCount = $("#expectedVoiceCount");
+  if (expectedCount) expectedCount.disabled = locked || discoveryBusy;
+  syncCurrentVoiceControls();
+  renderInlineCurrentVoices({ status: currentVoiceDiscoveryStatus });
+}
+
 function resetCurrentVoiceState(jobId = "") {
   currentVoiceRequestGeneration += 1;
   temporaryVoiceSourceRequestGeneration += 1;
@@ -15743,6 +16182,7 @@ function resetCurrentVoiceState(jobId = "") {
   currentVoiceTimeline = [];
   currentVoiceRevision = 0;
   currentVoiceCanUndo = false;
+  voiceCorrectionBusy = false;
   currentVoiceDiscoveryStatus = "not_started";
   currentVoiceTurnLimit = currentVoiceTurnPageSize;
   focusedCurrentVoiceRef = "";
@@ -15761,13 +16201,17 @@ function renderInlineCurrentVoices(discovery = {}) {
   const root = $("#inlineCurrentVoices");
   const narratorMode = Boolean(currentJob?.narratorSelectionPending?.active);
   if (!root || (workflowKindForJob(currentJob) !== "speaker_edit" && !narratorMode)) return;
+  const interactionLocked = !interactionCapabilitiesForJob(currentJob).canCorrectVoice || voiceCorrectionBusy;
+  const interactionLockAttributes = interactionLocked
+    ? `disabled aria-disabled="true" title="${escapeHtml(voiceCorrectionBusy ? "正在保存声音校正" : unavailableInteractionMessage(currentJob))}"`
+    : "";
   const status = String(discovery.status || currentVoiceDiscoveryStatus || "not_started");
   if (["running", "loading"].includes(status)) {
     root.innerHTML = `<header><div><small>${narratorMode ? "旁白识别" : "按说话人剪辑"}</small><strong>${narratorMode ? "正在生成疑似旁白候选" : "正在区分匿名说话人"}</strong></div><b>处理中</b></header><p>${escapeHtml(discovery.currentAction || discovery.detail || "正在通读全片语音并整理发言轮次")}</p><button type="button" data-inline-speaker-advanced>查看详细进度</button>`;
   } else if (status === "failed") {
-    root.innerHTML = `<header><div><small>按说话人剪辑</small><strong>说话人识别未完成</strong></div></header><p>${escapeHtml(discovery.error || "可以重新尝试识别。")}</p><footer><button type="button" class="primary" data-inline-speaker-start>重新识别</button><button type="button" data-inline-speaker-advanced>打开高级面板</button></footer>`;
+    root.innerHTML = `<header><div><small>按说话人剪辑</small><strong>说话人识别未完成</strong></div></header><p>${escapeHtml(discovery.error || "可以重新尝试识别。")}</p><footer><button type="button" class="primary" data-inline-speaker-start ${interactionLockAttributes}>重新识别</button><button type="button" data-inline-speaker-advanced>打开高级面板</button></footer>`;
   } else if (status !== "ready" || !currentVoices.length) {
-    root.innerHTML = `<header><div><small>${narratorMode ? "旁白识别" : "按说话人剪辑"}</small><strong>先区分视频中的匿名声音</strong></div></header><p>${narratorMode ? "系统只分析声音并给出疑似旁白，不会启动人物、人脸或 TalkNet 扫描。" : "不需要输入姓名。系统会提供代表片段供试听，再由你选择要保留的说话人。"}</p><label>预计说话人数 <input type="number" min="0" max="32" step="1" placeholder="自动判断" value="${Number(discovery.expectedSpeakerCount) || ""}" data-inline-speaker-count></label><footer><button type="button" class="primary" data-inline-speaker-start>开始识别说话人</button><button type="button" data-inline-speaker-advanced>高级设置</button></footer>`;
+    root.innerHTML = `<header><div><small>${narratorMode ? "旁白识别" : "按说话人剪辑"}</small><strong>先区分视频中的匿名声音</strong></div></header><p>${narratorMode ? "系统只分析声音并给出疑似旁白，不会启动人物、人脸或 TalkNet 扫描。" : "不需要输入姓名。系统会提供代表片段供试听，再由你选择要保留的说话人。"}</p><label>预计说话人数 <input type="number" min="0" max="32" step="1" placeholder="自动判断" value="${Number(discovery.expectedSpeakerCount) || ""}" data-inline-speaker-count ${interactionLockAttributes}></label><footer><button type="button" class="primary" data-inline-speaker-start ${interactionLockAttributes}>开始识别说话人</button><button type="button" data-inline-speaker-advanced>高级设置</button></footer>`;
   } else {
     const orderedVoices = narratorMode ? [...currentVoices].sort((left, right) => {
       const order = { confirmed: 0, candidate: 1, unlikely: 2, rejected: 3 };
@@ -15780,8 +16224,8 @@ function renderInlineCurrentVoices(discovery = {}) {
       const narration = voice.narration || {};
       const quality = narratorMode && narration.status === "confirmed" ? "已确认旁白" : narratorMode && narration.status === "candidate" ? "疑似旁白" : voice.requiresReview ? "建议复核" : "声音稳定";
       const reason = narratorMode && (narration.reasons || []).length ? `<em>${escapeHtml(narration.reasons.join(" · "))}</em>` : "";
-      return `<article class="inline-voice-card${selected ? " selected" : ""}${narration.status === "candidate" ? " narrator-candidate" : ""}"><label><input type="checkbox" data-inline-voice-select value="${escapeHtml(voice.speakerRef)}" ${selected ? "checked" : ""}><span><strong>${escapeHtml(voice.label || voice.speakerRef)}</strong><small>${Number(voice.speechSeconds || 0).toFixed(1)} 秒 · ${Number(voice.segmentCount || 0)} 段 · ${quality}</small>${reason}</span></label>${sample ? `<button type="button" data-inline-voice-preview data-start="${Number(sample.start) || 0}" data-end="${Number(sample.end) || 0}">▶ 试听 ${formatTime(sample.start)}</button>` : ""}${narratorMode && narration.status === "candidate" ? `<button type="button" data-inline-not-narrator="${escapeHtml(voice.speakerRef)}">不是旁白</button>` : ""}</article>`;
-    }).join("")}</div><footer><button type="button" class="primary" ${narratorMode ? "data-inline-narrator-confirm" : "data-inline-voice-confirm"} ${selectedCurrentVoices.size ? "" : "disabled"}>${narratorMode ? `确认旁白并继续检索（${selectedCurrentVoices.size}）` : `整理所选发言（${selectedCurrentVoices.size}）`}</button><button type="button" data-inline-speaker-advanced>更多校正工具</button></footer>`;
+      return `<article class="inline-voice-card${selected ? " selected" : ""}${narration.status === "candidate" ? " narrator-candidate" : ""}"><label><input type="checkbox" data-inline-voice-select value="${escapeHtml(voice.speakerRef)}" ${selected ? "checked" : ""}><span><strong>${escapeHtml(voice.label || voice.speakerRef)}</strong><small>${Number(voice.speechSeconds || 0).toFixed(1)} 秒 · ${Number(voice.segmentCount || 0)} 段 · ${quality}</small>${reason}</span></label>${sample ? `<button type="button" data-inline-voice-preview data-start="${Number(sample.start) || 0}" data-end="${Number(sample.end) || 0}">▶ 试听 ${formatTime(sample.start)}</button>` : ""}${narratorMode && narration.status === "candidate" ? `<button type="button" data-inline-not-narrator="${escapeHtml(voice.speakerRef)}" ${interactionLockAttributes}>不是旁白</button>` : ""}</article>`;
+    }).join("")}</div><footer><button type="button" class="primary" ${narratorMode ? "data-inline-narrator-confirm" : "data-inline-voice-confirm"} ${selectedCurrentVoices.size && !interactionLocked ? "" : "disabled"} ${interactionLocked ? `aria-disabled="true" title="${escapeHtml(unavailableInteractionMessage(currentJob))}"` : ""}>${interactionLocked ? "任务完成后继续" : narratorMode ? `确认旁白并继续检索（${selectedCurrentVoices.size}）` : `整理所选发言（${selectedCurrentVoices.size}）`}</button><button type="button" data-inline-speaker-advanced>更多校正工具</button></footer>`;
   }
   root.querySelector("[data-inline-speaker-start]")?.addEventListener("click", () => {
     const expected = Number(root.querySelector("[data-inline-speaker-count]")?.value || 0);
@@ -15806,6 +16250,10 @@ function renderCurrentVoices(discovery = {}) {
   const button = $("#discoverCurrentVoices");
   if (!list || !button) return;
   const status = String(discovery.status || "not_started");
+  const voiceLocked = !interactionCapabilitiesForJob(currentJob).canCorrectVoice || voiceCorrectionBusy;
+  const voiceLockAttributes = voiceLocked
+    ? `disabled aria-disabled="true" title="${escapeHtml(voiceCorrectionBusy ? "正在保存声音校正" : unavailableInteractionMessage(currentJob))}"`
+    : "";
   currentVoiceDiscoveryStatus = status;
   renderInlineCurrentVoices(discovery);
   renderTimelineSpeakerTrack();
@@ -15816,7 +16264,7 @@ function renderCurrentVoices(discovery = {}) {
   if (expectedCount && discovery.expectedSpeakerCount != null) {
     expectedCount.dataset.indexedCount = String(Number(discovery.expectedSpeakerCount) || 0);
   }
-  if (expectedCount) expectedCount.disabled = ["running", "loading"].includes(status);
+  if (expectedCount) expectedCount.disabled = voiceLocked || ["running", "loading"].includes(status);
   if (status !== "failed") {
     const countChanged = Number(expectedCount?.value || 0) !== Number(expectedCount?.dataset.indexedCount || 0);
     button.textContent = status === "ready" && currentVoices.length
@@ -15827,7 +16275,8 @@ function renderCurrentVoices(discovery = {}) {
   syncReviewWorkbench();
   const unchangedReadyCount = status === "ready" && currentVoices.length
     && Number(expectedCount?.value || 0) === Number(expectedCount?.dataset.indexedCount || 0);
-  button.disabled = ["running", "loading"].includes(status) || !currentJob;
+  button.disabled = voiceLocked || ["running", "loading"].includes(status) || !currentJob;
+  button.title = voiceLocked ? (voiceCorrectionBusy ? "正在保存声音校正" : unavailableInteractionMessage(currentJob)) : "";
   button.closest(".current-voice-discovery-controls")?.classList.toggle("discovery-ready", Boolean(unchangedReadyCount));
   button.classList.remove("hidden");
   syncReviewActionDock();
@@ -15901,7 +16350,7 @@ function renderCurrentVoices(discovery = {}) {
     const narrationHint = ["confirmed", "candidate"].includes(narration.status)
       ? `<section class="current-voice-narration ${escapeHtml(narration.status)}"><strong>${narration.status === "confirmed" ? "本视频旁白" : "系统建议试听确认是否为旁白"}</strong><small>${escapeHtml((narration.reasons || []).join(" · ") || "仅依据声音时间线判断，不代表人物身份")}</small></section>` : "";
     const narratorButton = narration.status === "confirmed" ? "取消旁白标记" : narration.status === "candidate" ? "确认是旁白" : "标记为旁白";
-    return `<article class="current-voice-card${selected ? " selected" : ""}${focusedCurrentVoiceRef === voice.speakerRef ? " focused" : ""}${narration.status === "candidate" ? " narrator-candidate" : ""}" data-current-voice="${escapeHtml(voice.speakerRef)}" style="--voice-color:var(--voice-${index % 6})"><header><label class="current-voice-choice"><input type="checkbox" data-current-voice-select value="${escapeHtml(voice.speakerRef)}" ${selected ? "checked" : ""}><span><strong>${escapeHtml(voice.label || voice.speakerRef)}</strong><small>${Number(voice.speechSeconds || 0).toFixed(1)} 秒发言 · ${Number(voice.segmentCount || 0)} 个片段 · ${score}</small></span></label><b class="${voice.requiresReview || narration.status === "candidate" ? "review" : ""}" title="${escapeHtml(quality.warning || "")}">${badge}</b></header>${narrationHint}<div class="current-voice-samples">${samples || '<small>没有足够长的试听片段</small>'}</div><footer><button type="button" data-current-voice-role="${escapeHtml(voice.speakerRef)}" data-role="${narration.status === "confirmed" ? "auto" : "narrator"}">${narratorButton}</button><button type="button" data-current-voice-label="${escapeHtml(voice.speakerRef)}">${voice.userLabeled && narration.status !== "confirmed" ? "改名" : "命名"}</button></footer></article>`;
+    return `<article class="current-voice-card${selected ? " selected" : ""}${focusedCurrentVoiceRef === voice.speakerRef ? " focused" : ""}${narration.status === "candidate" ? " narrator-candidate" : ""}" data-current-voice="${escapeHtml(voice.speakerRef)}" style="--voice-color:var(--voice-${index % 6})"><header><label class="current-voice-choice"><input type="checkbox" data-current-voice-select value="${escapeHtml(voice.speakerRef)}" ${selected ? "checked" : ""}><span><strong>${escapeHtml(voice.label || voice.speakerRef)}</strong><small>${Number(voice.speechSeconds || 0).toFixed(1)} 秒发言 · ${Number(voice.segmentCount || 0)} 个片段 · ${score}</small></span></label><b class="${voice.requiresReview || narration.status === "candidate" ? "review" : ""}" title="${escapeHtml(quality.warning || "")}">${badge}</b></header>${narrationHint}<div class="current-voice-samples">${samples || '<small>没有足够长的试听片段</small>'}</div><footer><button type="button" data-current-voice-role="${escapeHtml(voice.speakerRef)}" data-role="${narration.status === "confirmed" ? "auto" : "narrator"}" ${voiceLockAttributes}>${narratorButton}</button><button type="button" data-current-voice-label="${escapeHtml(voice.speakerRef)}" ${voiceLockAttributes}>${voice.userLabeled && narration.status !== "confirmed" ? "改名" : "命名"}</button></footer></article>`;
   }).join("");
   list.querySelectorAll("[data-current-voice-preview]").forEach((button) => button.addEventListener("click", () => {
     focusCurrentVoice(button.dataset.currentVoicePreview, { scroll: false });
@@ -15928,19 +16377,25 @@ function syncCurrentVoiceControls() {
   const count = selectedCurrentVoices.size;
   const correctionCount = selectedVoiceCorrectionVoices.size;
   const mode = $("#currentVoiceMode")?.value || "include";
+  const capabilities = interactionCapabilitiesForJob(currentJob);
+  const locked = !capabilities.canCorrectVoice || voiceCorrectionBusy;
+  const lockedReason = voiceCorrectionBusy ? "正在保存声音校正" : capabilities.reason;
   const search = $("#searchSelectedVoices");
-  if (search) { search.disabled = !count || (mode === "qa_pair" && count !== 1); search.textContent = count ? `查看发言片段（${count}）` : "查看发言片段"; }
+  if (search) { search.disabled = locked || !count || (mode === "qa_pair" && count !== 1); search.title = locked ? lockedReason : ""; search.textContent = count ? `查看发言片段（${count}）` : "查看发言片段"; }
   const merge = $("#mergeSelectedVoices");
   if (merge) {
-    merge.disabled = correctionCount < 2;
+    merge.disabled = locked || correctionCount < 2;
+    merge.title = locked ? lockedReason : "";
     merge.textContent = correctionCount >= 2 ? `合并所选声音（${correctionCount}）` : "合并所选声音";
   }
-  const undo = $("#undoVoiceCorrection"); if (undo) undo.disabled = !currentVoiceCanUndo;
+  const undo = $("#undoVoiceCorrection"); if (undo) { undo.disabled = locked || !currentVoiceCanUndo; undo.title = locked ? lockedReason : ""; }
   const target = $("#voiceReassignTarget");
   if (target) {
     const previous = target.value;
     target.innerHTML = `<option value="new">新建声音</option>${currentVoices.map((voice) => `<option value="${escapeHtml(voice.speakerRef)}">${escapeHtml(voice.label || voice.speakerRef)}</option>`).join("")}`;
     if ([...target.options].some((option) => option.value === previous)) target.value = previous;
+    target.disabled = locked;
+    target.title = locked ? lockedReason : "";
   }
   const selectedTurnIds = new Set(
     [...document.querySelectorAll("[data-voice-turn-select]:checked")].map((input) => String(input.value)),
@@ -15959,13 +16414,13 @@ function syncCurrentVoiceControls() {
   );
   const reassign = $("#reassignVoiceTurns");
   if (reassign) {
-    reassign.disabled = !selectedTurns.length || ineffectiveMove;
-    reassign.title = ineffectiveMove ? "所选发言已经属于该说话人" : selectedTurns.length ? "保存校正并立即更新后续提取时间轴" : "请先勾选发言";
+    reassign.disabled = locked || !selectedTurns.length || ineffectiveMove;
+    reassign.title = locked ? lockedReason : ineffectiveMove ? "所选发言已经属于该说话人" : selectedTurns.length ? "保存校正并立即更新后续提取时间轴" : "请先勾选发言";
   }
   const split = $("#splitVoiceTurn");
   if (split) {
-    split.disabled = selectedTurns.length !== 1;
-    split.title = selectedTurns.length === 1 ? "把所选发言在播放器当前时间拆成两段" : "请只勾选一段发言";
+    split.disabled = locked || selectedTurns.length !== 1;
+    split.title = locked ? lockedReason : selectedTurns.length === 1 ? "把所选发言在播放器当前时间拆成两段" : "请只勾选一段发言";
   }
   syncUnifiedWorkspaceView();
   syncReviewActionDock();
@@ -16294,6 +16749,9 @@ async function loadCurrentVoices() {
 
 async function discoverCurrentVoices() {
   if (!currentJob?.id) return setVoiceProfileStatus("请先打开一个视频任务。", "error");
+  if (!interactionCapabilitiesForJob(currentJob).canCorrectVoice || voiceCorrectionBusy) {
+    return setVoiceProfileStatus(unavailableInteractionMessage(currentJob, "当前已有声音操作正在处理"), "error");
+  }
   const jobId = String(currentJob.id);
   const button = $("#discoverCurrentVoices");
   if (button) button.disabled = true;
@@ -16348,6 +16806,7 @@ async function labelCurrentVoice(speakerRef) {
     confirmLabel: "保存名称",
   }))?.trim();
   if (!label || label === voice?.label) return;
+  if (!beginCurrentVoiceMutation("声音命名")) return;
   const jobId = String(currentJob?.id || "");
   try {
     const result = await apiJson(`/api/jobs/${encodeURIComponent(jobId)}/content-search/voices/label`, {
@@ -16357,11 +16816,15 @@ async function labelCurrentVoice(speakerRef) {
     currentVoices = Array.isArray(result.voices) ? result.voices : currentVoices;
     renderCurrentVoices({ status: "ready" });
   } catch (error) { setVoiceProfileStatus(error.message, "error"); }
+  finally { finishCurrentVoiceMutation(); }
 }
 
 async function setCurrentVoiceRole(speakerRef, role, { continuePendingSearch = true } = {}) {
   const jobId = String(currentJob?.id || "");
   if (!jobId || !speakerRef) return false;
+  if (!beginCurrentVoiceMutation("声音角色校正")) return false;
+  let continueSearch = false;
+  let succeeded = false;
   try {
     const result = await apiJson(`/api/jobs/${encodeURIComponent(jobId)}/content-search/voices/role`, {
       method: "PATCH", body: { speakerRef, role },
@@ -16374,18 +16837,22 @@ async function setCurrentVoiceRole(speakerRef, role, { continuePendingSearch = t
       setVoiceProfileStatus("已确认为本视频旁白；后续检索会直接复用这个 Speaker 的时间线。", "success");
       if (continuePendingSearch && currentJob?.narratorSelectionPending?.active) {
         selectedCurrentVoices = new Set([speakerRef]);
-        await searchSelectedCurrentVoices("include");
+        continueSearch = true;
       }
     } else if (role === "regular") {
       setVoiceProfileStatus("已标记为普通说话人，不再作为疑似旁白推荐。", "success");
     } else {
       setVoiceProfileStatus("已取消旁白绑定，恢复为自动判断。", "success");
     }
-    return true;
+    succeeded = true;
   } catch (error) {
     setVoiceProfileStatus(error.message, "error");
     return false;
+  } finally {
+    finishCurrentVoiceMutation();
   }
+  if (continueSearch) await searchSelectedCurrentVoices("include");
+  return succeeded;
 }
 
 async function confirmNarratorSelection() {
@@ -16403,6 +16870,7 @@ async function searchSelectedCurrentVoices(forcedMode = "") {
   const speakerRefs = [...selectedCurrentVoices];
   const mode = forcedMode || $("#currentVoiceMode")?.value || "include";
   if (mode === "qa_pair" && speakerRefs.length !== 1) return setVoiceProfileStatus("完整问答只能选择一个目标声音。", "error");
+  if (!beginCurrentVoiceMutation("发言片段整理")) return;
   const actionToken = captureJobAction(currentJob);
   setVoiceProfileStatus(`正在按${currentVoiceRevision ? `人工校正后的时间轴 r${currentVoiceRevision}` : "当前声音时间轴"}整理发言…`);
   try {
@@ -16417,6 +16885,7 @@ async function searchSelectedCurrentVoices(forcedMode = "") {
     clearTimeout(pollTimer);
     if (jobNeedsPolling(currentJob)) pollJob();
   } catch (error) { setVoiceProfileStatus(error.message, "error"); }
+  finally { finishCurrentVoiceMutation(); }
 }
 
 async function mergeSelectedCurrentVoices() {
@@ -16437,6 +16906,7 @@ async function mergeSelectedCurrentVoices() {
     confirmLabel: "确认合并",
   });
   if (!confirmed) return;
+  if (!beginCurrentVoiceMutation("合并说话人")) return;
   const jobId = String(currentJob.id);
   try {
     const result = await apiJson(`/api/jobs/${encodeURIComponent(jobId)}/content-search/voices/timeline`, {
@@ -16448,11 +16918,13 @@ async function mergeSelectedCurrentVoices() {
     selectedVoiceCorrectionVoices.clear(); renderCurrentVoices({ status: "ready" });
     setVoiceProfileStatus(`已合并 ${speakerRefs.length} 个声音 · 时间轴 r${currentVoiceRevision}；后续提取立即生效。`, "success");
   } catch (error) { setVoiceProfileStatus(error.message, "error"); }
+  finally { finishCurrentVoiceMutation(); }
 }
 
 async function reassignSelectedVoiceTurns() {
   const turnIds = [...document.querySelectorAll("[data-voice-turn-select]:checked")].map((input) => String(input.value));
   if (!currentJob?.id || !turnIds.length) return setVoiceProfileStatus("请先勾选需要移动的发言。", "error");
+  if (!beginCurrentVoiceMutation("移动发言归属")) return;
   const targetSpeakerRef = $("#voiceReassignTarget")?.value || "new";
   const label = targetSpeakerRef === "new" ? $("#voiceReassignLabel")?.value.trim() || "" : "";
   const selectedTurns = currentVoiceTimeline.filter((turn) => turnIds.includes(String(turn.turnId)));
@@ -16473,6 +16945,7 @@ async function reassignSelectedVoiceTurns() {
     if ($("#voiceReassignLabel")) $("#voiceReassignLabel").value = "";
     setVoiceProfileStatus(`已将 ${turnIds.length} 段发言从${sourceLabels.join("、")}移到“${targetLabel}” · 时间轴 r${currentVoiceRevision}；后续提取立即生效。`, "success");
   } catch (error) { setVoiceProfileStatus(error.message, "error"); }
+  finally { finishCurrentVoiceMutation(); }
 }
 
 async function splitSelectedVoiceTurn() {
@@ -16483,6 +16956,7 @@ async function splitSelectedVoiceTurn() {
   if (!turn || splitTime <= Number(turn.start) + .1 || splitTime >= Number(turn.end) - .1) {
     return setVoiceProfileStatus("请先播放或拖动时间线，把播放点放在所选发言内部。", "error");
   }
+  if (!beginCurrentVoiceMutation("拆分发言")) return;
   const targetSpeakerRef = $("#voiceReassignTarget")?.value || "new";
   const label = targetSpeakerRef === "new" ? $("#voiceReassignLabel")?.value.trim() || "" : "";
   const jobId = String(currentJob.id);
@@ -16500,11 +16974,14 @@ async function splitSelectedVoiceTurn() {
     setVoiceProfileStatus(`已在 ${formatTime(splitTime)} 拆分发言，后半段已移动到所选声音。`, "success");
   } catch (error) {
     setVoiceProfileStatus(error.message, "error");
+  } finally {
+    finishCurrentVoiceMutation();
   }
 }
 
 async function undoCurrentVoiceCorrection() {
   if (!currentJob?.id || !currentVoiceCanUndo) return;
+  if (!beginCurrentVoiceMutation("撤销声音校正")) return;
   const jobId = String(currentJob.id);
   try {
     const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/content-search/voices/timeline/undo`, { method: "POST" });
@@ -16516,6 +16993,7 @@ async function undoCurrentVoiceCorrection() {
     renderCurrentVoices({ status: "ready" });
     setVoiceProfileStatus(`已撤销最近一次校正；当前时间轴 r${currentVoiceRevision}。`, "success");
   } catch (error) { setVoiceProfileStatus(error.message, "error"); }
+  finally { finishCurrentVoiceMutation(); }
 }
 
 function renderTemporaryVoiceSources() {
@@ -16857,9 +17335,15 @@ async function loadHealth() {
     const visionProvider = health.visionProviderLabel || "视觉模型接口";
     const llmModel = health.llmModel || "未配置";
     const llmProvider = health.llmUsesVision ? "复用视觉配置" : (health.llmProviderLabel || "剪辑规划接口");
-    $("#engineState")?.classList.toggle("offline", !visionConfigured);
+    const engineState = $("#engineState");
+    engineState?.classList.toggle("offline", !visionConfigured);
     const engineLabel = $("#engineState span");
-    if (engineLabel) engineLabel.textContent = visionConfigured ? `视觉 · ${visionModel}　规划 · ${llmModel}` : "视觉模型未配置";
+    if (engineLabel) engineLabel.textContent = visionConfigured ? "服务正常" : "服务需配置";
+    if (engineState) {
+      const detail = visionConfigured ? `服务正常 · 视觉 ${visionModel} · 规划 ${llmModel}` : "服务需配置 · 视觉模型未配置";
+      engineState.title = detail;
+      engineState.setAttribute("aria-label", `${detail}，点击查看详情`);
+    }
     const settingsModel = $("#settingsModel");
     if (settingsModel) settingsModel.textContent = visionConfigured ? `${visionModel} · ${visionProvider}` : "未配置";
     const settingsBackend = $("#settingsBackend");
@@ -16875,9 +17359,14 @@ async function loadHealth() {
     if (settingsSpeechDevice) settingsSpeechDevice.textContent = health.speechDevice || "自动选择";
   } catch {
     lastHealth = null;
-    $("#engineState")?.classList.add("offline");
+    const engineState = $("#engineState");
+    engineState?.classList.add("offline");
     const engineLabel = $("#engineState span");
-    if (engineLabel) engineLabel.textContent = "服务连接失败";
+    if (engineLabel) engineLabel.textContent = "服务离线";
+    if (engineState) {
+      engineState.title = "服务连接失败";
+      engineState.setAttribute("aria-label", "服务连接失败，点击查看详情");
+    }
     ["#settingsModel", "#settingsLlmModel", "#settingsBackend", "#settingsFfmpeg", "#settingsSpeech", "#settingsSpeechDevice"].forEach((selector) => {
       const node = $(selector);
       if (node) node.textContent = selector === "#settingsFfmpeg" ? "未知" : selector === "#settingsSpeechDevice" ? "未知" : "服务连接失败";

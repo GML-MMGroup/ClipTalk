@@ -218,6 +218,7 @@ from .content_search import (
     content_expansion_options,
     content_query_cache_key,
     content_matches_to_segments,
+    collapse_contained_content_matches,
     fallback_content_intent,
     local_recall,
     annotate_subject_evidence,
@@ -14156,6 +14157,11 @@ def _search_content_index(
     matches = _apply_content_search_boundaries(
         matches, scope=scope, mode=str(intent.get("boundaryMode") or "complete"),
     )
+    matches_before_containment = len(matches)
+    matches = collapse_contained_content_matches(
+        matches, boundary_mode=str(intent.get("boundaryMode") or "complete"),
+    )
+    stats["containedCandidateCount"] = max(0, matches_before_containment - len(matches))
     if not predicate_execution:
         uncached_visual_predicates = [
             predicate for predicate in predicates
@@ -24068,6 +24074,22 @@ def _content_search_by_id(job: dict[str, Any], search_id: str) -> dict[str, Any]
     return next((item for item in _content_search_records(job) if str(item.get("id") or "") == wanted), None)
 
 
+def _require_idle_content_job(job: dict[str, Any], action: str) -> None:
+    """Keep review mutations out of media-worker execution windows."""
+    if has_active_execution(job):
+        raise HTTPException(409, f"当前任务正在处理，完成后再{action}")
+
+
+def _require_idle_source_project(job: dict[str, Any], action: str) -> None:
+    """A content basket is shared, so every sibling task must be idle."""
+    project_id = source_project_id_for_job(job)
+    if any(
+        source_project_id_for_job(item) == project_id and has_active_execution(item)
+        for item in jobs.values()
+    ):
+        raise HTTPException(409, f"当前源视频仍有任务正在处理，完成后再{action}")
+
+
 def _content_search_public_summary(search: dict[str, Any]) -> dict[str, Any]:
     summary = {
         key: copy.deepcopy(search.get(key))
@@ -24166,6 +24188,9 @@ def update_content_search_boundary(job_id: str, request: ContentSearchBoundaryRe
             raise HTTPException(404, "任务不存在")
         if str(job.get("taskMode") or "") != "content_extract":
             raise HTTPException(409, "当前任务不是内容剪辑任务")
+        _require_idle_content_job(job, "调整片段边界")
+        if str(job.get("status") or "") != "awaiting_content_confirmation":
+            raise HTTPException(409, "请先进入当前检索的片段确认阶段再调整边界")
         active_search = job.get("contentSearch") if isinstance(job.get("contentSearch"), dict) else {}
         if str(active_search.get("id") or "") != str(request.searchId or ""):
             raise HTTPException(409, "只能调整当前检索结果的边界")
@@ -24250,6 +24275,9 @@ def add_content_search_manual_range(
             raise HTTPException(404, "任务不存在")
         if str(job.get("taskMode") or "") != "content_extract":
             raise HTTPException(409, "当前任务不是内容剪辑任务")
+        _require_idle_content_job(job, "补充时间轴片段")
+        if str(job.get("status") or "") != "awaiting_content_confirmation":
+            raise HTTPException(409, "请先进入当前检索的片段确认阶段再补充片段")
         search = job.get("contentSearch") if isinstance(job.get("contentSearch"), dict) else {}
         if str(search.get("id") or "") != str(request.searchId or ""):
             raise HTTPException(409, "只能向当前探索结果添加片段")
@@ -24593,6 +24621,7 @@ def restore_content_search(job_id: str, search_id: str) -> dict[str, Any]:
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "任务不存在")
+        _require_idle_content_job(job, "恢复历史检索")
         source = _content_search_by_id(job, search_id)
         if source is None:
             raise HTTPException(404, "历史检索不存在")
@@ -25047,6 +25076,7 @@ def update_content_selection_basket(job_id: str, request: ContentSelectionBasket
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "任务不存在")
+        _require_idle_source_project(job, "修改成片清单")
         basket = job.get("contentSelectionBasket") if isinstance(job.get("contentSelectionBasket"), dict) else {}
         revision = int(basket.get("revision") or 0)
         if request.revision is not None and int(request.revision) != revision:
@@ -25095,6 +25125,7 @@ def confirm_content_selection_basket(job_id: str, request: ContentSelectionBaske
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "任务不存在")
+        _require_idle_source_project(job, "生成成片清单")
         basket = job.get("contentSelectionBasket") if isinstance(job.get("contentSelectionBasket"), dict) else {}
         refs = list(basket.get("items") or []) if basket.get("entryMode") == "explicit" else []
         if not refs:

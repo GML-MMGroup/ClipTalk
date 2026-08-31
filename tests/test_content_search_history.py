@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app import main
 
 
@@ -10,7 +12,7 @@ def test_public_content_search_records_keep_all_queries_in_order() -> None:
         size=100, count="auto", target_seconds="auto", theme="做饭", source_hash="history-hash",
     )
     job.update({
-        "taskMode": "content_extract",
+        "taskMode": "content_extract", "status": "awaiting_content_confirmation",
         "contentSearchHistory": [{
             "id": "search-cooking", "createdAt": "2026-08-19T10:00:00Z",
             "instruction": "找做饭的片段", "candidates": [{
@@ -162,7 +164,7 @@ def test_cross_search_basket_persists_ordered_references() -> None:
         size=100, count="auto", target_seconds="auto", theme="做饭", source_hash="basket-hash",
     )
     job.update({
-        "taskMode": "content_extract",
+        "taskMode": "content_extract", "status": "awaiting_content_confirmation",
         "contentSearchHistory": [{
             "id": "search-a", "instruction": "找做饭", "candidates": [{"id": "a-1", "start": 1, "end": 3, "title": "做饭"}],
         }],
@@ -202,12 +204,12 @@ def test_source_project_basket_accepts_matches_from_sibling_tasks() -> None:
         size=100, count="auto", target_seconds="auto", theme="洗衣机", source_hash="shared-project-hash",
     )
     first.update({
-        "taskMode": "content_extract",
+        "taskMode": "content_extract", "status": "awaiting_content_confirmation",
         "contentSearch": {"id": "search-fridge", "instruction": "找冰箱", "candidates": [
             {"id": "fridge-1", "start": 4, "end": 8, "title": "冰箱画面"},
         ]},
     })
-    second["taskMode"] = "content_extract"
+    second.update({"taskMode": "content_extract", "status": "awaiting_content_confirmation"})
     main.jobs[first_id], main.jobs[second_id] = first, second
     try:
         with patch.object(main, "save_job"):
@@ -220,6 +222,61 @@ def test_source_project_basket_accepts_matches_from_sibling_tasks() -> None:
     finally:
         main.jobs.pop(first_id, None)
         main.jobs.pop(second_id, None)
+
+
+def test_running_content_job_rejects_history_restore_without_changing_active_search() -> None:
+    job_id = "running-history-restore-guard"
+    job = main.new_job_record(
+        job_id=job_id, source=Path("/tmp/source.mp4"), filename="source.mp4",
+        size=100, count="auto", target_seconds="auto", theme="运行中恢复", source_hash="running-restore-guard-hash",
+    )
+    job.update({
+        "taskMode": "content_extract", "status": "running", "stage": "content_search",
+        "contentSearchHistory": [{"id": "search-old", "instruction": "旧检索", "candidates": []}],
+        "contentSearch": {"id": "search-current", "instruction": "当前检索", "candidates": []},
+    })
+    main.jobs[job_id] = job
+    try:
+        with patch.object(main, "save_job"), pytest.raises(Exception, match="完成后再恢复历史检索"):
+            main.restore_content_search(job_id, "search-old")
+        assert main.jobs[job_id]["contentSearch"]["id"] == "search-current"
+        assert main.jobs[job_id]["status"] == "running"
+    finally:
+        main.jobs.pop(job_id, None)
+
+
+def test_running_source_project_rejects_basket_update_and_confirm_before_snapshot_write() -> None:
+    job_id = "running-basket-mutation-guard"
+    job = main.new_job_record(
+        job_id=job_id, source=Path("/tmp/source.mp4"), filename="source.mp4",
+        size=100, count="auto", target_seconds="auto", theme="运行中清单", source_hash="running-basket-guard-hash",
+    )
+    job.update({
+        "taskMode": "content_extract", "status": "running", "stage": "rendering",
+        "contentSearchHistory": [],
+        "contentSearch": {
+            "id": "search-current", "instruction": "当前检索",
+            "candidates": [{"id": "match-1", "start": 1, "end": 3, "title": "片段"}],
+        },
+        "contentSelectionBasket": {
+            "schemaVersion": "content-selection-basket-v2", "entryMode": "explicit", "revision": 1,
+            "items": [{
+                "originJobId": job_id, "searchId": "search-current", "matchId": "match-1",
+                "start": 1, "end": 3, "duration": 2, "title": "片段", "sourceQuery": "当前检索",
+            }],
+        },
+    })
+    main.jobs[job_id] = job
+    try:
+        with patch.object(main, "save_job"), pytest.raises(Exception, match="完成后再修改成片清单"):
+            main.update_content_selection_basket(job_id, main.ContentSelectionBasketRequest(items=[]))
+        with patch.object(main, "save_job"), pytest.raises(Exception, match="完成后再生成成片清单"):
+            main.confirm_content_selection_basket(job_id, main.ContentSelectionBasketConfirmRequest())
+        assert main.jobs[job_id]["contentSearchHistory"] == []
+        assert "renderContentSearch" not in main.jobs[job_id]
+        assert main.jobs[job_id]["contentSelectionBasket"]["revision"] == 1
+    finally:
+        main.jobs.pop(job_id, None)
 
 
 def test_natural_language_assembly_builds_reviewable_cross_search_preview() -> None:
