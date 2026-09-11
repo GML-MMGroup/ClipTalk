@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,17 @@ from .security import validate_deployment_access
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _local_path(name: str, default: Path) -> str:
+    """Empty overrides use relocatable defaults; explicit paths stay authoritative."""
+    path = Path(os.environ.get(name, "").strip() or default).expanduser()
+    return str((ROOT / path).resolve() if not path.is_absolute() else path)
+
+
+def _binary(name: str, executable: str) -> str:
+    configured = os.environ.get(name, "").strip()
+    return shutil.which(configured or executable) or configured or executable
 
 
 def load_env(path: Path = ROOT / ".env") -> None:
@@ -202,8 +214,8 @@ class Settings:
             # with HIGHLIGHT_ACCESS_TOKEN plus an HTTPS reverse proxy.
             host=os.environ.get("HIGHLIGHT_HOST", "127.0.0.1"),
             port=_positive_int("HIGHLIGHT_PORT", 5180),
-            ffmpeg=os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg"),
-            ffprobe=os.environ.get("FFPROBE_BIN", "/usr/bin/ffprobe"),
+            ffmpeg=_binary("FFMPEG_BIN", "ffmpeg"),
+            ffprobe=_binary("FFPROBE_BIN", "ffprobe"),
             maximum_upload_bytes=_positive_int("HIGHLIGHT_MAX_UPLOAD_BYTES", 8 * 1024**3),
             maximum_workers=min(4, _positive_int("HIGHLIGHT_MAX_WORKERS", 1)),
             content_search_model_concurrency=_bounded_positive_int(
@@ -275,11 +287,11 @@ class Settings:
             recognition_ocr_enabled=_boolean("HIGHLIGHT_OCR_ENABLED", True),
             content_search_dialogue_v2=_boolean("CONTENT_SEARCH_DIALOGUE_V2", True),
             active_speaker_mode=(os.environ.get("HIGHLIGHT_ACTIVE_SPEAKER_MODE", "primary").strip().lower() or "primary"),
-            talknet_worker_python=os.environ.get("HIGHLIGHT_TALKNET_PYTHON", "").strip(),
-            talknet_worker_script=os.environ.get("HIGHLIGHT_TALKNET_WORKER", str(ROOT / "tools" / "talknet_worker.py")).strip(),
-            talknet_repository=os.environ.get("HIGHLIGHT_TALKNET_REPOSITORY", "").strip(),
-            talknet_checkpoint=os.environ.get("HIGHLIGHT_TALKNET_CHECKPOINT", "").strip(),
-            talknet_device=os.environ.get("HIGHLIGHT_TALKNET_DEVICE", "cuda:0").strip(),
+            talknet_worker_python=_local_path("HIGHLIGHT_TALKNET_PYTHON", data_root / "models/talknet/venv/bin/python"),
+            talknet_worker_script=_local_path("HIGHLIGHT_TALKNET_WORKER", ROOT / "tools/talknet_worker.py"),
+            talknet_repository=_local_path("HIGHLIGHT_TALKNET_REPOSITORY", data_root / "models/talknet/repository"),
+            talknet_checkpoint=_local_path("HIGHLIGHT_TALKNET_CHECKPOINT", data_root / "models/talknet/pretrain_TalkSet.model"),
+            talknet_device=os.environ.get("HIGHLIGHT_TALKNET_DEVICE", "auto").strip() or "auto",
             talknet_timeout_seconds=_positive_float("HIGHLIGHT_TALKNET_TIMEOUT_SECONDS", 900.0),
         )
 

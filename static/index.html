@@ -17,7 +17,7 @@
     <link rel="stylesheet" href="/static/editing-workspace.css?v=20260911-user-journey-1" />
     <link rel="stylesheet" href="/static/agent-workspace.css?v=20260911-user-journey-1" />
     <link rel="stylesheet" href="/static/secondary-editor-focus.css?v=20260911-light-media-2" />
-    <link rel="stylesheet" href="/static/theme.css?v=20260911-user-journey-1" />
+    <link rel="stylesheet" href="/static/theme.css?v=20260911-default-install-1" />
     <link rel="stylesheet" href="/static/cliptalk-tokens.css?v=20260910-ui-consistency-3" />
     <link rel="stylesheet" href="/static/workspace-components.css?v=20260911-user-journey-1" />
     <link rel="stylesheet" href="/static/workbench.css?v=20260911-user-journey-1" />
@@ -710,6 +710,12 @@
         </div>
         <footer class="settings-save-bar" data-settings-save-role="agent"><span><b id="agentDirtyState">所有修改已保存</b><small>保存前验证模型的工具调用能力</small></span><div><button id="discardAgentSettings" type="button" disabled>放弃修改</button><button id="saveAgentSettings" type="submit" class="primary" disabled>验证并保存更改</button></div></footer>
       </form>
+      <section id="localCapabilities" class="local-capabilities" aria-labelledby="localCapabilitiesTitle">
+        <header><div><h3 id="localCapabilitiesTitle">人物说话识别</h3><p>默认安装 TalkNet，用于区分人物正在讲话还是仅出现在画面中。</p></div><button id="checkLocalCapabilities" type="button">检查能力</button></header>
+        <p id="localCapabilityStatus" role="status" aria-live="polite">正在读取安装状态</p>
+        <p id="localCapabilityDetail">检查不会修改素材，也不会下载或安装软件。</p>
+        <details><summary>安装与修复说明</summary><p>在运行 ClipTalk 的电脑或服务器上，进入项目目录执行：</p><code>python3 tools/setup.py</code><p>该命令默认安装 TalkNet。仅修复人物说话识别时可执行：</p><code>python3 tools/install_talknet.py</code><p>需要 Python 3.10–3.11。脚本会保留现有配置；没有可用 GPU 时使用 CPU，长视频可能较慢。安装后重启服务并重新检查。</p></details>
+      </section>
       <details class="runtime-settings-summary">
         <summary><span><strong>运行环境</strong><small>按需查看模型、计算设备和本地渲染状态</small></span></summary>
         <dl><div><dt>视觉模型</dt><dd id="settingsModel">检查中</dd></div><div><dt>剪辑规划模型</dt><dd id="settingsLlmModel">检查中</dd></div><div><dt>富语音模型</dt><dd id="settingsSpeech">检查中</dd></div><div><dt>语音计算设备</dt><dd id="settingsSpeechDevice">自动选择</dd></div><div><dt>视觉分析后端</dt><dd id="settingsBackend">检查中</dd></div><div><dt>默认编码</dt><dd>H.264 · 成片画幅由当前项目决定</dd></div><div><dt>本地渲染</dt><dd id="settingsFfmpeg">检查中</dd></div></dl>
@@ -796,7 +802,7 @@
     <script src="/static/task-creation.js?v=20260909-single-model-1" defer></script>
     <script src="/static/agent-workspace.js?v=20260911-user-journey-1" defer></script>
     <script src="/static/delivery-state.js?v=20260910-render-spec-2" defer></script>
-    <script src="/static/app.js?v=20260911-user-journey-1" defer></script>
+    <script src="/static/app.js?v=20260911-default-install-1" defer></script>
     <script src="/static/app-shell.js?v=20260911-user-journey-1" defer></script>
     <script src="/static/timeline-presentation.js?v=20260909-media-loading-state-2" defer></script>
     <script src="/static/workspace-controller.js?v=20260911-user-journey-1" defer></script>

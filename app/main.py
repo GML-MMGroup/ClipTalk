@@ -136,6 +136,7 @@ from .kept_api import build_kept_router
 from .kept_library import KeptLibraryService
 from .output_naming import apply_output_naming, build_output_naming
 from .system_status import build_health_snapshot, build_runtime_metrics
+from .local_capabilities import local_capabilities, active_speaker_warning
 from .job_creation import (
     DEFAULT_CONTENT_VARIANT_COUNT,
     DEFAULT_HIGHLIGHT_VARIANT_COUNT,
@@ -13958,6 +13959,12 @@ def _search_content_index(
             "validationErrors": copy.deepcopy(query_plan.get("validationErrors") or []),
         }
         return _content_clarification_search(job, intent, instruction, index)
+    talknet_warning_sent = False
+    if "person.active_speaker_link" in set(query_plan.get("requiredOperations") or []):
+        warning = active_speaker_warning(active_speaker_runtime(settings))
+        if warning:
+            append_message(job_id, "assistant", warning, kind="warning")
+            talknet_warning_sent = True
     person_catalog = _content_person_catalog(job, index)
     person_target = query_plan.get("personTarget") if isinstance(query_plan.get("personTarget"), dict) else {}
     unresolved_speaking_predicates = [
@@ -14556,6 +14563,9 @@ def _search_content_index(
             stats["activeSpeakerAsd"][str(predicate.get("id") or "")]["matchCount"] = len(asd_matches)
             if asd_result.get("reason"):
                 stats["fallbackReasons"].append("active_speaker_model_unavailable")
+                if not talknet_warning_sent:
+                    append_message(job_id, "assistant", active_speaker_warning({**asd_result, "status": "degraded"}), kind="warning")
+                    talknet_warning_sent = True
             stats["activeSpeakerAsd"][str(predicate.get("id") or "")]["speakerCalibration"] = copy.deepcopy(
                 speaker_calibration,
             )
@@ -21342,7 +21352,7 @@ def health() -> dict[str, Any]:
         "schemaVersion": RECOGNITION_SCHEMA_VERSION,
         "enabled": bool(getattr(settings, "recognition_enabled", True)),
         "device": "unknown",
-        "activeSpeaker": {"status": "deferred", "reason": "health_probe_deferred"},
+        "activeSpeaker": active_speaker_runtime(settings, probe=False),
     }
     return build_health_snapshot(
         settings=settings,
@@ -36925,6 +36935,7 @@ app.include_router(build_system_router(
     health=health,
     runtime_metrics=runtime_metrics,
     classify_workflow_intent=classify_workflow_intent,
+    local_capabilities=lambda: local_capabilities(settings, probe=True),
 ))
 app.include_router(build_client_observability_router(
     report_client_error=report_client_error,

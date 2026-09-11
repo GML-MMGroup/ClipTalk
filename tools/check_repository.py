@@ -70,6 +70,11 @@ def environment_names_from_python(path: Path) -> set[str]:
         if not isinstance(node, ast.Call) or not node.args or not isinstance(node.args[0], ast.Constant):
             continue
         function = node.func
+        if isinstance(function, ast.Name) and function.id in {"_local_path", "_binary"}:
+            value = node.args[0].value
+            if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]+", value):
+                names.add(value)
+            continue
         if not isinstance(function, ast.Attribute) or function.attr != "get":
             continue
         owner = function.value
@@ -110,7 +115,10 @@ def configuration_errors(root: Path) -> list[str]:
     referenced.update(environment_names_from_shell(root / "start.sh"))
     referenced.update(environment_names_from_shell(root / "restart.sh"))
     documented = environment_names_from_example(root / ".env.example")
-    return [f".env.example 缺少配置项：{name}" for name in sorted(referenced - documented)]
+    advanced = root / "docs" / "environment.example"
+    if advanced.is_file():
+        documented.update(environment_names_from_example(advanced))
+    return [f"配置示例缺少配置项：{name}" for name in sorted(referenced - documented)]
 
 
 def repository_errors(root: Path, *, compare_ref: str = "", mode: str = "source") -> list[str]:

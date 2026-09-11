@@ -4,7 +4,8 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
-HOST="${HIGHLIGHT_HOST:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().host)')}"
-PORT="${HIGHLIGHT_PORT:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().port)')}"
-
-exec python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT"
+CLIPTALK_PYTHON="python3"
+if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+  CLIPTALK_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+fi
+exec "$CLIPTALK_PYTHON" tools/launch.py "$@"

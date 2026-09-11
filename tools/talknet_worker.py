@@ -26,6 +26,41 @@ IDENTITY_GATE_VERSION = "sface-v1"
 S3FD_WEIGHT_FILE_ID = "1KafnHz7ccT-3IyddBsL5yi2xGtxAKypt"
 
 
+def visible_cuda_device(requested: str, visible: str | None) -> str | None:
+    """Map a logical CUDA index through an existing container/device mask."""
+    if requested in {"auto", "cpu"}:
+        return visible
+    if not requested.startswith("cuda:") or not requested[5:].isdigit():
+        raise ValueError("计算设备应为 auto、cpu 或 cuda:N")
+    index = int(requested[5:])
+    if visible is None:
+        return str(index)
+    devices = [value.strip() for value in visible.split(",") if value.strip() and value.strip() != "-1"]
+    if index >= len(devices):
+        raise ValueError("指定的 GPU 不在当前可见设备列表中")
+    return devices[index]
+
+
+def configure_device(requested: str, repository: Path) -> str:
+    mask = visible_cuda_device(requested, os.environ.get("CUDA_VISIBLE_DEVICES"))
+    if requested.startswith("cuda:") and mask is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = mask
+    import torch
+    selected = ("cuda:0" if torch.cuda.is_available() else "cpu") if requested == "auto" else requested
+    if selected.startswith("cuda:"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA 不可用，请检查驱动或改用 CPU 环境")
+        float(torch.ones(1, device="cuda").cpu()[0])
+        backend = "cuda"
+    else:
+        for name in ("demoTalkNet.py", "talkNet.py"):
+            if "cliptalk-device-v1" not in (repository / name).read_text():
+                raise RuntimeError("现有 TalkNet 未安装 CPU 兼容适配，请按安装说明更新，或指定可用 GPU")
+        backend = "cpu"
+    os.environ["CLIPTALK_TALKNET_DEVICE"] = backend
+    return selected
+
+
 def number(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -288,6 +323,7 @@ def run(request: dict[str, Any], response_path: Path) -> None:
     checkpoint = Path(str(request.get("checkpoint") or ""))
     if not source.is_file() or not (repository / "demoTalkNet.py").is_file() or not checkpoint.is_file():
         raise RuntimeError("TalkNet source, repository, or checkpoint is missing")
+    configure_device(str(request.get("device") or "auto"), repository)
     ensure_s3fd_weight(repository)
     scope = request.get("scope") or {}
     scope_start = max(0.0, number(scope.get("start")))
@@ -326,9 +362,6 @@ def run(request: dict[str, Any], response_path: Path) -> None:
                 "--noVisualization",
             ]
             environment = dict(os.environ)
-            device = str(request.get("device") or "cuda:0")
-            if device.startswith("cuda:"):
-                environment["CUDA_VISIBLE_DEVICES"] = device.split(":", 1)[1]
             process = subprocess.run(command, cwd=str(repository), env=environment, capture_output=True, text=True, check=False)
             if process.returncode != 0:
                 raise RuntimeError((process.stderr or process.stdout or "TalkNet failed")[-2000:])
@@ -446,30 +479,52 @@ def main() -> int:
     parser.add_argument("--healthcheck", action="store_true")
     parser.add_argument("--repository")
     parser.add_argument("--checkpoint")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--verify-model", action="store_true", help="安装验收：载入权重并执行小型模型前向计算")
     args = parser.parse_args()
     try:
         if args.healthcheck:
-            repository = Path(str(args.repository or ""))
-            checkpoint = Path(str(args.checkpoint or ""))
+            repository = Path(str(args.repository or "")).resolve()
+            checkpoint = Path(str(args.checkpoint or "")).resolve()
             if not (repository / "demoTalkNet.py").is_file():
                 raise RuntimeError("TalkNet repository is incomplete")
             if not checkpoint.is_file() or checkpoint.stat().st_size < 1024 * 1024:
                 raise RuntimeError("TalkNet checkpoint is missing or incomplete")
             import cv2  # noqa: F401
             import numpy  # noqa: F401
-            requested_device = str(args.device)
-            if requested_device.startswith("cuda:"):
-                os.environ["CUDA_VISIBLE_DEVICES"] = requested_device.split(":", 1)[1]
+            import scipy  # noqa: F401
+            import pandas  # noqa: F401
+            import python_speech_features  # noqa: F401
+            from scenedetect.video_manager import VideoManager  # noqa: F401
+            selected = configure_device(str(args.device), repository)
             import torch
-            if requested_device.startswith("cuda"):
-                if not torch.cuda.is_available():
-                    raise RuntimeError("CUDA is not available in the isolated TalkNet runtime")
-                float(torch.ones(1, device="cuda").cpu()[0])
+            detector = repository / "model/faceDetector/s3fd/sfd_face.pth"
+            if not detector.is_file() or detector.stat().st_size < 1024 * 1024:
+                raise RuntimeError("人脸检测模型未安装完整，请重新运行安装脚本")
+            if args.verify_model:
+                torch.set_num_threads(2)
+                os.chdir(repository)
+                sys.path.insert(0, str(repository))
+                from talkNet import talkNet
+                from model.faceDetector.s3fd import S3FD
+                model = talkNet()
+                backend = os.environ["CLIPTALK_TALKNET_DEVICE"]
+                parameters = torch.load(str(checkpoint), map_location=backend)
+                parameters = {key.removeprefix("module."): value for key, value in parameters.items()}
+                model.load_state_dict(parameters, strict=True)
+                model.eval()
+                with torch.no_grad():
+                    audio = model.model.forward_audio_frontend(torch.zeros((1, 100, 13), device=backend))
+                    visual = model.model.forward_visual_frontend(torch.zeros((1, 25, 112, 112), device=backend))
+                    audio, visual = model.model.forward_cross_attention(audio, visual)
+                    scores = model.model.forward_audio_visual_backend(audio, visual)
+                    if not torch.isfinite(scores).all():
+                        raise RuntimeError("模型前向计算产生了无效结果")
+                S3FD(device=backend)
             print(json.dumps({
                 "protocolVersion": PROTOCOL,
                 "status": "ready",
-                "device": args.device,
+                "device": selected,
             }))
             return 0
         if not args.request or not args.response:

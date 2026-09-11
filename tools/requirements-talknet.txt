@@ -1,0 +1,11 @@
+# Isolated TalkNet adapter dependencies. PyTorch is installed for the chosen
+# CPU/CUDA profile by install_talknet.py; do not mix this environment with OCR.
+numpy==1.26.4
+scipy==1.15.3
+scikit-learn==1.7.2
+scenedetect==0.6.4
+opencv-contrib-python-headless==4.10.0.84
+python-speech-features==0.6
+tqdm==4.65.0
+gdown==5.2.0
+pandas==2.3.3

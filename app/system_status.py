@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 
+from .local_capabilities import describe_talknet
+
 
 def build_health_snapshot(
     *, settings: Any, speech_state: dict[str, Any],
@@ -57,6 +59,7 @@ def build_health_snapshot(
         "speechDiarization": settings.sensevoice_diarization,
         "speechModelError": speech_state.get("error"),
         "contentRecognition": recognition_state,
+        "localCapabilities": {"talknet": describe_talknet(recognition_state.get("activeSpeaker") or {})},
         "voiceprint": voiceprint_state or {"enabled": False, "reason": "not_configured"},
         "ffmpeg": Path(settings.ffmpeg).is_file(),
         "ffprobe": Path(settings.ffprobe).is_file(),

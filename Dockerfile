@@ -20,7 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg fonts-wqy-zenhei libgomp1 libsndfile1 \
+    && apt-get install -y --no-install-recommends git ffmpeg fonts-wqy-zenhei libgomp1 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=motion-renderer-dependencies /usr/local/bin/node /usr/local/bin/node
@@ -39,6 +39,20 @@ RUN python -m pip install --upgrade pip \
        else \
          echo "Unsupported CLIPTALK_INSTALL_PROFILE=$CLIPTALK_INSTALL_PROFILE" >&2; exit 2; \
        fi
+
+# Keep the large TalkNet installation layer independent from frequently edited
+# application and UI files. The installer only needs this minimal application
+# configuration surface.
+COPY app/__init__.py app/config.py app/security.py ./app/
+COPY tools/setup.py tools/install_talknet.py tools/talknet_worker.py tools/requirements-talknet.txt ./tools/
+
+# Model assets live outside /app/data so a new or existing data volume cannot
+# hide the default installation. Nothing is downloaded when the page opens.
+RUN python tools/install_talknet.py --profile "$CLIPTALK_INSTALL_PROFILE" --data-root /opt/cliptalk-models
+ENV HIGHLIGHT_TALKNET_PYTHON=/opt/cliptalk-models/models/talknet/venv/bin/python \
+    HIGHLIGHT_TALKNET_REPOSITORY=/opt/cliptalk-models/models/talknet/repository \
+    HIGHLIGHT_TALKNET_CHECKPOINT=/opt/cliptalk-models/models/talknet/pretrain_TalkSet.model \
+    HIGHLIGHT_TALKNET_DEVICE=auto
 
 COPY app ./app
 COPY static ./static

@@ -19817,10 +19817,40 @@ $("#keepButton")?.addEventListener("click", () => {
   if (currentCandidate || currentEventSegment || currentEventGroup) downloadCurrentFragment();
 });
 
+let localCapabilityChecked = false;
+function renderLocalCapability(capability) {
+  const status = $("#localCapabilityStatus");
+  const detail = $("#localCapabilityDetail");
+  if (!status || !detail) return;
+  const labels = { available: "可用", not_installed: "未安装完整", unchecked: "待检查", unavailable: "不可用", disabled: "已关闭" };
+  status.textContent = capability?.label || labels[capability?.status] || "状态未知";
+  detail.textContent = capability?.detail || "请点击“检查能力”确认安装和运行状态。";
+  $("#localCapabilities").dataset.status = capability?.status || "unknown";
+}
+$("#checkLocalCapabilities")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "检查中…";
+  $("#localCapabilityStatus").textContent = "正在检查依赖和计算设备";
+  try {
+    const response = await api("/api/capabilities/local");
+    if (!response?.talknet?.status) throw new Error("未收到有效的能力状态，请确认后端已更新并重启。");
+    localCapabilityChecked = true;
+    renderLocalCapability(response.talknet);
+  } catch {
+    localCapabilityChecked = false;
+    renderLocalCapability({ status: "unknown", label: "检查未完成", detail: "无法完成能力检查，请确认服务已更新并重启，然后重试。" });
+  } finally {
+    button.disabled = false;
+    button.textContent = "重新检查";
+  }
+});
+
 async function loadHealth() {
   if (document.hidden) return;
   try {
     const health = await api("/api/health");
+    if (!localCapabilityChecked) renderLocalCapability(health.localCapabilities?.talknet);
     const visionConfigured = health.visionConfigured ?? health.arkConfigured;
     const visionModel = health.visionModel || health.arkModel;
     const visionProvider = health.visionProviderLabel || "视觉模型接口";

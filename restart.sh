@@ -6,14 +6,18 @@ LEGACY_PID_FILE="$PROJECT_ROOT/vlm-highlight.pid"
 LEGACY_LOG_FILE="$PROJECT_ROOT/vlm-highlight.log"
 
 cd "$PROJECT_ROOT"
+CLIPTALK_PYTHON="python3"
+if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+  CLIPTALK_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+fi
 
-DATA_ROOT="${HIGHLIGHT_DATA_ROOT:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().data_root)')}"
+DATA_ROOT="${HIGHLIGHT_DATA_ROOT:-$("$CLIPTALK_PYTHON" -c 'from app.config import Settings; print(Settings.from_environment().data_root)')}"
 RUNTIME_DIR="${HIGHLIGHT_RUNTIME_DIR:-$DATA_ROOT/runtime}"
 mkdir -p "$RUNTIME_DIR"
 PID_FILE="${HIGHLIGHT_PID_FILE:-$RUNTIME_DIR/vlm-highlight.pid}"
 LOG_FILE="${HIGHLIGHT_LOG_FILE:-$RUNTIME_DIR/vlm-highlight.log}"
-HOST="${HIGHLIGHT_HOST:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().host)')}"
-PORT="${HIGHLIGHT_PORT:-$(python3 -c 'from app.config import Settings; print(Settings.from_environment().port)')}"
+HOST="${HIGHLIGHT_HOST:-$("$CLIPTALK_PYTHON" -c 'from app.config import Settings; print(Settings.from_environment().host)')}"
+PORT="${HIGHLIGHT_PORT:-$("$CLIPTALK_PYTHON" -c 'from app.config import Settings; print(Settings.from_environment().port)')}"
 
 is_project_server() {
   local pid="$1" cwd command
@@ -89,7 +93,7 @@ if PORT_PID="$(listener_pid || true)"; then
 fi
 
 setsid nohup env HIGHLIGHT_HOST="$HOST" HIGHLIGHT_PORT="$PORT" \
-  python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT" \
+  "$CLIPTALK_PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" \
   </dev/null >"$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"

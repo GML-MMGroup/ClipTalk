@@ -1490,6 +1490,24 @@ html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button {
 }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button.primary { border-color: var(--pw-accent) !important; color: var(--pw-accent-ink) !important; background: var(--pw-accent) !important; }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button:disabled { border-color: var(--pw-line) !important; color: var(--pw-faint) !important; background: var(--pw-surface-1) !important; }
+html body[data-shell-view="settings"] #settingsPanel .local-capabilities {
+  width: min(100%, 1120px);
+  padding: 20px;
+  border: 1px solid var(--ct-border);
+  border-radius: var(--pw-radius-panel);
+  color: var(--ct-text) !important;
+  background: var(--ct-panel) !important;
+}
+html body #settingsPanel .local-capabilities > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+html body #settingsPanel .local-capabilities h3 { margin: 0; font-size: 16px; }
+html body #settingsPanel .local-capabilities p { margin: 10px 0; color: var(--ct-text-secondary); line-height: 1.65; }
+html body #settingsPanel .local-capabilities #localCapabilityStatus { color: var(--ct-text); font-weight: 600; }
+html body #settingsPanel .local-capabilities button { padding: 8px 14px; border: 1px solid var(--ct-control-border); border-radius: 6px; color: var(--ct-text); background: var(--ct-raised); cursor: pointer; }
+html body #settingsPanel .local-capabilities button:hover:not(:disabled) { background: var(--ct-hover); }
+html body #settingsPanel .local-capabilities button:disabled { opacity: .65; cursor: wait; }
+html body #settingsPanel .local-capabilities :is(button, summary):focus-visible { outline: 2px solid var(--ct-focus); outline-offset: 3px; }
+html body #settingsPanel .local-capabilities summary { cursor: pointer; }
+html body #settingsPanel .local-capabilities code { display: block; overflow-wrap: anywhere; padding: 8px; color: var(--ct-text); background: var(--ct-raised); }
 html body[data-shell-view="settings"] #settingsPanel .runtime-settings-summary {
   width: min(100%, 1120px) !important;
   border-color: var(--pw-line) !important;

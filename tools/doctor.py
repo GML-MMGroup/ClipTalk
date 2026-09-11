@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from app.config import Settings  # noqa: E402
 from app.security import SecurityConfigurationError  # noqa: E402
+from app.local_capabilities import local_capabilities  # noqa: E402
 
 
 BASE_MODULES = {
@@ -114,10 +115,23 @@ def inspect_environment(profile: str = "visual") -> dict[str, Any]:
     except SecurityConfigurationError as error:
         checks.append(_result("部署访问控制", "blocker", str(error)))
     else:
-        token_state = "已配置访问令牌" if settings.access_token else "仅允许本机访问，无需令牌"
+        token_state = "已配置访问令牌" if settings.access_token else (
+            "已允许无认证访问；不要直接暴露公网" if settings.allow_unauthenticated_remote else "仅允许本机访问，无需令牌"
+        )
         checks.append(_result("部署访问控制", "ok", f"监听 {settings.host}:{settings.port}；{token_state}"))
 
     checks.extend(_module_checks(BASE_MODULES, required=True))
+    node = shutil.which("node")
+    try:
+        node_version = subprocess.check_output([node, "--version"], text=True, timeout=5).strip() if node else "未安装"
+    except (OSError, subprocess.SubprocessError):
+        node_version = "无法运行"
+    checks.append(_result("AI 助手运行环境", "ok" if node_version.startswith("v22.") else "blocker", f"Node.js {node_version}；需要 22.x"))
+    agent_installed = (settings.root / "agent-service/node_modules/@earendil-works/pi-coding-agent").is_dir()
+    checks.append(_result("AI 助手依赖", "ok" if agent_installed else "warning",
+                          "已安装" if agent_installed else "本机启动前请运行 python3 tools/setup.py；独立部署请配置助手服务地址"))
+    talknet = local_capabilities(settings, probe=False)["talknet"]
+    checks.append(_result("人物说话识别", "ok" if talknet["status"] == "available" else "warning", talknet["detail"]))
     if profile in {"cpu", "cuda"}:
         checks.extend(_module_checks(AUDIO_MODULES, required=True))
         checks.extend(_module_checks(RECOGNITION_MODULES, required=True))

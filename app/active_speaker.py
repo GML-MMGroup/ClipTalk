@@ -108,12 +108,13 @@ def _number(value: Any, default: float = 0.0) -> float:
     return result if math.isfinite(result) else default
 
 
-def active_speaker_runtime(settings: Any, *, probe: bool = True) -> dict[str, Any]:
+def active_speaker_runtime(settings: Any, *, probe: bool = True, probe_timeout: float = 3) -> dict[str, Any]:
     mode = str(getattr(settings, "active_speaker_mode", "shadow") or "shadow").lower()
     python = Path(str(getattr(settings, "talknet_worker_python", "") or ""))
     script = Path(str(getattr(settings, "talknet_worker_script", "") or ""))
     checkpoint = Path(str(getattr(settings, "talknet_checkpoint", "") or ""))
     repository = Path(str(getattr(settings, "talknet_repository", "") or ""))
+    device = str(getattr(settings, "talknet_device", "auto") or "auto")
     files_ready = (
         mode != "off" and python.is_file() and script.is_file() and checkpoint.is_file()
         and (repository / "demoTalkNet.py").is_file()
@@ -142,27 +143,34 @@ def active_speaker_runtime(settings: Any, *, probe: bool = True) -> dict[str, An
             now = time.monotonic()
             with _RUNTIME_PROBE_LOCK:
                 cached = _RUNTIME_PROBE_CACHE.copy()
-                if cached.get("key") == probe_key and now - float(cached.get("checkedAt") or 0) < 60:
+                cache_ttl = 60 if cached.get("ready") else 3
+                if cached.get("key") == probe_key and now - float(cached.get("checkedAt") or 0) < cache_ttl and (cached.get("ready") or probe_timeout <= 3):
                     ready = bool(cached.get("ready"))
                     reason = str(cached.get("reason") or "")
+                    device = str(cached.get("device") or device)
                 else:
                     process = subprocess.run(
                         [
                             str(python), str(script), "--healthcheck",
                             "--repository", str(repository),
                             "--checkpoint", str(checkpoint),
-                            "--device", str(getattr(settings, "talknet_device", "cuda:0") or "cuda:0"),
+                            "--device", device,
                         ],
                         # Health is queried during every frontend bootstrap. A
                         # broken CUDA/TalkNet environment must degrade quickly
                         # instead of holding the whole UI on a 15s request.
-                        capture_output=True, text=True, check=False, timeout=3,
+                        capture_output=True, text=True, check=False, timeout=probe_timeout,
                     )
                     ready = process.returncode == 0
                     detail = (process.stderr or process.stdout or "worker healthcheck failed").strip()[-300:]
                     reason = "" if ready else f"talknet_probe_failed:{detail}"
+                    if ready and process.stdout.strip():
+                        try:
+                            device = str(json.loads(process.stdout.strip().splitlines()[-1]).get("device") or device)
+                        except (ValueError, AttributeError):
+                            pass
                     _RUNTIME_PROBE_CACHE.update({
-                        "key": probe_key, "checkedAt": now, "ready": ready, "reason": reason,
+                        "key": probe_key, "checkedAt": now, "ready": ready, "reason": reason, "device": device,
                     })
         except (OSError, subprocess.SubprocessError) as error:
             ready = False
@@ -173,7 +181,7 @@ def active_speaker_runtime(settings: Any, *, probe: bool = True) -> dict[str, An
         "status": "ready" if ready else "disabled" if mode == "off" else "degraded",
         "coverageComplete": bool(ready),
         "reason": reason,
-        "device": str(getattr(settings, "talknet_device", "cuda:0") or "cuda:0"),
+        "device": device,
     }
 
 
