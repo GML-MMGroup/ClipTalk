@@ -18,6 +18,10 @@
 
 ## 📰 News
 
+* **[2026-09-11]** 🛠️ Added guided local setup, a standalone Agent service, and Docker Compose deployment.
+* **[2026-09-10]** 🎤 Integrated **TalkNet active-speaker detection** to distinguish speaking from visual presence, with automatic CPU/GPU selection and explicit fallback notices.
+* **[2026-09-09]** 🎨 Redesigned the landscape and portrait editing workspaces, improving preview layouts, timeline space usage, and light/dark theme support across aspect ratios.
+* **[2026-09-08]** 🤖 Added a reviewable conversational editing Agent that presents its editing plan before executing controlled tools and delivering previewable, revisable versions.
 * **[2026-08-28]** 🎬 Upgraded the **multimodal editing workspace** with reusable content-search results, person/speaker workflows, voiceprint-based clipping, and an editable fine-cut timeline; also streamlined CPU/GPU deployment.
 * **[2026-08-20]** 🎯 Added **Face-Matched Editing** and **Topic-Based Editing**, enabling target-person retrieval and topic-driven clip extraction.
 * **[2026-08-12]** 🚀 Optimized the timeline display and added support for switching to **vertical creation mode**.
