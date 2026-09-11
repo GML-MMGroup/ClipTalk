@@ -80,6 +80,160 @@ class SiglipEncoder:
         return _normalise_rows(np.concatenate(rows, axis=0)) if rows else np.empty((0, 0), dtype=np.float32)
 
 
+class WeMMEncoder:
+    """Unified text/image/video encoder for Tencent WeMM-Embedding.
+
+    WeMM intentionally lives behind the same small NumPy contract as the
+    existing encoders.  Deployments can therefore load it in the isolated
+    recognition Python without importing its Transformers 5.x dependency into
+    the API process.  Every returned row is truncated to a supported
+    Matryoshka dimension and normalized again, matching the upstream recipe.
+    """
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        dimension: int = 256,
+        device: str = "auto",
+        cache_dir: Path | None = None,
+    ) -> None:
+        import torch
+        from transformers import AutoModel, AutoProcessor
+
+        self.device = _torch_device(device)
+        self.dimension = max(1, int(dimension))
+        key = ("wemm", f"{model_id}:{self.dimension}", self.device)
+        with _model_lock:
+            loaded = _models.get(key)
+            if loaded is None:
+                processor = AutoProcessor.from_pretrained(
+                    model_id,
+                    cache_dir=str(cache_dir) if cache_dir else None,
+                    trust_remote_code=True,
+                )
+                model_kwargs = {
+                    "cache_dir": str(cache_dir) if cache_dir else None,
+                    "trust_remote_code": True,
+                }
+                dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
+                try:
+                    model = AutoModel.from_pretrained(model_id, dtype=dtype, **model_kwargs)
+                except TypeError:
+                    # Transformers 4.x used torch_dtype.  The official WeMM
+                    # environment is 5.2, but this keeps error reporting useful
+                    # for deployments probing the adapter in an older process.
+                    model = AutoModel.from_pretrained(model_id, torch_dtype=dtype, **model_kwargs)
+                model = model.eval().to(self.device)
+                supported = getattr(model.config, "matryoshka_dimensions", None)
+                if supported is not None and self.dimension not in set(int(value) for value in supported):
+                    raise ValueError(
+                        f"WeMM embedding dimension {self.dimension} is unsupported; "
+                        f"choose one of {list(supported)}"
+                    )
+                loaded = (processor, model)
+                _models[key] = loaded
+        self.processor, self.model = loaded
+
+    @staticmethod
+    def _conversation(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": content}]
+
+    def _encode_conversations(
+        self,
+        conversations: list[list[dict[str, Any]]],
+        *,
+        batch_size: int,
+    ) -> np.ndarray:
+        import torch
+        import torch.nn.functional as functional
+        from qwen_vl_utils import process_vision_info
+
+        rows: list[np.ndarray] = []
+        for position in range(0, len(conversations), max(1, int(batch_size))):
+            batch = conversations[position:position + max(1, int(batch_size))]
+            prompts = [
+                self.processor.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                for conversation in batch
+            ]
+            images, videos, video_kwargs = process_vision_info(
+                batch,
+                image_patch_size=16,
+                return_video_kwargs=True,
+                return_video_metadata=True,
+            )
+            video_metadata = None
+            if videos is not None and videos and isinstance(videos[0], tuple):
+                video_values, metadata_values = zip(*videos)
+                videos = list(video_values)
+                video_metadata = list(metadata_values)
+            processor_kwargs: dict[str, Any] = {
+                "text": prompts,
+                "images": images,
+                "videos": videos,
+                "padding": True,
+                "return_tensors": "pt",
+            }
+            if video_metadata is not None:
+                processor_kwargs["video_metadata"] = video_metadata
+            if isinstance(video_kwargs, dict):
+                processor_kwargs.update(video_kwargs)
+            inputs = self.processor(**processor_kwargs).to(self.device)
+            with torch.inference_mode():
+                embeddings = self.model.embedding(**inputs).float()
+            embeddings = functional.normalize(embeddings[..., :self.dimension], dim=-1)
+            rows.append(embeddings.detach().cpu().numpy())
+        return _normalise_rows(np.concatenate(rows, axis=0)) if rows else np.empty((0, self.dimension), dtype=np.float32)
+
+    def encode_texts(
+        self,
+        texts: Iterable[str],
+        *,
+        batch_size: int = 16,
+        instruction: str = "Retrieve visual content that matches this query.",
+    ) -> np.ndarray:
+        conversations = [
+            self._conversation([{
+                "type": "text",
+                "text": f"{instruction.strip()}\n{str(value).strip()}".strip(),
+            }])
+            for value in texts
+        ]
+        return self._encode_conversations(conversations, batch_size=batch_size)
+
+    def encode_images(self, paths: Iterable[Path], *, batch_size: int = 4) -> np.ndarray:
+        conversations = [
+            self._conversation([{"type": "image", "image": str(path)}])
+            for path in paths
+        ]
+        return self._encode_conversations(conversations, batch_size=batch_size)
+
+    def encode_video_spans(
+        self,
+        source: Path,
+        spans: Iterable[tuple[float, float]],
+        *,
+        batch_size: int = 1,
+        fps: float = 1.0,
+        max_frames: int = 64,
+    ) -> np.ndarray:
+        conversations = [
+            self._conversation([{
+                "type": "video",
+                "video": str(source),
+                "video_start": max(0.0, float(start)),
+                "video_end": max(float(start) + .2, float(end)),
+                "fps": max(.1, float(fps)),
+                "max_frames": max(2, int(max_frames)),
+            }])
+            for start, end in spans
+        ]
+        return self._encode_conversations(conversations, batch_size=batch_size)
+
 class TextEncoder:
     """Multilingual E5-compatible encoder for transcript and OCR retrieval."""
 

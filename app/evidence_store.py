@@ -175,6 +175,7 @@ def read_source_evidence(
     modalities: set[str] | None = None,
     start: float = 0.0,
     end: float | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     root = source_evidence_directory(data_root, source_hash)
     payload = _read_json(root / "evidence.json") or {}
@@ -200,7 +201,50 @@ def read_source_evidence(
             "sourceEvidence": True,
         })
         results.append(item)
-    return results
+    if limit is None or len(results) <= max(1, int(limit)):
+        return results
+
+    # Historical model observations are derived cache data and frequently
+    # contain several near-identical descriptions for the same instant. Keep
+    # temporal coverage while bounding the vector sidecar and later recall.
+    # Round-robin selection avoids letting one heavily inspected scene crowd
+    # out the rest of the source video.
+    maximum = max(1, int(limit))
+    buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    seen: set[tuple[str, int, str]] = set()
+    for item in sorted(
+        results,
+        key=lambda row: (
+            -float(row.get("confidence") or 0),
+            float(row.get("evidenceTime") or row.get("start") or 0),
+        ),
+    ):
+        evidence_time = float(item.get("evidenceTime") or item.get("start") or 0)
+        bucket = int(evidence_time)
+        fingerprint = _normalize_text(item.get("observation") or item.get("text"))
+        key = (str(item.get("modality") or ""), bucket, fingerprint)
+        if key in seen:
+            continue
+        seen.add(key)
+        buckets.setdefault((key[0], bucket), []).append(item)
+    selected: list[dict[str, Any]] = []
+    ordered_buckets = [buckets[key] for key in sorted(buckets, key=lambda value: (value[1], value[0]))]
+    depth = 0
+    while len(selected) < maximum:
+        added = False
+        for bucket_rows in ordered_buckets:
+            if depth < len(bucket_rows):
+                selected.append(bucket_rows[depth])
+                added = True
+                if len(selected) >= maximum:
+                    break
+        if not added:
+            break
+        depth += 1
+    return sorted(
+        selected,
+        key=lambda item: (float(item.get("evidenceTime") or item.get("start") or 0), str(item.get("id") or "")),
+    )
 
 
 def query_source_evidence_vectors(

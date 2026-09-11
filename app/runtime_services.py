@@ -65,8 +65,8 @@ class RuntimeServices:
 
     def shutdown(self) -> None:
         # Cancel work that has not started. Running FFmpeg/model calls receive
-        # their existing cooperative cancellation signal and are not awaited
-        # indefinitely during process shutdown.
+        # their existing cooperative cancellation signal. Keep the application
+        # startup lock until all writers have stopped, including Python threads.
         for event in list(self.cancel_events.values()):
             event.set()
         for event in list(self.subtitle_transcription_cancels.values()):
@@ -90,4 +90,4 @@ class RuntimeServices:
             self.render_executor,
             self.analysis_executor,
         ):
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)

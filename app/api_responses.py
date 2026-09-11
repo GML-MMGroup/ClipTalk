@@ -43,7 +43,7 @@ class WorkflowActionResponse(ExtensibleResponse):
 
 
 class WorkflowPresentationResponse(ExtensibleResponse):
-    schemaVersion: int = 1
+    schemaVersion: int = 2
     workflowKind: str = "highlight"
     phase: str | None = None
     state: str | None = None
@@ -55,6 +55,17 @@ class WorkflowPresentationResponse(ExtensibleResponse):
     capabilities: dict = Field(default_factory=dict)
     terminology: dict[str, str] = Field(default_factory=dict)
     error: dict | None = None
+    key: str | None = None
+    group: str | None = None
+    label: str | None = None
+    headline: str | None = None
+    detail: str | None = None
+    railTitle: str | None = None
+    running: bool = False
+    tone: str = "neutral"
+    primaryActionKey: str | None = None
+    outputCount: int = 0
+    previewCount: int = 0
 
 
 class JobDocumentResponse(ExtensibleResponse):

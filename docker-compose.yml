@@ -14,6 +14,24 @@ services:
       HIGHLIGHT_PORT: 5180
       HIGHLIGHT_DATA_ROOT: /app/data
       HIGHLIGHT_ACCESS_TOKEN: ${HIGHLIGHT_ACCESS_TOKEN:?请配置至少16字符的HIGHLIGHT_ACCESS_TOKEN}
+      CLIPTALK_AGENT_SERVICE_URL: http://agent:5190
+      CLIPTALK_AGENT_SERVICE_TOKEN: ${CLIPTALK_AGENT_SERVICE_TOKEN:?请配置至少32字符的独立Agent服务凭据}
+    volumes:
+      - cliptalk-data:/app/data
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent-service
+      dockerfile: Dockerfile
+    environment:
+      CLIPTALK_AGENT_HOST: 0.0.0.0
+      CLIPTALK_AGENT_PORT: 5190
+      CLIPTALK_AGENT_SERVICE_TOKEN: ${CLIPTALK_AGENT_SERVICE_TOKEN:?请配置至少32字符的独立Agent服务凭据}
+      HIGHLIGHT_DATA_ROOT: /app/data
     volumes:
       - cliptalk-data:/app/data
     restart: unless-stopped

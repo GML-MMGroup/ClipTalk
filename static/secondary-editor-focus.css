@@ -1,0 +1,2013 @@
+/* Timeline-first precision editor.
+   This file is the final owner of secondary-editor layout and presentation. */
+
+body.secondary-editor-open {
+  --secondary-lane-marker: var(--pw-warning);
+}
+
+body.secondary-editor-open #appSidebar { display: none !important; }
+
+body.secondary-editor-open #secondaryEditor {
+  inset: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  grid-template-rows: 60px minmax(0, 1fr) !important;
+  color: var(--secondary-text) !important;
+  background: var(--secondary-canvas) !important;
+}
+
+body.secondary-editor-open #secondaryEditor > .secondary-editor-header {
+  min-height: 60px;
+  padding: 0 18px !important;
+  border-bottom: 1px solid var(--secondary-panel-line) !important;
+}
+
+body.secondary-editor-open .secondary-editor-heading { color: var(--secondary-text) !important; }
+body.secondary-editor-open .secondary-editor-heading > span { background: var(--secondary-panel-line) !important; opacity: 1 !important; }
+body.secondary-editor-open .secondary-editor-heading strong { font-size: 14px; }
+body.secondary-editor-open .secondary-editor-heading small { color: var(--secondary-muted) !important; font-size: 12px; }
+body.secondary-editor-open .secondary-editor-heading small[data-state="saved"] { color: var(--secondary-success) !important; }
+
+body.secondary-editor-open .secondary-editor button {
+  min-height: 32px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+body.secondary-editor-open .secondary-editor-header button,
+body.secondary-editor-open .secondary-editor-actions button {
+  border: 1px solid var(--secondary-panel-line) !important;
+  color: #46545c !important;
+  background: var(--secondary-panel-raised) !important;
+}
+
+body.secondary-editor-open .secondary-editor-header button:hover:not(:disabled),
+body.secondary-editor-open .secondary-editor-actions button:hover:not(:disabled) {
+  border-color: #d8a187 !important;
+  color: #7f3518 !important;
+  background: var(--secondary-accent-soft) !important;
+}
+
+body.secondary-editor-open .secondary-editor-actions #secondaryEditorExport {
+  border-color: #db8057 !important;
+  color: #35180c !important;
+  background: #f3a079 !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-editor-layout {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--secondary-library-width, 0px) minmax(0, 1fr) var(--secondary-inspector-column-width, 0px) !important;
+  grid-template-rows:
+    44px
+    minmax(210px, calc(var(--secondary-editor-upper-ratio, 46%) - 44px))
+    8px
+    minmax(300px, 1fr) !important;
+  overflow: hidden;
+  background: var(--secondary-canvas) !important;
+}
+
+body.secondary-editor-open .secondary-editor.library-open { --secondary-library-width: 292px; }
+body.secondary-editor-open .secondary-editor.inspector-open { --secondary-inspector-column-width: var(--secondary-inspector-width, clamp(380px, 24vw, 460px)); }
+body.secondary-editor-open .secondary-editor-main { display: contents !important; }
+
+body.secondary-editor-open .secondary-editor-library {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  min-width: 0;
+  min-height: 0;
+  display: none;
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto !important;
+  border-right: 1px solid #2a373e !important;
+  color: #e3e9eb !important;
+  background: #111a20 !important;
+}
+
+body.secondary-editor-open .secondary-editor.library-open .secondary-editor-library { display: grid; }
+body.secondary-editor-open #secondaryEditor #secondaryEditorLibrary {
+  background-color: var(--secondary-panel) !important;
+  background-image: none !important;
+}
+body.secondary-editor-open .secondary-editor-library > header { padding: 9px 14px 7px; }
+body.secondary-editor-open .secondary-editor-library > header small { color: #f0a27d !important; font-size: 11px !important; letter-spacing: .04em !important; }
+body.secondary-editor-open .secondary-editor-library > header strong { color: #f0f4f5; font-size: 14px; }
+body.secondary-editor-open .secondary-editor-library > header div > em { max-width: 220px; color: #9aa8ae !important; font-size: 11px !important; }
+
+body.secondary-editor-open .secondary-editor-library-tabs {
+  margin: 0 12px 8px;
+  padding: 3px;
+  border: 1px solid #303d44 !important;
+  border-radius: 8px;
+  background: #0d151a !important;
+}
+
+body.secondary-editor-open .secondary-editor-library-tabs button {
+  min-height: 30px;
+  color: #aeb9bd !important;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-editor-library-tabs button.active {
+  color: #ffe5d7 !important;
+  background: #38251d !important;
+  box-shadow: inset 0 -2px 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-editor-library-context {
+  max-height: 34px;
+  margin: 0 14px 6px;
+  overflow: hidden;
+  color: #a0adb2 !important;
+  font-size: 12px !important;
+  line-height: 1.45;
+}
+
+body.secondary-editor-open .secondary-editor-library-search {
+  display: block;
+  margin: 0 12px 8px;
+}
+
+body.secondary-editor-open .secondary-editor-library-search input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #344249;
+  border-radius: 7px;
+  color: #eef2f3;
+  background: #0c1419;
+  outline: none;
+  font-size: 12px;
+}
+
+body.secondary-editor-open .secondary-editor-library-search input:focus {
+  border-color: var(--secondary-accent);
+  box-shadow: 0 0 0 2px rgb(233 143 100 / .18);
+}
+
+body.secondary-editor-open .secondary-editor-library-search input::placeholder { color: #78878e; }
+
+body.secondary-editor-open .secondary-editor-library-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  margin: 0 10px 8px;
+}
+
+body.secondary-editor-open .secondary-editor-library-filters button {
+  min-width: 0;
+  min-height: 31px;
+  padding: 0 3px;
+  border: 0 !important;
+  color: #98a7ad !important;
+  background: transparent !important;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+body.secondary-editor-open .secondary-editor-library-filters button b {
+  color: #74838a;
+  font: 600 10px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+body.secondary-editor-open .secondary-editor-library-filters button.active {
+  color: #ffe1d1 !important;
+  background: #34241d !important;
+  box-shadow: inset 0 -2px 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-editor-library-filters button.active b { color: #ffb18c; }
+
+body.secondary-editor-open .secondary-editor-insert-target {
+  grid-row: 7;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0 !important;
+  border-top: 1px solid #2b3940 !important;
+  border-radius: 0;
+  background: #0e171c !important;
+}
+
+body.secondary-editor-open .secondary-editor-insert-target label > span { color: #a9b4b8; font-size: 11px; }
+body.secondary-editor-open .secondary-editor-insert-target select {
+  min-height: 33px;
+  border-color: #3b494f;
+  color: #eef2f3;
+  background: #111b20;
+  font-size: 12px;
+}
+
+body.secondary-editor-open .secondary-editor-library-body {
+  grid-row: 6;
+  min-height: 0;
+  display: block;
+  position: relative;
+  padding: 0 10px 10px;
+  gap: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+body.secondary-editor-open .secondary-library-group {
+  display: none;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-library-group.active { display: block; }
+body.secondary-editor-open .secondary-library-group > summary {
+  min-height: 36px;
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--secondary-panel-line);
+}
+
+body.secondary-editor-open .secondary-library-group > summary strong { color: var(--secondary-text); font-size: 12px; }
+body.secondary-editor-open .secondary-library-group > summary small { color: var(--secondary-muted) !important; font-size: 11px !important; }
+body.secondary-editor-open .secondary-library-group > summary > b { color: var(--secondary-accent); font-size: 11px; }
+body.secondary-editor-open .secondary-library-group-items { gap: 0; padding: 0; border: 0 !important; }
+
+body.secondary-editor-open .secondary-library-item {
+  position: relative;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 7px 9px;
+  padding: 10px 4px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--secondary-panel-line) !important;
+  border-radius: 0;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-library-item:hover,
+body.secondary-editor-open .secondary-library-item:focus-visible {
+  background: var(--secondary-panel-raised) !important;
+  box-shadow: inset 3px 0 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-library-item.previewing {
+  background: var(--secondary-accent-soft) !important;
+  box-shadow: inset 3px 0 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-library-thumb {
+  width: 64px;
+  height: 43px;
+  min-height: 43px !important;
+  border-radius: 6px !important;
+}
+
+body.secondary-editor-open .secondary-library-item strong { color: var(--secondary-text); font-size: 12px; }
+body.secondary-editor-open .secondary-library-item small { color: var(--secondary-muted) !important; font-size: 11px !important; }
+body.secondary-editor-open .secondary-library-copy > span { gap: 3px; }
+body.secondary-editor-open .secondary-library-copy > span b {
+  padding: 1px 3px;
+  color: var(--secondary-text-secondary);
+  background: var(--secondary-panel-raised);
+  font-size: 10px;
+}
+
+body.secondary-editor-open .secondary-library-copy > span b.state-recommended,
+body.secondary-editor-open .secondary-library-copy > span b.state-timeline,
+body.secondary-editor-open .secondary-library-copy > span b.state-kept,
+body.secondary-editor-open .secondary-library-copy > span b.used {
+  color: var(--secondary-accent);
+  background: var(--secondary-accent-soft);
+}
+
+body.secondary-editor-open .secondary-library-reason {
+  grid-column: 1 / -1;
+  color: var(--secondary-muted);
+  font-size: 11px;
+}
+
+body.secondary-editor-open .secondary-library-reason > summary {
+  width: max-content;
+  color: var(--secondary-accent);
+  cursor: pointer;
+  list-style: none;
+}
+
+body.secondary-editor-open .secondary-library-reason > summary::-webkit-details-marker { display: none; }
+body.secondary-editor-open .secondary-library-reason > summary::after { content: " +"; }
+body.secondary-editor-open .secondary-library-reason[open] > summary::after { content: " -"; }
+body.secondary-editor-open .secondary-library-reason p { margin: 5px 0 0; color: var(--secondary-muted); font-size: 11px; line-height: 1.5; }
+body.secondary-editor-open .secondary-library-item footer { grid-template-columns: 1fr 1fr; gap: 5px; }
+body.secondary-editor-open .secondary-library-item footer,
+body.secondary-editor-open .secondary-library-item footer button { position: relative; z-index: 2; pointer-events: auto; }
+body.secondary-editor-open .secondary-library-item footer:not(.has-used-clips) { grid-template-columns: 1fr; }
+body.secondary-editor-open .secondary-library-item footer button { min-height: 30px; font-size: 11px; }
+body.secondary-editor-open .secondary-library-item footer .primary {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+body.secondary-editor-open .secondary-library-item footer.has-used-clips .secondary-library-remove {
+  grid-column: auto;
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-panel-raised) !important;
+}
+
+body.secondary-editor-open .secondary-editor-library.source-range-active :is(.secondary-editor-library-search, .secondary-editor-library-filters, .secondary-editor-library-body) { display: none !important; }
+body.secondary-editor-open .secondary-editor-library.source-range-active .secondary-editor-range-form { grid-row: 4 / 7; }
+
+body.secondary-editor-open .secondary-editor-view-switch {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  padding: 6px 12px !important;
+  border: 0 !important;
+  border-bottom: 1px solid #29343a !important;
+  color: #dce3e5 !important;
+  background: #151d22 !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-editor-view-switch button {
+  min-height: 31px;
+  color: #aeb9bd !important;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-editor-view-switch button.active,
+body.secondary-editor-open .secondary-editor-view-switch > .secondary-editor-add-text:hover {
+  border-color: #8e553d !important;
+  color: #ffe1d2 !important;
+  background: #37251e !important;
+  box-shadow: inset 0 -2px 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-editor-view-switch > #secondaryEditorClock { display: none; }
+body.secondary-editor-open .secondary-editor-panel-switch { display: flex; margin-left: auto; }
+body.secondary-editor-open .secondary-editor-panel-switch button[aria-expanded="true"] {
+  color: #ffe1d2 !important;
+  background: #38261f !important;
+}
+
+body.secondary-editor-open .secondary-editor-player {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: #0d1215 !important;
+}
+
+body.secondary-editor-open .secondary-editor-player > video { background: #0d1215 !important; }
+body.secondary-editor-open .secondary-editor-media-controls {
+  border-top: 1px solid #2b363c !important;
+  color: #dce3e5 !important;
+  background: #151d22 !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-editor-media-controls button {
+  border: 0 !important;
+  color: #c6d0d3 !important;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-editor-media-controls #secondaryEditorMediaPlay {
+  color: #281208 !important;
+  background: var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-editor-media-controls #secondaryEditorMediaClock { color: var(--secondary-text) !important; }
+body.secondary-editor-open #secondaryEditorMediaSeek {
+  background-image: linear-gradient(90deg, var(--secondary-accent) 0 var(--media-progress, 0%), #536168 var(--media-progress, 0%) 100%) !important;
+}
+
+body.secondary-editor-open .secondary-editor-inspector {
+  grid-column: 3;
+  grid-row: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: none;
+  overflow: auto;
+  border-left: 1px solid var(--secondary-panel-line) !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open .secondary-editor.inspector-open .secondary-editor-inspector { display: block; }
+body.secondary-editor-open .secondary-inspector-tabs {
+  padding: 7px;
+  border-bottom: 1px solid var(--secondary-panel-line) !important;
+  background: rgb(247 248 249 / .97) !important;
+  backdrop-filter: none;
+}
+
+body.secondary-editor-open .secondary-inspector-tabs button {
+  min-height: 33px;
+  border: 0 !important;
+  color: #66747c !important;
+  background: transparent !important;
+  font-size: 12px;
+}
+
+body.secondary-editor-open .secondary-inspector-tabs button.active {
+  color: #7f3518 !important;
+  background: var(--secondary-accent-soft) !important;
+  box-shadow: inset 0 -2px 0 var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-inspector-section {
+  padding: 14px !important;
+  border-bottom: 0 !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open .secondary-inspector-section header { margin-bottom: 12px; }
+body.secondary-editor-open .secondary-inspector-section header small { color: #9d4b27 !important; font-size: 11px !important; letter-spacing: .03em !important; }
+body.secondary-editor-open .secondary-inspector-section header strong { color: var(--secondary-text) !important; font-size: 14px; }
+body.secondary-editor-open .secondary-inspector-form { gap: 12px; }
+body.secondary-editor-open .secondary-inspector-fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 11px 0 0;
+  border: 0;
+  border-top: 1px solid var(--secondary-panel-line);
+}
+
+body.secondary-editor-open .secondary-inspector-fieldset legend {
+  padding: 0 7px 0 0;
+  color: #526169;
+  background: var(--secondary-panel);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body.secondary-editor-open .secondary-inspector-form label { color: #526169; font-size: 12px; }
+body.secondary-editor-open .secondary-inspector-form :is(input, select) {
+  min-height: 36px;
+  border: 1px solid #cfd7db !important;
+  border-radius: 7px;
+  color: #253139 !important;
+  background: #fff !important;
+  font-size: 12px;
+}
+
+body.secondary-editor-open .secondary-inspector-form :is(input, select):focus {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: 0 0 0 2px rgb(233 143 100 / .16) !important;
+}
+
+body.secondary-editor-open .secondary-inspector-time label > small {
+  min-height: 18px;
+  color: #718088 !important;
+  font-size: 10px !important;
+}
+
+body.secondary-editor-open .secondary-inspector-timing-summary {
+  display: block;
+  overflow: visible;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+}
+
+body.secondary-editor-open .secondary-inspector-timing-line {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 5px 12px !important;
+  padding: 9px 10px !important;
+  border: 1px solid var(--secondary-panel-line);
+  border-radius: 7px;
+  color: #67757d !important;
+  background: #eef2f4 !important;
+}
+
+body.secondary-editor-open .secondary-inspector-timing-line span { color: #68767e !important; font-size: 11px !important; }
+body.secondary-editor-open .secondary-inspector-timing-line b { color: #27343b !important; font-size: 11px !important; }
+body.secondary-editor-open .secondary-inspector-timing-summary > small { display: block; margin-top: 6px; color: #76533f !important; font-size: 11px !important; }
+
+body.secondary-editor-open .secondary-inspector-form-actions {
+  position: sticky;
+  z-index: 3;
+  bottom: -14px;
+  margin: 2px -14px -14px;
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--secondary-panel-line);
+  background: rgb(247 248 249 / .97);
+}
+
+body.secondary-editor-open .secondary-inspector-form-actions button { border: 1px solid #ccd5d9 !important; color: #536169 !important; background: #fff !important; }
+body.secondary-editor-open .secondary-inspector-form-actions button.primary:not(:disabled) { border-color: #d67c53 !important; color: #35180c !important; background: #f1a078 !important; }
+
+body.secondary-editor-open .secondary-editor-workspace-resize {
+  position: relative;
+  z-index: 18;
+  grid-column: 1 / 3;
+  grid-row: 3;
+  display: grid;
+  place-items: center;
+  min-height: 8px;
+  border-top: 1px solid #354148;
+  border-bottom: 1px solid #222d32;
+  background: #182126;
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+
+body.secondary-editor-open .secondary-editor-workspace-resize > span {
+  width: 42px;
+  height: 3px;
+  border-radius: 3px;
+  background: #647178;
+}
+
+body.secondary-editor-open .secondary-editor-workspace-resize:hover > span,
+body.secondary-editor-open .secondary-editor-workspace-resize.dragging > span,
+body.secondary-editor-open .secondary-editor-workspace-resize:focus-visible > span { background: var(--secondary-accent); }
+
+body.secondary-editor-open .secondary-editor-timeline-section {
+  grid-column: 1 / 3;
+  grid-row: 4;
+  min-width: 0;
+  min-height: 0;
+  border: 0 !important;
+  color: #dce3e5 !important;
+  background: var(--secondary-canvas) !important;
+}
+
+body.secondary-editor-open .secondary-editor-inspector-resize {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  body.secondary-editor-open .secondary-editor.inspector-open .secondary-editor-inspector-resize {
+    position: relative;
+    z-index: 30;
+    grid-column: 3;
+    grid-row: 1 / -1;
+    align-self: stretch;
+    justify-self: start;
+    display: grid;
+    place-items: center;
+    width: 10px;
+    min-width: 10px;
+    margin-left: -5px;
+    cursor: col-resize;
+    touch-action: none;
+    outline: none;
+  }
+
+  body.secondary-editor-open .secondary-editor-inspector-resize > span {
+    width: 2px;
+    height: 44px;
+    border-radius: 2px;
+    background: #596069;
+    opacity: .72;
+  }
+
+  body.secondary-editor-open .secondary-editor-inspector-resize:hover > span,
+  body.secondary-editor-open .secondary-editor-inspector-resize.dragging > span,
+  body.secondary-editor-open .secondary-editor-inspector-resize:focus-visible > span {
+    background: var(--secondary-accent);
+    opacity: 1;
+  }
+}
+
+body.secondary-editor-open .secondary-editor-timeline-section > header {
+  min-height: 45px;
+  padding: 6px 12px !important;
+  border: 0 !important;
+  border-bottom: 1px solid #303c42 !important;
+  color: #dce3e5 !important;
+  background: #151d22 !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-editor-timeline-section > header strong { color: #eef2f3; font-size: 13px; }
+body.secondary-editor-open .secondary-editor-timeline-section > header span { color: #9eacb2; font-size: 11px; }
+body.secondary-editor-open .secondary-editor-timeline-section > header .secondary-editor-media-state { color: #87aa98; }
+body.secondary-editor-open .secondary-editor-timeline-actions { display: flex; align-items: center; gap: 5px; }
+body.secondary-editor-open .secondary-editor-timeline-section > header button,
+body.secondary-editor-open .secondary-editor-action-overflow > summary {
+  min-height: 29px;
+  padding: 0 8px;
+  border: 1px solid #3a474e !important;
+  border-radius: 6px;
+  color: #bdc8cc !important;
+  background: #1b252a !important;
+  font-size: 11px;
+}
+
+body.secondary-editor-open .secondary-editor-timeline-section > header button:hover:not(:disabled),
+body.secondary-editor-open .secondary-editor-action-overflow > summary:hover {
+  border-color: #8c5840 !important;
+  color: #ffe0d0 !important;
+  background: #34251f !important;
+}
+
+body.secondary-editor-open .secondary-editor-timeline-section > header button.active {
+  border-color: #9e6045 !important;
+  color: #ffe0d0 !important;
+  background: #38261f !important;
+}
+
+body.secondary-editor-open .secondary-editor-zoom { border-color: #3a474e !important; background: #11191e !important; }
+body.secondary-editor-open .secondary-editor-core-actions { display: flex; gap: 4px; padding-left: 5px; border-left: 1px solid #3a474e; }
+body.secondary-editor-open .secondary-editor-action-overflow { position: relative; }
+body.secondary-editor-open .secondary-editor-action-overflow > summary {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+body.secondary-editor-open .secondary-editor-action-overflow > summary::-webkit-details-marker { display: none; }
+body.secondary-editor-open .secondary-editor-action-overflow > div {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 150px;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #46535a;
+  border-radius: 8px;
+  background: #172126;
+  box-shadow: 0 14px 30px rgb(4 8 10 / .34);
+}
+
+body.secondary-editor-open .secondary-editor-action-overflow > div button { width: 100%; justify-content: start; text-align: left; }
+body.secondary-editor-open .secondary-editor-shortcuts { color: #aebbc0; background: #11191e; border-color: #303c42; font-size: 11px; }
+
+body.secondary-editor-open :where(
+  .secondary-editor-timeline-viewport,
+  .secondary-editor-timeline-canvas,
+  .secondary-editor-ruler,
+  .secondary-editor-timeline,
+  .secondary-editor-subtitle-track,
+  .secondary-editor-text-track,
+  .secondary-editor-subtitle-lane,
+  .secondary-editor-text-lane
+) {
+  border-color: var(--secondary-canvas-line) !important;
+  color: #aeb9bd !important;
+  background-color: #121a1f !important;
+}
+
+body.secondary-editor-open .secondary-editor-timeline-viewport { padding: 0 12px 9px; scrollbar-color: #526067 #11191e; }
+body.secondary-editor-open .secondary-editor-timeline-canvas {
+  min-height: 250px;
+  grid-template-rows: 28px clamp(88px, 34%, 136px) minmax(48px, 1fr) minmax(48px, 1fr);
+}
+
+body.secondary-editor-open .secondary-editor-ruler { background: #182126 !important; }
+body.secondary-editor-open .secondary-editor-ruler-tick b { color: #9eabb0 !important; font-size: 10px !important; }
+body.secondary-editor-open .secondary-editor-ruler-tick i { background: #536169 !important; }
+
+body.secondary-editor-open .secondary-timeline-clip {
+  border: 1px solid #44545b !important;
+  border-radius: 5px;
+  color: #e5ebed !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-timeline-clip:hover { border-color: #9d6a52 !important; background: #27343a !important; }
+body.secondary-editor-open .secondary-timeline-clip.selected {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: inset 0 0 0 1px var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open .secondary-timeline-clip::after { background: var(--secondary-accent) !important; }
+body.secondary-editor-open .secondary-timeline-clip strong { font-size: 12px; }
+body.secondary-editor-open .secondary-timeline-clip small,
+body.secondary-editor-open .secondary-timeline-clip em { font-size: 11px !important; }
+body.secondary-editor-open .secondary-clip-media::after { background: linear-gradient(90deg, rgb(10 16 19 / .78), rgb(10 16 19 / .35) 58%, rgb(10 16 19 / .7)); }
+body.secondary-editor-open .secondary-editor-playhead span { color: #2c1209 !important; }
+body.secondary-editor-open .secondary-editor-text-track,
+body.secondary-editor-open .secondary-editor-subtitle-track { font-size: 12px; }
+body.secondary-editor-open .secondary-editor-text-lane,
+body.secondary-editor-open .secondary-editor-subtitle-lane {
+  height: calc(100% - 12px);
+  min-height: 34px;
+  max-height: 64px;
+}
+
+body.secondary-editor-open .secondary-editor :where(small, em) { line-height: 1.45; }
+
+@media (max-width: 1439px) {
+  body.secondary-editor-open .secondary-editor-layout {
+    grid-template-columns: 0 minmax(0, 1fr) 0 !important;
+  }
+
+  body.secondary-editor-open .secondary-editor-library,
+  body.secondary-editor-open .secondary-editor-inspector {
+    position: absolute;
+    z-index: 24;
+    top: 0;
+    bottom: 0;
+    height: 100%;
+    box-shadow: 0 18px 42px rgb(5 10 13 / .34);
+  }
+
+  body.secondary-editor-open .secondary-editor-library { left: 0; width: 300px; }
+  body.secondary-editor-open .secondary-editor-inspector { right: 0; width: 320px; }
+  body.secondary-editor-open .secondary-editor-view-switch,
+  body.secondary-editor-open .secondary-editor-player { grid-column: 1 / -1; }
+}
+
+@media (max-width: 780px) {
+  body.secondary-editor-open .secondary-editor { grid-template-rows: auto minmax(0, 1fr) !important; }
+  body.secondary-editor-open .secondary-editor-header { align-items: flex-start; flex-wrap: wrap; gap: 8px; padding: 9px 10px !important; }
+  body.secondary-editor-open .secondary-editor-actions { width: 100%; overflow-x: auto; }
+  body.secondary-editor-open .secondary-editor-layout {
+    grid-template-rows: 42px minmax(190px, calc(var(--secondary-editor-upper-ratio, 46%) - 42px)) 8px minmax(280px, 1fr) !important;
+  }
+  body.secondary-editor-open .secondary-editor-library,
+  body.secondary-editor-open .secondary-editor-inspector { width: min(88vw, 320px); }
+  body.secondary-editor-open .secondary-editor-view-switch { overflow-x: auto; padding-inline: 8px !important; }
+  body.secondary-editor-open .secondary-editor-timeline-section > header { align-items: flex-start; flex-wrap: wrap; }
+  body.secondary-editor-open .secondary-editor-timeline-actions { width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  body.secondary-editor-open .secondary-editor-media-controls { grid-template-columns: 32px minmax(72px, 1fr) auto auto !important; }
+  body.secondary-editor-open .secondary-editor-media-controls > span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.secondary-editor-open .secondary-editor * { scroll-behavior: auto !important; }
+}
+
+/* Secondary editor lanes use the workstation surfaces. Track labels and
+   selection states provide semantics without introducing another palette. */
+body.secondary-editor-open .secondary-editor-timeline {
+  border-color: var(--secondary-panel-line) !important;
+}
+body.secondary-editor-open .secondary-editor-text-track {
+  border-color: var(--secondary-panel-line) !important;
+  color: var(--secondary-muted) !important;
+  background: var(--secondary-lane-text) !important;
+}
+body.secondary-editor-open .secondary-editor-text-lane {
+  border-color: var(--secondary-panel-line) !important;
+  color: var(--secondary-muted) !important;
+  background: var(--secondary-canvas-raised) !important;
+}
+body.secondary-editor-open .secondary-editor-subtitle-track {
+  border-color: var(--secondary-panel-line) !important;
+  color: var(--secondary-muted) !important;
+  background: var(--secondary-lane-subtitle) !important;
+}
+body.secondary-editor-open .secondary-editor-subtitle-lane {
+  border-color: var(--secondary-panel-line) !important;
+  color: var(--secondary-muted) !important;
+  background: var(--secondary-canvas-raised) !important;
+}
+body.secondary-editor-open .secondary-timeline-clip {
+  border-color: var(--secondary-panel-line-strong) !important;
+  background: var(--secondary-lane-video-raised) !important;
+}
+body.secondary-editor-open .secondary-editor-playhead { background: var(--secondary-playhead) !important; }
+body.secondary-editor-open .secondary-editor-playhead i { border-top-color: var(--secondary-playhead) !important; }
+body.secondary-editor-open .secondary-editor-playhead span { background: var(--secondary-playhead) !important; }
+
+body.secondary-editor-open .secondary-editor-text-block,
+body.secondary-editor-open .secondary-editor-subtitle-block.text-box {
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-lane-text-raised) !important;
+}
+body.secondary-editor-open .secondary-text-time-handle,
+body.secondary-editor-open .secondary-editor-subtitle-block.text-box .secondary-subtitle-handle { background: var(--secondary-accent) !important; }
+body.secondary-editor-open .secondary-editor-subtitle-block:not(.text-box) {
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-lane-subtitle-raised) !important;
+}
+body.secondary-editor-open .secondary-editor-subtitle-block:not(.text-box) .secondary-subtitle-handle { background: var(--secondary-accent) !important; }
+body.secondary-editor-open .secondary-editor-text-block.selected,
+body.secondary-editor-open .secondary-editor-subtitle-block.selected {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: inset 3px 0 0 var(--secondary-accent), 0 0 0 1px var(--secondary-accent-soft) !important;
+}
+
+body.secondary-editor-open .secondary-transition-chip,
+body.secondary-editor-open .secondary-editor-marker {
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-panel-raised) !important;
+}
+body.secondary-editor-open .secondary-editor-marker > i { border-bottom-color: var(--secondary-lane-marker) !important; }
+body.secondary-editor-open .secondary-editor-marker.selected {
+  border-color: var(--secondary-warning) !important;
+  color: var(--secondary-warning) !important;
+  background: var(--secondary-warning-soft) !important;
+  box-shadow: inset 2px 0 0 var(--secondary-lane-marker) !important;
+}
+body.secondary-editor-open .secondary-timeline-clip.pending-settings {
+  border-style: dashed !important;
+  border-color: var(--secondary-warning) !important;
+  background: var(--secondary-warning-soft) !important;
+  box-shadow: inset 0 0 0 1px var(--secondary-warning-soft) !important;
+}
+body.secondary-editor-open :where(.secondary-editor-text-block, .secondary-editor-subtitle-block, .secondary-transition-chip):focus-visible {
+  outline: 2px solid var(--secondary-accent) !important;
+  outline-offset: 1px;
+}
+
+body.secondary-editor-open .secondary-editor-subtitle-block [data-secondary-cue-text] { cursor: pointer; }
+body.secondary-editor-open .secondary-editor-subtitle-block.is-editing [data-secondary-cue-text] { cursor: text; }
+
+/* A pending timing proposal makes subtitle positions provisional. Keep the
+   blocks available for navigation while locking text and trim interactions
+   until the proposal is saved and the cues can be realigned. */
+body.secondary-editor-open .secondary-editor-timeline-section.has-timing-preview .secondary-editor-subtitle-blocks {
+  pointer-events: auto;
+}
+body.secondary-editor-open .secondary-editor-timeline-section.has-timing-preview .secondary-editor-subtitle-block :where(
+  [data-secondary-cue-text],
+  [data-secondary-cue-handle]
+) {
+  pointer-events: none;
+}
+
+/* Left-to-right workspace luminance -------------------------------------
+   The decoded picture remains color-accurate, while letterbox space and the
+   editing canvas reveal the dark-library to light-inspector progression. */
+body.secondary-editor-open #secondaryEditor,
+body.secondary-editor-open .secondary-editor-layout {
+  background-color: #172229 !important;
+  background-image: var(--secondary-workspace-gradient) !important;
+}
+body.secondary-editor-open .secondary-editor-view-switch {
+  border-bottom-color: rgb(72 84 92 / .55) !important;
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg, #151f25 0%, #26323a 42%, #cbd2d6 82%, #f7f9fa 100%) !important;
+}
+body.secondary-editor-open .secondary-editor-player {
+  background-color: #0b1115 !important;
+  background-image: linear-gradient(90deg, #0b1115 0%, #111a20 47%, #dfe4e7 88%, #f8f9fa 100%) !important;
+}
+body.secondary-editor-open .secondary-editor-player > video {
+  background-color: transparent !important;
+  background-image: none !important;
+}
+body.secondary-editor-open .secondary-editor-timeline-section {
+  background-color: #172229 !important;
+  background-image: var(--secondary-workspace-gradient) !important;
+}
+body.secondary-editor-open .secondary-editor-timeline-section > header {
+  border-bottom-color: rgb(85 97 104 / .48) !important;
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg, #151d22 0%, #2b373e 42%, #cbd2d6 82%, #f8f9fa 100%) !important;
+}
+body.secondary-editor-open .secondary-editor-timeline-viewport,
+body.secondary-editor-open .secondary-editor-timeline-canvas {
+  background-color: transparent !important;
+  background-image: var(--secondary-workspace-gradient) !important;
+}
+body.secondary-editor-open .secondary-editor-timeline {
+  background-color: var(--secondary-lane-video) !important;
+  background-image:
+    repeating-linear-gradient(90deg, rgb(151 166 173 / .09) 0, rgb(151 166 173 / .09) 1px, transparent 1px, transparent 48px),
+    linear-gradient(90deg, #111c23 0%, #1d2a32 40%, #9ba5ab 72%, #edf1f3 100%) !important;
+}
+body.secondary-editor-open .secondary-editor-text-track,
+body.secondary-editor-open .secondary-editor-text-lane {
+  background-color: var(--secondary-lane-text) !important;
+  background-image: linear-gradient(90deg, #1d1a15 0%, #594b35 43%, #d4c5ad 76%, #f5f0e8 100%) !important;
+}
+body.secondary-editor-open .secondary-editor-subtitle-track,
+body.secondary-editor-open .secondary-editor-subtitle-lane {
+  background-color: var(--secondary-lane-subtitle) !important;
+  background-image: linear-gradient(90deg, #181923 0%, #3b3c52 43%, #c6c4d5 76%, #f1f0f6 100%) !important;
+}
+
+/* Light inspector content -------------------------------------------------
+   Legacy controls inside the light inspector used dark editor surfaces.
+   Keep every tab readable as one continuous light settings workspace. */
+body.secondary-editor-open .secondary-editor-inspector,
+body.secondary-editor-open .secondary-inspector-section {
+  color: var(--secondary-text) !important;
+  background-color: var(--secondary-panel) !important;
+  background-image: none !important;
+}
+
+body.secondary-editor-open .secondary-editor-inspector button:not(.active) {
+  border-color: #cfd8dc !important;
+  color: #4d5b62 !important;
+  background: #fff !important;
+}
+
+body.secondary-editor-open .secondary-editor-inspector button:hover:not(:disabled),
+body.secondary-editor-open .secondary-editor-inspector button:focus-visible {
+  border-color: var(--secondary-accent) !important;
+  color: #7f3518 !important;
+  background: var(--secondary-accent-soft) !important;
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(233 143 100 / .16) !important;
+}
+
+body.secondary-editor-open .secondary-inspector-empty {
+  border-color: #cbd5da !important;
+  color: #68767e !important;
+  background: #f0f3f5 !important;
+}
+
+body.secondary-editor-open .secondary-inspector-form.has-pending-changes {
+  border-color: #e5c2ad !important;
+  background: #fff8f2 !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-controls > label {
+  color: #46545b !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-controls > small,
+body.secondary-editor-open .secondary-export-settings > small {
+  color: #718087 !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-canvas-settings {
+  border-color: #d6dfe3 !important;
+  background: #eef2f4 !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-canvas-settings > span {
+  color: #596870 !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-canvas-settings > div {
+  border-color: #d5dde1 !important;
+  background: #fff !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-clip-scope > strong { color: #2d3940 !important; }
+body.secondary-editor-open .secondary-subtitle-clip-scope > small { color: #718087 !important; }
+
+body.secondary-editor-open #secondaryEditorSubtitleReview,
+body.secondary-editor-open .secondary-ai-editor form button[type="submit"] {
+  border-color: #d67c53 !important;
+  color: #35180c !important;
+  background: #f1a078 !important;
+  font-weight: 700;
+}
+
+body.secondary-editor-open .secondary-ai-editor p {
+  color: #64737a !important;
+}
+
+body.secondary-editor-open .secondary-ai-editor textarea,
+body.secondary-editor-open .secondary-export-settings input {
+  border-color: #cfd8dc !important;
+  color: #253139 !important;
+  background: #fff !important;
+  caret-color: #253139;
+}
+
+body.secondary-editor-open .secondary-ai-editor textarea::placeholder { color: #8a979d !important; }
+body.secondary-editor-open .secondary-ai-editor textarea:focus,
+body.secondary-editor-open .secondary-export-settings input:focus {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: 0 0 0 2px rgb(233 143 100 / .16) !important;
+}
+
+body.secondary-editor-open .secondary-command-examples button {
+  border-color: #d3dce0 !important;
+  color: #59676e !important;
+  background: #fff !important;
+}
+
+body.secondary-editor-open .secondary-editor-proposal {
+  border-color: #e6b89d !important;
+  background: #fff8f2 !important;
+}
+
+body.secondary-editor-open .secondary-editor-proposal strong { color: #7f3518 !important; }
+body.secondary-editor-open .secondary-editor-proposal span { color: #445159 !important; }
+body.secondary-editor-open .secondary-editor-proposal em { color: #9d4b27 !important; }
+body.secondary-editor-open .secondary-editor-proposal small { color: #718087 !important; }
+
+body.secondary-editor-open .secondary-proposal-variants button {
+  border: 1px solid #d7dfe3 !important;
+  color: #59676e !important;
+  background: #f2f5f6 !important;
+}
+
+body.secondary-editor-open .secondary-proposal-variants button.active {
+  border-color: #dc9878 !important;
+  color: #7f3518 !important;
+  background: #ffe9dd !important;
+  box-shadow: inset 0 0 0 1px rgb(233 143 100 / .18) !important;
+}
+
+body.secondary-editor-open .secondary-export-settings label { color: #526169 !important; }
+
+body.secondary-editor-open .secondary-editor-preflight {
+  border-color: #d5dee2 !important;
+  background: #eef2f4 !important;
+}
+
+body.secondary-editor-open .secondary-editor-preflight strong { color: #334148 !important; }
+body.secondary-editor-open .secondary-editor-preflight small { color: #718087 !important; }
+body.secondary-editor-open .secondary-editor-preflight[data-tone="warning"] {
+  border-color: #e2c18c !important;
+  background: #fff8e8 !important;
+}
+body.secondary-editor-open .secondary-editor-preflight[data-tone="warning"] strong { color: #825a1e !important; }
+body.secondary-editor-open .secondary-editor-preflight[data-tone="error"] {
+  border-color: #e3b4b8 !important;
+  background: #fff1f2 !important;
+}
+body.secondary-editor-open .secondary-editor-preflight[data-tone="error"] strong { color: #9a4048 !important; }
+
+/* Timeline interaction contract -----------------------------------------
+   Selection, transitions, deletion and trim handles are sibling controls;
+   each keeps an independent focus target instead of nesting button roles. */
+body.secondary-editor-open .secondary-clip-select {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  min-width: 0;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-timeline-clip .secondary-clip-select:hover:not(:disabled),
+body.secondary-editor-open .secondary-timeline-clip .secondary-clip-select:active:not(:disabled),
+body.secondary-editor-open .secondary-timeline-clip .secondary-clip-select:focus-visible {
+  border: 0 !important;
+  color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open .secondary-timeline-clip:has(.secondary-clip-select:focus-visible) {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: 0 0 0 2px rgb(233 143 100 / .28) !important;
+}
+
+body.secondary-editor-open .secondary-transition-chip {
+  top: 5px;
+  left: 5px;
+  min-height: 28px !important;
+  padding: 4px 7px !important;
+  font-size: 10px !important;
+  line-height: 1.2;
+}
+
+body.secondary-editor-open .secondary-clip-delete {
+  top: 5px;
+  right: 5px;
+  width: 32px;
+  min-width: 32px;
+  min-height: 32px !important;
+}
+
+body.secondary-editor-open .secondary-trim-handle {
+  width: 14px;
+  min-width: 14px;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+
+body.secondary-editor-open .secondary-editor-marker > button {
+  min-width: 28px !important;
+  min-height: 28px !important;
+}
+
+body.secondary-editor-open .secondary-subtitle-handle,
+body.secondary-editor-open .secondary-text-time-handle { width: 10px; }
+
+body.secondary-editor-open .secondary-editor-subtitle-preview > [data-secondary-subtitle-resize] {
+  width: 26px;
+  min-width: 26px;
+  min-height: 26px;
+}
+
+/* Lightweight editing surface: reuse the workstation design language while
+   preserving the focused, full-screen editing layout. */
+body.secondary-editor-open {
+  --secondary-accent: var(--pw-accent);
+  --secondary-accent-strong: var(--pw-accent-hover);
+  --secondary-accent-soft: var(--pw-accent-soft);
+  --secondary-accent-ink: var(--pw-accent-ink);
+  --secondary-canvas: var(--pw-canvas);
+  --secondary-canvas-raised: var(--pw-canvas-deep);
+  --secondary-canvas-line: var(--pw-line);
+  --secondary-panel: var(--pw-surface-1);
+  --secondary-panel-raised: var(--pw-surface-2);
+  --secondary-panel-hover: var(--pw-surface-3);
+  --secondary-panel-line: var(--pw-line);
+  --secondary-panel-line-strong: var(--pw-line-strong);
+  --secondary-text: var(--pw-text);
+  --secondary-text-secondary: var(--pw-body);
+  --secondary-muted: var(--pw-muted);
+  --secondary-disabled: var(--ct-text-disabled);
+  --secondary-success: var(--pw-success);
+  --secondary-warning: var(--pw-warning);
+  --secondary-danger: var(--pw-danger);
+  --secondary-warning-soft: rgba(226, 192, 128, .12);
+  --secondary-danger-soft: rgba(227, 165, 156, .12);
+  --secondary-video-surface: #06090b;
+  --secondary-lane-video: var(--pw-canvas-deep);
+  --secondary-lane-video-raised: var(--pw-surface-2);
+  --secondary-lane-text: var(--pw-canvas-deep);
+  --secondary-lane-text-raised: var(--pw-surface-2);
+  --secondary-lane-subtitle: var(--pw-canvas-deep);
+  --secondary-lane-subtitle-raised: var(--pw-surface-2);
+  --secondary-playhead: var(--pw-playhead);
+  --secondary-workspace-gradient: none;
+}
+body.secondary-editor-open #secondaryEditor#secondaryEditor,
+body.secondary-editor-open #secondaryEditor .secondary-editor-layout,
+body.secondary-editor-open #secondaryEditor .secondary-editor-main,
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-section,
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-canvas {
+  color: var(--secondary-text) !important;
+  background: var(--secondary-canvas) !important;
+  font-family: var(--pw-font-ui) !important;
+}
+body.secondary-editor-open #secondaryEditor > .secondary-editor-header,
+body.secondary-editor-open #secondaryEditor .secondary-editor-view-switch,
+body.secondary-editor-open #secondaryEditor .secondary-editor-media-controls,
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-section > header,
+body.secondary-editor-open #secondaryEditor .secondary-editor-library,
+body.secondary-editor-open #secondaryEditor .secondary-editor-inspector,
+body.secondary-editor-open #secondaryEditor .secondary-inspector-section,
+body.secondary-editor-open #secondaryEditor .secondary-inspector-empty {
+  color: var(--secondary-text) !important;
+  background: var(--secondary-panel) !important;
+  border-color: var(--secondary-panel-line) !important;
+  box-shadow: none !important;
+}
+body.secondary-editor-open #secondaryEditor :where(button, summary, input, select, textarea) {
+  color: var(--secondary-text) !important;
+  background: var(--secondary-panel-raised) !important;
+  border-color: var(--secondary-panel-line-strong) !important;
+  box-shadow: none !important;
+  font-family: var(--pw-font-ui) !important;
+  font-size: 12px;
+  transition:
+    color var(--ct-duration-hover) var(--ct-ease),
+    border-color var(--ct-duration-hover) var(--ct-ease),
+    background-color var(--ct-duration-hover) var(--ct-ease),
+    transform var(--ct-duration-hover) var(--ct-ease);
+}
+body.secondary-editor-open #secondaryEditor :where(button, summary):hover:not(:disabled) {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-text) !important;
+  background: var(--secondary-panel-hover) !important;
+}
+body.secondary-editor-open #secondaryEditor :where(button.active, button[aria-pressed="true"]) {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent) !important;
+  background: var(--secondary-accent-soft) !important;
+}
+body.secondary-editor-open #secondaryEditor :where(button, summary):active:not(:disabled) {
+  transform: translateY(1px);
+}
+body.secondary-editor-open #secondaryEditor :where(button, input, select, textarea):disabled {
+  color: var(--secondary-disabled) !important;
+  opacity: .72;
+}
+body.secondary-editor-open #secondaryEditor :where(button, summary, input, textarea, select):focus-visible {
+  outline: none;
+  box-shadow: var(--pw-focus) !important;
+}
+body.secondary-editor-open #secondaryEditor #secondaryEditorExport {
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+  border-color: transparent !important;
+}
+body.secondary-editor-open #secondaryEditor :where(button.primary, button[type="submit"]) {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+body.secondary-editor-open #secondaryEditor :where(button.primary, button[type="submit"]):hover:not(:disabled) {
+  border-color: var(--secondary-accent-strong) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent-strong) !important;
+}
+body.secondary-editor-open #secondaryEditor :where(small, em, label, legend, p, .secondary-editor-ruler-tick b) { color: var(--secondary-muted) !important; }
+body.secondary-editor-open #secondaryEditor :where(h2, strong, .secondary-inspector-tabs button, .secondary-library-item strong) { color: var(--secondary-text) !important; }
+/* These labels sit over footage, not over the theme's panel surface. */
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip :is(strong, small, em) {
+  color: var(--ct-on-media, #f5f7f4) !important;
+  background-color: rgba(6, 9, 11, .86) !important;
+}
+body.secondary-editor-open #secondaryEditor .secondary-editor-zoom {
+  color: var(--secondary-text) !important; background: var(--secondary-panel) !important;
+}
+body.secondary-editor-open #secondaryEditor #secondaryEditorZoomFit {
+  color: var(--secondary-accent-ink) !important; background: var(--secondary-accent) !important;
+}
+body.secondary-editor-open #secondaryEditor .secondary-editor-heading { min-width: 0; overflow: hidden; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-heading > div { min-width: 0; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-heading strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-layout {
+  grid-template-rows: 44px minmax(180px, calc(var(--secondary-editor-upper-ratio, 56%) - 44px)) 6px minmax(250px, 1fr) !important;
+}
+body.secondary-editor-open #secondaryEditor .secondary-editor-player { background: var(--secondary-video-surface) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-player video { background: transparent !important; }
+
+/* In the light theme, keep only the decoded video pixels dark. The editing
+   stage around the video belongs to the light workspace; a black matte there
+   reads as an accidental dark panel. Fullscreen remains dark via the existing
+   :fullscreen rules. */
+html[data-theme="light"] body.secondary-editor-open {
+  --secondary-video-surface: #e7ebe7;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-editor-player:not(:fullscreen) {
+  background:
+    radial-gradient(ellipse 62% 78% at 50% 44%, rgba(255, 255, 255, .82), transparent 76%),
+    var(--secondary-video-surface) !important;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-editor-player:not(:fullscreen) > video {
+  background: transparent !important;
+}
+body.secondary-editor-open #secondaryEditor .secondary-editor-workspace-resize { border: 0 !important; background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-workspace-resize > span { background: var(--secondary-panel-line-strong); }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-section { min-height: 0 !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-section > header { min-height: 46px; padding: 6px 12px; gap: 8px; flex-wrap: nowrap; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-actions { min-width: 0; gap: 6px; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-core-actions { display: flex; gap: 6px; padding: 0; border: 0; }
+body.secondary-editor-open #secondaryEditor #secondaryEditorClock,
+body.secondary-editor-open #secondaryEditor .secondary-library-context,
+body.secondary-editor-open #secondaryEditor #secondaryEditorLibraryContext,
+body.secondary-editor-open #secondaryEditor #secondaryEditorLibraryInsertHint,
+body.secondary-editor-open #secondaryEditor .secondary-editor-library > header small,
+body.secondary-editor-open #secondaryEditor .secondary-inspector-section > header small,
+body.secondary-editor-open #secondaryEditor .secondary-inspector-timing-summary,
+body.secondary-editor-open #secondaryEditor .secondary-inspector-time small,
+body.secondary-editor-open #secondaryEditor .secondary-transition-chip,
+body.secondary-editor-open #secondaryEditor .secondary-clip-delete { display: none !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-canvas {
+  display: flex !important;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 280px !important;
+  height: 100% !important;
+  padding-bottom: 12px;
+}
+body.secondary-editor-open #secondaryEditor .secondary-editor-ruler { flex: 0 0 28px; background: var(--secondary-canvas) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline { flex: 1 1 124px; height: auto !important; min-height: 112px !important; background: var(--secondary-canvas) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-text-track,
+body.secondary-editor-open #secondaryEditor .secondary-editor-subtitle-track { flex: 0 0 54px; min-height: 54px !important; height: 54px !important; background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-text-lane,
+body.secondary-editor-open #secondaryEditor .secondary-editor-subtitle-lane { height: 44px !important; min-height: 38px; background: transparent !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-viewport { min-height: 0; overflow: auto; scrollbar-color: var(--secondary-panel-hover) var(--secondary-canvas-raised); }
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip { background: var(--secondary-panel-raised) !important; border-color: var(--secondary-panel-line) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip.selected { border-color: var(--secondary-accent) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-clip-copy { text-shadow: 0 1px 3px var(--secondary-video-surface); }
+body.secondary-editor-open #secondaryEditor .secondary-clip-copy > :where(strong, small) { background: rgba(6, 9, 11, .86); border-radius: 3px; padding: 2px 4px; max-width: 100%; }
+body.secondary-editor-open #secondaryEditor .secondary-clip-media::after { background: linear-gradient(0deg, rgba(6, 9, 11, .8), transparent 70%) !important; }
+
+/* Do not dim the complete thumbnail against a pale lane. A compact bottom
+   gradient keeps the overlaid time/title readable without hiding the image. */
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-clip-media > i {
+  opacity: 1 !important;
+  filter: saturate(.96) contrast(1.04) brightness(1.01) !important;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-clip-media {
+  background: #dfe5df !important;
+}
+
+/* Sprite frames are inline SVGs. Without an explicit block size they keep
+   their intrinsic aspect-ratio height and leave the lower half of a tall
+   timeline clip showing the dark media fallback, which looks like a veil. */
+body.secondary-editor-open #secondaryEditor .secondary-clip-frame {
+  overflow: hidden;
+}
+
+body.secondary-editor-open #secondaryEditor .secondary-clip-frame > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-clip-media::after {
+  background: none !important;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-timeline-clip .secondary-clip-copy {
+  justify-items: start;
+}
+
+html[data-theme="light"] body.secondary-editor-open #secondaryEditor .secondary-timeline-clip .secondary-clip-copy > :where(strong, small, em) {
+  width: max-content;
+  max-width: 100%;
+  color: var(--ct-on-media, #f5f7f4) !important;
+  background: rgba(9, 18, 15, .68) !important;
+}
+body.secondary-editor-open #secondaryEditor .secondary-trim-handle { background: transparent !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-playhead { background: var(--secondary-playhead) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-playhead i { border-top-color: var(--secondary-playhead) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-playhead span { color: var(--secondary-accent-ink) !important; background: var(--secondary-playhead) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-action-overflow > div { z-index: 50; max-height: min(55dvh, 380px); overflow-y: auto; border-color: var(--secondary-panel-line); background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-library { position: relative; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-library > header { padding-right: 40px; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-library-search { margin-block: 8px; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-insert-target { grid-row: auto; padding: 8px 12px; background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-insert-target summary { padding: 6px 8px; cursor: pointer; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-insert-target label { margin-top: 8px; }
+body.secondary-editor-open #secondaryEditor .secondary-editor-library-body { min-height: 0; overflow: auto; }
+body.secondary-editor-open #secondaryEditor .secondary-panel-close { position: absolute; right: 6px; top: 6px; z-index: 10; width: 28px; min-height: 28px; padding: 0; }
+body.secondary-editor-open #secondaryEditor .secondary-inspector-tabs { padding-right: 34px; background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .secondary-inspector-advanced { display: block; margin: 8px 0; border-top: 1px solid var(--secondary-panel-line); }
+body.secondary-editor-open #secondaryEditor .secondary-inspector-advanced summary { padding: 10px 8px; cursor: pointer; }
+body.secondary-editor-open #secondaryEditor .secondary-inspector-advanced label { display: grid; gap: 6px; padding: 8px 0; }
+body.secondary-editor-open #secondaryEditor .secondary-inspector-form-actions { background: var(--secondary-panel) !important; }
+body.secondary-editor-open #secondaryEditor .hidden { display: none !important; }
+@media (min-width: 1024px) {
+  body.secondary-editor-open #secondaryEditor .secondary-editor-layout { grid-template-columns: var(--secondary-library-width, 0px) minmax(0, 1fr) var(--secondary-inspector-column-width, 0px) !important; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-library,
+  body.secondary-editor-open #secondaryEditor .secondary-editor-inspector { position: relative; top: auto; bottom: auto; width: auto; height: auto; box-shadow: none; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-view-switch,
+  body.secondary-editor-open #secondaryEditor .secondary-editor-player { grid-column: 2; }
+}
+@media (max-width: 1023px) {
+  body.secondary-editor-open #secondaryEditor .secondary-editor-layout { grid-template-columns: 0 minmax(0, 1fr) 0 !important; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-library,
+  body.secondary-editor-open #secondaryEditor .secondary-editor-inspector { position: absolute; z-index: 40; top: 0; bottom: 0; width: min(320px, 90vw); height: 100%; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-library { left: 0; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-inspector { right: 0; }
+}
+@media (max-width: 600px) {
+  body.secondary-editor-open #secondaryEditor#secondaryEditor { grid-template-rows: auto minmax(0, 1fr) !important; }
+  body.secondary-editor-open #secondaryEditor > .secondary-editor-header { padding: 8px !important; gap: 6px; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-heading { width: 100%; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-actions { width: 100%; justify-content: flex-end; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-section > header { flex-wrap: wrap; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-actions { width: 100%; overflow: visible; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-core-actions { flex-wrap: nowrap; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-view-switch { padding-inline: 8px; gap: 4px; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-view-switch button { padding-inline: 8px; }
+}
+
+body.secondary-editor-open #secondaryEditor .secondary-editor-inspector { position: relative; }
+body.secondary-editor-open #secondaryEditor .secondary-panel-close { display: block !important; }
+body.secondary-editor-open #secondaryEditor .secondary-library-group > summary small,
+body.secondary-editor-open #secondaryEditor .secondary-library-copy > small,
+body.secondary-editor-open #secondaryEditor .secondary-library-copy b.source { display: none; }
+body.secondary-editor-open #secondaryEditor input { accent-color: var(--secondary-accent); }
+body.secondary-editor-open #secondaryEditor .secondary-subtitle-canvas-settings,
+body.secondary-editor-open #secondaryEditor .secondary-subtitle-clip-scope,
+body.secondary-editor-open #secondaryEditor .secondary-editor-preflight { background: var(--secondary-panel) !important; color: var(--secondary-muted) !important; border-color: var(--secondary-panel-line) !important; }
+@media (max-width: 1023px) { body.secondary-editor-open #secondaryEditor .secondary-editor-inspector { position: absolute; } }
+
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip .secondary-clip-select,
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip .secondary-clip-select:hover,
+body.secondary-editor-open #secondaryEditor .secondary-timeline-clip .secondary-clip-select:focus-visible {
+  background: transparent !important;
+  border: 0 !important;
+  color: transparent !important;
+}
+
+@media (max-width: 600px) {
+  body.secondary-editor-open #secondaryEditor .secondary-editor-timeline-actions { flex-wrap: nowrap; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-core-actions { min-width: 0; overflow-x: auto; flex: 1 1 auto; scrollbar-width: none; }
+  body.secondary-editor-open #secondaryEditor .secondary-editor-core-actions button,
+  body.secondary-editor-open #secondaryEditor .secondary-editor-action-overflow { flex: none; }
+}
+
+/* Secondary editor v2: explicit review states in the shared ClipTalk theme. */
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2#secondaryEditor {
+  background: var(--secondary-canvas) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 > .secondary-editor-header {
+  gap: 24px;
+  padding-inline: 16px 18px !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-heading > button {
+  min-height: 36px;
+  padding-inline: 11px 13px;
+  color: var(--secondary-text-secondary) !important;
+  background: transparent !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-heading > span {
+  height: 28px;
+  background: var(--secondary-panel-line-strong) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-heading strong {
+  max-width: min(46vw, 620px);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-document-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-document-state small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--secondary-muted) !important;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-document-state small::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreviewFreshness {
+  padding-left: 8px;
+  border-left: 1px solid var(--secondary-panel-line-strong);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreviewFreshness[data-tone="ready"] { color: var(--secondary-success) !important; }
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreviewFreshness[data-tone="stale"],
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreviewFreshness[data-tone="proposal"] { color: var(--secondary-warning) !important; }
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreviewFreshness[data-tone="error"] { color: var(--secondary-danger) !important; }
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-actions {
+  gap: 8px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-history-actions {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--secondary-panel-line);
+  border-radius: 7px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-history-actions button {
+  min-height: 34px;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-history-actions button + button {
+  border-left: 1px solid var(--secondary-panel-line) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreview,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorExport {
+  min-height: 36px;
+  padding-inline: 14px;
+  font-weight: 650;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorPreview[data-state="required"] {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorExport[data-state="blocked"] {
+  border-color: var(--secondary-panel-line) !important;
+  color: var(--secondary-disabled) !important;
+  background: var(--secondary-panel-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorExport[data-state="ready"] {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-view-switch {
+  gap: 5px;
+  padding-inline: 14px !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-view-label,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-kicker {
+  color: var(--secondary-muted) !important;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .08em;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-view-switch > button {
+  min-height: 30px;
+  padding-inline: 10px;
+  border: 0 !important;
+  border-radius: 5px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-view-switch > button.active {
+  color: var(--secondary-text) !important;
+  background: var(--secondary-accent-soft) !important;
+  box-shadow: none !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-panel-switch {
+  gap: 5px;
+  padding-left: 8px;
+  border-left: 1px solid var(--secondary-panel-line);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-player > span#secondaryEditorVideoBadge {
+  border-color: var(--secondary-panel-line-strong);
+  color: var(--secondary-text-secondary);
+  background: rgba(6, 9, 11, .82);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-preview-state {
+  top: 14px;
+  right: 14px;
+  border-color: var(--secondary-panel-line-strong);
+  color: var(--secondary-warning);
+  background: rgba(19, 43, 42, .92);
+  backdrop-filter: blur(8px);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-player {
+  grid-template-rows: minmax(0, 1fr) 50px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-media-controls {
+  --secondary-seek-thumb-size: 12px;
+  --secondary-seek-thumb-offset: -6px;
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto !important;
+  grid-template-rows: 10px 32px;
+  column-gap: 8px !important;
+  row-gap: 2px !important;
+  min-height: 50px;
+  height: 50px !important;
+  padding: 4px 12px !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaPlay {
+  grid-column: 1;
+  grid-row: 2;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaSeek {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  width: calc(100% + var(--secondary-seek-thumb-size));
+  height: 14px;
+  margin-inline: var(--secondary-seek-thumb-offset);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaClock {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaMute {
+  grid-column: 4;
+  grid-row: 2;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaFullscreen {
+  grid-column: 5;
+  grid-row: 2;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-subtitle-preview::before {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  padding: 3px 6px;
+  border: 1px solid var(--secondary-panel-line-strong);
+  border-radius: 4px;
+  color: var(--secondary-text-secondary);
+  background: rgba(19, 43, 42, .92);
+  font: 600 9px/1.2 var(--pw-font-ui);
+  text-shadow: none;
+  white-space: nowrap;
+  content: "导出字幕层";
+  transform: translateX(-50%);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-section > header {
+  min-height: 52px;
+  padding-inline: 14px !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-heading > strong {
+  display: block !important;
+  padding-right: 8px;
+  border-right: 1px solid var(--secondary-panel-line-strong);
+  color: var(--secondary-text) !important;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaState {
+  display: inline !important;
+  overflow: hidden;
+  color: var(--secondary-muted) !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-section > header button,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-action-overflow > summary {
+  min-height: 34px;
+  padding-inline: 10px;
+  font-size: 11px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-viewport {
+  padding: 0 12px 10px;
+  background: var(--secondary-canvas-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline-canvas {
+  gap: 7px;
+  background: var(--secondary-canvas-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-ruler {
+  border-color: var(--secondary-panel-line) !important;
+  background: var(--secondary-canvas) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-timeline {
+  border-color: var(--secondary-panel-line) !important;
+  background: var(--secondary-lane-video) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-text-track,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-subtitle-track {
+  grid-template-columns: 78px minmax(0, 1fr);
+  border-color: var(--secondary-panel-line) !important;
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-text-track > span,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-subtitle-track > span {
+  padding-left: 12px;
+  color: var(--secondary-muted) !important;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-text-lane,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-subtitle-lane {
+  margin-right: 8px;
+  border-color: var(--secondary-panel-line) !important;
+  background: var(--secondary-canvas-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-timeline-clip {
+  border-color: var(--secondary-panel-line-strong) !important;
+  background: var(--secondary-panel-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-timeline-clip:hover {
+  border-color: var(--secondary-accent) !important;
+  background: var(--secondary-panel-hover) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-timeline-clip.selected {
+  border-color: var(--secondary-accent) !important;
+  box-shadow: inset 0 0 0 1px var(--secondary-accent), 0 0 0 1px var(--secondary-accent-soft) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-clip-copy em {
+  display: block !important;
+  max-width: calc(100% - 12px);
+  overflow: hidden;
+  color: var(--ct-on-media, #f5f7f4) !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-inspector,
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-library {
+  background: var(--secondary-panel) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-tabs {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  gap: 2px;
+  padding: 8px 36px 8px 8px;
+  border-bottom: 1px solid var(--secondary-panel-line);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-tabs button {
+  min-height: 34px;
+  padding-inline: 8px;
+  color: var(--secondary-muted) !important;
+  background: transparent !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-tabs button.active {
+  color: var(--secondary-text) !important;
+  background: var(--secondary-accent-soft) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-section {
+  padding: 18px 16px 24px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-section > header {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 16px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-section > header small {
+  display: block !important;
+  color: var(--secondary-muted) !important;
+  font-size: 10px !important;
+  letter-spacing: .06em !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-inspector-section > header strong {
+  font-size: 16px;
+  letter-spacing: -.01em;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor-intro {
+  margin: -2px 0 16px;
+  color: var(--secondary-muted) !important;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-scope {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px 10px;
+  margin-bottom: 14px;
+  padding: 11px;
+  border: 1px solid var(--secondary-panel-line);
+  border-radius: 7px;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-canvas-raised);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-scope > span {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-scope select {
+  min-height: 32px;
+  padding-inline: 9px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-scope small {
+  grid-column: 1 / -1;
+  color: var(--secondary-muted) !important;
+  font-size: 10px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-scope small[data-tone="timeline"] {
+  color: var(--secondary-warning) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-command-examples {
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-command-examples button {
+  min-height: 30px;
+  padding-inline: 8px;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-panel-raised) !important;
+  font-size: 10px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor form {
+  gap: 8px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor form > label {
+  color: var(--secondary-text-secondary) !important;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor textarea {
+  min-height: 104px;
+  resize: vertical;
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text) !important;
+  background: var(--secondary-canvas-raised) !important;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor form > small {
+  color: var(--secondary-muted) !important;
+  font-size: 10px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor form button[type="submit"] {
+  min-height: 38px;
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+  font-weight: 700;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-proposal {
+  margin-top: 16px;
+  padding: 11px;
+  border-color: var(--secondary-panel-line-strong) !important;
+  color: var(--secondary-text-secondary) !important;
+  background: var(--secondary-canvas-raised) !important;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor.has-proposal > :where(.secondary-ai-editor-intro, .secondary-ai-scope, .secondary-command-examples, form) {
+  display: none;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-ai-editor.has-proposal .secondary-editor-proposal {
+  margin-top: 0;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-heading {
+  display: grid;
+  gap: 6px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-heading > b {
+  width: max-content;
+  padding: 3px 6px;
+  border-radius: 3px;
+  color: var(--secondary-warning);
+  background: var(--secondary-warning-soft);
+  font-size: 9px;
+  letter-spacing: .05em;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-heading > strong {
+  color: var(--secondary-text) !important;
+  font-size: 13px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-proposal > p {
+  margin: 7px 0 0;
+  color: var(--secondary-muted) !important;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-impact {
+  display: grid;
+  grid-template-columns: .72fr 1.45fr 1fr;
+  gap: 1px;
+  margin: 9px 0;
+  overflow: hidden;
+  border: 1px solid var(--secondary-panel-line);
+  border-radius: 6px;
+  background: var(--secondary-panel-line);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-impact > div {
+  min-width: 0;
+  padding: 8px;
+  background: var(--secondary-panel);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-impact :where(dt, dd) {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-impact dt {
+  color: var(--secondary-muted);
+  font-size: 9px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-impact dd {
+  margin-top: 3px;
+  color: var(--secondary-text);
+  font: 600 10px/1.3 var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-operations {
+  padding-top: 1px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-operations > strong {
+  color: var(--secondary-text-secondary) !important;
+  font-size: 10px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-operations ol {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-operations li {
+  position: relative;
+  padding: 5px 8px 5px 22px;
+  border-left: 2px solid var(--secondary-accent);
+  color: var(--secondary-text-secondary);
+  background: var(--secondary-panel);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-operations li::before {
+  position: absolute;
+  left: 8px;
+  color: var(--secondary-accent);
+  content: "→";
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-warning {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  margin: 7px 0;
+  padding: 7px 8px;
+  border: 1px solid var(--secondary-warning);
+  border-radius: 5px;
+  background: var(--secondary-warning-soft);
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-warning strong { color: var(--secondary-warning) !important; font-size: 10px; }
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-proposal-warning span { color: var(--secondary-text-secondary) !important; font-size: 10px; line-height: 1.45; }
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-proposal > small {
+  display: none;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-proposal footer button {
+  min-height: 36px;
+}
+
+body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-proposal footer .primary {
+  border-color: var(--secondary-accent) !important;
+  color: var(--secondary-accent-ink) !important;
+  background: var(--secondary-accent) !important;
+}
+
+@media (max-width: 900px) {
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-document-state,
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-view-label,
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaState { display: none !important; }
+}
+
+@media (min-width: 1024px) {
+  body.secondary-editor-open #secondaryEditor.library-open .secondary-editor-library {
+    grid-row: 1 / -1;
+  }
+
+  body.secondary-editor-open #secondaryEditor.library-open .secondary-editor-workspace-resize,
+  body.secondary-editor-open #secondaryEditor.library-open .secondary-editor-timeline-section {
+    grid-column: 2 / 3;
+  }
+}
+
+@media (max-width: 780px) {
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 .secondary-editor-media-controls {
+    grid-template-columns: 32px minmax(0, 1fr) auto auto !important;
+  }
+
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaClock {
+    display: none;
+  }
+
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaMute { grid-column: 3; }
+  body.secondary-editor-open #secondaryEditor.secondary-editor-v2 #secondaryEditorMediaFullscreen { grid-column: 4; }
+}

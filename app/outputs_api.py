@@ -7,6 +7,7 @@ from fastapi import APIRouter
 
 
 OUTPUT_ROUTES = (
+    ("get_render_operation", "/api/jobs/{job_id}/operations/{operation_id}", "GET", 200),
     ("create_alternative_cut", "/api/jobs/{job_id}/alternative", "POST", 202),
     ("render_auto_edit_plan", "/api/jobs/{job_id}/auto-plans/{plan_id}/render", "POST", 202),
     ("finalize_preview_output_version", "/api/jobs/{job_id}/output-versions/{version_id}/finalize", "POST", 202),
@@ -19,6 +20,11 @@ OUTPUT_ROUTES = (
     ("keep_job_output", "/api/jobs/{job_id}/outputs/{filename}/keep", "POST", 200),
     ("activate_job_output_version", "/api/jobs/{job_id}/output-versions/{version_id}/activate", "POST", 200),
     ("delete_job_output_version", "/api/jobs/{job_id}/output-versions/{version_id}", "DELETE", 200),
+    ("create_cover_intro_output", "/api/jobs/{job_id}/outputs/{filename}/cover-intro", "POST", 202),
+    ("update_cover_intro_draft", "/api/jobs/{job_id}/cover-intro", "PATCH", 200),
+    ("render_cover_intro_draft", "/api/jobs/{job_id}/cover-intro/render", "POST", 202),
+    ("update_cover_timeline_draft", "/api/jobs/{job_id}/cover-timeline", "PATCH", 200),
+    ("activate_cover_timeline_variant", "/api/jobs/{job_id}/cover-timeline/activate", "POST", 200),
 )
 
 

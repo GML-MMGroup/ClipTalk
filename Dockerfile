@@ -28,6 +28,7 @@ RUN python -m pip install --upgrade pip \
 
 COPY app ./app
 COPY static ./static
+COPY skills ./skills
 COPY tools/prepare_speech_models.py ./tools/prepare_speech_models.py
 COPY tools/container_smoke.py ./tools/container_smoke.py
 

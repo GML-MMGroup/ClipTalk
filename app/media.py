@@ -158,6 +158,43 @@ def _run(command: list[str], *, timeout: float = 600.0) -> subprocess.CompletedP
     return result
 
 
+def _run_cancellable(
+    command: list[str], *, timeout: float,
+    cancelled: Callable[[], bool] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a media command while allowing an active analysis to stop it.
+
+    ``subprocess.run`` cannot observe a job cancellation until FFmpeg returns.
+    Dense recognition extraction can keep one FFmpeg batch busy for minutes,
+    so use the shared process supervisor and poll the cancellation signal.
+    """
+    if cancelled is None:
+        return _run(command, timeout=timeout)
+    try:
+        process = process_supervisor.start(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise MediaError(f"媒体命令无法执行：{error}") from error
+    started = time.monotonic()
+    try:
+        while process.poll() is None:
+            if cancelled():
+                process_supervisor.terminate(process)
+                raise MediaError("任务已取消")
+            if time.monotonic() - started > timeout:
+                process_supervisor.terminate(process)
+                raise MediaError(f"媒体命令执行超过 {timeout:g} 秒")
+            time.sleep(.1)
+        stdout, stderr = process.communicate()
+        result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        if result.returncode != 0:
+            raise MediaError((result.stderr or result.stdout or "媒体命令执行失败")[-2000:])
+        return result
+    finally:
+        process_supervisor.forget(process)
+
+
 def probe_video(path: Path, ffprobe: str) -> VideoInfo:
     result = _run([
         ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path),
@@ -535,6 +572,7 @@ def extract_frames_at_times(
     *,
     ffmpeg: str,
     progress_callback: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[SampledFrame]:
     output_directory.mkdir(parents=True, exist_ok=True)
     requested = [max(0.0, float(value)) for value in times]
@@ -578,6 +616,8 @@ def extract_frames_at_times(
         if requested else []
     )
     for batch_start in batch_starts:
+        if cancelled is not None and cancelled():
+            raise MediaError("任务已取消")
         current_batch_size = first_batch_size if batch_start == 0 else batch_size
         batch = requested[batch_start:batch_start + current_batch_size]
         command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
@@ -591,7 +631,9 @@ def extract_frames_at_times(
                 "-vf", "scale=640:-2:force_original_aspect_ratio=decrease",
                 "-q:v", "2", "-y", str(path),
             ])
-        _run(command, timeout=max(60, len(batch) * 12))
+        _run_cancellable(
+            command, timeout=max(60, len(batch) * 12), cancelled=cancelled,
+        )
         for local_index, second in enumerate(batch):
             absolute_index = batch_start + local_index
             path = output_directory / f"detail-{absolute_index:03d}.jpg"
@@ -1408,7 +1450,11 @@ def render_composition(
             "loudnorm=I=-16:LRA=11:TP=-1.5,alimiter=limit=0.95,asetpts=PTS-STARTPTS[aout]"
         )
         audio_output_label = "aout"
-    if subtitle_path and subtitle_cues:
+    # subtitle_path is an optional artifact/work-directory hint, not the
+    # switch that enables overlays. Exact edit previews provide in-memory
+    # subtitle/text cues and historically omitted this path, which silently
+    # skipped every drawtext filter while still reporting a successful render.
+    if subtitle_cues:
         subtitle_style = normalize_subtitle_style(subtitle_style)
         visual_style = {
             key: value for key, value in SUBTITLE_STYLES[subtitle_style].items()
@@ -1416,7 +1462,8 @@ def render_composition(
         }
         default_layout = subtitle_layout if isinstance(subtitle_layout, dict) else {}
         cue_style_lookup = subtitle_cue_styles if isinstance(subtitle_cue_styles, dict) else {}
-        subtitle_dir = subtitle_path.with_suffix(".cues")
+        overlay_artifact_path = subtitle_path or output.with_suffix(".overlays.ass")
+        subtitle_dir = overlay_artifact_path.with_suffix(".cues")
         subtitle_dir.mkdir(parents=True, exist_ok=True)
         for cue_index, cue in enumerate(subtitle_cues):
             text_path = subtitle_dir / f"{cue_index:04d}.txt"
@@ -1590,6 +1637,262 @@ def validate_rendered_clip(
     except Exception:
         output.unlink(missing_ok=True)
         raise
+
+
+SOCIAL_PREVIEW_SIZES: dict[str, tuple[int, int]] = {
+    "9:16": (540, 960),
+    "4:5": (576, 720),
+    "1:1": (720, 720),
+    "16:9": (960, 540),
+}
+
+
+def _parse_ffmpeg_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _loudnorm_measurement(path: Path, ffmpeg: str) -> dict[str, float] | None:
+    """Measure an audio stream for a deterministic linear loudnorm pass."""
+    try:
+        result = subprocess.run([
+            ffmpeg, "-hide_banner", "-nostats", "-i", str(path),
+            "-map", "0:a:0", "-af",
+            "loudnorm=I=-16:LRA=11:TP=-1.5:print_format=json",
+            "-f", "null", "-",
+        ], text=True, capture_output=True, timeout=3600, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    matches = re.findall(r"\{[^{}]*\}", result.stderr or "", flags=re.S)
+    for raw in reversed(matches):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        parsed = {
+            "input_i": _parse_ffmpeg_float(payload.get("input_i")),
+            "input_tp": _parse_ffmpeg_float(payload.get("input_tp")),
+            "input_lra": _parse_ffmpeg_float(payload.get("input_lra")),
+            "input_thresh": _parse_ffmpeg_float(payload.get("input_thresh")),
+            "target_offset": _parse_ffmpeg_float(payload.get("target_offset")),
+        }
+        if all(value is not None for value in parsed.values()):
+            return {key: float(value) for key, value in parsed.items() if value is not None}
+    return None
+
+
+def _two_pass_loudnorm_filter(measurement: dict[str, float] | None) -> str:
+    if not measurement:
+        return (
+            "loudnorm=I=-16:LRA=11:TP=-1.5,alimiter=limit=0.95,"
+            "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+        )
+    return (
+        "loudnorm=I=-16:LRA=11:TP=-1.5:linear=true:"
+        f"measured_I={measurement['input_i']:.3f}:"
+        f"measured_TP={measurement['input_tp']:.3f}:"
+        f"measured_LRA={measurement['input_lra']:.3f}:"
+        f"measured_thresh={measurement['input_thresh']:.3f}:"
+        f"offset={measurement['target_offset']:.3f},"
+        "alimiter=limit=0.95,aresample=48000,"
+        "aformat=sample_fmts=fltp:channel_layouts=stereo"
+    )
+
+
+def create_social_reframe_preview(
+    source: Path,
+    output: Path,
+    *,
+    aspect: str,
+    fit: str,
+    focus_x: float,
+    focus_y: float,
+    has_audio: bool,
+    ffmpeg: str,
+    ffprobe: str,
+    preview_only: bool = True,
+) -> VideoInfo:
+    """Apply the same canvas in proxy or delivery quality."""
+    if aspect not in SOCIAL_PREVIEW_SIZES:
+        raise MediaError(f"不支持的社媒画幅：{aspect}")
+    if fit not in {"blur", "crop", "pad"}:
+        raise MediaError("社媒适配方式必须为 blur、crop 或 pad")
+    focus_x = max(0.0, min(1.0, float(focus_x)))
+    focus_y = max(0.0, min(1.0, float(focus_y)))
+    width, height = SOCIAL_PREVIEW_SIZES[aspect]
+    if not preview_only:
+        width, height = width * 2, height * 2
+    if fit == "crop":
+        video_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}:"
+            f"x='max(0,min(iw-ow,(iw-ow)*{focus_x:.5f}))':"
+            f"y='max(0,min(ih-oh,(ih-oh)*{focus_y:.5f}))',"
+            "fps=30,setsar=1,format=yuv420p"
+        )
+    elif fit == "pad":
+        video_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            "fps=30,setsar=1,format=yuv420p"
+        )
+    else:
+        video_filter = (
+            "split=2[background_source][foreground_source];"
+            f"[background_source]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma=24:steps=2[background];"
+            f"[foreground_source]scale={width}:{height}:force_original_aspect_ratio=decrease[foreground];"
+            "[background][foreground]overlay=(W-w)/2:(H-h)/2,"
+            "fps=30,setsar=1,format=yuv420p"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".tmp.mp4")
+    temporary.unlink(missing_ok=True)
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(source),
+        "-map", "0:v:0", "-vf", video_filter,
+        "-c:v", "libx264", "-preset", "veryfast" if preview_only else "medium", "-crf", "25" if preview_only else "18",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    ]
+    if has_audio:
+        measurement = _loudnorm_measurement(source, ffmpeg)
+        command.extend([
+            "-map", "0:a:0", "-af", _two_pass_loudnorm_filter(measurement),
+            "-c:a", "aac", "-b:a", "128k",
+        ])
+    else:
+        command.append("-an")
+    command.extend(["-shortest", "-y", str(temporary)])
+    try:
+        _run(command, timeout=max(600.0, probe_video(source, ffprobe).duration * 4.0))
+        temporary.replace(output)
+        rendered = probe_video(output, ffprobe)
+        if (rendered.width, rendered.height) != (width, height):
+            raise MediaError(
+                f"社媒预览尺寸无效：期望 {width}×{height}，实际 {rendered.width}×{rendered.height}"
+            )
+        _run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(output),
+            "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-",
+        ], timeout=max(90.0, rendered.duration * 3.0))
+        return rendered
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)
+        raise
+
+
+def analyze_rendered_media(
+    path: Path,
+    *,
+    ffmpeg: str,
+    ffprobe: str,
+    expected_duration: float | None = None,
+    expect_audio: bool | None = None,
+) -> dict[str, Any]:
+    """Run deterministic delivery checks without changing or deleting the media."""
+    info = probe_video(path, ffprobe)
+    issues: list[dict[str, Any]] = []
+
+    def add(severity: str, code: str, message: str, **evidence: Any) -> None:
+        issues.append({
+            "severity": severity, "code": code, "message": message,
+            **({"evidence": evidence} if evidence else {}),
+        })
+
+    if expected_duration is not None:
+        delta = info.duration - float(expected_duration)
+        tolerance = max(.5, float(expected_duration) * .05)
+        if abs(delta) > tolerance:
+            add("error", "duration_mismatch", "成片时长超出允许偏差。", deltaSeconds=round(delta, 3), toleranceSeconds=round(tolerance, 3))
+    if expect_audio is True and not info.has_audio:
+        add("error", "audio_missing", "成片缺少预期音轨。")
+    if info.audio_duration and info.video_duration:
+        stream_delta = info.audio_duration - info.video_duration
+        if abs(stream_delta) > .25:
+            add("error" if abs(stream_delta) > 1.0 else "warning", "stream_duration_mismatch", "音频与视频流时长不一致。", deltaSeconds=round(stream_delta, 3))
+    if info.frame_rate and not 23 <= info.frame_rate <= 61:
+        add("warning", "unusual_frame_rate", "成片帧率不在常用交付范围内。", frameRate=round(info.frame_rate, 3))
+
+    decode = subprocess.run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path),
+        "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-",
+    ], text=True, capture_output=True, timeout=max(90.0, info.duration * 3.0), check=False)
+    decoded = decode.returncode == 0
+    if not decoded:
+        add("error", "decode_failed", "成片无法完整解码。", detail=(decode.stderr or "")[-800:])
+
+    visual = subprocess.run([
+        ffmpeg, "-hide_banner", "-nostats", "-i", str(path), "-an",
+        "-vf", "blackdetect=d=0.5:pix_th=0.10,freezedetect=n=-50dB:d=2",
+        "-f", "null", "-",
+    ], text=True, capture_output=True, timeout=max(90.0, info.duration * 3.0), check=False)
+    black_ranges = [
+        {"start": float(start), "end": float(end), "duration": float(duration)}
+        for start, end, duration in re.findall(
+            r"black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)", visual.stderr or "",
+        )
+    ]
+    freeze_starts = [float(value) for value in re.findall(r"freeze_start:\s*([\d.]+)", visual.stderr or "")]
+    freeze_ends = [float(value) for value in re.findall(r"freeze_end:\s*([\d.]+)", visual.stderr or "")]
+    freeze_ranges = [
+        {"start": start, "end": end, "duration": round(end - start, 3)}
+        for start, end in zip(freeze_starts, freeze_ends) if end > start
+    ]
+    if black_ranges:
+        add("warning", "black_frames", "检测到持续黑帧；淡入淡出可人工豁免。", ranges=black_ranges[:20])
+    if freeze_ranges:
+        longest = max(item["duration"] for item in freeze_ranges)
+        add("error" if longest >= 5 else "warning", "freeze_frames", "检测到持续静止画面。", ranges=freeze_ranges[:20], longestSeconds=longest)
+
+    audio_metrics: dict[str, Any] = {"available": info.has_audio}
+    silence_ranges: list[dict[str, float]] = []
+    if info.has_audio:
+        audio = subprocess.run([
+            ffmpeg, "-hide_banner", "-nostats", "-i", str(path), "-vn",
+            "-af", "silencedetect=noise=-50dB:d=3,volumedetect",
+            "-f", "null", "-",
+        ], text=True, capture_output=True, timeout=max(90.0, info.duration * 2.0), check=False)
+        starts = [float(value) for value in re.findall(r"silence_start:\s*([\d.]+)", audio.stderr or "")]
+        ends = [float(value) for value in re.findall(r"silence_end:\s*([\d.]+)", audio.stderr or "")]
+        silence_ranges = [
+            {"start": start, "end": end, "duration": round(end - start, 3)}
+            for start, end in zip(starts, ends) if end > start
+        ]
+        max_volume_match = re.search(r"max_volume:\s*(-?[\d.]+)\s*dB", audio.stderr or "")
+        max_volume = float(max_volume_match.group(1)) if max_volume_match else None
+        measurement = _loudnorm_measurement(path, ffmpeg)
+        audio_metrics.update({
+            "integratedLufs": measurement.get("input_i") if measurement else None,
+            "truePeakDbtp": measurement.get("input_tp") if measurement else None,
+            "loudnessRangeLu": measurement.get("input_lra") if measurement else None,
+            "maxVolumeDb": max_volume,
+        })
+        if silence_ranges:
+            add("warning", "long_silence", "检测到超过 3 秒的静音区间。", ranges=silence_ranges[:20])
+        if max_volume is not None and max_volume >= -.1:
+            add("warning", "near_clipping", "音频峰值接近 0 dBFS，请检查削波。", maxVolumeDb=max_volume)
+        integrated = audio_metrics.get("integratedLufs")
+        if isinstance(integrated, (int, float)) and abs(float(integrated) + 16) > 2:
+            difference = abs(float(integrated) + 16)
+            add("error" if difference > 4 else "warning", "loudness_out_of_range", "对白响度偏离 -16 LUFS 目标。", integratedLufs=integrated)
+
+    return {
+        "path": str(path), "passed": decoded and not any(item["severity"] == "error" for item in issues),
+        "media": {
+            "duration": round(info.duration, 3), "width": info.width, "height": info.height,
+            "frameRate": round(info.frame_rate, 3), "hasAudio": info.has_audio,
+            "videoDuration": round(info.video_duration, 3), "audioDuration": round(info.audio_duration, 3),
+        },
+        "audio": audio_metrics,
+        "detections": {"blackRanges": black_ranges, "freezeRanges": freeze_ranges, "silenceRanges": silence_ranges},
+        "issues": issues,
+    }
 
 
 def create_preview_proxy(

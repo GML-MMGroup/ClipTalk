@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from .edit_boundaries import load_transcript_segments
 from .editing_techniques import composition_schedule
+from .content_contract import selection_binding, timeline_content_report
 
 
 EDIT_SESSION_SCHEMA_VERSION = 3
 EDIT_SESSION_SPEEDS = (0.5, 0.75, 1.0, 1.1, 1.25, 1.5, 2.0)
 EDIT_SESSION_TRANSITIONS = {"cut", "dissolve", "fade_black"}
 EDIT_SESSION_AUDIO_BRIDGES = {"none", "j_cut", "l_cut"}
+EDIT_SESSION_REFRAME_ASPECTS = {"9:16", "4:5", "1:1", "16:9"}
+EDIT_SESSION_REFRAME_FITS = {"blur", "crop", "pad"}
 MIN_EDIT_CLIP_SECONDS = 0.25
 EDIT_PROPOSAL_OPERATION_TYPES = frozenset({
     "insert_clip", "delete_clips", "trim_clip", "split_clip", "reorder_clips",
     "update_clip", "update_clips", "set_subtitle", "add_marker",
+    "update_marker", "delete_marker", "add_text_layer", "update_text_layer", "delete_text_layer",
+    "toggle_cutaway",
 })
 
 
@@ -34,6 +42,68 @@ def _id(prefix: str) -> str:
 
 def _duration(start: float, end: float, rate: float = 1.0) -> float:
     return round(max(0.0, float(end) - float(start)) / max(0.01, float(rate)), 3)
+
+
+def normalize_edit_session_reframe(value: Any) -> dict[str, Any] | None:
+    """Return the delivery canvas that must survive timeline revisions."""
+    if not isinstance(value, dict):
+        return None
+    aspect = str(value.get("aspect") or "").strip()
+    if aspect not in EDIT_SESSION_REFRAME_ASPECTS:
+        return None
+    fit = str(value.get("fit") or "blur").strip().lower()
+    if fit not in EDIT_SESSION_REFRAME_FITS:
+        fit = "blur"
+    try:
+        focus_x = max(0.0, min(1.0, float(value.get("focusX", .5))))
+        focus_y = max(0.0, min(1.0, float(value.get("focusY", .5))))
+    except (TypeError, ValueError):
+        focus_x, focus_y = .5, .5
+    return {
+        "aspect": aspect,
+        "fit": fit,
+        "focusX": round(focus_x, 5),
+        "focusY": round(focus_y, 5),
+    }
+
+
+def _job_requested_reframe(job: dict[str, Any]) -> dict[str, Any] | None:
+    brief = job.get("brief") if isinstance(job.get("brief"), dict) else {}
+    delivery = brief.get("socialDelivery") if isinstance(brief.get("socialDelivery"), dict) else {}
+    if delivery.get("requested"):
+        return normalize_edit_session_reframe(delivery)
+    settings = job.get("projectSettings") or {}
+    if settings.get("outputAspect") in {"16:9", "9:16"}:
+        return normalize_edit_session_reframe({"aspect": settings["outputAspect"], "fit": settings.get("outputFit", "blur")})
+    return None
+
+
+def _job_transcript_segments(job: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Resolve timestamped transcript rows without iterating compact counts.
+
+    Completed jobs intentionally replace ``speechAnalysis.segments`` with a
+    count.  Edit preflight still needs the canonical rows, which live in the
+    work directory when they are not embedded in the job snapshot.
+    """
+    if not isinstance(job, dict):
+        return []
+    speech = job.get("speechAnalysis") if isinstance(job.get("speechAnalysis"), dict) else {}
+    inline = speech.get("segments")
+    if isinstance(inline, list):
+        return load_transcript_segments(inline)
+    transcript = job.get("transcript")
+    if isinstance(transcript, dict):
+        transcript = transcript.get("segments")
+    if isinstance(transcript, list):
+        return load_transcript_segments(transcript)
+    work_directory = str(job.get("workDirectory") or "").strip()
+    path = Path(work_directory) / "transcript.json" if work_directory else None
+    if not path or not path.is_file():
+        return []
+    try:
+        return load_transcript_segments(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, TypeError, ValueError):
+        return []
 
 
 def _find_version(job: dict[str, Any], version_id: str) -> dict[str, Any]:
@@ -64,7 +134,10 @@ def _compact_clip(
     start = round(float(segment.get("start") or 0), 3)
     end = round(float(segment.get("end") or 0), 3)
     rate = float(segment.get("playbackRate") or 1)
-    segment_id = str(segment.get("id") or segment.get("candidateId") or f"segment_{index}")
+    segment_identity = segment.get("id") or segment.get("candidateId")
+    if segment_identity in (None, "") and segment.get("index") is not None:
+        segment_identity = segment.get("index")
+    segment_id = str(segment_identity if segment_identity not in (None, "") else f"segment_{index}")
     title = str(
         segment.get("title")
         or segment.get("shotTitle")
@@ -72,6 +145,11 @@ def _compact_clip(
         or segment.get("chapterTitle")
         or f"片段 {index + 1}"
     )[:100]
+    boundary_confidence = segment.get("boundaryConfidence")
+    if boundary_confidence is None:
+        boundary_confidence = (segment.get("quality") or {}).get("boundaryConfidence")
+    if boundary_confidence is None:
+        boundary_confidence = 0 if source_kind == "content_match" else 1.0
     return {
         "id": _id("edit_clip"),
         "sourceRef": {"kind": source_kind, "id": segment_id},
@@ -87,7 +165,7 @@ def _compact_clip(
         "audioFadeIn": round(max(0.0, min(0.35, float(segment.get("audioFadeIn", .06)))), 3),
         "audioFadeOut": round(max(0.0, min(0.35, float(segment.get("audioFadeOut", .06)))), 3),
         "boundaryConfidence": round(max(0.0, min(1.0, float(
-            segment.get("boundaryConfidence") or (segment.get("quality") or {}).get("boundaryConfidence") or 1.0
+            boundary_confidence
         ))), 3),
         "origin": {
             "workflowKind": workflow_kind,
@@ -107,11 +185,12 @@ def _session_state(session: dict[str, Any]) -> dict[str, Any]:
         "disabledCutawayIds": list(session.get("disabledCutawayIds") or []),
         "markers": copy.deepcopy(session.get("markers") or []),
         "textLayers": copy.deepcopy(session.get("textLayers") or []),
+        "reframe": copy.deepcopy(normalize_edit_session_reframe(session.get("reframe"))),
     }
 
 
 def _restore_state(session: dict[str, Any], state: dict[str, Any]) -> None:
-    for key in ("clips", "subtitleEnabled", "subtitleDraftId", "subtitleStyle", "disabledCutawayIds", "markers", "textLayers"):
+    for key in ("clips", "subtitleEnabled", "subtitleDraftId", "subtitleStyle", "disabledCutawayIds", "markers", "textLayers", "reframe"):
         session[key] = copy.deepcopy(state.get(key))
 
 
@@ -193,7 +272,7 @@ def edit_session_preflight(
     compact_events = [value for index, value in enumerate(event_sequence) if value and (index == 0 or value != event_sequence[index - 1])]
     if len(compact_events) != len(set(compact_events)):
         issues.append({"severity": "warning", "code": "event_interleave", "message": "同一事件被其他事件切开后再次出现，建议确认叙事顺序"})
-    transcript = list(((job or {}).get("speechAnalysis") or {}).get("segments") or [])
+    transcript = _job_transcript_segments(job)
     for index, clip in enumerate(clips):
         for boundary_name, boundary in (("入点", float(clip.get("sourceStart") or 0)), ("出点", float(clip.get("sourceEnd") or 0))):
             if any(
@@ -203,6 +282,11 @@ def edit_session_preflight(
             ):
                 issues.append({"severity": "warning", "code": "speech_truncation", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的{boundary_name}落在一句话中间"})
                 break
+    content_report = timeline_content_report(session, job)
+    issues.extend(content_report["issues"])
+    if session.get("contentVerificationRevision") == session.get("revision"):
+        issues.extend(issue for issue in (session.get("contentVerification") or {}).get("issues") or []
+                      if str(issue.get("code") or "").startswith("content_render_"))
     errors = [item for item in issues if item["severity"] == "error"]
     warnings = [item for item in issues if item["severity"] == "warning"]
     acknowledged = {str(value) for value in session.get("acknowledgedWarningCodes") or []}
@@ -213,11 +297,14 @@ def edit_session_preflight(
         "acknowledgedWarningCodes": sorted(acknowledged),
         "infoCount": len(issues) - len(errors) - len(warnings),
         "issues": issues,
+        "contentVerification": content_report,
     }
 
 
 def refresh_edit_session(session: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
     session["schemaVersion"] = EDIT_SESSION_SCHEMA_VERSION
+    session_reframe = normalize_edit_session_reframe(session.get("reframe"))
+    session["reframe"] = session_reframe
     clips = session.get("clips") if isinstance(session.get("clips"), list) else []
     for index, clip in enumerate(clips):
         clip["order"] = index
@@ -264,6 +351,33 @@ def refresh_edit_session(session: dict[str, Any], job: dict[str, Any] | None = N
     return session
 
 
+def repair_agent_short_clips(session: dict[str, Any], *, minimum: float = MIN_EDIT_CLIP_SECONDS) -> list[str]:
+    """Remove sub-frame agent artifacts before media rendering.
+
+    Semantic planners can occasionally emit a tiny residual clip after a
+    trim/split operation. The renderer correctly rejects it, but retrying the
+    same proposal only repeats the failure. For Agent-owned review renders,
+    discard these non-meaningful fragments once and record the repair.
+    """
+    clips = [item for item in session.get("clips") or [] if isinstance(item, dict)]
+    removed = [
+        str(item.get("id") or "") for item in clips
+        if float(item.get("sourceEnd") or 0) - float(item.get("sourceStart") or 0) < float(minimum)
+    ]
+    if not removed:
+        return []
+    session["clips"] = [
+        item for item in clips
+        if str(item.get("id") or "") not in set(removed)
+    ]
+    session.setdefault("agentRepairs", []).append({
+        "type": "remove_short_clips", "clipIds": removed,
+        "minimumSeconds": round(float(minimum), 3), "at": _now_iso(),
+    })
+    refresh_edit_session(session)
+    return removed
+
+
 def public_edit_session(session: dict[str, Any]) -> dict[str, Any]:
     refresh_edit_session(session)
     return {
@@ -285,7 +399,9 @@ def create_or_resume_edit_session(
             and str(session.get("baseOutputFilename")) == filename
             and str(session.get("status") or "draft") in {"draft", "rendered", "failed"}
         ):
-            return refresh_edit_session(session), False
+            if normalize_edit_session_reframe(session.get("reframe")) is None:
+                session["reframe"] = normalize_edit_session_reframe(output.get("reframe"))
+            return refresh_edit_session(session, job), False
     workflow_kind = str(job.get("workflowKind") or (job.get("request") or {}).get("workflowKind") or "highlight")
     clips = [
         _compact_clip(item, index, workflow_kind)
@@ -314,12 +430,21 @@ def create_or_resume_edit_session(
         "subtitleEnabled": bool(output.get("subtitleMode") == "burn"),
         "subtitleDraftId": None,
         "subtitleStyle": str(output.get("subtitleStyle") or "clean"),
+        "reframe": normalize_edit_session_reframe(output.get("reframe")),
         "undo": [],
         "redo": [],
         "createdAt": now,
         "updatedAt": now,
     }
-    refresh_edit_session(session)
+    traced_segments = copy.deepcopy(output.get("segments") or [])
+    if any(segment.get("sourceContentContract") for segment in traced_segments):
+        record = {"id": f"version:{version_id}:{filename}", "recordType": "assembly",
+                  "basketSnapshot": {"sourceVersionId": version_id}}
+        session["contentBinding"] = selection_binding(record, traced_segments)
+        session["sourceSearchId"] = str(version.get("contentSearchId") or record["id"])
+    elif version.get("contentSearchId"):
+        session["sourceSearchId"] = str(version["contentSearchId"])
+    refresh_edit_session(session, job)
     job.setdefault("editSessions", []).append(session)
     job["activeEditSessionId"] = session["id"]
     return session, True
@@ -365,13 +490,15 @@ def create_or_resume_content_edit_session(
     if str(order_mode or "source") == "source":
         ordered_matches.sort(key=lambda item: (float(item.get("start") or 0), float(item.get("end") or 0)))
     source_match_ids = [str(item.get("id") or "") for item in ordered_matches]
+    binding = selection_binding(search, ordered_matches)
     for session in reversed(job.get("editSessions") or []):
         if (
             str(session.get("sourceSearchId") or "") == str(search_id)
             and list(session.get("sourceMatchIds") or []) == source_match_ids
+            and (session.get("contentBinding") or {}).get("selectionFingerprint") == binding["selectionFingerprint"]
             and str(session.get("status") or "draft") in {"draft", "rendered", "failed"}
         ):
-            return refresh_edit_session(session), False
+            return refresh_edit_session(session, job), False
     workflow_kind = str(job.get("workflowKind") or "content_search")
     clips = [
         _compact_clip(item, index, workflow_kind, source_kind="content_match")
@@ -390,6 +517,7 @@ def create_or_resume_content_edit_session(
         "baseOutputFilename": "",
         "sourceSearchId": str(search_id),
         "sourceMatchIds": source_match_ids,
+        "contentBinding": binding,
         "workflowKind": workflow_kind,
         "title": "内容探索精剪",
         "status": "draft",
@@ -402,12 +530,95 @@ def create_or_resume_content_edit_session(
         "subtitleEnabled": False,
         "subtitleDraftId": None,
         "subtitleStyle": "clean",
+        "reframe": _job_requested_reframe(job),
         "undo": [],
         "redo": [],
         "createdAt": now,
         "updatedAt": now,
     }
-    refresh_edit_session(session)
+    refresh_edit_session(session, job)
+    job.setdefault("editSessions", []).append(session)
+    job["activeEditSessionId"] = session["id"]
+    return session, True
+
+
+def create_or_resume_candidate_edit_session(
+    job: dict[str, Any], *, candidate_ids: list[str] | None = None, order_mode: str = "source",
+) -> tuple[dict[str, Any], bool]:
+    """Start a real review timeline directly from highlight candidates.
+
+    Highlight analysis predates content search and stores its evidence on the
+    job itself.  Keeping this as a first-class session source means an Agent can
+    prepare a review draft without asking the user to manually copy candidates
+    through the legacy candidate drawer first.
+    """
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for index, item in enumerate(job.get("candidates") or []):
+        if not isinstance(item, dict) or float(item.get("end") or 0) <= float(item.get("start") or 0):
+            continue
+        identity = item.get("id") or item.get("candidateId")
+        if identity in (None, "") and item.get("index") is not None:
+            identity = item.get("index")
+        candidate_id = str(identity if identity not in (None, "") else f"candidate_{index}")
+        candidates.append((candidate_id, item))
+    if not candidates:
+        raise EditSessionError("高光分析尚未生成可用镜头")
+
+    lookup = {candidate_id: item for candidate_id, item in candidates}
+    requested_ids = list(dict.fromkeys(str(value) for value in (candidate_ids or []) if str(value)))
+    if requested_ids:
+        missing = [candidate_id for candidate_id in requested_ids if candidate_id not in lookup]
+        if missing:
+            raise EditSessionError("部分高光候选已失效，请重新分析后再试")
+    else:
+        requested_ids = [candidate_id for candidate_id, _item in candidates]
+    ordered_candidates = [(candidate_id, lookup[candidate_id]) for candidate_id in requested_ids]
+    if str(order_mode or "source") == "source":
+        ordered_candidates.sort(key=lambda row: (
+            float(row[1].get("start") or 0), float(row[1].get("end") or 0),
+        ))
+    source_candidate_ids = [candidate_id for candidate_id, _item in ordered_candidates]
+    for session in reversed(job.get("editSessions") or []):
+        if (
+            list(session.get("sourceCandidateIds") or []) == source_candidate_ids
+            and str(session.get("status") or "draft") in {"draft", "rendered", "failed"}
+        ):
+            job["activeEditSessionId"] = session.get("id")
+            return refresh_edit_session(session, job), False
+
+    workflow_kind = str(job.get("workflowKind") or "highlight")
+    clips = [
+        _compact_clip(item, index, workflow_kind, source_kind="highlight_candidate")
+        for index, (_candidate_id, item) in enumerate(ordered_candidates)
+    ]
+    now = _now_iso()
+    session = {
+        "schemaVersion": EDIT_SESSION_SCHEMA_VERSION,
+        "id": _id("edit_session"),
+        "jobId": str(job.get("id") or ""),
+        "baseVersionId": "",
+        "baseVersionNumber": 0,
+        "baseOutputFilename": "",
+        "sourceCandidateIds": source_candidate_ids,
+        "workflowKind": workflow_kind,
+        "title": "高光候选精剪",
+        "status": "draft",
+        "revision": 0,
+        "clips": clips,
+        "cutaways": [],
+        "disabledCutawayIds": [],
+        "markers": [],
+        "textLayers": [],
+        "subtitleEnabled": False,
+        "subtitleDraftId": None,
+        "subtitleStyle": "clean",
+        "reframe": _job_requested_reframe(job),
+        "undo": [],
+        "redo": [],
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    refresh_edit_session(session, job)
     job.setdefault("editSessions", []).append(session)
     job["activeEditSessionId"] = session["id"]
     return session, True
@@ -839,7 +1050,9 @@ def edit_session_subtitle_outputs(session: dict[str, Any]) -> list[dict[str, Any
 
 
 def _segment_sources(job: dict[str, Any], session: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    sources: dict[str, dict[str, Any]] = {}
+    sources: dict[str, dict[str, Any]] = {
+        str(item["id"]): item for item in (session.get("contentBinding") or {}).get("matches") or []
+    }
     if session.get("baseVersionId"):
         version = _find_version(job, str(session.get("baseVersionId") or ""))
         output = _find_output(version, str(session.get("baseOutputFilename") or ""))
@@ -848,11 +1061,13 @@ def _segment_sources(job: dict[str, Any], session: dict[str, Any]) -> dict[str, 
     for group in job.get("eventGroups") or []:
         for item in [*(group.get("segments") or []), *(group.get("availableSegments") or [])]:
             sources.setdefault(str(item.get("id") or ""), item)
-    for item in job.get("candidates") or []:
+    for index, item in enumerate(job.get("candidates") or []):
         candidate_key = item.get("id") or item.get("candidateId")
         if candidate_key in (None, "") and item.get("index") is not None:
             candidate_key = item.get("index")
-        sources.setdefault(str(candidate_key or ""), item)
+        if candidate_key in (None, ""):
+            candidate_key = f"candidate_{index}"
+        sources.setdefault(str(candidate_key), item)
     for record in _content_search_records(job):
         for item in record.get("candidates") or []:
             sources.setdefault(str(item.get("id") or ""), item)
@@ -874,6 +1089,8 @@ def build_edit_session_render_plan(
             "id": str(clip.get("id") or _id("edit_clip")),
             "start": start,
             "end": end,
+            "sourceContentContract": copy.deepcopy(source.get("sourceContentContract") or
+                                                    (session.get("contentBinding") or {}).get("contract") or {}),
             "duration": round(end - start, 3),
             "sourceOrder": start,
             "editOrder": index,
@@ -1033,6 +1250,7 @@ def apply_edit_proposal(job: dict[str, Any], session: dict[str, Any], proposal_i
     session["redo"] = []
     session["revision"] = int(session.get("revision") or 0) + 1
     session["pendingProposal"] = None
+    session["proposalVariants"] = []
     session["status"] = "draft"
     session["updatedAt"] = _now_iso()
     refresh_edit_session(session)
@@ -1044,4 +1262,17 @@ def cancel_edit_proposal(session: dict[str, Any], proposal_id: str) -> None:
     if not proposal or str(proposal.get("id")) != str(proposal_id):
         raise EditSessionError("编辑提案不存在")
     session["pendingProposal"] = None
+    session["proposalVariants"] = []
     session["updatedAt"] = _now_iso()
+
+
+def select_edit_proposal_variant(session: dict[str, Any], proposal_id: str) -> dict[str, Any]:
+    variants = [item for item in session.get("proposalVariants") or [] if isinstance(item, dict)]
+    proposal = next((item for item in variants if str(item.get("id") or "") == str(proposal_id)), None)
+    if not proposal:
+        raise EditSessionError("时间线结构方案不存在")
+    if int(proposal.get("baseRevision") or 0) != int(session.get("revision") or 0):
+        raise EditSessionError("时间线已经变化，请重新生成结构方案")
+    session["pendingProposal"] = copy.deepcopy(proposal)
+    session["updatedAt"] = _now_iso()
+    return session["pendingProposal"]

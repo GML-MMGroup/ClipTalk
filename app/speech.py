@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .algorithm_contract import CURRENT_ALGORITHM_VERSION
+
 import numpy as np
 
 
@@ -24,6 +26,10 @@ _sensevoice_state_lock = threading.Lock()
 _sensevoice_state: dict[str, Any] = {
     "status": "not_started", "device": None, "error": None, "loadedAt": None,
 }
+_sensevoice_worker_log_lock = threading.Lock()
+
+SPEECH_WORKER_LOG_MAX_BYTES = 10 * 1024**2
+SPEECH_WORKER_LOG_BACKUP_BYTES = 2 * 1024**2
 
 LANGUAGES = {"zh", "en", "yue", "ja", "ko", "nospeech"}
 EMOTIONS = {
@@ -115,12 +121,11 @@ def _sensevoice_model_options(
     punc_model: str,
     spk_model: str,
     diarization: bool,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "model": model_name,
         "vad_model": vad_model,
-        "vad_kwargs": {"max_single_segment_time": 3000 if algorithm_version == "editing-algorithm-v2" else 30000},
+        "vad_kwargs": {"max_single_segment_time": 3000},
         "device": device,
         "disable_update": True,
     }
@@ -225,11 +230,10 @@ def _sensevoice_instance(
     spk_model: str,
     diarization: bool,
     model_cache: Path,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> tuple[Any, str]:
     global _sensevoice_model, _sensevoice_key
     resolved = _resolve_sensevoice_device(device)
-    key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache), algorithm_version)
+    key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache))
     with _sensevoice_lock:
         if _sensevoice_model is not None and _sensevoice_key == key:
             return _sensevoice_model, resolved
@@ -245,7 +249,6 @@ def _sensevoice_instance(
                 punc_model=punc_model,
                 spk_model=spk_model,
                 diarization=diarization,
-                algorithm_version=algorithm_version,
             )
             try:
                 instance = AutoModel(**options)
@@ -254,7 +257,7 @@ def _sensevoice_instance(
                     raise
                 resolved = "cpu"
                 options["device"] = resolved
-                key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache), algorithm_version)
+                key = (model_name, resolved, vad_model, punc_model, spk_model if diarization else "", str(model_cache))
                 instance = AutoModel(**options)
             if diarization:
                 _configure_speaker_cluster_backend(instance)
@@ -275,9 +278,48 @@ def prewarm_sensevoice(**options: Any) -> None:
         return
 
 
+def _rotate_sensevoice_worker_log(
+    worker_directory: Path,
+    *,
+    maximum_bytes: int = SPEECH_WORKER_LOG_MAX_BYTES,
+    backup_bytes: int = SPEECH_WORKER_LOG_BACKUP_BYTES,
+) -> bool:
+    """Bound the persistent worker log while keeping a small diagnostic tail."""
+    log_path = worker_directory / "worker.log"
+    try:
+        if log_path.stat().st_size <= maximum_bytes:
+            return False
+    except OSError:
+        return False
+    with _sensevoice_worker_log_lock:
+        try:
+            size = log_path.stat().st_size
+            if size <= maximum_bytes:
+                return False
+            retained = max(0, min(int(backup_bytes), size))
+            with log_path.open("rb") as stream:
+                if retained:
+                    stream.seek(-retained, os.SEEK_END)
+                    tail = stream.read(retained)
+                else:
+                    tail = b""
+            backup_path = worker_directory / "worker.log.1"
+            temporary = worker_directory / "worker.log.1.tmp"
+            temporary.write_bytes(tail)
+            temporary.replace(backup_path)
+            # Truncate the existing inode in place: a persistent worker may
+            # still own an O_APPEND descriptor across web-service restarts.
+            with log_path.open("r+b") as stream:
+                stream.truncate(0)
+            return True
+        except OSError:
+            return False
+
+
 def launch_sensevoice_worker(*, worker_directory: Path, **options: Any) -> None:
     """Launch a persistent model worker outside the web process so loading cannot freeze HTTP."""
     worker_directory.mkdir(parents=True, exist_ok=True)
+    _rotate_sensevoice_worker_log(worker_directory)
     config_path = worker_directory / "config.json"
     status_path = worker_directory / "status.json"
     pid_path = worker_directory / "worker.pid"
@@ -328,7 +370,10 @@ def launch_sensevoice_worker(*, worker_directory: Path, **options: Any) -> None:
     if candidates and config_path.is_file():
         try:
             existing_config = json.loads(config_path.read_text(encoding="utf-8"))
-            config_mismatch = any(existing_config.get(key) != value for key, value in desired_config.items())
+            config_mismatch = (
+                set(existing_config) != set(desired_config)
+                or any(existing_config.get(key) != value for key, value in desired_config.items())
+            )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             config_mismatch = True
     if config_mismatch:
@@ -794,12 +839,10 @@ def _analyze_sensevoice(
     cancelled: Any,
     progress_callback: Any = None,
     preset_speaker_count: int | None = None,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     model, actual_device = _sensevoice_instance(
         model_name=model_name, device=device, vad_model=vad_model, punc_model=punc_model,
         spk_model=spk_model, diarization=diarization, model_cache=model_cache,
-        algorithm_version=algorithm_version,
     )
     if cancelled and cancelled():
         raise RuntimeError("任务已取消")
@@ -820,8 +863,7 @@ def _analyze_sensevoice(
     if cancelled and cancelled():
         raise RuntimeError("任务已取消")
     normalized = normalize_sensevoice_result(result)
-    if algorithm_version == "editing-algorithm-v2":
-        normalized["segments"] = enforce_speaker_turn_contract(normalized["segments"])
+    normalized["segments"] = enforce_speaker_turn_contract(normalized["segments"])
     return {
         "schemaVersion": SPEECH_SCHEMA_VERSION, "engine": "sensevoice", "model": model_name,
         "device": actual_device, "language": normalized.get("language"),
@@ -906,7 +948,6 @@ def analyze_speech(
     cancelled: Any = None,
     progress_callback: Any = None,
     preset_speaker_count: int | None = None,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     cached = _read_cache(cache_path)
     if (
@@ -914,7 +955,7 @@ def analyze_speech(
         and cached.get("schemaVersion") == SPEECH_SCHEMA_VERSION
         and (not diarization or bool(cached.get("diarization")))
         and int(cached.get("presetSpeakerCount") or 0) == int(preset_speaker_count or 0)
-        and str(cached.get("algorithmVersion") or "editing-algorithm-v1") == algorithm_version
+        and str(cached.get("algorithmVersion") or "") == CURRENT_ALGORITHM_VERSION
     ):
         return cached
     if engine == "sensevoice":
@@ -927,7 +968,6 @@ def analyze_speech(
                     worker_directory=worker_directory, model_name=model_name, device=device,
                     vad_model=vad_model, punc_model=punc_model, spk_model=spk_model,
                     diarization=diarization, model_cache=resolved_cache,
-                    algorithm_version=algorithm_version,
                 )
                 try:
                     payload = _sensevoice_via_worker(
@@ -958,7 +998,7 @@ def analyze_speech(
         payload = _analyze_whisper(source, model_name=model_name, device=device, cancelled=cancelled)
     else:
         raise RuntimeError(f"不支持的语音引擎：{engine}")
-    payload["algorithmVersion"] = algorithm_version
+    payload["algorithmVersion"] = CURRENT_ALGORITHM_VERSION
     _write_cache(cache_path, payload)
     return payload
 

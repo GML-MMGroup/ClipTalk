@@ -16,7 +16,7 @@ from .content_query import (
 from .recognition import MULTIMODAL_INDEX_VERSION, evidence_ref
 
 CONTENT_INDEX_VERSION = MULTIMODAL_INDEX_VERSION
-CONTENT_SEARCH_VERSION = "content-search-v39-described-person-speaking-20260827"
+CONTENT_SEARCH_VERSION = "content-search-v41-evidence-edit-contract-20260910"
 CONTENT_INTENT_SCHEMA_VERSION = "content-intent-v2-typed-logic-20260820"
 CONTENT_INTENT_PARSER_VERSION = "content-intent-parser-v3-described-person-speaking-20260827"
 CONTENT_INTENT_PROMPT_VERSION = "content-intent-prompt-v3-described-person-speaking-20260827"
@@ -801,7 +801,7 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
     # its visual branch.  This is type/provenance normalization, not a catalog
     # of domain objects or actions.
     breadth_wording = bool(re.search(
-        r"相关|关于|围绕|讨论|谈论|提到|说到|涉及|主题|内容|related|about|discuss|mention|topic",
+        r"相关|关于|围绕|讨论|谈论|讲解|介绍|解说|说明|提到|说到|涉及|主题|内容|related|about|discuss|mention|topic",
         str(text or ""), flags=re.I,
     ))
     broad_kinds = {str(item.get("kind") or "") for item in predicates}
@@ -1014,6 +1014,7 @@ def normalized_intent_payload(intent: dict[str, Any]) -> dict[str, Any]:
         "speechQuotes": sorted(value.lower() for value in _strings(intent.get("speechQuotes"))),
         "temporalRelations": sorted(value.lower() for value in _strings(intent.get("temporalRelations"))),
         "requestedCount": intent.get("requestedCount"),
+        "requestedCountExplicit": bool(intent.get("requestedCountExplicit")),
         "resultMode": str(intent.get("resultMode") or "top_k"),
         "targetSeconds": intent.get("targetSeconds"),
         "assemblyMode": str(intent.get("assemblyMode") or "single_reel"),
@@ -1506,16 +1507,19 @@ def rank_predicate_units(
                 "segmentIds": [value for value in _strings(row.get("segmentIds") or row.get("segment_ids")) if value in allowed_segment_ids],
             }
     vector_scores: dict[tuple[str, str], float] = {}
+    vector_metadata: dict[tuple[str, str], dict[str, Any]] = {}
     for predicate_id, rows in (vector_results or {}).items():
         if predicate_id not in predicate_ids:
             continue
         for row in rows or []:
             unit_id = str(row.get("id") or row.get("unitId") or "")
             if unit_id in by_id:
-                vector_scores[(predicate_id, unit_id)] = max(
-                    vector_scores.get((predicate_id, unit_id), 0.0),
-                    min(96.0, max(0.0, (_number(row.get("score")) + 1.0) * 50.0)),
-                )
+                key = (predicate_id, unit_id)
+                raw_score = _number(row.get("score"), -1.0)
+                normalized_score = min(96.0, max(0.0, (raw_score + 1.0) * 50.0))
+                if normalized_score >= vector_scores.get(key, 0.0):
+                    vector_scores[key] = normalized_score
+                    vector_metadata[key] = {**row, "rawScore": raw_score}
     ranked_by_predicate: dict[str, list[dict[str, Any]]] = {}
     exhaustive = str((query_plan.get("result") or {}).get("mode") or "top_k") == "exhaustive"
     for predicate in predicates:
@@ -1559,6 +1563,7 @@ def rank_predicate_units(
             lexical = lexical_scores.get(unit_id, 0.0)
             model = model_scores.get((predicate_id, unit_id), {})
             vector = vector_scores.get((predicate_id, unit_id), 0.0)
+            vector_meta = vector_metadata.get((predicate_id, unit_id), {})
             source_ranks = [
                 ranks[unit_id] for ranks in (lexical_ranks, model_ranks, vector_ranks)
                 if unit_id in ranks
@@ -1580,9 +1585,16 @@ def rank_predicate_units(
                 model_satisfied and model_grounded
                 and _number(model.get("score")) >= (35 if exhaustive else 55)
             )
-            # A vector hit is a recall hint, never proof. Unsupported model-only
-            # guesses are discarded even in exhaustive mode.
-            if not explicit_support and not contextual_support:
+            embedding_support = bool(
+                expected_modality == "visual"
+                and vector_meta.get("embeddingBackend") == "wemm"
+                and vector_meta.get("evidenceStatus") == "embedding_recalled"
+                and _number(vector_meta.get("rawScore"), -1.0)
+                >= _number(vector_meta.get("threshold"), .18)
+            )
+            # A WeMM hit may enter the candidate set, but stays explicitly
+            # labelled as recall-only until a visual verifier confirms it.
+            if not explicit_support and not contextual_support and not embedding_support:
                 continue
             evidence_score = max(
                 lexical,
@@ -1598,15 +1610,21 @@ def rank_predicate_units(
                 name for name, value in (
                     ("index_lexical", lexical >= 60),
                     ("index_vector", vector >= 55),
+                    ("wemm_embedding", embedding_support),
                     ("semantic_verifier", model_satisfied and model_grounded),
                 ) if value
             ]
             if score < (35 if exhaustive else 60):
                 continue
             confidence_tier = "reliable" if explicit_support else "possible"
+            embedding_only = embedding_support and not explicit_support and not contextual_support
             ranked.append({
                 "unit": unit, "score": round(score, 1),
-                "reason": str(model.get("reason") or ("索引文本直接匹配" if lexical >= 60 else "语义证据匹配")),
+                "reason": str(model.get("reason") or (
+                    "索引文本直接匹配" if lexical >= 60 else
+                    "WeMM 全片向量召回，尚待视觉核验" if embedding_only else
+                    "语义证据匹配"
+                )),
                 "matchedEvidence": str(model.get("matchedEvidence") or "")[:500],
                 "segmentIds": list(model.get("segmentIds") or []),
                 "lexicalScore": lexical, "predicateId": predicate_id,
@@ -1614,7 +1632,7 @@ def rank_predicate_units(
                 "recallChannels": recall_channels,
                 "groundingStatus": (
                     "explicit" if lexical >= 60 or model_grounded and support_level == "explicit"
-                    else "contextual"
+                    else "embedding_recalled" if embedding_only else "contextual"
                 ),
                 "confidenceTier": confidence_tier,
                 "dominantSubject": str(model.get("dominantSubject") or "")[:160],
@@ -1987,6 +2005,66 @@ def _match_predicate_ids(match: dict[str, Any]) -> set[str]:
     return {value for value in values if value}
 
 
+def select_top_content_matches(
+    matches: list[dict[str, Any]], intent: dict[str, Any], *, limit: int,
+) -> list[dict[str, Any]]:
+    """Keep one result per explicit parallel category before global top-k.
+
+    A global score cut can otherwise spend the whole result budget on several
+    strong matches from one category and erase weaker-but-valid evidence for a
+    required sibling category. The intent normalizer marks only true parallel
+    semantic requests, so ordinary relevance searches retain their score order.
+    """
+    maximum = max(1, min(200, int(limit or 1)))
+    ranked = sorted(
+        matches,
+        key=lambda item: (-_number(item.get("score")), _number(item.get("start"))),
+    )
+    diagnostics = intent.get("normalizationDiagnostics") or []
+    parallel_ids: list[str] = []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict) or diagnostic.get("code") != "parallel_semantic_categories_normalized":
+            continue
+        parallel_ids = list(dict.fromkeys(
+            str(value) for value in diagnostic.get("predicateIds") or [] if str(value)
+        ))
+        break
+    if len(parallel_ids) < 2 or maximum < len(parallel_ids):
+        return ranked[:maximum]
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, float, float]] = set()
+
+    def identity(item: dict[str, Any]) -> tuple[str, float, float]:
+        return (
+            str(item.get("id") or item.get("unitId") or ""),
+            round(_number(item.get("start")), 3),
+            round(_number(item.get("end")), 3),
+        )
+
+    for predicate_id in parallel_ids:
+        candidate = next((
+            item for item in ranked if predicate_id in _match_predicate_ids(item)
+        ), None)
+        if candidate is None:
+            continue
+        key = identity(candidate)
+        if key not in selected_keys:
+            selected.append(candidate)
+            selected_keys.add(key)
+    for item in ranked:
+        if len(selected) >= maximum:
+            break
+        key = identity(item)
+        if key in selected_keys:
+            continue
+        selected.append(item)
+        selected_keys.add(key)
+    return sorted(
+        selected,
+        key=lambda item: (-_number(item.get("score")), _number(item.get("start"))),
+    )[:maximum]
+
+
 def _match_speakers(match: dict[str, Any]) -> set[str]:
     values = {
         str(match.get("speakerRef") or match.get("speaker") or "").strip(),
@@ -1996,9 +2074,7 @@ def _match_speakers(match: dict[str, Any]) -> set[str]:
     return {value for value in values if value}
 
 
-def _matches_can_merge(
-    previous: dict[str, Any], item: dict[str, Any], *, algorithm_version: str = "editing-algorithm-v1",
-) -> bool:
+def _matches_can_merge(previous: dict[str, Any], item: dict[str, Any]) -> bool:
     """Merge only evidence that can still represent one source occurrence."""
     previous_end = _number(previous.get("end"))
     item_start = _number(item.get("start"))
@@ -2021,28 +2097,18 @@ def _matches_can_merge(
     item_type = str(item.get("evidenceType") or "")
     if previous_type != item_type:
         return False
-    if algorithm_version == "editing-algorithm-v2":
-        if previous_type == "speech":
-            previous_speakers, item_speakers = _match_speakers(previous), _match_speakers(item)
-            # Completing one utterance is safe only when speaker identity is
-            # known and stable. Unknown or intervening speakers stay separate.
-            return bool(previous_speakers and previous_speakers == item_speakers)
-        if previous_type in {"visual", "ocr", "audio"}:
-            return bool(
-                previous_events & item_events or previous_shots & item_shots
-            )
-    if previous_type in {"speech", "ocr", "audio"}:
-        return True
-    if previous_events and item_events:
-        return bool(previous_events & item_events)
-    if previous_shots and item_shots:
-        return bool(previous_shots & item_shots)
-    return not (previous_shots or item_shots or previous_events or item_events)
+    if previous_type == "speech":
+        previous_speakers, item_speakers = _match_speakers(previous), _match_speakers(item)
+        # Completing one utterance is safe only when speaker identity is
+        # known and stable. Unknown or intervening speakers stay separate.
+        return bool(previous_speakers and previous_speakers == item_speakers)
+    if previous_type in {"visual", "ocr", "audio"}:
+        return bool(previous_events & item_events or previous_shots & item_shots)
+    return False
 
 
 def merge_content_matches(
     matches: list[dict[str, Any]], *, maximum_gap: float = 1.0,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> list[dict[str, Any]]:
     ordered = sorted(matches, key=lambda item: (_number(item.get("start")), _number(item.get("end"))))
     merged: list[dict[str, Any]] = []
@@ -2051,7 +2117,7 @@ def merge_content_matches(
         if (
             not merged
             or _number(item.get("start")) - _number(merged[-1].get("end")) > maximum_gap
-            or not _matches_can_merge(merged[-1], item, algorithm_version=algorithm_version)
+            or not _matches_can_merge(merged[-1], item)
         ):
             merged.append(item)
             continue
@@ -2180,13 +2246,13 @@ def merge_content_matches(
         reliable = (
             str(item.get("confidenceTier") or "") == "reliable"
             or "explicit" in grounding
-            or (
-                algorithm_version != "editing-algorithm-v2"
-                and len(modalities) >= 2 and len(item.get("evidenceItems") or []) >= 2
-            )
         )
         item["confidenceTier"] = "reliable" if reliable else "possible"
-        item["groundingStatus"] = "explicit" if "explicit" in grounding else "contextual"
+        item["groundingStatus"] = (
+            "explicit" if "explicit" in grounding else
+            "embedding_recalled" if "embedding_recalled" in grounding else
+            "contextual"
+        )
         if item.get("reviewStatus") not in {"kept", "rejected"}:
             item["requiresReview"] = not reliable
             item["reviewStatus"] = "confirmed" if reliable else "pending"
@@ -2443,7 +2509,12 @@ def content_matches_to_segments(matches: list[dict[str, Any]]) -> list[dict[str,
             "originalStart": round(start, 3),
             "originalEnd": round(end, 3),
             "minimumKeepSeconds": round(min(end - start, max(.8, (end - start) * .5)), 3),
-            "boundaryConfidence": round(min(1.0, max(.4, _number(match.get("score")) / 100)), 3),
+            "boundaryConfidence": round(max(0, min(1, _number(match.get("boundaryConfidence"), 0))), 3),
+            "boundaryVerification": copy.deepcopy(match.get("boundaryVerification") or {}),
+            "candidateRange": copy.deepcopy(match.get("candidateRange") or {}),
+            "evidenceRanges": copy.deepcopy(match.get("evidenceRanges") or []),
+            "allowedRanges": copy.deepcopy(match.get("allowedRanges") or []),
+            "sourceContentContract": copy.deepcopy(match.get("sourceContentContract") or {}),
             "essential": True,
             "standalone": True,
             "transitionIn": {"type": "cut", "duration": 0.0},

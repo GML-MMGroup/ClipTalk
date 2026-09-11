@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -43,11 +44,33 @@ class UploadSessionStore:
         return self.root / f"{self._id(session_id)}.part"
 
     def _read(self, session_id: str) -> dict[str, Any]:
-        import json
         try:
-            return json.loads(self._meta_path(session_id).read_text(encoding="utf-8"))
+            metadata = json.loads(self._meta_path(session_id).read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             raise HTTPException(404, "上传会话不存在或已过期") from error
+        try:
+            actual_size = self._data_path(session_id).stat().st_size
+        except OSError:
+            actual_size = int(metadata.get("offset") or 0)
+        declared_size = int(metadata.get("size") or 0)
+        metadata["offset"] = max(0, min(actual_size, declared_size)) if declared_size > 0 else max(0, actual_size)
+        return metadata
+
+    def _write_fast_metadata(self, session_id: str, metadata: dict[str, Any]) -> None:
+        """Update upload progress without forcing a disk sync for every chunk.
+
+        The part file size is the source of truth for resume offsets, so this
+        metadata can be published cheaply. Final job creation still validates
+        the byte count and SHA-256 before accepting the upload.
+        """
+        path = self._meta_path(session_id)
+        temporary = path.with_name(f".{path.name}.tmp")
+        try:
+            temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
     def get(self, session_id: str) -> dict[str, Any]:
         return self._read(session_id)
@@ -68,27 +91,33 @@ class UploadSessionStore:
     def append(self, session_id: str, offset: int, payload: bytes) -> dict[str, Any]:
         with self._lock:
             metadata = self._read(session_id)
-            current = int(metadata["offset"])
+            data_path = self._data_path(session_id)
+            try:
+                current = data_path.stat().st_size
+            except OSError:
+                current = int(metadata["offset"])
             if offset != current:
                 raise HTTPException(409, f"上传偏移不一致，服务端已收到 {current} 字节")
             if current + len(payload) > int(metadata["size"]):
                 raise HTTPException(413, "上传数据超过声明的文件大小")
-            with self._data_path(session_id).open("ab") as handle:
+            with data_path.open("ab") as handle:
                 handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
             metadata["offset"] = current + len(payload)
             metadata["updatedAt"] = time.time()
-            atomic_write_json(self._meta_path(session_id), metadata)
+            self._write_fast_metadata(session_id, metadata)
         return metadata
 
     def consume(self, session_id: str, destination: Path) -> ConsumedUpload:
         with self._lock:
             metadata = self._read(session_id)
             size = int(metadata["size"])
-            if int(metadata["offset"]) != size:
-                raise HTTPException(409, f"视频尚未上传完整：{metadata['offset']}/{size} 字节")
             source = self._data_path(session_id)
+            try:
+                actual_size = source.stat().st_size
+            except OSError as error:
+                raise HTTPException(404, "上传会话不存在或已过期") from error
+            if actual_size != size:
+                raise HTTPException(409, f"视频尚未上传完整：{actual_size}/{size} 字节")
             digest = hashlib.sha256()
             with source.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):

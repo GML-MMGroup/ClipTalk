@@ -94,7 +94,9 @@ setsid nohup env HIGHLIGHT_HOST="$HOST" HIGHLIGHT_PORT="$PORT" \
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 
-for _ in $(seq 1 50); do
+# Existing workspaces may need around two minutes to hydrate model-backed state.
+# Keep probing instead of killing a healthy process just as startup completes.
+for _ in $(seq 1 750); do
   if ! kill -0 "$NEW_PID" 2>/dev/null; then
     echo "启动失败"
     rm -f "$PID_FILE"

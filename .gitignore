@@ -21,6 +21,7 @@ node_modules/
 # Runtime media, models, task state and generated outputs
 data/
 local-artifacts/
+cest-video/
 *.log
 *.pid
 *.sqlite3

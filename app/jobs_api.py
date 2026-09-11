@@ -14,10 +14,12 @@ def build_jobs_router(
     create_job: Callable[..., Any],
     get_job: Callable[..., Any],
     get_job_status: Callable[..., Any],
+    update_job_project_settings: Callable[..., Any],
     cancel_job: Callable[..., Any],
     finalize_one_off_job: Callable[..., Any],
     create_job_delete_intent: Callable[..., Any],
     delete_job: Callable[..., Any],
+    activate_agent_draft: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """Own the core job collection and lifecycle URL surface."""
     router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -28,8 +30,14 @@ def build_jobs_router(
     )
     router.add_api_route("/{job_id}", get_job, methods=["GET"], response_model=JobEnvelopeResponse)
     router.add_api_route("/{job_id}/status", get_job_status, methods=["GET"])
+    router.add_api_route(
+        "/{job_id}/project-settings", update_job_project_settings,
+        methods=["PATCH"], response_model=JobEnvelopeResponse,
+    )
     router.add_api_route("/{job_id}/cancel", cancel_job, methods=["POST"])
     router.add_api_route("/{job_id}/finalize-one-off", finalize_one_off_job, methods=["POST"])
     router.add_api_route("/{job_id}/delete-intent", create_job_delete_intent, methods=["POST"])
+    if activate_agent_draft:
+        router.add_api_route("/{job_id}/activate", activate_agent_draft, methods=["POST"])
     router.add_api_route("/{job_id}", delete_job, methods=["DELETE"])
     return router

@@ -11,7 +11,7 @@
       navigation: Object.freeze([
         ["准备", "确认要求并准备媒体"],
         ["高光发现", "发现并组织精彩事件"],
-        ["事件审核", "确认事件与内部镜头"],
+        ["事件审核", "确认事件与候选镜头"],
         ["生成版本", "合成、预览并下载"],
       ]),
     }),
@@ -67,8 +67,8 @@
     addToBasket: "加入成片清单",
     addToEvent: "加入事件",
     insertTimeline: "插入时间线",
-    preview: "生成预览",
-    exportVersion: "导出新版本",
+    preview: "生成剪辑预览",
+    exportVersion: "生成成片",
     download: "下载",
   });
 

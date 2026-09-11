@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -11,6 +12,11 @@ from typing import Any, Callable
 
 
 TaskTarget = Callable[..., Any]
+_task_context = threading.local()
+
+
+def current_task_id() -> str:
+    return str(getattr(_task_context, "task_id", ""))
 
 
 def _now_iso() -> str:
@@ -20,10 +26,12 @@ def _now_iso() -> str:
 class DurableTaskStore:
     """SQLite-backed queue metadata for recoverable background tasks."""
 
-    def __init__(self, path: Path, *, one_active_per_job: bool = True) -> None:
+    def __init__(self, path: Path, *, one_active_per_job: bool = True, lease_seconds: float = 90) -> None:
         self.path = path
         self.one_active_per_job = one_active_per_job
         self.lock = threading.RLock()
+        self.owner_id = uuid.uuid4().hex
+        self.lease_seconds = max(1.0, lease_seconds)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -36,6 +44,14 @@ class DurableTaskStore:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS tasks_job_status ON tasks(job_id,status,created_at)"
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+            for name, declaration in (("owner_id", "TEXT"), ("lease_until", "REAL"), ("dedup_key", "TEXT")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS tasks_dedup ON tasks(job_id,dedup_key) "
+                "WHERE dedup_key IS NOT NULL AND status IN ('queued','running','completed')"
             )
             if one_active_per_job:
                 connection.execute(
@@ -53,11 +69,19 @@ class DurableTaskStore:
         connection.execute("PRAGMA busy_timeout=15000")
         return connection
 
-    def enqueue(self, *, job_id: str, kind: str, args: tuple[Any, ...]) -> dict[str, Any]:
+    def enqueue(self, *, job_id: str, kind: str, args: tuple[Any, ...], dedup_key: str | None = None) -> dict[str, Any]:
         payload = json.dumps(list(args), ensure_ascii=False, separators=(",", ":"))
         task_id = f"task_{uuid.uuid4().hex}"
         now = _now_iso()
         with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if dedup_key:
+                existing = connection.execute(
+                    "SELECT id FROM tasks WHERE job_id=? AND dedup_key=? "
+                    "AND status IN ('queued','running','completed')", (job_id, dedup_key),
+                ).fetchone()
+                if existing:
+                    return {"id": existing[0], "duplicate": True}
             if self.one_active_per_job:
                 active = connection.execute(
                     "SELECT id FROM tasks WHERE job_id=? AND status IN ('queued','running') LIMIT 1",
@@ -67,9 +91,9 @@ class DurableTaskStore:
                     raise RuntimeError(f"任务 {job_id} 已有未完成的队列记录")
             try:
                 connection.execute(
-                    "INSERT INTO tasks(id,job_id,kind,payload,status,attempts,error,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (task_id, job_id, kind, payload, "queued", 0, "", now, now),
+                    "INSERT INTO tasks(id,job_id,kind,payload,status,attempts,error,created_at,updated_at,dedup_key) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, job_id, kind, payload, "queued", 0, "", now, now, dedup_key),
                 )
             except sqlite3.IntegrityError as error:
                 raise RuntimeError(f"任务 {job_id} 已有未完成的队列记录") from error
@@ -81,11 +105,32 @@ class DurableTaskStore:
     def claim(self, task_id: str) -> bool:
         with self.lock, self._connect() as connection:
             cursor = connection.execute(
-                "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=? "
+                "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=?,owner_id=?,lease_until=? "
                 "WHERE id=? AND status='queued'",
-                (_now_iso(), task_id),
+                (_now_iso(), self.owner_id, time.time() + self.lease_seconds, task_id),
             )
             return cursor.rowcount == 1
+
+    def heartbeat(self, task_id: str) -> bool:
+        with self.lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET lease_until=?,updated_at=? WHERE id=? AND status='running' AND owner_id=?",
+                (time.time() + self.lease_seconds, _now_iso(), task_id, self.owner_id),
+            )
+            return cursor.rowcount == 1
+
+    def find_duplicate(self, job_id: str, dedup_key: str) -> dict[str, Any] | None:
+        with self.lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM tasks WHERE job_id=? AND dedup_key=? AND status IN ('queued','running','completed')",
+                (job_id, dedup_key),
+            ).fetchone()
+        return self.get(row[0]) if row else None
+
+    def release_abandoned_leases(self) -> None:
+        """Only call after obtaining the exclusive application startup lock."""
+        with self.lock, self._connect() as connection:
+            connection.execute("UPDATE tasks SET lease_until=0 WHERE status='running'")
 
     def finish(self, task_id: str, *, status: str, error: str = "") -> None:
         if status not in {"completed", "failed", "cancelled"}:
@@ -93,8 +138,8 @@ class DurableTaskStore:
         with self.lock, self._connect() as connection:
             connection.execute(
                 "UPDATE tasks SET status=?,error=?,updated_at=? "
-                "WHERE id=? AND status IN ('queued','running')",
-                (status, str(error)[:2000], _now_iso(), task_id),
+                "WHERE id=? AND (status='queued' OR (status='running' AND owner_id=?))",
+                (status, str(error)[:2000], _now_iso(), task_id, self.owner_id),
             )
 
     def cancel_job(self, job_id: str) -> bool:
@@ -120,8 +165,9 @@ class DurableTaskStore:
     def prepare_recovery(self) -> list[dict[str, Any]]:
         with self.lock, self._connect() as connection:
             connection.execute(
-                "UPDATE tasks SET status='queued',updated_at=? WHERE status='running'",
-                (_now_iso(),),
+                "UPDATE tasks SET status='queued',updated_at=?,owner_id=NULL,lease_until=NULL "
+                "WHERE status='running' AND COALESCE(lease_until,0) < ?",
+                (_now_iso(), time.time()),
             )
             rows = connection.execute(
                 "SELECT id,job_id,kind,payload,status,attempts,created_at,updated_at "
@@ -160,6 +206,11 @@ class DurableTaskStore:
             "createdAt": str(row[7]), "updatedAt": str(row[8]),
         }
 
+    def for_job(self, job_id: str) -> list[dict[str, Any]]:
+        with self.lock, self._connect() as connection:
+            ids = connection.execute("SELECT id FROM tasks WHERE job_id=? ORDER BY created_at,id", (job_id,)).fetchall()
+        return [record for (task_id,) in ids if (record := self.get(task_id)) is not None]
+
     def stats(self) -> dict[str, int]:
         with self.lock, self._connect() as connection:
             rows = connection.execute(
@@ -178,17 +229,40 @@ class DurableTaskExecutor:
     def _execute(self, task_id: str, target: TaskTarget, args: tuple[Any, ...]) -> Any:
         if not self.store.claim(task_id):
             return None
+        stopped = threading.Event()
+
+        def renew() -> None:
+            while not stopped.wait(self.store.lease_seconds / 3):
+                if not self.store.heartbeat(task_id):
+                    return
+
+        heartbeat = threading.Thread(target=renew, daemon=True, name=f"lease-{task_id}")
+        heartbeat.start()
+        previous_task = current_task_id()
+        _task_context.task_id = task_id
         try:
             result = target(*args)
         except BaseException as error:
             self.store.finish(task_id, status="failed", error=str(error))
             raise
+        finally:
+            _task_context.task_id = previous_task
+            stopped.set()
+            heartbeat.join(timeout=1)
         self.store.finish(task_id, status="completed")
         return result
 
-    def submit(self, *, job_id: str, target: TaskTarget, args: tuple[Any, ...]) -> tuple[str, Future[Any]]:
-        task = self.store.enqueue(job_id=job_id, kind=target.__name__, args=args)
-        future = self.executor.submit(self._execute, task["id"], target, args)
+    def submit(self, *, job_id: str, target: TaskTarget, args: tuple[Any, ...], dedup_key: str | None = None) -> tuple[str, Future[Any]]:
+        task = self.store.enqueue(job_id=job_id, kind=target.__name__, args=args, dedup_key=dedup_key)
+        if task.get("duplicate"):
+            future: Future[Any] = Future()
+            future.set_result({"operationId": task["id"], "duplicate": True})
+            return str(task["id"]), future
+        try:
+            future = self.executor.submit(self._execute, task["id"], target, args)
+        except RuntimeError as error:
+            self.store.finish(task["id"], status="failed", error=str(error))
+            raise
         future.add_done_callback(
             lambda completed: self.store.finish(task["id"], status="cancelled")
             if completed.cancelled() else None

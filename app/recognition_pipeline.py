@@ -30,6 +30,59 @@ ProgressCallback = Callable[[float, str], None]
 RECOGNITION_MODALITIES = frozenset({"speech", "visual", "ocr", "audio", "person"})
 
 
+def person_sampling_interval(duration: float) -> float:
+    """Choose useful person-track density without making long media unusable.
+
+    Four frames per second is valuable for short action clips, but on a
+    ten-minute interview it creates thousands of CPU YOLOX/ReID inferences.
+    Scene boundaries are added separately by ``dense_person_sample_times``, so
+    long-form footage can use a wider continuous interval without losing the
+    first observation after an edit.
+    """
+    seconds = max(0.0, float(duration or 0.0))
+    if seconds <= 120:
+        return .25
+    if seconds <= 900:
+        return .75
+    return 1.0
+
+
+def visual_embedding_backend(settings: Any) -> tuple[str, str, int | None]:
+    """Resolve the visual encoder without making older test fixtures invalid."""
+    backend = str(getattr(settings, "recognition_visual_backend", "siglip") or "siglip").lower()
+    if backend == "wemm":
+        return (
+            "wemm",
+            str(getattr(settings, "recognition_wemm_model", "tencent/WeMM-Embedding-2B")),
+            int(getattr(settings, "recognition_wemm_dimension", 256) or 256),
+        )
+    return "siglip", str(getattr(settings, "recognition_siglip_model", "")), None
+
+
+def visual_video_spans(
+    shots: list[dict[str, Any]], *, maximum_seconds: float = 64.0,
+) -> list[tuple[str, float, float]]:
+    """Split scene-bounded shots into video-embedding windows.
+
+    The official WeMM evaluation caps videos at 64 frames.  Keeping a 64-second
+    maximum at 1 FPS avoids silently reducing a long source to a single vector
+    while retaining scene boundaries as the primary temporal unit.
+    """
+    limit = max(2.0, float(maximum_seconds))
+    spans: list[tuple[str, float, float]] = []
+    for shot in shots:
+        start = float(shot.get("start") or 0)
+        end = max(start + .2, float(shot.get("end") or start + .2))
+        position = 0
+        cursor = start
+        while cursor < end - .05:
+            span_end = min(end, cursor + limit)
+            spans.append((f"{str(shot.get('id') or 'shot')}_video_{position:02d}", cursor, span_end))
+            cursor = span_end
+            position += 1
+    return spans
+
+
 def recognition_work_plan(
     requested_modalities: set[str] | list[str] | tuple[str, ...] | None,
     *, recognition_profile: str,
@@ -163,7 +216,6 @@ def enrich_multimodal_index(
     speech_analysis_complete: bool = False,
     scope_start: float = 0.0, scope_end: float | None = None,
     progress: ProgressCallback | None = None, cancelled: Callable[[], bool] | None = None,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     """Build optional v4 evidence without making an unavailable model fatal."""
     report = progress or (lambda _value, _detail: None)
@@ -219,9 +271,10 @@ def enrich_multimodal_index(
         generic_times = _spread(dense_person_sample_times(
             shots, start=bounded_start, end=bounded_end, interval=2.0,
         ), 300)
+    person_interval = person_sampling_interval(bounded_end - bounded_start)
     person_times = dense_person_sample_times(
         shots, start=bounded_start, end=bounded_end,
-        interval=.25 if algorithm_version == "editing-algorithm-v2" else .5,
+        interval=person_interval,
     ) if work["needsPersons"] else []
     # Person recognition has an exhaustive coverage contract. Keep it on its
     # own dense frame stream so a person-only request does not inherit the
@@ -260,6 +313,7 @@ def enrich_multimodal_index(
             root / "recognition-frames",
             selected_times,
             ffmpeg=ffmpeg,
+            cancelled=is_cancelled,
             progress_callback=frame_progress_reporter(
                 "人物识别 1/2 · 正在解码分析帧"
                 if person_only_frames else "正在抽取多模态采样帧",
@@ -277,6 +331,7 @@ def enrich_multimodal_index(
         )
         person_frames = extract_frames_at_times(
             source, root / "person-frames", person_times, ffmpeg=ffmpeg,
+            cancelled=is_cancelled,
             progress_callback=frame_progress_reporter(
                 "人物识别 1/2 · 正在解码分析帧", start=.2, span=.16,
             ),
@@ -289,7 +344,7 @@ def enrich_multimodal_index(
         "shots": shots if work["needsFrames"] else [], "embeddingIndexes": {},
         "recognitionProfile": profile, "degradedReasons": [], "recognitionFrameCount": len(frames),
         "personSampling": {
-            "intervalSeconds": (.25 if algorithm_version == "editing-algorithm-v2" else .5) if work["needsPersons"] else None,
+            "intervalSeconds": person_interval if work["needsPersons"] else None,
             "requestedFrameCount": len(person_times),
             "extractedFrameCount": len(person_frames),
             "coverageMode": "continuous_sampled" if work["needsPersons"] else "not_requested",
@@ -328,6 +383,8 @@ def enrich_multimodal_index(
             result["recognitionCompletedModalities"].append("ocr")
             result["recognitionAvailableModalities"].append("ocr")
         except Exception as error:
+            if is_cancelled():
+                raise RuntimeError("任务已取消") from error
             result["degradedReasons"].append(f"ocr_unavailable:{str(error)[:160]}")
 
     if work["needsPersons"]:
@@ -339,8 +396,7 @@ def enrich_multimodal_index(
 
             face_engine = AnonymousFaceEngine(settings.recognition_yunet_model, settings.recognition_sface_model, device=device)
             use_body_pipeline = bool(
-                algorithm_version == "editing-algorithm-v2"
-                and Path(settings.recognition_yolox_model).is_file()
+                Path(settings.recognition_yolox_model).is_file()
                 and Path(settings.recognition_youtureid_model).is_file()
             )
             body_engine = AnonymousBodyEngine(
@@ -355,6 +411,8 @@ def enrich_multimodal_index(
             for frame_position, (frame_path, time_value) in enumerate(
                 zip(person_paths, person_times_actual), 1,
             ):
+                if is_cancelled():
+                    raise RuntimeError("任务已取消")
                 if body_engine is None:
                     tracks.extend(face_engine.detect(frame_path, time_value=time_value))
                 else:
@@ -408,7 +466,6 @@ def enrich_multimodal_index(
                 tracks, scene_cuts=scene_cuts,
                 similarity_threshold=.68 if body_engine is not None else .42,
                 maximum_gap=.8 if body_engine is not None else 2.0,
-                algorithm_version=algorithm_version,
             )
             person_for_track = {
                 track_id: person["id"]
@@ -425,10 +482,12 @@ def enrich_multimodal_index(
             result["personIdentityPipeline"] = (
                 "yolox-youtureid-sface-anchor-v3" if body_engine is not None else "yunet-sface-fallback-v1"
             )
-            if algorithm_version == "editing-algorithm-v2" and body_engine is None:
+            if body_engine is None:
                 result["degradedReasons"].append("person_body_models_unavailable_face_only_fallback")
             report(.54, f"人物识别完成 · {len(result['persons'])} 个人物簇")
         except Exception as error:
+            if is_cancelled():
+                raise RuntimeError("任务已取消") from error
             result["degradedReasons"].append(f"anonymous_persons_unavailable:{str(error)[:160]}")
 
     if work["needsVisualEmbeddings"]:
@@ -436,25 +495,100 @@ def enrich_multimodal_index(
         result["embeddingVisualUnits"] = []
         try:
             report(.55, "正在建立画面语义索引")
-            from .recognition_models import SiglipEncoder
+            backend, visual_model, visual_dimension = visual_embedding_backend(settings)
+            if backend == "wemm":
+                from .recognition_models import WeMMEncoder
 
+                encoder = WeMMEncoder(
+                    visual_model, dimension=int(visual_dimension or 256),
+                    device=device, cache_dir=settings.recognition_model_cache,
+                )
+                image_batch_size = 4 if cuda else 1
+            else:
+                from .recognition_models import SiglipEncoder
+
+                encoder = SiglipEncoder(
+                    visual_model, device=device,
+                    cache_dir=settings.recognition_model_cache,
+                )
+                image_batch_size = 16 if cuda else 4
             embedding_frames = frames if effective == "full" else _spread(frames, min(240, len(frames)))
-            encoder = SiglipEncoder(settings.recognition_siglip_model, device=device, cache_dir=settings.recognition_model_cache)
-            matrix = encoder.encode_images([Path(frame.path) for frame in embedding_frames], batch_size=16 if cuda else 4)
+            matrix = encoder.encode_images(
+                [Path(frame.path) for frame in embedding_frames],
+                batch_size=image_batch_size,
+            )
             frame_ids = [f"frame_{float(frame.time):010.3f}" for frame in embedding_frames]
             result["embeddingVisualUnits"] = [{
                 "id": frame_id, "modality": "visual", "start": round(max(0.0, float(frame.time) - .5), 3),
                 "end": round(min(duration, float(frame.time) + .5), 3), "title": "画面语义证据帧",
-                "text": "画面语义证据帧", "evidenceTimes": [round(float(frame.time), 3)],
-                "confidence": .5, "source": "siglip2",
+                "text": "画面语义证据帧", "evidenceTime": round(float(frame.time), 3),
+                "evidenceTimes": [round(float(frame.time), 3)], "confidence": .5,
+                "source": "wemm_image" if backend == "wemm" else "siglip2",
+                "unitKind": "frame", "embeddingBackend": backend,
             } for frame_id, frame in zip(frame_ids, embedding_frames)]
-            manifest = write_embedding_matrix(root / "visual-embeddings.npy", frame_ids, matrix, model=settings.recognition_siglip_model)
+            manifest = write_embedding_matrix(
+                root / "visual-embeddings.npy", frame_ids, matrix, model=visual_model,
+            )
+            manifest.update({
+                "backend": backend,
+                "dimension": int(matrix.shape[1]) if matrix.ndim == 2 and matrix.size else visual_dimension,
+                "unitKind": "frame",
+            })
             manifest["times"] = [round(float(frame.time), 3) for frame in embedding_frames]
             (root / "visual-embeddings.json").write_text(__import__("json").dumps(manifest, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             result["embeddingIndexes"]["visual"] = manifest
+
+            if backend == "wemm" and bool(getattr(settings, "recognition_wemm_video_index", True)):
+                try:
+                    report(.64, "正在建立视频片段语义索引")
+                    span_rows = visual_video_spans(shots)
+                    span_matrix = encoder.encode_video_spans(
+                        source, [(start, end) for _span_id, start, end in span_rows],
+                        batch_size=1, fps=1.0, max_frames=64,
+                    )
+                    span_ids = [span_id for span_id, _start, _end in span_rows]
+                    video_units = [{
+                        "id": span_id,
+                        "modality": "visual",
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "duration": round(max(0.0, end - start), 3),
+                        "title": "视频片段语义窗口",
+                        "text": "视频片段语义窗口",
+                        "evidenceTime": round((start + end) * .5, 3),
+                        "evidenceTimes": [round((start + end) * .5, 3)],
+                        "confidence": .5,
+                        "source": "wemm_video",
+                        "unitKind": "video",
+                        "embeddingBackend": "wemm",
+                    } for span_id, start, end in span_rows]
+                    video_manifest = write_embedding_matrix(
+                        root / "visual-video-embeddings.npy", span_ids, span_matrix,
+                        model=visual_model,
+                    )
+                    video_manifest.update({
+                        "backend": "wemm",
+                        "dimension": int(span_matrix.shape[1]) if span_matrix.ndim == 2 and span_matrix.size else visual_dimension,
+                        "unitKind": "video",
+                        "spans": [[round(start, 3), round(end, 3)] for _span_id, start, end in span_rows],
+                    })
+                    (root / "visual-video-embeddings.json").write_text(
+                        json.dumps(video_manifest, ensure_ascii=False, separators=(",", ":")),
+                        encoding="utf-8",
+                    )
+                    result["embeddingVisualUnits"].extend(video_units)
+                    result["embeddingIndexes"]["visualVideo"] = video_manifest
+                except Exception as error:
+                    if is_cancelled():
+                        raise RuntimeError("任务已取消") from error
+                    result["degradedReasons"].append(
+                        f"visual_video_embeddings_unavailable:{str(error)[:160]}"
+                    )
             result["recognitionCompletedModalities"].append("visual")
             result["recognitionAvailableModalities"].append("visual")
         except Exception as error:
+            if is_cancelled():
+                raise RuntimeError("任务已取消") from error
             result["degradedReasons"].append(f"visual_embeddings_unavailable:{str(error)[:160]}")
 
     if work["needsAudio"]:
@@ -474,6 +608,8 @@ def enrich_multimodal_index(
                 result["embeddingIndexes"]["audio"] = manifest
                 audio_complete = True
             except Exception as error:
+                if is_cancelled():
+                    raise RuntimeError("任务已取消") from error
                 audio_complete = False
                 result["degradedReasons"].append(f"audio_embeddings_unavailable:{str(error)[:160]}")
         if audio_complete:
@@ -499,6 +635,8 @@ def enrich_multimodal_index(
                 matrix, model=settings.recognition_text_model,
             )
         except Exception as error:
+            if is_cancelled():
+                raise RuntimeError("任务已取消") from error
             result["degradedReasons"].append(f"text_embeddings_unavailable:{str(error)[:160]}")
     result["recognitionSkippedModalities"] = sorted(RECOGNITION_MODALITIES - requested)
     report(1.0, "所需内容索引已完成")
@@ -514,7 +652,6 @@ def enrich_multimodal_index_isolated(
     scope_start: float = 0.0, scope_end: float | None = None,
     progress: ProgressCallback | None = None,
     cancelled: Callable[[], bool] | None = None,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> dict[str, Any]:
     """Run native optional models outside the API process when configured."""
     report = progress or (lambda _value, _detail: None)
@@ -530,7 +667,6 @@ def enrich_multimodal_index_isolated(
         "requestedModalities": sorted(requested_modalities or RECOGNITION_MODALITIES),
         "speechAnalysisComplete": bool(speech_analysis_complete),
         "scopeStart": float(scope_start), "scopeEnd": scope_end,
-        "algorithmVersion": algorithm_version,
         "ffmpeg": ffmpeg,
         "settings": {
             "recognition_ocr_enabled": bool(settings.recognition_ocr_enabled),
@@ -539,6 +675,11 @@ def enrich_multimodal_index_isolated(
             "recognition_yolox_model": str(settings.recognition_yolox_model),
             "recognition_youtureid_model": str(settings.recognition_youtureid_model),
             "recognition_siglip_model": settings.recognition_siglip_model,
+            "recognition_visual_backend": str(getattr(settings, "recognition_visual_backend", "siglip")),
+            "recognition_wemm_model": str(getattr(settings, "recognition_wemm_model", "tencent/WeMM-Embedding-2B")),
+            "recognition_wemm_dimension": int(getattr(settings, "recognition_wemm_dimension", 256)),
+            "recognition_wemm_video_index": bool(getattr(settings, "recognition_wemm_video_index", True)),
+            "recognition_wemm_recall_threshold": float(getattr(settings, "recognition_wemm_recall_threshold", .18)),
             "recognition_text_model": settings.recognition_text_model,
             "recognition_clap_model": settings.recognition_clap_model,
             "recognition_grounding_model": settings.recognition_grounding_model,
@@ -608,6 +749,91 @@ def enrich_multimodal_index_isolated(
         progress_path.unlink(missing_ok=True)
 
 
+def encode_wemm_inputs(
+    *,
+    texts: list[str] | None,
+    image_paths: list[Path] | None,
+    directory: Path,
+    worker_python: str,
+    model_id: str,
+    dimension: int,
+    device: str,
+    model_cache: Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Encode text/image batches in the optional Transformers 5.x worker env.
+
+    This deliberately optimizes for dependency isolation, not warm-query
+    latency. Deployments with sustained traffic should keep the worker/model
+    warm; the file protocol remains useful as the compatible fallback.
+    """
+    text_values = list(texts or [])
+    path_values = [Path(value) for value in image_paths or []]
+    worker_python = str(worker_python or "").strip()
+    if not worker_python:
+        from .recognition_models import WeMMEncoder
+
+        encoder = WeMMEncoder(
+            model_id, dimension=dimension, device=device, cache_dir=model_cache,
+        )
+        text_matrix = (
+            encoder.encode_texts(text_values)
+            if text_values else np.empty((0, dimension), dtype=np.float32)
+        )
+        image_matrix = (
+            encoder.encode_images(path_values, batch_size=4)
+            if path_values else np.empty((0, dimension), dtype=np.float32)
+        )
+        return text_matrix, image_matrix
+    directory.mkdir(parents=True, exist_ok=True)
+    request_id = uuid.uuid4().hex
+    request_path = directory / f"recognition-query-request-{request_id}.json"
+    response_path = directory / f"recognition-query-response-{request_id}.json"
+    request_path.write_text(json.dumps({
+        "operation": "embedding_batch",
+        "texts": text_values,
+        "imagePaths": [str(value) for value in path_values],
+        "model": model_id,
+        "dimension": dimension,
+        "device": device,
+        "modelCache": str(model_cache),
+        "responsePath": str(response_path),
+        "ownerPid": os.getpid(),
+    }, ensure_ascii=False), encoding="utf-8")
+    try:
+        completed = subprocess.run(
+            [worker_python, "-m", "app.recognition_worker", str(request_path)],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=300,
+        )
+        if completed.returncode or not response_path.is_file():
+            detail = completed.stderr.decode("utf-8", errors="replace")[-1200:]
+            raise RuntimeError(detail or "隔离 WeMM 查询编码失败")
+        payload = json.loads(response_path.read_text(encoding="utf-8"))
+        text_matrix = np.asarray(payload.get("textEmbeddings") or [], dtype=np.float32)
+        image_matrix = np.asarray(payload.get("imageEmbeddings") or [], dtype=np.float32)
+        if text_values and (text_matrix.ndim != 2 or len(text_matrix) != len(text_values)):
+            raise RuntimeError("隔离 WeMM 文本编码返回格式无效")
+        if path_values and (image_matrix.ndim != 2 or len(image_matrix) != len(path_values)):
+            raise RuntimeError("隔离 WeMM 图片编码返回格式无效")
+        return text_matrix, image_matrix
+    finally:
+        request_path.unlink(missing_ok=True)
+        response_path.unlink(missing_ok=True)
+
+
+def _wemm_text_embedding_isolated(
+    query: str, directory: Path, settings: Any, *, device: str,
+) -> np.ndarray:
+    text_matrix, _image_matrix = encode_wemm_inputs(
+        texts=[query], image_paths=[], directory=directory,
+        worker_python=str(getattr(settings, "recognition_worker_python", "") or ""),
+        model_id=str(getattr(settings, "recognition_wemm_model", "tencent/WeMM-Embedding-2B")),
+        dimension=int(getattr(settings, "recognition_wemm_dimension", 256) or 256),
+        device=device, model_cache=settings.recognition_model_cache,
+    )
+    return text_matrix[0]
+
+
 def query_embedding_indexes(
     query: str, index: dict[str, Any], directory: Path, settings: Any,
     *, modalities: set[str], limit: int = 16,
@@ -620,15 +846,35 @@ def query_embedding_indexes(
     device = "cuda" if profile.get("effective") == "full" else "cpu"
     if "visual" in modalities and isinstance(manifests.get("visual"), dict):
         try:
-            from .recognition_models import SiglipEncoder
+            backend, visual_model, visual_dimension = visual_embedding_backend(settings)
+            if backend == "wemm":
+                vector = _wemm_text_embedding_isolated(query, directory, settings, device=device)
+            else:
+                from .recognition_models import SiglipEncoder
 
-            vector = SiglipEncoder(
-                settings.recognition_siglip_model, device=device,
-                cache_dir=settings.recognition_model_cache,
-            ).encode_texts([query])[0]
-            rows.extend({**item, "modality": "visual"} for item in vector_recall(
-                vector, manifests["visual"], directory, limit=limit,
-            ))
+                vector = SiglipEncoder(
+                    visual_model, device=device,
+                    cache_dir=settings.recognition_model_cache,
+                ).encode_texts([query])[0]
+            threshold = (
+                float(getattr(settings, "recognition_wemm_recall_threshold", .18))
+                if backend == "wemm" else -1.0
+            )
+            visual_manifests = [("visual", manifests["visual"])]
+            if backend == "wemm" and isinstance(manifests.get("visualVideo"), dict):
+                visual_manifests.append(("visualVideo", manifests["visualVideo"]))
+            for index_kind, visual_manifest in visual_manifests:
+                recalled = vector_recall(vector, visual_manifest, directory, limit=limit)
+                rows.extend({
+                    **item,
+                    "modality": "visual",
+                    "embeddingBackend": backend,
+                    "embeddingModel": visual_model,
+                    "embeddingDimension": visual_dimension,
+                    "indexKind": index_kind,
+                    "evidenceStatus": "embedding_recalled" if backend == "wemm" else "recall_only",
+                    "threshold": threshold,
+                } for item in recalled if float(item.get("score") or -1) >= threshold)
         except Exception as error:
             warnings.append(f"visual_vector_query_unavailable:{str(error)[:140]}")
     if "audio" in modalities and isinstance(manifests.get("audio"), dict):

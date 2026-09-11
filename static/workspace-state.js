@@ -2,6 +2,7 @@
   const STATES = Object.freeze({
     HOME: "home",
     PREPARING: "preparing",
+    AWAITING_INSTRUCTION: "awaiting_instruction",
     UPLOADING: "uploading",
     ROUTING_CONFIRMATION: "routing_confirmation",
     ANALYSING: "analysing",
@@ -12,21 +13,101 @@
     FAILED: "failed",
   });
 
+  const PRESENTATION_STATES = Object.freeze({
+    HOME: "home",
+    WAITING_INSTRUCTION: "waiting_instruction",
+    PLAN_PLANNING: "plan_planning",
+    PLAN_CONFIRMATION: "plan_confirmation",
+    RUNNING: "running",
+    CONTENT_REVIEW: "content_review",
+    PREVIEW_REVIEW: "preview_review",
+    EXPORT_RUNNING: "export_running",
+    EXPORTED: "exported",
+    HANDED_OFF: "handed_off",
+    NO_RESULT: "no_result",
+    FAILED: "failed",
+    CANCELLED: "cancelled",
+  });
+
+  const EMPTY_EXECUTION = Object.freeze({
+    schemaVersion: 1,
+    status: "idle",
+    operation: "none",
+    phase: "",
+    active: false,
+    background: false,
+    outcome: "none",
+    progress: {},
+    result: {},
+    capabilities: {},
+  });
+
+  const HOME_PRESENTATION = Object.freeze({
+    schemaVersion: 3,
+    key: PRESENTATION_STATES.HOME,
+    group: "other",
+    label: "等待创建任务",
+    headline: "开始一个剪辑任务",
+    detail: "上传视频后描述想保留的内容。",
+    railTitle: "开始剪辑",
+    running: false,
+    tone: "neutral",
+    primaryActionKey: "upload",
+    outputCount: 0,
+    previewCount: 0,
+  });
+
+  function execution(job = null) {
+    const value = job?.execution;
+    return value && Number(value.schemaVersion) >= 1
+      ? Object.freeze({ ...value })
+      : EMPTY_EXECUTION;
+  }
+
+  function derivePresentation(job = null) {
+    if (!job) return HOME_PRESENTATION;
+    const value = job.presentation;
+    if (value && Number(value.schemaVersion) >= 2 && value.key) {
+      return Object.freeze({ ...value });
+    }
+    // Presentation precedence belongs to the backend. A partial local job must
+    // wait for its public snapshot instead of rebuilding a second rule model.
+    return Object.freeze({
+      schemaVersion: 3,
+      key: PRESENTATION_STATES.RUNNING,
+      group: "other",
+      label: "正在同步任务状态",
+      headline: "正在同步任务状态",
+      detail: "正在读取统一任务状态，请稍候。",
+      railTitle: "任务状态",
+      running: false,
+      tone: "neutral",
+      primaryActionKey: null,
+      outputCount: 0,
+      previewCount: 0,
+    });
+  }
+
   function derive({ job = null, hasUpload = false, uploading = false, routingConfirmation = false, home = false } = {}) {
     if (home) return STATES.HOME;
     if (uploading) return STATES.UPLOADING;
     if (routingConfirmation) return STATES.ROUTING_CONFIRMATION;
     if (!job) return hasUpload ? STATES.PREPARING : STATES.HOME;
-    const execution = job.execution && Number(job.execution.schemaVersion) >= 1 ? job.execution : null;
-    const workflow = job.presentation || job.workflow || null;
-    const status = String(execution?.status || job.status || "");
-    if (["failed", "cancelled"].includes(status)) return STATES.FAILED;
     if (job.reediting) return STATES.REVISING;
-    if (status === "completed" || execution?.outcome === "output_ready" || workflow?.phase === "complete") return STATES.COMPLETED;
-    if (["render", "auto_composition", "quality_review"].includes(String(execution?.operation || ""))
-      || ["render", "complete"].includes(String(workflow?.phase || ""))) return STATES.COMPOSING;
-    if (status === "waiting_user" || workflow?.state === "action_required" || workflow?.phase === "review") return STATES.REVIEWING;
-    if (execution?.active || ["queued", "running", "cancelling", "awaiting_model_decision"].includes(status)) return STATES.ANALYSING;
+
+    const key = derivePresentation(job).key;
+    if ([PRESENTATION_STATES.FAILED, PRESENTATION_STATES.CANCELLED].includes(key)) return STATES.FAILED;
+    if (key === PRESENTATION_STATES.WAITING_INSTRUCTION) return STATES.AWAITING_INSTRUCTION;
+    if (key === PRESENTATION_STATES.EXPORTED) return STATES.COMPLETED;
+    if (key === PRESENTATION_STATES.EXPORT_RUNNING) return STATES.COMPOSING;
+    if ([
+      PRESENTATION_STATES.PLAN_CONFIRMATION,
+      PRESENTATION_STATES.CONTENT_REVIEW,
+      PRESENTATION_STATES.PREVIEW_REVIEW,
+      PRESENTATION_STATES.NO_RESULT,
+      PRESENTATION_STATES.HANDED_OFF,
+    ].includes(key)) return STATES.REVIEWING;
+    if ([PRESENTATION_STATES.PLAN_PLANNING, PRESENTATION_STATES.RUNNING].includes(key)) return STATES.ANALYSING;
     return STATES.PREPARING;
   }
 
@@ -74,8 +155,40 @@
     });
   }
 
+  // Group execution records only through explicit handoffs, never filenames.
+  // Missing descendants remain navigable; pagination must not hide a task.
+  function logicalTasks(jobs = []) {
+    const records = new Map(jobs.map(job => [String(job.id), job]));
+    const nextId = job => String(job?.latestHandoff?.toJobId || job?.handoff?.activeChildJobId
+      || job?.agentHandoffJobId || job?.presentation?.handoffJobId || "");
+    const groups = new Map();
+    for (const job of records.values()) {
+      let current = job;
+      const visited = new Set();
+      while (records.has(nextId(current)) && !visited.has(String(current.id))) {
+        visited.add(String(current.id));
+        current = records.get(nextId(current));
+      }
+      // Corrupt cycles are grouped deterministically, not silently discarded.
+      if (visited.has(String(current.id))) current = records.get([...visited].sort()[0]);
+      const key = String(current.id);
+      if (!groups.has(key)) groups.set(key, { ...current, executionHistory: [], openJobId: visited.has(key) ? key : nextId(current) || key });
+      if (String(job.id) !== key) groups.get(key).executionHistory.push(job);
+    }
+    return [...groups.values()].sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+  }
+
+  function formatTime(seconds) {
+    const number = Number(seconds);
+    const total = Number.isFinite(number) ? Math.max(0, Math.round(number * 10)) : 0;
+    const hours = Math.floor(total / 36000);
+    const minutes = Math.floor(total % 36000 / 600);
+    const rest = (total % 600 / 10).toFixed(1).padStart(4, "0");
+    return `${hours ? `${String(hours).padStart(2, "0")}:` : ""}${String(minutes).padStart(2, "0")}:${rest}`;
+  }
+
   global.ClipTalkWorkspaceState = Object.freeze({
-    STATES, WORKFLOWS, PHASES, PANELS, MEDIA_KINDS, SELECTION_PURPOSES,
-    derive, deriveView, create,
+    STATES, PRESENTATION_STATES, WORKFLOWS, PHASES, PANELS, MEDIA_KINDS, SELECTION_PURPOSES,
+    derive, derivePresentation, deriveView, execution, create, logicalTasks, formatTime,
   });
 })(window);

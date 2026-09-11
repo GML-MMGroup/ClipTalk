@@ -21,6 +21,26 @@ def main() -> None:
         raise SystemExit("usage: python -m app.recognition_worker REQUEST.json")
     request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     owner_pid = int(request.get("ownerPid") or 0)
+    if request.get("operation") in {"embedding_query", "embedding_batch"}:
+        from .recognition_models import WeMMEncoder
+
+        encoder = WeMMEncoder(
+            str(request.get("model") or "tencent/WeMM-Embedding-2B"),
+            dimension=int(request.get("dimension") or 256),
+            device=str(request.get("device") or "auto"),
+            cache_dir=Path(request["modelCache"]) if request.get("modelCache") else None,
+        )
+        texts = list(request.get("texts") or [])
+        if request.get("operation") == "embedding_query":
+            texts = [str(request.get("query") or "")]
+        image_paths = [Path(value) for value in request.get("imagePaths") or []]
+        text_matrix = encoder.encode_texts(texts) if texts else []
+        image_matrix = encoder.encode_images(image_paths, batch_size=4) if image_paths else []
+        write_json(Path(request["responsePath"]), {
+            "textEmbeddings": text_matrix.tolist() if hasattr(text_matrix, "tolist") else [],
+            "imageEmbeddings": image_matrix.tolist() if hasattr(image_matrix, "tolist") else [],
+        })
+        return
     progress_path = Path(request["progressPath"])
 
     def owner_alive() -> bool:
@@ -56,7 +76,6 @@ def main() -> None:
         speech_analysis_complete=bool(request.get("speechAnalysisComplete")),
         scope_start=float(request.get("scopeStart") or 0),
         scope_end=float(request["scopeEnd"]) if request.get("scopeEnd") is not None else None,
-        algorithm_version=str(request.get("algorithmVersion") or "editing-algorithm-v1"),
         ffmpeg=str(request["ffmpeg"]),
         progress=report,
         cancelled=lambda: not owner_alive(),

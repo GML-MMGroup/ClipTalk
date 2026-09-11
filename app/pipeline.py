@@ -14,6 +14,7 @@ from PIL import Image, ImageChops, ImageStat
 
 from .edit_boundaries import annotate_candidate_boundaries
 from .ark_client import VisionModelClient
+from .algorithm_contract import CURRENT_ALGORITHM_VERSION
 from .event_groups import (
     allocate_event_group_budget,
     build_event_groups,
@@ -51,7 +52,7 @@ from .speech import analyze_speech, speech_evidence, transcript_context
 
 
 ProgressCallback = Callable[..., None]
-ANALYSIS_CACHE_VERSION = f"visual-highlights-v17-constrained-semantic-edl-{PROMPT_VERSION}"
+ANALYSIS_CACHE_VERSION = f"visual-highlights-v18-wemm-coarse-recall-{PROMPT_VERSION}"
 
 
 class ModelDecisionRequired(RuntimeError):
@@ -247,27 +248,16 @@ def merge_priority_frames(
 
 def refinement_candidate_limit(
     *, discovery_only: bool, total_target_seconds: float | None, target_seconds: float, count: int,
-    video_duration: float | None = None, algorithm_version: str = "editing-algorithm-v1",
+    video_duration: float | None = None,
 ) -> int:
     if discovery_only:
         duration = max(0.0, float(video_duration or 0.0))
-        if algorithm_version == "editing-algorithm-v2":
-            recall_budget = min(48, max(
-                12,
-                math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
-                math.ceil(duration / 180.0),
-            ))
-            return min(24, max(6, math.ceil(recall_budget / 2)))
-        # Deep visual boundary review is the expensive part of the pipeline.
-        # Keep a small duration-aware budget here; the wider recall pool is
-        # still retained and aligned locally with speech/scene evidence below.
-        if duration <= 180:
-            return 2
-        if duration <= 900:
-            return 4
-        if duration <= 3600:
-            return 5
-        return 6
+        recall_budget = min(48, max(
+            12,
+            math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
+            math.ceil(duration / 180.0),
+        ))
+        return min(24, max(6, math.ceil(recall_budget / 2)))
     return max(count, min(16, count * 2))
 
 
@@ -743,6 +733,7 @@ def select_montage_moments(
             candidate_visual_similarity(candidate, other) >= .94
             and candidate_text_similarity(candidate, other) >= .5
             and abs((candidate.start + candidate.end) / 2 - (other.start + other.end) / 2) <= 90
+            and min(abs(candidate.start - other.end), abs(other.start - candidate.end)) > .5
             for other in selected
         ):
             continue
@@ -830,6 +821,8 @@ class HighlightPipeline:
     def __init__(
         self, *, client: VisionModelClient, ffmpeg: str, ffprobe: str,
         selection_backend: str = "openai-compatible-vlm", visual_embedding_model: str = "",
+        visual_embedding_backend: str = "siglip", visual_embedding_dimension: int | None = None,
+        visual_embedding_worker_python: str = "",
         model_cache: Path | None = None, embedding_device: str = "auto",
     ) -> None:
         self.client = client
@@ -837,8 +830,73 @@ class HighlightPipeline:
         self.ffprobe = ffprobe
         self.selection_backend = selection_backend
         self.visual_embedding_model = visual_embedding_model
+        self.visual_embedding_backend = str(visual_embedding_backend or "siglip").lower()
+        self.visual_embedding_dimension = visual_embedding_dimension
+        self.visual_embedding_worker_python = str(visual_embedding_worker_python or "")
         self.model_cache = model_cache
         self.embedding_device = embedding_device
+
+    def _embedding_coarse_candidates(
+        self,
+        *,
+        frames: list[SampledFrame],
+        content_profile: dict[str, Any],
+        theme: str,
+        video_duration: float,
+        target_seconds: float,
+        automatic_duration: bool,
+    ) -> list[HighlightCandidate]:
+        """Use WeMM as a broad full-source recall stage before VLM refinement."""
+        if self.visual_embedding_backend != "wemm" or not self.visual_embedding_model:
+            return []
+        criteria = [
+            str(theme or "").strip(),
+            *[str(value).strip() for value in content_profile.get("highlightDefinition") or []],
+            f"{str(content_profile.get('primaryType') or '视频')}中值得保留的关键动作、变化、反应或视觉高潮",
+        ]
+        criteria = list(dict.fromkeys(value for value in criteria if value))[:10]
+        from .recognition_pipeline import encode_wemm_inputs
+
+        text_vectors, image_vectors = encode_wemm_inputs(
+            texts=criteria, image_paths=[Path(frame.path) for frame in frames],
+            directory=Path(frames[0].path).parent / "wemm-worker",
+            worker_python=self.visual_embedding_worker_python,
+            model_id=self.visual_embedding_model,
+            dimension=int(self.visual_embedding_dimension or 256),
+            device=self.embedding_device,
+            model_cache=self.model_cache or Path("data/models/recognition"),
+        )
+        similarities = image_vectors @ text_vectors.T
+        scores = similarities.max(axis=1)
+        target = min(len(frames), max(24, min(64, coarse_frame_limit(video_duration) // 2)))
+        minimum_separation = max(1.0, min(8.0, video_duration / max(1, target) * .45))
+        selected: list[int] = []
+        for position in np.argsort(-scores).tolist():
+            if any(abs(frames[position].time - frames[other].time) < minimum_separation for other in selected):
+                continue
+            selected.append(position)
+            if len(selected) >= target:
+                break
+        candidates: list[HighlightCandidate] = []
+        for rank, position in enumerate(selected):
+            frame = frames[position]
+            raw_score = float(scores[position])
+            percentile_score = 88.0 - 30.0 * rank / max(1, len(selected) - 1)
+            candidate = _candidate_from_coarse({
+                "center_seconds": frame.time,
+                "suggested_duration": 10.0 if automatic_duration else target_seconds,
+                "score": percentile_score,
+                "title": "WeMM 语义召回候选",
+                "reason": f"全片多模态向量召回（相似度 {raw_score:.3f}），待视觉精修确认",
+                "evidence": [f"WeMM 在 {frame.time:.2f} 秒证据帧召回该候选"],
+            }, duration=video_duration, target_seconds=target_seconds, automatic_duration=automatic_duration)
+            if candidate is not None:
+                candidates.append(replace(
+                    candidate,
+                    candidate_origin="wemm_embedding",
+                    semantic_status="recalled",
+                ))
+        return candidates
 
     def _analyze_with_heartbeat(
         self,
@@ -985,7 +1043,6 @@ class HighlightPipeline:
         usage: list[dict[str, Any]],
         progress: ProgressCallback,
         degraded: bool = False,
-        algorithm_version: str = "editing-algorithm-v1",
     ) -> dict[str, Any]:
         candidates = annotate_candidate_boundaries(
             candidates,
@@ -1020,7 +1077,7 @@ class HighlightPipeline:
         progress(1.0, "awaiting_confirmation", f"VLM 精修保留 {len(candidates)} 个候选镜头，已归并为 {len(event_groups)} 个精彩事件")
         return {
             "schemaVersion": 4,
-            "algorithmVersion": algorithm_version,
+            "algorithmVersion": CURRENT_ALGORITHM_VERSION,
             "promptVersion": PROMPT_VERSION,
             "source": source.name,
             "video": info,
@@ -1087,7 +1144,6 @@ class HighlightPipeline:
         requested_count: int | None = None,
         resume_action: str | None = None,
         scene_cuts: list[float] | None = None,
-        algorithm_version: str = "editing-algorithm-v1",
     ) -> dict[str, Any]:
         exclusions = [
             (max(0.0, float(start)), max(0.0, float(end)))
@@ -1167,7 +1223,6 @@ class HighlightPipeline:
                 usage=usage,
                 progress=progress,
                 degraded=degraded,
-                algorithm_version=algorithm_version,
             )
             manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {**checkpoint, "phase": "completed", "decisionRequired": False})
@@ -1198,7 +1253,6 @@ class HighlightPipeline:
                         spk_model=sensevoice_spk_model, diarization=sensevoice_diarization,
                         model_cache=speech_model_cache, whisper_model=whisper_model,
                         whisper_device=whisper_device, cancelled=cancelled,
-                        algorithm_version=algorithm_version,
                     )
                     speech_segments = list(speech_analysis.get("segments") or [])
                     speech_analysis = {**speech_analysis, "status": "ready", "segments": len(speech_segments)}
@@ -1337,7 +1391,6 @@ class HighlightPipeline:
                             model_cache=speech_model_cache, whisper_model=whisper_model,
                             whisper_device=whisper_device, cancelled=cancelled,
                             progress_callback=report_speech_progress,
-                            algorithm_version=algorithm_version,
                         )
                         speech_segments = list(speech_analysis.get("segments") or [])
                         speech_analysis = {**speech_analysis, "status": "ready", "segments": len(speech_segments)}
@@ -1473,7 +1526,24 @@ class HighlightPipeline:
         # without reducing full-video coverage.
         pages = [frames[index:index + 16] for index in range(0, len(frames), 16)]
         coarse: list[HighlightCandidate] = []
-        for index, page in enumerate(pages):
+        embedding_coarse: list[HighlightCandidate] = []
+        if self.visual_embedding_backend == "wemm":
+            try:
+                progress(.14, "coarse_embedding", "WeMM 正在全片召回高光候选")
+                embedding_coarse = self._embedding_coarse_candidates(
+                    frames=frames, content_profile=content_profile, theme=theme,
+                    video_duration=info.duration, target_seconds=target_seconds,
+                    automatic_duration=automatic_duration,
+                )
+                coarse.extend(embedding_coarse)
+                progress(
+                    .50, "coarse_embedding",
+                    f"WeMM 已从 {len(frames)} 帧中召回 {len(embedding_coarse)} 个候选",
+                    {"completed": len(frames), "total": len(frames), "unit": "帧", "fraction": 1.0},
+                )
+            except Exception:
+                embedding_coarse = []
+        for index, page in enumerate([] if embedding_coarse else pages):
             if cancelled():
                 raise RuntimeError("任务已取消")
             sheet = create_contact_sheet(page, work_directory / "coarse-sheets" / f"sheet-{index:03d}.jpg")
@@ -1530,17 +1600,15 @@ class HighlightPipeline:
                 )
                 if candidate:
                     page_candidates.append(candidate)
-            coarse.extend(
-                calibrate_page_candidate_scores(page_candidates)
-                if algorithm_version == "editing-algorithm-v2" else page_candidates
-            )
+            coarse.extend(calibrate_page_candidate_scores(page_candidates))
 
-        progress(
-            .50,
-            "coarse_vlm",
-            f"已完成 {len(pages)}/{len(pages)} 组画面分析",
-            {"completed": len(pages), "total": len(pages), "unit": "组", "fraction": 1.0},
-        )
+        if not embedding_coarse:
+            progress(
+                .50,
+                "coarse_vlm",
+                f"已完成 {len(pages)}/{len(pages)} 组画面分析",
+                {"completed": len(pages), "total": len(pages), "unit": "组", "fraction": 1.0},
+            )
 
         audio_candidates = (
             speech_signal_candidates(speech_segments, video_duration=info.duration)
@@ -1571,22 +1639,17 @@ class HighlightPipeline:
             target_seconds=target_seconds,
             count=count,
             video_duration=info.duration,
-            algorithm_version=algorithm_version,
         )
         # Adjacent moments can be different physical shots belonging to the
         # same event. Do not apply title/one-second-gap deduplication before
         # visual refinement, otherwise a complete event can collapse into one
         # shot. Exact overlaps are removed here; semantic/visual deduplication
         # is deferred until the model has refined the real boundaries.
-        recall_target = (
-            min(48, max(
-                12,
-                math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
-                math.ceil(float(info.duration or 0.0) / 180.0),
-            ))
-            if algorithm_version == "editing-algorithm-v2"
-            else min(18, max(8, count * 3, math.ceil(float(total_target_seconds or 30.0) / 7.0)))
-        )
+        recall_target = min(48, max(
+            12,
+            math.ceil(float(total_target_seconds or target_seconds or 0.0) / 4.0),
+            math.ceil(float(info.duration or 0.0) / 180.0),
+        ))
         recall_pool = select_montage_moments(coarse, recall_target)
         refinement_pool = sorted(
             recall_pool,
@@ -1727,17 +1790,31 @@ class HighlightPipeline:
             if representative_path is not None:
                 refined_visual_paths.append(representative_path)
 
-        if (
-            algorithm_version == "editing-algorithm-v2" and len(refined_visual_paths) == len(refined)
-            and self.visual_embedding_model
-        ):
+        if len(refined_visual_paths) == len(refined) and self.visual_embedding_model:
             try:
-                from .recognition_models import SiglipEncoder
+                if self.visual_embedding_backend == "wemm":
+                    from .recognition_pipeline import encode_wemm_inputs
 
-                embeddings = SiglipEncoder(
-                    self.visual_embedding_model, device=self.embedding_device,
-                    cache_dir=self.model_cache,
-                ).encode_images(refined_visual_paths, batch_size=16)
+                    _text_matrix, embeddings = encode_wemm_inputs(
+                        texts=[], image_paths=refined_visual_paths,
+                        directory=refined_visual_paths[0].parent / "wemm-worker",
+                        worker_python=self.visual_embedding_worker_python,
+                        model_id=self.visual_embedding_model,
+                        dimension=int(self.visual_embedding_dimension or 256),
+                        device=self.embedding_device,
+                        model_cache=self.model_cache or Path("data/models/recognition"),
+                    )
+                else:
+                    from .recognition_models import SiglipEncoder
+
+                    embedding_encoder = SiglipEncoder(
+                        self.visual_embedding_model, device=self.embedding_device,
+                        cache_dir=self.model_cache,
+                    )
+                    embedding_batch_size = 16
+                    embeddings = embedding_encoder.encode_images(
+                        refined_visual_paths, batch_size=embedding_batch_size,
+                    )
                 refined = [
                     replace(candidate, visual_embedding=tuple(float(value) for value in embedding))
                     for candidate, embedding in zip(refined, embeddings)
@@ -1776,9 +1853,7 @@ class HighlightPipeline:
 
         eligible = [candidate for candidate in [*refined, *locally_aligned] if not overlaps_ranges(candidate, exclusions)]
         selected = select_montage_moments(
-            eligible,
-            recall_target if algorithm_version == "editing-algorithm-v2" else min(14, max(8, count * 3)),
-            semantic_dedup=algorithm_version == "editing-algorithm-v2",
+            eligible, recall_target, semantic_dedup=True,
         )
         if not selected:
             raise RuntimeError(
@@ -1879,7 +1954,6 @@ class HighlightPipeline:
                 scene_cuts=list(scene_cuts or []),
                 speech_analysis=speech_analysis,
                 exclusions=exclusions, usage=usage, progress=progress,
-                algorithm_version=algorithm_version,
             )
             manifest["sourceValidation"] = source_validation
             write_analysis_checkpoint(work_directory, {

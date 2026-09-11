@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -53,6 +53,20 @@ class LlmSettingsRequest(BaseModel):
     verifiedAt: str | None = None
 
 
+class AgentSettingsRequest(BaseModel):
+    provider: str = ""
+    apiKey: str = ""
+    model: str = ""
+    baseUrl: str = ""
+    thinkingType: str = ""
+    models: list[dict[str, Any]] | None = None
+    verifiedAt: str | None = None
+
+
+class AgentProbeRequest(AgentSettingsRequest):
+    pass
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -92,6 +106,8 @@ def build_settings_router(
     *,
     vision_store: VisionConfigurationStore,
     llm_store: LlmConfigurationStore,
+    agent_store: LlmConfigurationStore | None = None,
+    agent_probe: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     allow_private_model_endpoints: bool,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -113,6 +129,20 @@ def build_settings_router(
             provider_error="不支持的剪辑规划模型服务商",
             allow_private=allow_private_model_endpoints,
         )
+
+    def resolve_agent_request(request: AgentSettingsRequest) -> tuple[str, str, str]:
+        if agent_store is None:
+            raise HTTPException(503, "Agent 模型配置尚未启用")
+        provider_id, base_url = validate_llm_endpoint(request.provider, request.baseUrl)
+        resolved = agent_store.resolve(provider_id)
+        api_key = _connection_test_api_key(
+            supplied_key=request.apiKey, resolved=resolved, requested_base_url=base_url,
+        )
+        if not api_key or len(api_key) > 4096:
+            raise HTTPException(400, "请填写有效的 Agent API Key")
+        if not request.model.strip() or len(request.model.strip()) > 200:
+            raise HTTPException(400, "请选择有效的 Agent 模型")
+        return provider_id, base_url, api_key
 
     @router.get("/vision")
     def get_vision_settings() -> dict[str, Any]:
@@ -252,5 +282,69 @@ def build_settings_router(
         except VisionRequestError as error:
             raise HTTPException(400, str(error)) from error
         return llm_store.public_state()
+
+    if agent_store is not None:
+        @router.get("/agent")
+        def get_agent_settings() -> dict[str, Any]:
+            return agent_store.public_state()
+
+        @router.post("/agent/discover")
+        def discover_agent_models(request: LlmDiscoverRequest) -> dict[str, Any]:
+            provider_id = request.provider.strip().lower().replace("-", "_")
+            public = agent_store.public_state()
+            provider_state = next((item for item in public["providers"] if item["id"] == provider_id), None)
+            if provider_state is None:
+                raise HTTPException(400, "不支持的 Agent 模型服务商")
+            resolved = agent_store.resolve(provider_id)
+            base_url = request.baseUrl.strip() or str(resolved.get("baseUrl") or provider_state.get("baseUrl") or "")
+            provider_id, base_url = validate_llm_endpoint(provider_id, base_url)
+            api_key = _connection_test_api_key(
+                supplied_key=request.apiKey, resolved=resolved, requested_base_url=base_url,
+            )
+            try:
+                models = discover_llm_models(
+                    api_key=api_key, base_url=base_url, provider=provider_id,
+                    protocol=str(provider_state.get("protocol") or "openai"),
+                    timeout_seconds=min(30.0, float(resolved.get("timeoutSeconds") or 20.0)),
+                )
+            except VisionRequestError as error:
+                raise HTTPException(400, str(error)) from error
+            return {
+                "provider": provider_id, "providerLabel": llm_provider_label(provider_id),
+                "baseUrl": base_url, "models": models, "verifiedAt": _now_iso(),
+                "keyHint": "已验证当前输入的密钥" if request.apiKey.strip() else provider_state.get("keyHint") or "已验证保存的密钥",
+            }
+
+        @router.post("/agent/probe")
+        def probe_agent_model(request: AgentProbeRequest) -> dict[str, Any]:
+            if agent_probe is None:
+                raise HTTPException(503, "Agent Tool Calling 探测服务不可用")
+            provider_id, base_url, api_key = resolve_agent_request(request)
+            resolved = agent_store.resolve(provider_id)
+            try:
+                return agent_probe({
+                    "provider": provider_id, "protocol": resolved.get("protocol") or "openai",
+                    "apiKey": api_key, "model": request.model.strip(), "baseUrl": base_url,
+                    "thinkingType": request.thinkingType.strip().lower(),
+                })
+            except Exception as error:
+                raise HTTPException(400, f"Agent Tool Calling 探测失败：{error}") from error
+
+        @router.post("/agent")
+        def save_agent_settings(request: AgentSettingsRequest) -> dict[str, Any]:
+            provider_id, base_url, _ = resolve_agent_request(request)
+            thinking_type = request.thinkingType.strip().lower()
+            if thinking_type not in {"", "disabled", "enabled", "auto"}:
+                raise HTTPException(400, "思考模式配置无效")
+            try:
+                agent_store.save(
+                    reuse_vision=False, provider=provider_id, api_key=request.apiKey,
+                    model=request.model, base_url=base_url, thinking_type=thinking_type,
+                    response_format="none", models=(request.models or [])[:500],
+                    verified_at=request.verifiedAt,
+                )
+            except VisionRequestError as error:
+                raise HTTPException(400, str(error)) from error
+            return agent_store.public_state()
 
     return router

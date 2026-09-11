@@ -5,26 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-ALGORITHM_V1 = "editing-algorithm-v1"
-ALGORITHM_V2 = "editing-algorithm-v2"
+CURRENT_ALGORITHM_VERSION = "editing-algorithm-v2"
 ALGORITHM_STAGES = (
     "route", "index", "recall", "verify", "boundary", "select", "quality", "edit",
 )
 COVERAGE_STATUSES = frozenset({"complete", "partial", "sampled", "unknown"})
-
-
-def algorithm_version(job: dict[str, Any] | None) -> str:
-    """Return the durable algorithm snapshot for a task.
-
-    Missing values intentionally mean v1.  This is what prevents an old task
-    from changing behaviour merely because the service was upgraded.
-    """
-    value = str((job or {}).get("algorithmVersion") or "").strip()
-    return value if value in {ALGORITHM_V1, ALGORITHM_V2} else ALGORITHM_V1
-
-
-def uses_algorithm_v2(job: dict[str, Any] | None) -> bool:
-    return algorithm_version(job) == ALGORITHM_V2
 
 
 def _confidence(value: Any, fallback: float = 0.0) -> float:
@@ -83,7 +68,10 @@ def attach_candidate_quality(
     quality = candidate_quality(
         retrieval_confidence=retrieval,
         evidence_confidence=candidate.get("evidenceConfidence", candidate.get("confidence", retrieval)),
-        boundary_confidence=candidate.get("boundaryConfidence", candidate.get("confidence", retrieval)),
+        # Content contracts require independent boundary evidence. Preserve the
+        # legacy highlight score contract until that pipeline supplies one.
+        boundary_confidence=candidate.get("boundaryConfidence", 0 if candidate.get("boundaryVerification")
+                                          else candidate.get("confidence", retrieval)),
         coverage_status=coverage_status,
         review_reasons=[*(review_reasons or []), *(candidate.get("reviewReasons") or [])],
     )

@@ -1,0 +1,959 @@
+.agent-skill-row {
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--ink-muted, #74716a);
+  font-size: 11px;
+}
+
+.agent-skill-row label { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agent-skill-row select {
+  max-width: 180px;
+  padding: 5px 24px 5px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+.agent-skill-row button { padding: 4px 0; border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.agent-skill-row button:hover { color: var(--ink, #1e201e); }
+
+.agent-plan-dock {
+  display: flex;
+  flex-direction: column;
+}
+.agent-plan-dock[data-compact="true"] { flex: 0 0 auto; min-height: 0; max-height: none; }
+.agent-plan-dock > header { flex: none; border-bottom: 1px solid rgba(42, 47, 43, .1); }
+.agent-plan-dock > header div { min-width: 0; }
+.agent-plan-dock > header small { display: block; margin-bottom: 4px; }
+.agent-plan-dock > header strong { display: -webkit-box; overflow: hidden; color: #242925; font-size: 13px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.agent-plan-dock .agent-plan-progress { margin: 5px 0 0; color: #657069; font-size: 10px; line-height: 1.4; }
+.agent-plan-dock > header > b { flex: none; }
+.agent-plan-dock > footer { position: relative; z-index: 1; flex: none; justify-content: flex-end; border-top: 1px solid rgba(42, 47, 43, .1); }
+.agent-plan-dock > footer span { flex: 1 1 0; min-width: 0; margin-right: 0; color: #707771; font-size: 10px; line-height: 1.4; }
+.agent-plan-dock > footer button { flex: none; padding: 7px 11px; border: 1px solid rgba(42, 47, 43, .16); border-radius: 8px; background: transparent; cursor: pointer; white-space: nowrap; }
+.agent-plan-dock > footer button.primary { border-color: #315a42; color: #fff; background: #315a42; }
+.agent-plan-now { display: flex; align-items: center; gap: 10px; padding: 11px 14px; }
+.agent-plan-now > div { min-width: 0; flex: 1 1 auto; }
+.agent-plan-now strong, .agent-plan-now small { display: block; }
+.agent-plan-now strong { overflow: hidden; color: #303a34; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.agent-plan-now small { display: -webkit-box; margin-top: 3px; overflow: hidden; color: #737d76; font-size: 10px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.agent-plan-now button, .agent-plan-collapse button { flex: none; padding: 6px 9px; border: 1px solid rgba(42, 47, 43, .18); border-radius: 7px; background: transparent; cursor: pointer; font: 10px inherit; white-space: nowrap; }
+.agent-plan-collapse { flex: none; padding: 7px 14px; border-top: 1px solid rgba(42, 47, 43, .08); text-align: right; }
+.agent-plan-revision { flex: none; padding: 10px 14px; border-top: 1px solid rgba(42, 47, 43, .1); background: rgba(243, 248, 244, .96); }
+.agent-plan-revision label { display: grid; gap: 6px; color: #47544b; font-size: 10px; font-weight: 650; }
+.agent-plan-revision textarea { width: 100%; min-height: 68px; box-sizing: border-box; resize: vertical; padding: 8px 9px; border: 1px solid rgba(49, 90, 66, .26); border-radius: 8px; color: #28352c; background: #fff; font: 11px/1.45 inherit; }
+.agent-plan-revision textarea:focus { border-color: #315a42; outline: 2px solid rgba(49, 90, 66, .14); outline-offset: 1px; }
+.agent-plan-revision > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.agent-plan-revision button { padding: 7px 10px; border: 1px solid rgba(42, 47, 43, .16); border-radius: 8px; background: #fff; cursor: pointer; font: inherit; font-size: 10px; }
+.agent-plan-revision button.primary { border-color: #315a42; color: #fff; background: #315a42; }
+
+/* The Agent lives in the dark conversation column.  Keep the plan on that
+   same surface so summary, state and controls remain legible at a glance. */
+body[data-shell-mode="workspace"] .agent-plan-dock > header strong { color: #e7edef; }
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-plan-progress { color: #96a5ab; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer span { color: #9aa9af; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer button,
+body[data-shell-mode="workspace"] .agent-plan-now button,
+body[data-shell-mode="workspace"] .agent-plan-collapse button { border-color: #43525b; color: #d2dce0; background: #202d34; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer button.primary { border-color: #4f9876; }
+body[data-shell-mode="workspace"] .agent-plan-now { background: #172229; }
+body[data-shell-mode="workspace"] .agent-plan-now strong { color: #e1e9eb; }
+body[data-shell-mode="workspace"] .agent-plan-now small { color: #91a0a7; }
+body[data-shell-mode="workspace"] .agent-plan-collapse { border-top-color: #2a3941; background: #172229; }
+body[data-shell-mode="workspace"] .agent-plan-revision { border-top-color: #2c3a42; background: #19262d; }
+body[data-shell-mode="workspace"] .agent-plan-revision label { color: #cfdadd; }
+body[data-shell-mode="workspace"] .agent-plan-revision textarea { border-color: #43525b; color: #e0e8eb; background: #101a20; }
+body[data-shell-mode="workspace"] .agent-plan-revision > div button { border-color: #43525b; color: #d2dce0; background: #202d34; }
+body[data-shell-mode="workspace"] .agent-plan-revision > div button.primary { border-color: #4f9876; color: #eef8f1; background: #34745b; }
+
+@media (max-height: 760px) {
+  .agent-plan-dock { min-height: 164px; max-height: min(46dvh, 390px); }
+  .agent-plan-dock > header { padding-block: 10px 8px; }
+}
+
+/* Planning surface: a compact editing-workstation treatment. The brand
+   avatar/icon remains untouched; only the plan canvas adopts the timeline
+   language of the reference editor. */
+body[data-shell-mode="workspace"] .agent-plan-dock {
+  border-color: #2e3d45;
+}
+body[data-shell-mode="workspace"] .agent-plan-dock > header {
+  border-bottom-color: #2c3a42;
+}
+body[data-shell-mode="workspace"] .agent-plan-dock > header small { letter-spacing: .12em; }
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-headline { margin: 0; padding: 8px 12px 0; }
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow {
+  margin: 10px 12px 0;
+  background: repeating-linear-gradient(90deg, transparent 0, transparent calc(20% - 1px), rgba(121,145,154,.10) 20%);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow::before { top: 13px; left: 7%; right: 7%; }
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow li > i { width: 10px; height: 10px; border-radius: 2px; }
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-focus { margin: 9px 12px 0 !important; border-radius: 2px; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer { margin-top: 9px; border-top-color: #2c3a42; }
+
+.agent-planning-trace {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding: 9px 0 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  list-style: none;
+}
+
+.agent-planning-live-track {
+  margin: 14px 14px 0;
+  padding: 11px 12px 10px;
+  border: 1px solid rgba(110, 135, 145, .24);
+  border-radius: 6px;
+  background: rgba(20, 33, 40, .72);
+}
+.agent-planning-live-track > header {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.agent-planning-live-track > header span {
+  color: #81939a;
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+.agent-planning-live-track > header strong {
+  flex: 1;
+  color: #e5edef;
+  font-size: 13px;
+  font-weight: 650;
+}
+.agent-planning-live-track > header b {
+  color: #d5a45d;
+  font: 600 11px ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.agent-planning-live-bar {
+  position: relative;
+  height: 3px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #293b44;
+}
+.agent-planning-live-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  border-radius: inherit;
+  background: #7eae8d;
+  transition: transform .45s cubic-bezier(.2, .8, .2, 1);
+  will-change: transform;
+}
+.agent-planning-live-bar::before,
+.agent-planning-live-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.agent-planning-live-bar::before {
+  opacity: .28;
+  background: repeating-linear-gradient(90deg, transparent 0 16px, rgba(255, 255, 255, .22) 16px 20px);
+  transform: translateX(-20px);
+  animation: agent-planning-stripe-flow 1.5s linear infinite;
+}
+.agent-planning-live-bar::after {
+  inset: -35% auto -35% -42%;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .56), transparent);
+  filter: blur(3px);
+  transform: translateX(0);
+  animation: agent-planning-sweep 2.1s ease-in-out infinite;
+}
+.agent-planning-live-track > p {
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: #a9b7bc;
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Planning is a live work status, not a checklist wizard. Keep any legacy
+   markup from reintroducing circular checkmarks or traffic-light colors. */
+.agent-planning-flow { display: none !important; }
+.agent-planning-trace li > span {
+  background: #708189;
+  box-shadow: none !important;
+  animation: none !important;
+}
+.agent-planning-trace li > span::after { display: none !important; }
+.agent-plan-segments i,
+.agent-plan-segments i[data-state="completed"],
+.agent-plan-segments i[data-state="skipped"],
+.agent-plan-segments i[data-state="running"],
+.agent-plan-segments i[data-state="waiting_operation"],
+.agent-plan-segments i[data-state="action_required"],
+.agent-plan-segments i[data-state="failed"] {
+  animation: none;
+}
+.agent-planning-trace li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 7px; align-items: start; color: var(--ink-muted, #74716a); }
+.agent-planning-trace li > span { width: 8px; height: 8px; margin-top: 4px; border: 1px solid currentColor; border-radius: 50%; }
+.agent-planning-trace li > div { min-width: 0; }
+.agent-planning-trace strong, .agent-planning-trace small { display: block; }
+.agent-planning-trace strong { color: inherit; font-size: 10px; font-weight: 650; line-height: 1.35; }
+.agent-planning-trace small { margin-top: 1px; overflow: hidden; color: inherit; font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; opacity: .82; }
+.agent-planning-trace li[data-state="completed"] { color: #4f7a5e; }
+.agent-planning-trace li[data-state="completed"] > span { border-color: #4f7a5e; background: #4f7a5e; }
+.agent-planning-trace li[data-state="completed"] > span::after { content: ""; display: block; width: 2px; height: 4px; margin: 1px 0 0 2px; border: solid #fff; border-width: 0 1px 1px 0; transform: rotate(45deg); }
+.agent-planning-trace li[data-state="active"] { color: #315a42; }
+.agent-planning-trace li[data-state="active"] > span { border-color: #315a42; box-shadow: 0 0 0 3px rgba(49, 90, 66, .12); animation: agent-planning-pulse 1.25s ease-in-out infinite; }
+@keyframes agent-planning-pulse { 50% { transform: scale(.72); opacity: .45; } }
+@keyframes agent-planning-stripe-flow {
+  to { transform: translateX(20px); }
+}
+@keyframes agent-planning-sweep {
+  0% { transform: translateX(0); opacity: .12; }
+  42% { opacity: .9; }
+  100% { transform: translateX(340%); opacity: .16; }
+}
+
+.agent-registry-dialog { width: min(820px, calc(100vw - 32px)); max-height: min(780px, calc(100vh - 32px)); padding: 0; border: 0; border-radius: 18px; background: #f7f5ef; box-shadow: 0 30px 90px rgba(16, 20, 17, .3); }
+.agent-registry-dialog::backdrop { background: rgba(18, 21, 19, .55); backdrop-filter: blur(8px); }
+.agent-registry-shell { display: flex; min-height: 560px; flex-direction: column; }
+.agent-registry-shell > header { display: flex; justify-content: space-between; gap: 20px; padding: 24px 26px 18px; }
+.agent-registry-shell > header small { color: #6f776f; font: 600 10px/1 ui-monospace, monospace; letter-spacing: .12em; }
+.agent-registry-shell > header h2 { margin: 6px 0; color: #202521; font-size: 24px; }
+.agent-registry-shell > header p { margin: 0; color: #6f756f; font-size: 12px; }
+.agent-registry-shell > header button { align-self: start; border: 0; color: #717771; background: transparent; font-size: 24px; cursor: pointer; }
+.agent-registry-shell > nav { display: flex; gap: 4px; padding: 0 26px; border-bottom: 1px solid #d9d8d1; }
+.agent-registry-shell > nav button { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; color: #747973; background: transparent; cursor: pointer; }
+.agent-registry-shell > nav button.active { border-bottom-color: #315a42; color: #284a37; font-weight: 650; }
+.agent-registry-content { flex: 1; padding: 20px 26px 26px; overflow: auto; }
+.agent-registry-create { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 18px; padding: 16px; border: 1px solid #d9d9d2; border-radius: 12px; background: #fff; }
+.agent-registry-create label { display: grid; gap: 7px; color: #414741; font-size: 12px; }
+.agent-registry-create textarea { min-height: 76px; resize: vertical; padding: 10px; border: 1px solid #d5d6d0; border-radius: 8px; font: inherit; }
+.agent-registry-create button { align-self: end; padding: 10px 13px; border: 0; border-radius: 8px; color: #fff; background: #315a42; cursor: pointer; }
+.agent-package-upload { display: flex; align-items: center; justify-content: space-between; grid-column: 1 / -1; gap: 12px; color: #656b65; font-size: 11px; }
+.agent-registry-list { display: grid; gap: 10px; }
+.agent-registry-item { padding: 15px 16px; border: 1px solid #dbdbd4; border-radius: 11px; background: rgba(255, 255, 255, .72); }
+.agent-registry-item > header { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+.agent-registry-item > header strong, .agent-registry-item > header small { display: block; }
+.agent-registry-item > header small { margin-top: 3px; color: #7c817c; font: 10px ui-monospace, monospace; }
+.agent-registry-item > header b { padding: 3px 7px; border-radius: 999px; color: #3f694e; background: #e3f0e7; font-size: 10px; }
+.agent-registry-item p { margin: 10px 0; color: #606760; font-size: 12px; line-height: 1.55; }
+.agent-registry-item > small { color: #777c77; font-size: 10px; }
+.agent-registry-item footer { display: flex; justify-content: flex-end; margin-top: 10px; }
+.agent-registry-item button { padding: 6px 9px; border: 1px solid #cdd1cc; border-radius: 7px; background: #fff; cursor: pointer; }
+.agent-registry-item button.danger { border-color: #a75e3f; color: #8f4b31; }
+.agent-plugin-warning { margin-bottom: 15px; padding: 12px 14px; border-left: 3px solid #a75e3f; color: #6f4838; background: #f5e9e3; }
+.agent-plugin-warning p { margin: 4px 0 0; font-size: 12px; }
+.agent-plugin-trust { display: inline-flex; align-items: flex-start; gap: 7px; max-width: 390px; color: #6f4838; font-size: 12px; line-height: 1.4; }
+.agent-plugin-trust input { margin-top: 2px; accent-color: #a75e3f; }
+
+@media (max-width: 720px) {
+  .agent-skill-row { align-items: stretch; flex-direction: column; }
+  .agent-registry-create { grid-template-columns: 1fr; }
+  .agent-registry-create button { justify-self: start; }
+}
+
+/* Agent conversation IA v2: a small action surface stays in context while
+   the full plan and execution history use progressive disclosure. */
+.agent-plan-dock {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+}
+.agent-plan-dock[data-tone="ready"] { border-left-color: #c9974f; }
+.agent-plan-dock[data-tone="running"] { border-left-color: #5e9a7d; }
+.agent-plan-dock[data-tone="attention"] { border-left-color: #d49755; background: #1d2426; }
+.agent-plan-dock[data-tone="complete"] { border-left-color: #6fac8a; background: #15241f; }
+.agent-plan-dock[data-tone="danger"] { border-left-color: #bd6e70; background: #251c21; }
+.agent-plan-dock > header { display: flex; justify-content: space-between; gap: 8px; }
+.agent-plan-dock > header small { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-plan-dock > header > b { border-radius: 0; font-size: 10px; font-weight: 600; }
+.agent-plan-dock > strong { display: block; margin-top: 7px; color: #edf2f4; font: 600 14px/1.35 var(--font-reading, sans-serif); letter-spacing: -.01em; }
+.agent-plan-dock > p { display: -webkit-box; margin: 4px 0 0; overflow: hidden; color: #92a0a7; font: 11px/1.5 var(--font-reading, sans-serif); text-wrap: pretty; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.agent-plan-segments { display: grid; grid-auto-columns: minmax(14px, 1fr); grid-auto-flow: column; }
+.agent-plan-segments i { background: #33424a; transition: transform .2s ease, background-color .2s ease, opacity .2s ease; }
+.agent-plan-segments i[data-state="completed"] { background: #5b9b7a; }
+.agent-plan-segments i[data-state="skipped"] { background: #627078; opacity: .66; }
+.agent-plan-segments i[data-state="running"], .agent-plan-segments i[data-state="waiting_operation"] { background: #d0a05b; animation: agent-segment-pulse 1.3s ease-in-out infinite; }
+.agent-plan-segments i[data-state="action_required"] { background: #d28b48; }
+.agent-plan-segments i[data-state="failed"] { background: #bd6e70; }
+@keyframes agent-segment-pulse { 50% { opacity: .48; transform: scaleY(.72); } }
+.agent-planning-live { display: inline-flex; align-items: center; gap: 6px; }
+.agent-planning-live > i { width: 6px; height: 6px; border-radius: 50%; background: #73b18f; box-shadow: 0 0 0 0 rgba(115, 177, 143, .35); animation: agent-live-breathe 1.8s ease-out infinite; }
+.agent-planning-headline { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.agent-planning-headline > strong { min-width: 0; color: #edf2f4; font: 600 14px/1.35 var(--font-reading, sans-serif); letter-spacing: -.01em; text-wrap: balance; }
+.agent-planning-headline > time { flex: none; color: #c6a06a; font: 600 10px/1 var(--font-data, monospace); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-planning-flow {
+  position: relative;
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  min-height: auto;
+  margin: 12px 0 0;
+  padding: 0;
+  overflow: visible;
+  list-style: none;
+}
+.agent-planning-flow::before { position: absolute; top: 5px; right: 8%; left: 8%; height: 1px; content: ""; background: #34434b; }
+.agent-planning-flow li {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 9px auto;
+  grid-auto-flow: row;
+  align-items: start;
+  justify-items: center;
+  row-gap: 6px;
+  column-gap: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: #718088;
+  background: transparent;
+  font: 600 10px/1.25 var(--font-ui, sans-serif);
+  text-align: center;
+}
+.agent-planning-flow li > i { width: 9px; height: 9px; box-sizing: border-box; border: 2px solid #34434b; border-radius: 3px; background: #172229; transition: border-color .25s ease, background-color .25s ease, transform .25s ease; }
+.agent-planning-flow li > .agent-planning-stage-label {
+  grid-row: 2;
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  overflow: visible;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.agent-planning-flow li[data-state="completed"] { color: #7fa58f; }
+.agent-planning-flow li[data-state="completed"] > i { border-color: #5e9678; background: #5e9678; }
+.agent-planning-flow li[data-state="active"] { color: #dfbd88; }
+.agent-planning-flow li[data-state="active"] > i { border-color: #d0a05b; background: #d0a05b; box-shadow: 0 0 0 4px rgba(208, 160, 91, .11); animation: agent-planning-node 1.5s ease-in-out infinite; }
+.agent-planning-flow li[data-state="active"] .agent-planning-stage-label { animation: agent-planning-label 1.8s ease-in-out infinite; }
+.agent-planning-flow[data-active-index="5"]::after { width: 84%; }
+@keyframes agent-planning-label { 0%, 100% { opacity: .72; } 50% { opacity: 1; } }
+/* Keep the compact planning rail isolated so unrelated list rules cannot
+   turn stage labels into fixed-size step markers. */
+.agent-plan-dock .agent-planning-flow {
+  display: grid !important;
+  flex: none;
+  min-height: auto;
+  margin: 12px 0 0;
+  overflow: visible;
+}
+.agent-plan-dock .agent-planning-flow li,
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow li {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 9px auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow li > .agent-planning-stage-label {
+  color: inherit;
+  background: transparent;
+}
+.agent-planning-focus { display: grid !important; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin-top: 10px !important; padding: 8px 9px; border-radius: 6px; color: #9eabb0 !important; background: #1d2930; -webkit-line-clamp: unset !important; }
+.agent-planning-focus > span { align-self: start; padding-top: 1px; color: #c7a06a; font: 600 9px/1.45 var(--font-ui, sans-serif); white-space: nowrap; }
+@keyframes agent-live-breathe { 55% { box-shadow: 0 0 0 5px rgba(115, 177, 143, 0); transform: scale(.82); } }
+@keyframes agent-planning-node { 50% { box-shadow: 0 0 0 6px rgba(208, 160, 91, 0); transform: scale(.88); } }
+.agent-plan-dock > footer { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; }
+.agent-plan-dock > footer > span { margin-right: auto; color: #718089; font: 600 10px/1 var(--font-data, sans-serif); font-variant-numeric: tabular-nums; }
+.agent-plan-dock button, .agent-plan-drawer button { min-height: 28px; padding: 0 9px; border: 0; border-radius: 7px; color: #b8c3c8; background: #243139; font: 600 10px/1 var(--font-ui, sans-serif); cursor: pointer; transition: transform .18s ease, color .18s ease, background-color .18s ease; }
+.agent-plan-dock button:hover, .agent-plan-drawer button:hover { color: #eef3f5; background: #2d3c45; }
+.agent-plan-dock button:active, .agent-plan-drawer button:active { transform: translateY(1px) scale(.985); }
+.agent-plan-dock button:focus-visible, .agent-plan-drawer button:focus-visible { outline: 2px solid rgba(201, 151, 79, .7); outline-offset: 2px; }
+.agent-plan-dock button.primary, .agent-plan-drawer button.primary { color: #1b2023; background: #d1a15d; }
+.agent-plan-dock .agent-plan-text-action { padding-inline: 3px; color: #96a5ac; background: transparent; }
+body[data-shell-mode="workspace"] .agent-plan-dock > header,
+body[data-shell-mode="workspace"] .agent-plan-dock > footer { padding: 0; border: 0; background: transparent; }
+body[data-shell-mode="workspace"] .agent-plan-dock > header > b { padding: 0; border-radius: 0; background: transparent; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer > span { margin-right: auto; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer button,
+body[data-shell-mode="workspace"] .agent-plan-dock > footer button.primary { border: 0; color: #b8c3c8; background: #243139; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer button.primary { color: #1b2023; background: #d1a15d; }
+body[data-shell-mode="workspace"] .agent-plan-dock > footer .agent-plan-text-action { color: #96a5ac; background: transparent; }
+
+.agent-plan-drawer-scrim { position: fixed; inset: 0; z-index: 70; border: 0; background: rgba(5, 10, 14, .28); backdrop-filter: blur(1px); }
+.agent-plan-drawer {
+  position: fixed;
+  z-index: 71;
+  top: var(--agent-drawer-top, 14px);
+  left: var(--agent-drawer-left, 480px);
+  display: flex;
+  height: var(--agent-drawer-height, calc(100dvh - 28px));
+  box-sizing: border-box;
+  flex-direction: column;
+  overflow: hidden;
+  color: #dfe7ea;
+  opacity: 0;
+  transition: transform .19s ease, opacity .19s ease;
+}
+.agent-plan-drawer.open { opacity: 1; }
+.agent-plan-drawer > header { display: flex; justify-content: space-between; gap: 16px; }
+.agent-plan-drawer > header small, .agent-plan-drawer > header strong { display: block; }
+.agent-plan-drawer > header small { font: 600 10px/1.3 var(--font-data, sans-serif); }
+.agent-plan-drawer > header strong { font: 600 19px/1.3 var(--font-reading, sans-serif); }
+.agent-plan-drawer > header button { padding: 0; color: #829098; font-size: 22px; }
+.agent-plan-drawer > nav { display: flex; border-bottom: 1px solid #2a3740; }
+.agent-plan-drawer > nav button { padding: 0; border-bottom: 2px solid transparent; border-radius: 0; color: #7f8d95; background: transparent; }
+.agent-plan-drawer > nav button.active { border-bottom-color: #c99b5d; color: #e8eef0; }
+.agent-plan-drawer-panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-color: #3b4d57 transparent; }
+.agent-plan-drawer-summary { padding-bottom: 15px; }
+.agent-plan-drawer-summary p { margin: 0; color: #aab5ba; font: 12px/1.6 var(--font-reading, sans-serif); text-wrap: pretty; }
+.agent-plan-drawer-summary > small { display: block; margin-top: 7px; color: #c99b5d; font: 600 9px/1.4 var(--font-data, sans-serif); }
+.agent-cover-review { margin: 0 0 18px; padding: 13px; border: 1px solid #33434d; border-radius: 10px; background: #121d23; }
+.agent-cover-review > small { display: block; margin-bottom: 10px; color: #d2a767; font: 600 10px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-review > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.agent-cover-review label { position: relative; min-width: 0; overflow: hidden; border: 1px solid #34454f; border-radius: 8px; background: #1b282f; cursor: pointer; }
+.agent-cover-review label:has(input:checked) { border-color: #d0a05b; box-shadow: 0 0 0 2px rgba(208, 160, 91, .18); }
+.agent-cover-review input { position: absolute; top: 7px; left: 7px; z-index: 1; accent-color: #d0a05b; }
+.agent-cover-review img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #0c1419; }
+.agent-cover-review label > span { display: block; padding: 7px 8px 8px; }
+.agent-cover-review label strong, .agent-cover-review label small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-cover-review label strong { color: #e8eef0; font: 600 10px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-review label small { margin-top: 2px; color: #82929a; font: 9px/1.3 var(--font-data, monospace); }
+.agent-cover-review > p { margin: 9px 0 0; color: #829098; font: 9px/1.45 var(--font-reading, sans-serif); }
+.agent-cover-review-empty > p { margin: 0; }
+.agent-cover-result { margin: 0 0 18px; padding: 13px; border: 1px solid #3e514c; border-radius: 10px; background: #121e1e; }
+.agent-cover-result > small { display: block; margin-bottom: 9px; color: #d2a767; font: 600 10px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-result > button { width: 100%; padding: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid #40544d; border-radius: 8px; color: inherit; background: #0d1718; text-align: left; }
+.agent-cover-result > button img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.agent-cover-result > button span { padding: 8px 9px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.agent-cover-result > button strong { color: #edf2ef; font: 600 10px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-result > button em { color: #8fa099; font: 9px/1.3 var(--font-data, monospace); font-style: normal; }
+.agent-cover-result > p { margin: 9px 0; color: #91a09c; font: 9px/1.45 var(--font-reading, sans-serif); }
+.agent-cover-result > a { color: #e3bd80; font: 600 9px/1.3 var(--font-ui, sans-serif); text-decoration: none; }
+.agent-cover-result > a:hover { text-decoration: underline; }
+.agent-cover-review-handoff > button,
+.agent-cover-result > button[data-agent-cover-timeline-open] { width: auto; min-height: 32px; margin-top: 10px; padding: 7px 10px; display: inline-flex; overflow: visible; border: 0; border-radius: 6px; color: #35180c; background: #f3a079; text-align: center; }
+.agent-cover-timeline { margin-top: 14px; padding-top: 13px; border-top: 1px solid #344843; }
+.agent-cover-timeline > header { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+.agent-cover-timeline > header div > small,
+.agent-cover-timeline > header div > strong { display: block; }
+.agent-cover-timeline > header div > small { color: #71837d; font: 8px/1.25 var(--font-data, monospace); letter-spacing: .08em; text-transform: uppercase; }
+.agent-cover-timeline > header div > strong { margin-top: 3px; color: #edf2ef; font: 600 12px/1.35 var(--font-ui, sans-serif); }
+.agent-cover-timeline > header output { flex: none; color: #e1b672; font: 600 11px/1.3 var(--font-data, monospace); }
+.agent-cover-timeline-ruler { position: relative; height: 22px; margin-top: 10px; border-top: 1px solid #3b4d49; color: #70817c; font: 8px/1 var(--font-data, monospace); }
+.agent-cover-timeline-ruler span { position: absolute; top: 5px; transform: translateX(-50%); }
+.agent-cover-timeline-ruler span:first-child { left: 0; transform: none; }
+.agent-cover-timeline-ruler span:nth-child(2) { left: var(--cover-width); }
+.agent-cover-timeline-ruler span:last-child { right: 0; transform: none; }
+.agent-cover-timeline-track { display: flex; min-height: 70px; overflow: hidden; border: 1px solid #41534e; border-radius: 7px; background: #0a1314; box-shadow: inset 0 1px rgba(255,255,255,.025); }
+.agent-cover-timeline-track article { position: relative; min-width: 0; display: flex; align-items: center; overflow: hidden; }
+.agent-cover-timeline-track article span { position: relative; z-index: 1; min-width: 0; padding: 8px; }
+.agent-cover-timeline-track article b,
+.agent-cover-timeline-track article small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-cover-timeline-track article b { color: #f2f4ef; font: 600 10px/1.25 var(--font-ui, sans-serif); }
+.agent-cover-timeline-track article small { margin-top: 4px; color: #b6c0bb; font: 8px/1.25 var(--font-data, monospace); }
+.agent-cover-timeline-track .cover { flex: 0 0 var(--cover-width); border-right: 2px solid #e0aa61; background: #392b1d; transition: flex-basis .12s ease; }
+.agent-cover-timeline-track .cover::after { position: absolute; inset: 0; content: ""; background: linear-gradient(90deg, rgba(12,17,16,.15), rgba(12,17,16,.82)); }
+.agent-cover-timeline-track .cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .72; }
+.agent-cover-timeline-track .cover i { position: absolute; z-index: 2; top: 0; right: -1px; bottom: 0; width: 3px; background: #f0bd73; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+.agent-cover-timeline-track .video { flex: 1 1 auto; background: repeating-linear-gradient(135deg, #183034 0, #183034 12px, #1c363a 12px, #1c363a 24px); }
+.agent-cover-duration-control { display: grid; grid-template-columns: auto minmax(80px, 1fr) 52px auto; align-items: center; gap: 8px; margin-top: 12px; color: #a6b1ac; font: 9px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-duration-control input[type="range"] { width: 100%; min-width: 0; accent-color: #d9a45e; }
+.agent-cover-duration-control input[type="number"] { width: 52px; min-height: 28px; box-sizing: border-box; padding: 4px 5px; border: 1px solid #43554f; border-radius: 5px; color: #edf1ee; background: #0c1718; font: 10px/1 var(--font-data, monospace); }
+.agent-cover-duration-control em { color: #768780; font-style: normal; }
+.agent-cover-timeline > footer { display: grid; gap: 7px; margin-top: 12px; }
+.agent-cover-timeline > footer > button { width: 100%; min-height: 36px; }
+.agent-cover-timeline-status { color: #82928c; font: 9px/1.45 var(--font-reading, sans-serif); }
+.agent-cover-timeline-status.complete { color: #80b598; }
+.agent-cover-timeline-status.error { color: #d78787; }
+.agent-cover-timeline-status a { color: #e3bd80; text-decoration: none; }
+.agent-cover-timeline-status a:hover { text-decoration: underline; }
+.agent-review-results { display: grid; gap: 7px; margin: 0 0 14px; padding: 11px; border: 1px solid #304049; border-radius: 8px; background: #152129; }
+.agent-review-results > small { color: #7e8e96; font: 600 9px/1.3 var(--font-data, sans-serif); }
+.agent-review-results > button { display: flex; min-height: 48px; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 9px 10px; border: 1px solid #354750; color: #dce5e8; background: #1a2931; text-align: left; }
+.agent-review-results > button:hover { border-color: #9b784b; background: #1d2d35; }
+.agent-review-results strong { font-size: 11px; }
+.agent-review-results span { flex: none; color: #829198; font: 9px/1.5 var(--font-data, sans-serif); }
+.agent-qc-summary { display: grid; gap: 7px; margin: 0 0 14px; padding: 11px 12px; border: 1px solid #745a36; border-radius: 8px; background: #271f18; }
+.agent-qc-summary strong { color: #e1b16f; font-size: 11px; }
+.agent-qc-summary ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.agent-qc-summary li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; }
+.agent-qc-summary span { color: #bda88c; font: 10px/1.55 var(--font-reading, sans-serif); }
+.agent-qc-summary time { color: #e0b36f; font: 600 9px/1.3 var(--font-data, monospace); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-plan-step-list, .agent-activity-list { margin: 0; padding: 0; list-style: none; }
+.agent-plan-step-list li { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; padding: 9px 0 12px; }
+.agent-plan-step-list li::before { position: absolute; top: 20px; bottom: -9px; left: 5px; width: 1px; content: ""; background: #33424a; }
+.agent-plan-step-list li:last-child::before { display: none; }
+.agent-step-marker { z-index: 1; width: 9px; height: 9px; margin-top: 4px; border: 2px solid #455660; border-radius: 2px; background: #111a21; }
+.agent-plan-step-list li[data-step-status="completed"] .agent-step-marker { border-color: #609d7d; background: #609d7d; }
+.agent-plan-step-list li[data-step-status="running"] .agent-step-marker,
+.agent-plan-step-list li[data-step-status="waiting_operation"] .agent-step-marker { border-color: #d1a15d; background: #d1a15d; }
+.agent-plan-step-list li[data-step-status="action_required"] .agent-step-marker { border-color: #d78d4c; background: #d78d4c; }
+.agent-plan-step-list li > div > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.agent-plan-step-list strong { color: #dce5e8; font-size: 12px; }
+.agent-plan-step-list header b { flex: none; color: #7f8e95; font-size: 9px; font-weight: 500; }
+.agent-plan-step-list p { margin: 4px 0 0; color: #84939a; font: 10.5px/1.5 var(--font-reading, sans-serif); }
+.agent-plan-step-list em { display: block; margin-top: 5px; color: #e3a3a7; font-size: 10px; font-style: normal; }
+.agent-plan-step-list details { margin-top: 5px; color: #718088; font-size: 9px; }
+.agent-plan-step-list summary { width: max-content; cursor: pointer; }
+.agent-plan-step-list details small { display: block; margin-top: 4px; font-family: var(--font-data, sans-serif); }
+.agent-activity-list li { display: grid; grid-template-columns: 38px 9px minmax(0, 1fr); gap: 8px; padding: 7px 0; }
+.agent-activity-list time { color: #667781; font: 9px/1.4 var(--font-data, sans-serif); font-variant-numeric: tabular-nums; }
+.agent-activity-list li > span { width: 5px; height: 5px; margin-top: 4px; border-radius: 1px; background: #658c78; }
+.agent-activity-list strong { display: block; color: #cdd7db; font-size: 11px; }
+.agent-activity-list p { margin: 2px 0 0; color: #77878f; font: 10px/1.45 var(--font-reading, sans-serif); }
+.agent-activity-empty, .agent-plan-drawer-loading { padding: 28px 4px; color: #85949b; }
+.agent-activity-empty strong, .agent-plan-drawer-loading strong { color: #cbd5d9; font-size: 13px; }
+.agent-activity-empty p, .agent-plan-drawer-loading p { margin: 6px 0 0; font-size: 11px; line-height: 1.55; }
+.agent-plan-drawer-loading > header { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
+.agent-plan-drawer-loading > header time { flex: none; font: 600 10px/1 var(--font-data, monospace); font-variant-numeric: tabular-nums; }
+.agent-plan-drawer-loading .agent-planning-flow::before { top: 7px; }
+.agent-plan-drawer-loading .agent-planning-flow li { padding: 0; border: 0; background: transparent; }
+.agent-plan-drawer-loading .agent-planning-flow li > i { background: #111a21; }
+.agent-plan-drawer-loading > p { color: #a9b5ba; }
+.agent-plan-drawer-loading > small { display: block; color: #6f7f87; font: 10px/1.55 var(--font-reading, sans-serif); }
+.agent-plan-drawer > footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid #2a3740; }
+.agent-plan-drawer .agent-plan-revision { margin: 10px -2px 0; padding: 13px; border: 0; border-radius: 8px; background: #17242a; }
+
+/* A revision plan is part of the light precision editor, not the dark Agent
+   conversation surface. Keep the explicit context on the drawer so every
+   nested step, result and activity state follows the same visual system. */
+.agent-plan-drawer[data-plan-surface="editor"] {
+  border-color: #d6dde1;
+  color: var(--ct-text);
+  background: var(--ct-raised);
+  box-shadow: 24px 18px 60px rgba(23, 31, 36, .18), inset 0 1px rgba(255, 255, 255, .8);
+}
+.agent-plan-drawer[data-plan-surface="editor"] > header small,
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-summary > small,
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading > header time { color: #b65f39; }
+.agent-plan-drawer[data-plan-surface="editor"] > header button { color: #68777f; }
+.agent-plan-drawer[data-plan-surface="editor"] > nav { border-bottom-color: #d9dfe3; }
+.agent-plan-drawer[data-plan-surface="editor"] > nav button { color: #728087; background: transparent; }
+.agent-plan-drawer[data-plan-surface="editor"] > nav button:hover { color: #7f3518; background: transparent; }
+.agent-plan-drawer[data-plan-surface="editor"] > nav button.active { border-bottom-color: #e98f64; color: #253139; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-panel { scrollbar-color: #c4cdd2 transparent; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-summary p { color: #56656d; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-cover-review { border-color: #d9dfe3; background: #f6f8f9; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-cover-review label { border-color: #d5dde1; background: #fff; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-cover-review label:has(input:checked) { border-color: #dd845b; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-cover-review label strong { color: #2c383f; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-review-results {
+  border-color: #d8dfe3;
+  background: #fff;
+}
+.agent-plan-drawer[data-plan-surface="editor"] .agent-review-results > small { color: #748188; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-review-results > button {
+  border-color: #d8dfe3;
+  color: #2d3940;
+  background: #f8fafb;
+}
+.agent-plan-drawer[data-plan-surface="editor"] .agent-review-results > button:hover {
+  border-color: #d99270;
+  color: #612b16;
+  background: #fff2eb;
+}
+.agent-plan-drawer[data-plan-surface="editor"] .agent-review-results span { color: #748188; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-qc-summary {
+  border-color: #e5c7a3;
+  background: #fff8ee;
+}
+.agent-plan-drawer[data-plan-surface="editor"] .agent-qc-summary strong { color: #9a551f; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-qc-summary span { color: #765f49; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list li::before { background: #d5dde1; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-step-marker { border-color: #9ca9af; background: #f7f8f9; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list strong { color: #2c383f; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list header b { color: #718087; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list p { color: #66757d; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list em { color: #a53f48; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-step-list details { color: #748188; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-activity-list time,
+.agent-plan-drawer[data-plan-surface="editor"] .agent-activity-list p { color: #748188; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-activity-list strong { color: #344148; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-activity-empty,
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading { color: #68777f; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-activity-empty strong,
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading strong { color: #2f3b42; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading .agent-planning-flow li > i { background: #f7f8f9; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading > p { color: #56656d; background: #eef2f4; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-drawer-loading > small { color: #748188; }
+.agent-plan-drawer[data-plan-surface="editor"] > footer { border-top-color: #d9dfe3; background: #fff; }
+.agent-plan-drawer[data-plan-surface="editor"] button { color: #48565e; background: #e9eef0; }
+.agent-plan-drawer[data-plan-surface="editor"] button:hover { color: #6f3119; background: #fde9df; }
+.agent-plan-drawer[data-plan-surface="editor"] button.primary { color: #35180c; background: #f3a079; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-revision { background: #eef2f4; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-revision label { color: #46545c; }
+.agent-plan-drawer[data-plan-surface="editor"] .agent-plan-revision textarea {
+  border-color: #cbd4d8;
+  color: #253139;
+  background: #fff;
+}
+
+.agent-skill-row { position: relative; display: flex; justify-content: flex-start; margin: 0 0 8px; }
+.agent-skill-row > button {
+  min-height: 36px;
+  max-width: 100%;
+  padding: 6px 11px;
+  display: inline-grid;
+  grid-template-columns: minmax(0, auto) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #334650;
+  border-radius: 999px;
+  color: #d9e2e5;
+  background: #121f27;
+  font-size: 11px;
+}
+.agent-skill-row > button::before { content: none; }
+.agent-skill-row > button span {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-skill-row > button small {
+  padding-left: 8px;
+  border-left: 1px solid rgba(137, 158, 168, .22);
+  color: #91a2a9;
+  font-size: 10px;
+  font-weight: 600;
+}
+.agent-skill-row > button:hover {
+  border-color: #b9864a;
+  color: #f2e1c3;
+  background: #1a272e;
+}
+.agent-skill-row > button[aria-expanded="true"] {
+  border-color: #d09955;
+  color: #f6dfb8;
+  background: #221f18;
+  box-shadow: 0 0 0 2px rgba(208, 153, 85, .12);
+}
+.agent-skill-menu { position: absolute; z-index: 12; top: calc(100% + 7px); left: 0; display: grid; width: min(300px, calc(100vw - 32px)); gap: 9px; padding: 11px; border: 1px solid #34444d; border-radius: 10px; background: #162129; box-shadow: 0 14px 32px rgba(0,0,0,.32); }
+.agent-skill-menu label { display: grid; gap: 5px; color: #8e9da4; font-size: 10px; }
+.agent-skill-menu select { width: 100%; max-width: none; min-height: 32px; color: #dbe4e7; background: #10191f; }
+.agent-skill-menu > button { justify-self: start; color: #c6a16d; }
+.chat-panel.agent-plan-active #directorTaskSummary,
+.chat-panel.agent-plan-active #directorStageNav { display: none !important; }
+html body #assistantPanel.agent-plan-active #ctTaskJourney { display: none !important; }
+.chat-panel.agent-plan-active .panel-header { min-height: 58px; height: 58px; }
+.chat-panel.agent-plan-active .chat-message:has(> .bubble) { width: 100%; min-width: 0; }
+.chat-panel.agent-plan-active .chat-message > .bubble {
+  width: 90%;
+  max-width: 90%;
+  min-width: 0;
+  box-sizing: border-box;
+  flex: 0 1 90%;
+}
+.chat-panel.agent-plan-active .chat-message > .bubble p { width: 100%; max-width: none; min-width: 0; overflow-wrap: anywhere; }
+.chat-message.agent-message.assistant .avatar { display: none !important; }
+.chat-message.agent-message.assistant .bubble { padding-left: 2px; }
+.chat-message.agent-message.assistant .bubble small { color: #b89563 !important; }
+.agent-goal-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.agent-goal-tags span { padding: 3px 6px; border: 0; border-radius: 4px; color: #9daab0; background: #243139; font: 9px/1.2 var(--font-data, sans-serif); }
+
+@media (max-width: 760px) {
+  .agent-plan-drawer { inset: 8px; width: auto; height: auto; border-radius: 12px; transform: translateY(14px); }
+  .agent-plan-drawer.open { transform: translateY(0); }
+  .agent-plan-dock > footer { flex-wrap: wrap; }
+  .agent-planning-flow { gap: 0; }
+  .agent-planning-flow li { font-size: 10px; }
+  .agent-cover-duration-control { grid-template-columns: 1fr 52px auto; }
+  .agent-cover-duration-control > span { grid-column: 1 / -1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-plan-drawer, .agent-plan-dock button, .agent-plan-drawer button, .agent-plan-segments i,
+  .agent-planning-live > i, .agent-planning-flow li > i,
+  .agent-planning-live-bar i, .agent-planning-live-bar::before, .agent-planning-live-bar::after { transition: none; animation: none; }
+}
+
+/* Precision-edit plans belong to the light editing workspace.  Keep dark
+   pixels for the actual video canvas and timeline media, not for task steps. */
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] {
+  border-left-color: #d9845d;
+  color: #263239;
+  background: #f7f8f9;
+  box-shadow: none;
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"][data-tone="attention"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"][data-tone="complete"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"][data-tone="danger"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > header,
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > footer { background: transparent; }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > header small,
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > p,
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > footer span { color: var(--ct-text-secondary); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > header > b { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] > strong { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] button {
+  color: var(--ct-text);
+  background: var(--ct-raised);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] button:hover {
+  color: var(--ct-text);
+  background: var(--ct-hover);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] button.primary {
+  color: var(--ct-text);
+  background: var(--ct-raised);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="completed"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="skipped"] { background: var(--ct-raised); opacity: .68; }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="running"],
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="waiting_operation"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="action_required"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-segments i[data-state="failed"] { background: var(--ct-raised); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-headline > strong { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-headline > time { color: var(--ct-text-secondary); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-flow::before { background: #d5dde1; }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-flow li { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-flow li > i {
+  border-color: var(--ct-control-border);
+  background: var(--ct-raised);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-flow li[data-state="completed"] { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-flow li[data-state="active"] { color: var(--ct-text); }
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-focus {
+  color: var(--ct-text) !important;
+  background: var(--ct-raised);
+}
+body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-planning-focus > span { color: var(--ct-text); }
+
+/* Planning surface: a deliberate, cinematic briefing panel rather than a
+   generic side drawer. The Cliptalk mark remains the existing brand asset. */
+.agent-plan-drawer {
+  width: min(760px, calc(100vw - var(--agent-drawer-left, 480px) - 24px));
+  border: 1px solid #354149;
+  border-radius: 18px;
+  background: #11191f;
+  box-shadow: 0 28px 80px rgba(3, 8, 11, .48), inset 0 1px rgba(255,255,255,.04);
+  transform: translate(-10px, -18px);
+}
+.agent-plan-drawer.open { transform: translate(0, 0); }
+.agent-plan-drawer > header {
+  min-height: 112px;
+  box-sizing: border-box;
+  align-items: center;
+  padding: 24px 28px 20px;
+  border-bottom: 1px solid #2d3941;
+}
+.agent-plan-drawer-brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.agent-plan-drawer-brand > img {
+  width: 58px; height: 58px; flex: none; object-fit: contain;
+  border-radius: 15px; box-shadow: 0 8px 20px rgba(0,0,0,.24);
+}
+.agent-plan-drawer > header small { color: #78ad82; font-size: 11px; letter-spacing: .04em; }
+.agent-plan-drawer > header strong { margin-top: 4px; color: #f1f4f2; font-size: 27px; letter-spacing: -.035em; }
+.agent-plan-drawer > header button { width: 34px; height: 34px; border-radius: 9px; background: #1b252b; }
+.agent-plan-drawer > nav { gap: 28px; padding: 0 28px; background: #121c22; }
+.agent-plan-drawer > nav button { min-height: 46px; font-size: 12px; }
+.agent-plan-drawer-panel { padding: 24px 28px 30px; }
+.agent-plan-drawer-loading { padding: 10px 0 24px; }
+.agent-plan-drawer-loading > header strong { font-size: 21px; color: #f0f3f2; }
+.agent-plan-drawer-loading > header time { color: #d4a45f; font-size: 12px; }
+.agent-plan-drawer-loading .agent-planning-flow { margin: 34px 0 28px; }
+.agent-plan-drawer-loading .agent-planning-flow li { gap: 11px; font-size: 13px; }
+.agent-plan-drawer-loading .agent-planning-flow li > i { width: 15px; height: 15px; border-radius: 50%; }
+.agent-plan-drawer-loading > p { padding: 14px 16px; border-left: 3px solid #d2a15d; border-radius: 8px; background: #1a252b; font-size: 12px; }
+.agent-plan-drawer-loading > small { margin-top: 14px; font-size: 10px; }
+.agent-plan-drawer > footer { min-height: 66px; padding: 12px 28px; background: #151f25; }
+
+/* Match the visible in-context planning card to the full planning language. */
+.agent-plan-dock > header { align-items: flex-start; }
+.agent-plan-dock-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.agent-plan-dock-brand > img { width: 36px; height: 36px; flex: none; border-radius: 10px; object-fit: contain; }
+.agent-plan-dock-brand > div { min-width: 0; }
+.agent-plan-dock-brand small,
+body[data-shell-mode="workspace"] .agent-plan-dock .agent-plan-dock-brand small { display: block; color: #d0a05b; font-size: 10px; }
+.agent-plan-dock-brand strong { display: block; margin-top: 2px; color: #edf2f4; font: 600 15px/1.2 var(--font-reading, sans-serif); }
+.agent-plan-dock-brand span { display: flex; align-items: center; gap: 5px; margin-top: 3px; color: #87969e; font: 10px/1.2 var(--font-ui, sans-serif); }
+.agent-plan-dock-brand span i { width: 5px; height: 5px; border-radius: 50%; background: #73b18f; }
+.agent-plan-dock > header > b { margin-top: 7px; }
+.agent-plan-dock .agent-planning-headline { margin-top: 16px; }
+.agent-plan-dock .agent-planning-headline > strong { font-size: 18px; }
+.agent-plan-dock .agent-planning-headline > time { font-size: 11px; }
+.agent-plan-dock .agent-planning-flow { margin-top: 19px; padding: 13px 0 10px; border-top: 1px solid #2d3c44; border-bottom: 1px solid #2d3c44; }
+.agent-plan-dock .agent-planning-flow::before { top: 18px; right: 7%; left: 7%; background: #40515a; }
+.agent-plan-dock .agent-planning-flow li {
+  grid-template-rows: 10px auto;
+  row-gap: 8px;
+  column-gap: 0;
+  font-size: 10px;
+}
+.agent-plan-dock .agent-planning-flow li > i { width: 10px; height: 10px; border-radius: 50%; }
+.agent-plan-dock .agent-planning-focus { margin-top: 12px !important; padding: 10px 11px; border-left: 3px solid #d0a05b; border-radius: 5px; background: #1c282f; font-size: 10px; }
+.agent-plan-dock > footer { margin-top: 12px; }
+
+/* Agent plan control console: the visible card answers what the user needs to
+   know now; the drawer keeps detailed steps and activity history. */
+html body[data-shell-mode="workspace"] .agent-plan-dock,
+html body[data-shell-mode="workspace"] .studio.director-merged:not(.home-mode) .agent-plan-dock,
+.agent-plan-dock {
+  margin: 10px 14px 12px;
+  padding: 13px 14px 12px;
+  border: 1px solid #32424a !important;
+  border-left: 3px solid #c9974f !important;
+  border-radius: 8px !important;
+  background: #121d23 !important;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .035) !important;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-tone="running"] { border-left-color: #74a98a !important; }
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-tone="complete"] { border-left-color: #6fac8a !important; background: #12221d !important; }
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-tone="attention"] { border-left-color: #d49755 !important; background: #1d2426 !important; }
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-tone="danger"] { border-left-color: #bd6e70 !important; background: #251c21 !important; }
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"],
+html body[data-shell-mode="workspace"] .studio.director-merged:not(.home-mode) .agent-plan-dock[data-plan-surface="editor"] {
+  color: var(--ct-text);
+  border-color: var(--ct-control-border) !important;
+}
+.agent-plan-dock > header,
+html body[data-shell-mode="workspace"] .agent-plan-dock > header,
+html body[data-shell-mode="workspace"] .agent-plan-dock > footer {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+.agent-plan-dock > header small,
+html body[data-shell-mode="workspace"] .agent-plan-dock > header small {
+  color: #8c9aa1 !important;
+  font: 650 14px/1.35 var(--font-ui, sans-serif) !important;
+  letter-spacing: .02em !important;
+}
+.agent-plan-dock > header > b,
+html body[data-shell-mode="workspace"] .agent-plan-dock > header > b {
+  margin: 0 !important;
+  padding: 0 !important;
+  color: #d0a05b !important;
+  background: transparent !important;
+  font: 600 10px/1.3 var(--font-ui, sans-serif) !important;
+}
+.agent-plan-control {
+  margin-top: 10px;
+  padding: 10px 11px;
+  border: 1px solid rgba(104, 128, 139, .2);
+  border-radius: 7px;
+  background: var(--ct-raised);
+}
+.agent-plan-control dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+.agent-plan-control div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 9px;
+}
+.agent-plan-control dt {
+  color: var(--ct-text-secondary);
+  font: 600 10px/1.35 var(--font-ui, sans-serif);
+}
+.agent-plan-control dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ct-text);
+  font: 600 12px/1.5 var(--font-reading, sans-serif);
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-wrap: pretty;
+}
+
+/* Conversation controls inherit the same semantic palette in both themes. */
+.assistant-plan-summary { margin-block: 8px; min-width: 0; }
+.assistant-plan-summary > summary {
+  color: var(--ct-text); font-size: 12px; line-height: 1.6;
+  cursor: pointer; overflow-wrap: anywhere;
+}
+.assistant-plan-summary .agent-plan-control,
+.assistant-effective-goal { background: transparent; border: 0; padding: 6px 0; }
+.assistant-pending-changes {
+  color: var(--ct-text); background: var(--ct-raised);
+  border: 1px solid var(--ct-warning); border-radius: 6px;
+  padding: 10px; margin-bottom: 8px; max-height: 180px; overflow-y: auto;
+  font-size: 12px; line-height: 1.6;
+}
+.assistant-pending-changes[hidden] { display: none; }
+.assistant-pending-changes p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-pending-changes > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.assistant-pending-changes button { color: var(--ct-text); background: var(--ct-panel); }
+.assistant-pending-changes [data-pending-error] { color: var(--ct-danger); }
+.assistant-pending-changes button:focus-visible,
+.assistant-plan-summary > summary:focus-visible { outline: 2px solid var(--ct-primary); outline-offset: 2px; }
+.agent-plan-control > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--ct-text-secondary);
+  font: 600 9px/1.3 var(--font-data, sans-serif);
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-control {
+  border-color: var(--ct-control-border);
+  background: var(--ct-raised);
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-control dt,
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-control > small { color: var(--ct-text-secondary); }
+html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-control dd { color: var(--ct-text); }
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-track {
+  margin: 10px 0 0;
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid rgba(107, 130, 140, .22);
+  border-radius: 0;
+  background: transparent;
+  width: 100%;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-track > header span,
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-track > header b {
+  display: none;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-track > header strong {
+  color: #aebbc0;
+  font-size: 10px;
+  font-weight: 600;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-track > p {
+  display: none;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-live-bar {
+  height: 8px;
+  margin-top: 8px;
+  border: 1px solid rgba(169, 183, 188, .12);
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(43, 59, 67, .95), rgba(55, 72, 78, .75), rgba(43, 59, 67, .95));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .36);
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow,
+html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-headline,
+html body[data-shell-mode="workspace"] .agent-plan-dock > strong,
+html body[data-shell-mode="workspace"] .agent-plan-dock > p {
+  display: none !important;
+}
+.agent-plan-segments {
+  gap: 3px;
+  margin-top: 9px;
+}
+.agent-plan-segments i {
+  height: 3px;
+  border-radius: 2px;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock > footer {
+  margin-top: 10px !important;
+}
+html body[data-shell-mode="workspace"] .agent-plan-dock > footer > span {
+  color: #788990 !important;
+  font: 600 10px/1 var(--font-data, sans-serif) !important;
+}

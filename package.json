@@ -11,8 +11,9 @@
     "evaluate:workflow-intent": "python3 tools/evaluate_workflow_intent.py",
     "check:repository": "python3 tools/check_repository.py",
     "check:deployment": "python3 tools/check_repository.py --mode deployment",
-    "lint": "npm run lint:frontend && npm run lint:python",
-    "lint:frontend": "eslint static/api-client.js static/app-shell.js static/app.js static/review-actions.js static/runtime-errors.js static/task-creation.js static/ui-copy.js static/workspace-state.js",
+    "audit:ownership": "python3 tools/audit_frontend_ownership.py",
+    "lint": "npm run lint:frontend && npm run lint:python && npm run audit:ownership && npm run audit:css",
+    "lint:frontend": "eslint static/api-client.js static/agent-workspace.js static/app-shell.js static/app.js static/delivery-state.js static/theme-runtime.js static/timeline-presentation.js static/workspace-controller.js static/review-actions.js static/runtime-errors.js static/task-creation.js static/ui-copy.js static/workspace-state.js",
     "lint:python": "ruff check app tools --select F811,F821,F822,F823",
     "test:frontend": "node --test tests/frontend/*.test.mjs",
     "test:intent": "python3 -m pytest -q tests/test_intent_logic.py",
@@ -25,7 +26,8 @@
     "build:loaders": "vite build --config vite.loaders.config.js",
     "build:beam": "vite build --config vite.beam.config.js",
     "build:icons": "vite build --config vite.icons.config.js",
-    "build:ui-runtime": "npm run build:orbs && npm run build:loaders && npm run build:beam && npm run build:icons"
+    "build:ui-runtime": "npm run build:orbs && npm run build:loaders && npm run build:beam && npm run build:icons",
+    "audit:css": "node tools/audit_css_cascade.mjs --check"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
@@ -43,6 +45,7 @@
     "marked": "^18.0.9",
     "mermaid": "^11.16.1",
     "playwright": "^1.62.1",
+    "postcss": "^8.5.25",
     "vite": "^8.2.0"
   }
 }

@@ -1,0 +1,163 @@
+/*
+ * ClipTalk workspace component styles
+ * Structural source: a_clean_modern_dark_and_beige_ui_mockup_of_a_vide.png
+ * Reusable timeline, conversation and review components. The workbench layout
+ * itself is owned by workbench.css.
+ */
+
+/* Usability pass: keep the visual separator quiet while making its actual
+   drag target large enough to discover and grab. */
+
+/* New task is a normal workbench state, not a modal upload canvas. The left
+   assistant, resize handle, and task navigation must stay available before a
+   file is chosen. */
+
+@media (min-width: 1121px) {
+  html body[data-shell-view="home"] {
+    --app-shell-offset: 84px;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  html body[data-shell-view="home"] main#workspace#workspace.studio.home-mode {
+    position: fixed !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    place-items: center !important;
+    background:
+      radial-gradient(circle at 70% 30%, rgba(197, 226, 165, .055), transparent 28rem),
+      #0b1b1a !important;
+  }
+
+  html body[data-shell-view="home"] #homeView.home-view {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    width: min(1040px, calc(100vw - 148px)) !important;
+    min-height: auto !important;
+    margin: 0 !important;
+    padding: 0 24px !important;
+    color: #eef5ef !important;
+    transform: translateY(-2vh);
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading {
+    margin-bottom: 24px !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading h1 {
+    color: #f4f7ef !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading p,
+  html body[data-shell-view="home"] #homeView .home-section-heading span,
+  html body[data-shell-view="home"] #homeView .home-current-empty span {
+    color: #9dafaa !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface {
+    max-width: 760px !important;
+    border: 1px solid rgba(210, 232, 220, .1) !important;
+    background: rgba(16, 38, 36, .72) !important;
+    box-shadow: 0 22px 60px rgba(2, 12, 11, .22) !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface > button {
+    min-height: 84px !important;
+    border-color: rgba(197, 226, 165, .22) !important;
+    color: #f3f8f2 !important;
+    background: rgba(255, 255, 255, .025) !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface small {
+    color: #9dafaa !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-section {
+    max-width: 760px !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-section-heading h2,
+  html body[data-shell-view="home"] #homeView .home-current-empty strong {
+    color: #f3f8f2 !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-current-empty {
+    border-color: rgba(210, 232, 220, .14) !important;
+    color: #9dafaa !important;
+  }
+}
+
+/* Creation is a focused canvas, never a stale three-column task workspace.
+   This structural guard also neutralizes earlier theme layers. */
+
+/* Left assistant — one calm product column, not a nested task dashboard. */
+
+/* Full-width conversation rows do not render an avatar. The legacy chat grid
+   still reserves its 26px avatar column, so these rows must explicitly own a
+   single column or their entire contents collapse into a vertical word stack. */
+
+/* Before the first instruction, the source title already confirms upload in
+   the center toolbar. Keep the assistant column focused on the four starts. */
+
+/* Center — real project toolbar, preview, edit tools and persistent timeline. */
+
+/* Empty timeline uses real capability lanes without inventing content. */
+
+/* Populated source timeline replaces the placeholder at the same visual weight. */
+
+/* The old review mode hid the real tracks until an explicit "expand" action.
+   In the reference workstation, the timeline is a permanent primary surface. */
+
+/* Keep cover candidates editable without allowing the legacy full editor to
+   consume the entire timeline. Each candidate remains independently clickable. */
+
+/* Right rail — visual review cards and real contextual details. */
+
+/* The fine timeline is permanently visible in the center workbench in v3;
+   repeating it as a right-rail tab caused the labels to wrap and waste space. */
+
+/* Conversation density and responsive integrity -------------------------
+   The assistant is a working conversation, so persisted setup notices,
+   status controls and the composer must not squeeze the message stream into
+   a narrow strip. These rules intentionally live last: legacy workspace
+   styles use long selectors and otherwise reintroduce fixed heights. */
+
+/* The review-card content is mounted inside #reviewWorkbench at runtime.
+   Older workstation rules therefore gain an extra ID in their selector; repeat the
+   semantic preview-card palette at the actual mounted depth so cream cards do
+   not inherit white-on-light typography or a washed-out primary action. */
+
+/* Desktop navigation rail -------------------------------------------------
+   Keep global destinations separate from the conversation.  The former
+   horizontal tool row becomes a persistent, quiet side rail while the Agent
+   column keeps the remaining width for task context and messages. */

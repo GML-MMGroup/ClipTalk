@@ -64,7 +64,12 @@
       return Promise.resolve("");
     }
     accessTokenPrompt = new Promise((resolve) => {
+      let settled = false;
       const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        dialog.removeEventListener("cancel", dismiss);
+        dialog.removeEventListener("close", closed);
         form.removeEventListener("submit", submit);
         cancel?.removeEventListener("click", dismiss);
         dialog.close();
@@ -73,8 +78,11 @@
       };
       const submit = (event) => { event.preventDefault(); finish(input.value.trim()); };
       const dismiss = () => finish("");
+      const closed = () => { if (!dialog.open) finish(""); };
       form.addEventListener("submit", submit);
       cancel?.addEventListener("click", dismiss);
+      dialog.addEventListener("cancel", dismiss);
+      dialog.addEventListener("close", closed);
       input.value = "";
       dialog.showModal();
       global.requestAnimationFrame(() => input.focus());
@@ -106,7 +114,11 @@
         credentials: "same-origin",
       });
     } catch (error) {
-      const apiError = new ApiError(error?.message || "网络连接失败", {
+      const nativeMessage = String(error?.message || "").trim();
+      const message = /failed to fetch|load failed|network\s*error|network request failed/i.test(nativeMessage)
+        ? "网络连接失败"
+        : nativeMessage || "网络连接失败";
+      const apiError = new ApiError(message, {
         status: 0, code: "network_error", recoveryAction: "retry",
       });
       apiError.message = formatErrorMessage(apiError);
@@ -150,19 +162,28 @@
     return createResponseError(body, response.status, response.headers.get("X-Request-ID") || "");
   }
 
-  async function request(path, options = {}, allowTokenPrompt = true) {
+  async function requestResponse(path, options = {}, allowTokenPrompt = true) {
     const response = await authenticateAndRetry(path, options, allowTokenPrompt);
     if (!response.ok) throw await errorFromResponse(response);
+    return response;
+  }
+
+  async function request(path, options = {}, allowTokenPrompt = true) {
+    const response = await requestResponse(path, options, allowTokenPrompt);
     return response.json().catch(() => ({}));
   }
 
   async function requestJson(path, options = {}, allowTokenPrompt = true) {
     const headers = new Headers(options.headers || {});
     headers.set("Content-Type", "application/json");
+    const method = String(options.method || "GET").toUpperCase();
+    if (["GET", "HEAD"].includes(method)) {
+      return request(path, { ...options, method, headers }, allowTokenPrompt);
+    }
     const body = typeof options.body === "string"
       ? options.body
       : JSON.stringify(options.body ?? {});
-    return request(path, { ...options, headers, body }, allowTokenPrompt);
+    return request(path, { ...options, method, headers, body }, allowTokenPrompt);
   }
 
   async function requestBlob(path, options = {}, allowTokenPrompt = true) {
@@ -177,7 +198,7 @@
   }
 
   global.ClipTalkApi = Object.freeze({
-    request, requestJson, requestBlob, clearAccessToken, ApiError,
+    request, requestResponse, requestJson, requestBlob, clearAccessToken, ApiError,
     createResponseError, formatErrorMessage, recoveryLabels,
   });
 })(window);

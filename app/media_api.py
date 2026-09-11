@@ -10,6 +10,7 @@ def build_media_router(
     *,
     source_media: Callable[..., Any],
     job_thumbnail: Callable[..., Any],
+    cover_artifact_media: Callable[..., Any],
     retry_job_thumbnail: Callable[..., Any],
     preview_media: Callable[..., Any],
     preview_media_status: Callable[..., Any],
@@ -26,6 +27,9 @@ def build_media_router(
     output_media: Callable[..., Any],
     output_preview_media: Callable[..., Any],
     output_browser_preview_media: Callable[..., Any],
+    output_cover_media: Callable[..., Any],
+    output_release_package: Callable[..., Any],
+    draft_export_media: Callable[..., Any],
 ) -> APIRouter:
     """Own the public media-delivery URL surface.
 
@@ -37,6 +41,7 @@ def build_media_router(
     routes = (
         ("/api/jobs/{job_id}/source", source_media),
         ("/api/jobs/{job_id}/thumbnail", job_thumbnail),
+        ("/api/jobs/{job_id}/cover-artifacts/{artifact_id}", cover_artifact_media),
         ("/api/jobs/{job_id}/preview", preview_media),
         ("/api/jobs/{job_id}/preview-status", preview_media_status),
         ("/api/jobs/{job_id}/browser-preview", browser_preview_media),
@@ -52,6 +57,9 @@ def build_media_router(
         ("/api/jobs/{job_id}/outputs/{filename}", output_media),
         ("/api/jobs/{job_id}/outputs/{filename}/preview", output_preview_media),
         ("/api/jobs/{job_id}/outputs/{filename}/browser-preview", output_browser_preview_media),
+        ("/api/jobs/{job_id}/outputs/{filename}/cover", output_cover_media),
+        ("/api/jobs/{job_id}/outputs/{filename}/package", output_release_package),
+        ("/api/jobs/{job_id}/draft-exports/{filename}", draft_export_media),
     )
     for path, endpoint in routes:
         router.add_api_route(path, endpoint, methods=["GET"])

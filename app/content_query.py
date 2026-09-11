@@ -1383,7 +1383,7 @@ def attach_result_coordinates_and_scores(
         match = copy.deepcopy(source)
         start, end = _interval(match)
         confidence = max(0.0, min(1.0, _number(match.get("confidence"), _number(match.get("score")) / 100)))
-        boundary = max(0.0, min(1.0, _number(match.get("boundaryConfidence"), confidence)))
+        boundary = max(0.0, min(1.0, _number(match.get("boundaryConfidence"), 0)))
         retrieval = max(0.0, min(1.0, _number(match.get("score")) / 100))
         coverage = max(0.0, min(1.0, _number(coverage_completeness, 1.0)))
         probability = retrieval * .45 + confidence * .3 + boundary * .15 + coverage * .1
@@ -1395,7 +1395,10 @@ def attach_result_coordinates_and_scores(
         )
         if confidence_tier not in {"reliable", "possible"}:
             confidence_tier = "possible"
-        review_required = confidence_tier == "possible" and review_status not in {"kept", "rejected"}
+        review_required = (confidence_tier == "possible" and review_status not in {"kept", "rejected"}) or (
+            bool(match.get("boundaryVerification"))
+            and (match.get("boundaryVerification") or {}).get("status") not in {"verified", "human_confirmed"}
+        )
         match.update({
             "startUs": int(round(start * 1_000_000)), "endUs": int(round(end * 1_000_000)),
             "sourceRange": {"startUs": int(round(start * 1_000_000)), "endUs": int(round(end * 1_000_000))},

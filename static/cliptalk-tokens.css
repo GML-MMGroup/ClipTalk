@@ -1,0 +1,109 @@
+:root {
+  color-scheme: dark;
+
+  /* ClipTalk UI 开发定稿 v1.0 · 设计基线 A */
+  --ct-canvas: var(--ct-theme-canvas, #102625);
+  --ct-shell: var(--ct-theme-shell, #132b2a);
+  --ct-sidebar: var(--ct-theme-sidebar, #193332);
+  --ct-panel: var(--ct-theme-panel, #193431);
+  --ct-raised: var(--ct-theme-raised, #2a4642);
+  --ct-hover: var(--ct-theme-hover, #355650);
+  --ct-border: var(--ct-theme-border, #34433f);
+  --ct-control-border: var(--ct-theme-control-border, #718579);
+
+  --ct-text: var(--ct-theme-text, #f5f7f4);
+  --ct-text-secondary: var(--ct-theme-text-secondary, #d2dcd7);
+  --ct-text-muted: var(--ct-theme-text-muted, #a6b5aa);
+  --ct-text-disabled: var(--ct-theme-text-disabled, #788a7d);
+  --ct-on-media: #f5f7f4;
+  --ct-waveform-on-media: #cbe7aa;
+
+  --ct-primary: var(--ct-theme-primary, #cbe7aa);
+  --ct-primary-hover: var(--ct-theme-primary-hover, #d7efb8);
+  --ct-primary-active: var(--ct-theme-primary-active, #b5cb94);
+  --ct-on-primary: var(--ct-theme-on-primary, #1c3028);
+  --ct-selected: var(--ct-theme-selected, #2c3a2d);
+  --ct-focus: var(--ct-theme-focus, #d6e8bd);
+  --ct-playhead: var(--ct-theme-playhead, #f1d9a1);
+  --ct-success: var(--ct-theme-success, #94cfa0);
+  --ct-warning: var(--ct-theme-warning, #e2c080);
+  --ct-danger: var(--ct-theme-danger, #e3a59c);
+  --ct-info: var(--ct-theme-info, #a6c7e5);
+
+  --ct-category-speaker: #f3e5c2;
+  --ct-category-person: #dce7d4;
+  --ct-category-content: #dce6ef;
+  --ct-category-highlight: #f1dad4;
+  --ct-on-category: #233027;
+  --ct-on-category-muted: #4f6155;
+
+  --ct-space-1: 4px;
+  --ct-space-2: 8px;
+  --ct-space-3: 12px;
+  --ct-space-4: 16px;
+  --ct-space-5: 20px;
+  --ct-space-6: 24px;
+  --ct-space-8: 32px;
+
+  --ct-radius-label: 4px;
+  --ct-radius-control: 8px;
+  --ct-radius-card: 10px;
+  --ct-radius-overlay: 12px;
+  --ct-radius-shell: 18px;
+
+  --ct-duration-hover: 120ms;
+  --ct-duration-panel: 180ms;
+  --ct-duration-state: 240ms;
+  --ct-ease: cubic-bezier(.2, .75, .25, 1);
+
+  --ct-z-header: 20;
+  --ct-z-menu: 100;
+  --ct-z-panel: 200;
+  --ct-z-scrim: 400;
+  --ct-z-modal: 410;
+  --ct-z-modal-menu: 420;
+  --ct-z-alert: 500;
+
+  --ct-shadow-shell: 0 24px 70px rgba(31, 39, 34, .16);
+  --ct-shadow-overlay: 0 20px 50px rgba(12, 19, 18, .38);
+}
+
+:root[data-theme="light"] {
+  color-scheme: only light;
+
+  --ct-theme-canvas: #f3f3f0;
+  --ct-theme-shell: #f7f7f4;
+  --ct-theme-sidebar: #f2f2f0;
+  --ct-theme-panel: #ffffff;
+  --ct-theme-raised: #f7f7f4;
+  --ct-theme-hover: #eceeea;
+  --ct-theme-border: #d7dad6;
+  --ct-theme-control-border: #bcc4bd;
+
+  --ct-theme-text: #1d2924;
+  --ct-theme-text-secondary: #43534b;
+  --ct-theme-text-muted: #596b61;
+  --ct-theme-text-disabled: #98a49d;
+
+  --ct-theme-primary: #355d48;
+  --ct-theme-primary-hover: #294c3b;
+  --ct-theme-primary-active: #203e30;
+  --ct-theme-on-primary: #f7fbf7;
+  --ct-theme-selected: #dce8dd;
+  --ct-theme-focus: #4d775f;
+  --ct-theme-playhead: #a56d23;
+  --ct-theme-success: #34764d;
+  --ct-theme-warning: #9a661f;
+  --ct-theme-danger: #a94e45;
+  --ct-theme-info: #3f6f9c;
+
+  --ct-category-speaker: #f8ead1;
+  --ct-category-person: #e5f0e7;
+  --ct-category-content: #e8f0f6;
+  --ct-category-highlight: #f6e8e4;
+  --ct-on-category: #24312a;
+  --ct-on-category-muted: #53635a;
+
+  --ct-shadow-shell: 0 24px 70px rgba(44, 49, 46, .1);
+  --ct-shadow-overlay: 0 20px 50px rgba(35, 40, 37, .17);
+}

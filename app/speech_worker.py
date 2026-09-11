@@ -13,6 +13,19 @@ from .speech import (
 )
 
 
+SENSEVOICE_RUNTIME_CONFIG_KEYS = frozenset({
+    "model_name", "device", "vad_model", "punc_model", "spk_model",
+    "diarization", "model_cache",
+})
+
+
+def _sensevoice_runtime_config(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep persisted worker metadata out of model function arguments."""
+    config = {key: value[key] for key in SENSEVOICE_RUNTIME_CONFIG_KEYS if key in value}
+    config["model_cache"] = Path(config["model_cache"])
+    return config
+
+
 def write_json(path: Path, value: dict[str, Any]) -> None:
     value = dict(value)
     if path.name == "status.json":
@@ -26,10 +39,9 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 def main() -> int:
     if len(sys.argv) != 2:
         return 2
-    config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    worker_directory = Path(config.pop("worker_directory"))
-    config.pop("runtime_version", None)
-    config["model_cache"] = Path(config["model_cache"])
+    persisted_config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    worker_directory = Path(persisted_config["worker_directory"])
+    config = _sensevoice_runtime_config(persisted_config)
     status_path = worker_directory / "status.json"
     requests = worker_directory / "requests"
     results = worker_directory / "results"

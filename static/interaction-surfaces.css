@@ -1,3 +1,4 @@
+/* Dialogs, focus surfaces and compact-screen interaction guards. */
 :root {
   --z-base: 0;
   --z-sticky: 20;
@@ -14,7 +15,6 @@ body {
 
 .input-prompt {
   position: fixed;
-  z-index: var(--z-dialog);
   inset: 0;
   display: grid;
   place-items: center;

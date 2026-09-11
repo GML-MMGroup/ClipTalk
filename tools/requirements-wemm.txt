@@ -1,0 +1,8 @@
+# Optional isolated WeMM visual-retrieval environment.
+# Keep this separate from requirements-gpu.txt because WeMM's reproducible
+# preprocessing requires Transformers 5.2 while the primary app is pinned to 4.x.
+torch
+transformers==5.2.0
+qwen-vl-utils[decord]==0.0.14
+sentence-transformers==5.7.0
+accelerate>=1.1.0

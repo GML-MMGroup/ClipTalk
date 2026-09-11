@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,7 @@ class ContentSearchConfirmRequest(BaseModel):
     subtitleDraftId: str | None = None
     orderReason: str = ""
     acknowledgeIncomplete: bool = False
+    acknowledgeUnverified: bool = False
 
 
 class ContentSelectionBasketRequest(BaseModel):
@@ -72,6 +73,7 @@ class ContentSelectionBasketConfirmRequest(BaseModel):
     subtitleDraftId: str | None = None
     acknowledgeIncomplete: bool = False
     acknowledgeOverlap: bool = False
+    acknowledgeUnverified: bool = False
     targetSeconds: float | None = None
 
 
@@ -212,6 +214,11 @@ class BriefConfirmRequest(BaseModel):
     confirmed: bool = True
 
 
+class ProjectSettingsRequest(BaseModel):
+    outputAspect: Literal["source", "16:9", "9:16"] = "source"
+    outputFit: Literal["blur", "crop"] = "blur"
+
+
 class AnalysisDecisionRequest(BaseModel):
     action: str
 
@@ -256,6 +263,21 @@ class SameSourceTaskRequest(BaseModel):
     autoCompose: bool = True
 
 
+class ActivateAgentDraftRequest(BaseModel):
+    workflowKind: str = Field(min_length=8, max_length=24)
+    instruction: str = Field(default="", max_length=500)
+    sourceScopeKind: str = Field(default="all", min_length=3, max_length=16)
+    sourceScopeStart: float | None = Field(default=None, ge=0)
+    sourceScopeEnd: float | None = Field(default=None, gt=0)
+    targetSeconds: float | None = Field(default=None, ge=4, le=86400)
+    variantCount: int | None = Field(default=None, ge=1, le=4)
+    expectedSpeakerCount: int | None = Field(default=None, ge=1, le=32)
+
+
+# One-release import alias for integrations that still import the old schema.
+LegacyActivationRequest = ActivateAgentDraftRequest
+
+
 class ConfirmCandidatesRequest(BaseModel):
     indices: list[int] | None = None
     groupIds: list[str] | None = None
@@ -293,10 +315,25 @@ class RenderAutoPlanRequest(BaseModel):
 
 
 class FinalizeOutputVersionRequest(BaseModel):
+    specVersion: int | None = None
+    subtitleDraftRevision: int | None = None
+    subtitleDraftHash: str | None = Field(default=None, max_length=64)
+    outputFilename: str | None = Field(default=None, max_length=255)
+    outputRevision: str | None = Field(default=None, max_length=64)
     subtitleMode: str = "none"
     subtitleStyle: str = "clean"
     subtitleDraftId: str | None = None
     acknowledgeQualityRisk: bool = False
+
+
+class CoverIntroRequest(BaseModel):
+    duration: float = Field(default=1.0, ge=0.5, le=5.0)
+
+
+class CoverTimelineDraftRequest(BaseModel):
+    variantId: str = Field(min_length=1, max_length=160)
+    duration: float = Field(default=1.0, ge=0.5, le=5.0)
+    contentHash: str = Field(default="", max_length=160)
 
 
 class RegenerateAutoCompositionRequest(BaseModel):

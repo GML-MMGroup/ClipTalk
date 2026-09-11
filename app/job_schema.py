@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 
-CURRENT_JOB_SCHEMA_VERSION = 5
+CURRENT_JOB_SCHEMA_VERSION = 6
 
-from .algorithm_contract import ALGORITHM_V1
+from .algorithm_contract import CURRENT_ALGORITHM_VERSION
 
 WORKFLOW_KINDS = frozenset({"highlight", "content_search", "person_edit", "speaker_edit"})
 
@@ -94,10 +94,10 @@ def normalize_job_schema(job: dict[str, Any]) -> bool:
                     legacy_composition_text, composition_text, 1,
                 )
                 changed = True
-    if version < 5:
-        # The release boundary is deliberately one-way: persisted jobs never
-        # inherit a newer decision pipeline just because the server changed.
-        job.setdefault("algorithmVersion", ALGORITHM_V1)
+    if version < 6 or job.get("algorithmVersion") != CURRENT_ALGORITHM_VERSION:
+        # Algorithm selection is no longer a per-task compatibility switch.
+        # Persist the current value only for diagnostics and cache identity.
+        job["algorithmVersion"] = CURRENT_ALGORITHM_VERSION
         changed = True
     if version != CURRENT_JOB_SCHEMA_VERSION:
         job["schemaVersion"] = CURRENT_JOB_SCHEMA_VERSION

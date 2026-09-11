@@ -117,6 +117,29 @@ Anthropic 兼容接口使用 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 `
 - `HIGHLIGHT_RECOGNITION_PYTHON`：把可选原生识别模型隔离到另一 Python 环境。
 - `HIGHLIGHT_SENSEVOICE_DEVICE=auto`：自动选择 CPU 或 CUDA。
 - `HIGHLIGHT_RECOGNITION_MODEL_CACHE=./data/models/recognition`：模型缓存位置。
+
+### 可选 WeMM 视觉检索后端
+
+WeMM 可以替换 SigLIP 画面索引、全片粗召回、高光粗筛和匿名人物外观描述召回，但不会替换事实核验、精确边界判断、事件编排或自然语言解释。系统把 WeMM 命中标记为 `embedding_recalled`；只有后续视觉核验通过才会升级为明确证据。
+
+建议使用隔离环境，避免 WeMM 官方推荐的 Transformers 5.2 与主应用依赖冲突：
+
+```bash
+python3 -m venv .venv-wemm
+.venv-wemm/bin/pip install -r tools/requirements-wemm.txt
+```
+
+```dotenv
+HIGHLIGHT_VISUAL_EMBEDDING_BACKEND=wemm
+HIGHLIGHT_RECOGNITION_PYTHON=.venv-wemm/bin/python
+HIGHLIGHT_WEMM_MODEL=tencent/WeMM-Embedding-2B
+HIGHLIGHT_WEMM_DIMENSION=256
+HIGHLIGHT_WEMM_VIDEO_INDEX=true
+HIGHLIGHT_WEMM_RECALL_THRESHOLD=0.18
+HIGHLIGHT_WEMM_EXHAUSTIVE_VLM_FALLBACK=false
+```
+
+默认的 `false` 策略会完整扫描图片与视频向量索引，只把候选交给 VLM 核验，因此结果会明确显示“向量召回完整、语义证明不完整”。需要原有逐帧严格语义覆盖时把最后一项设为 `true`，或在单次检索中请求强制密集扫描。文件协议 worker 会在每次查询冷启动模型，持续流量部署应改用官方支持的 vLLM/SGLang 常驻 embedding 服务。
 - `CONTENT_SEARCH_DIALOGUE_V2=true`：启用对话图检索，仅排障回滚时关闭。
 
 完整变量、默认模型和超时配置以 `.env.example` 为准。

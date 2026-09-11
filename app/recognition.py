@@ -13,10 +13,7 @@ from PIL import Image
 from .active_speaker import active_speaker_runtime
 
 
-LEGACY_MULTIMODAL_INDEX_VERSION = "multimodal-index-v4"
-CONTINUITY_MULTIMODAL_INDEX_VERSION = "multimodal-index-v8-continuity"
-PREVIOUS_MULTIMODAL_INDEX_VERSION = "multimodal-index-v9-person-continuity"
-MULTIMODAL_INDEX_VERSION = "multimodal-index-v11-face-anchored-person-identity"
+MULTIMODAL_INDEX_VERSION = "multimodal-index-v12-wemm-visual-retrieval"
 RECOGNITION_SCHEMA_VERSION = 10
 RECOGNITION_MODALITIES = ("speech", "visual", "ocr", "audio", "person")
 
@@ -69,6 +66,11 @@ def runtime_capabilities(settings: Any, *, probe_active_speaker: bool = True) ->
     yolox = Path(getattr(settings, "recognition_yolox_model", ""))
     youtureid = Path(getattr(settings, "recognition_youtureid_model", ""))
     enabled = bool(getattr(settings, "recognition_enabled", True))
+    visual_backend = str(getattr(settings, "recognition_visual_backend", "siglip") or "siglip").lower()
+    visual_model = (
+        getattr(settings, "recognition_wemm_model", "tencent/WeMM-Embedding-2B")
+        if visual_backend == "wemm" else getattr(settings, "recognition_siglip_model", "")
+    )
     capabilities = {
         "schemaVersion": RECOGNITION_SCHEMA_VERSION,
         "indexVersion": MULTIMODAL_INDEX_VERSION,
@@ -82,7 +84,13 @@ def runtime_capabilities(settings: Any, *, probe_active_speaker: bool = True) ->
         },
         "visualEmbedding": {
             "status": "ready" if enabled and importlib.util.find_spec("transformers") and torch_ready else "degraded",
-            "model": getattr(settings, "recognition_siglip_model", ""),
+            "backend": visual_backend,
+            "model": visual_model,
+            "dimension": (
+                int(getattr(settings, "recognition_wemm_dimension", 256) or 256)
+                if visual_backend == "wemm" else None
+            ),
+            "videoIndex": bool(getattr(settings, "recognition_wemm_video_index", True)) if visual_backend == "wemm" else False,
         },
         "audioEmbedding": {
             "status": "ready" if enabled and importlib.util.find_spec("transformers") and torch_ready else "degraded",
@@ -370,7 +378,6 @@ def cluster_person_tracks(
     tracks: list[dict[str, Any]], *, similarity_threshold: float = PERSON_IDENTITY_SIMILARITY_THRESHOLD,
     scene_cuts: Iterable[Any] | None = None,
     maximum_gap: float = PERSON_TRACK_CONTINUITY_GAP_SECONDS,
-    algorithm_version: str = "editing-algorithm-v1",
 ) -> list[dict[str, Any]]:
     tracks = sorted((dict(item) for item in tracks if item.get("embedding")), key=lambda item: _number(item.get("start")))
     identity_scene_cuts = sorted(_number(value) for value in scene_cuts or [])
@@ -394,7 +401,7 @@ def cluster_person_tracks(
             )
             last_time = max((_number(value.get("start")) for value in cluster.get("tracks") or []), default=-1)
             crossed_shot = any(last_time < cut <= track_time for cut in identity_scene_cuts)
-            required = similarity_threshold + (.1 if algorithm_version == "editing-algorithm-v2" and crossed_shot else 0)
+            required = similarity_threshold + (.1 if crossed_shot else 0)
             return {
                 "body": body_similarity,
                 "face": face_similarity,
@@ -449,7 +456,7 @@ def cluster_person_tracks(
         cluster = ranked_candidates[0][0] if ranked_candidates else None
         best_profile = ranked_candidates[0][1] if ranked_candidates else None
         if (
-            algorithm_version == "editing-algorithm-v2" and cluster is not None
+            cluster is not None
             and best_profile is not None
             and not best_profile["sameTracklet"]
             and not (
@@ -558,27 +565,21 @@ def cluster_person_tracks(
                 _number(evidence.get("maxObservedGap")) > max(.75, maximum_gap * .6)
                 or int(evidence.get("sceneCutBridgeCount") or 0) > 0
             )
-            if algorithm_version == "editing-algorithm-v2":
-                evidence["status"] = (
-                    "face_confirmed" if any(
-                        str(item.get("identityStatus") or "") == "face_confirmed"
-                        and ranges[range_index]["start"] - .001 <= _number(item.get("start")) <= ranges[range_index]["end"] + .001
-                        for item in observed_items
-                    ) else "body_tracked"
-                )
-                evidence["confidence"] = round(max(.5, min(.96,
-                    .58
-                    + (.18 if evidence["status"] == "face_confirmed" else .08)
-                    + min(.12, .02 * math.sqrt(evidence["observedCount"]))
-                    - (.12 if evidence["interpolated"] else 0)
-                )), 3)
-                if evidence["confidence"] < .62:
-                    evidence["status"] = "possible"
-            else:
-                evidence["confidence"] = round(
-                    max(.55, min(.98, .72 + min(.18, .03 * evidence["observedCount"])
-                    - (.1 if evidence["interpolated"] else 0))), 3,
-                )
+            evidence["status"] = (
+                "face_confirmed" if any(
+                    str(item.get("identityStatus") or "") == "face_confirmed"
+                    and ranges[range_index]["start"] - .001 <= _number(item.get("start")) <= ranges[range_index]["end"] + .001
+                    for item in observed_items
+                ) else "body_tracked"
+            )
+            evidence["confidence"] = round(max(.5, min(.96,
+                .58
+                + (.18 if evidence["status"] == "face_confirmed" else .08)
+                + min(.12, .02 * math.sqrt(evidence["observedCount"]))
+                - (.12 if evidence["interpolated"] else 0)
+            )), 3)
+            if evidence["confidence"] < .62:
+                evidence["status"] = "possible"
         appearance_seconds = sum(max(0.0, item["end"] - item["start"]) for item in ranges)
         face_anchor_count = len(cluster.get("faceEmbeddings") or [])
         result.append({
@@ -590,15 +591,15 @@ def cluster_person_tracks(
             "trackIds": [str(item.get("id") or "") for item in items],
             "trackCount": len(items), "confidence": (
                 round(float(np.mean([_number(value.get("confidence"), .5) for value in range_evidence])), 3)
-                if algorithm_version == "editing-algorithm-v2" and range_evidence
+                if range_evidence
                 else round(min(1.0, .55 + .06 * len(items)), 3)
             ),
-            "confidenceCalibration": "person-identity-v3-face-anchor" if algorithm_version == "editing-algorithm-v2" else "legacy-observation-count",
+            "confidenceCalibration": "person-identity-v3-face-anchor",
             "faceAnchorCount": face_anchor_count,
             "appearanceSeconds": round(appearance_seconds, 3),
             "reviewRecommended": (
                 len(items) < 3 or appearance_seconds < 1.0
-                or (algorithm_version == "editing-algorithm-v2" and face_anchor_count == 0)
+                or face_anchor_count == 0
             ),
             "representativeTime": round(_number(representative.get("start")), 3),
             "representativeBox": [round(_number(value), 2) for value in representative.get("box") or []],

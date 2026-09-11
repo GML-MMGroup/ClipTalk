@@ -15,6 +15,7 @@ EDIT_SESSION_ROUTES = (
     ("edit_session_preview_media", "/api/jobs/{job_id}/edit-sessions/{session_id}/preview", "GET", 200),
     ("render_edit_session", "/api/jobs/{job_id}/edit-sessions/{session_id}/render", "POST", 202),
     ("create_edit_session_proposal", "/api/jobs/{job_id}/edit-sessions/{session_id}/proposals", "POST", 200),
+    ("select_edit_session_proposal", "/api/jobs/{job_id}/edit-sessions/{session_id}/proposals/{proposal_id}/select", "POST", 200),
     ("apply_edit_session_proposal", "/api/jobs/{job_id}/edit-sessions/{session_id}/proposals/{proposal_id}/apply", "POST", 200),
     ("cancel_edit_session_proposal", "/api/jobs/{job_id}/edit-sessions/{session_id}/proposals/{proposal_id}", "DELETE", 200),
 )

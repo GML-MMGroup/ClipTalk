@@ -96,6 +96,8 @@ def normalize_segments(outputs: Any) -> list[list[dict[str, Any]]]:
                 transition_duration = round(max(0.0, float(transition.get("duration") or 0)), 3)
             except (TypeError, ValueError):
                 transition_duration = 0.0
+            if transition_type == "cut":
+                transition_duration = 0.0
             segments.append({
                 "start": start,
                 "end": end,

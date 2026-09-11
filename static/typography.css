@@ -1,4 +1,4 @@
-/* ClipTalk visual system --------------------------------------------------
+/* ClipTalk typography and foundational surfaces --------------------------
    This file is intentionally loaded after the legacy layout stylesheet. It
    owns typography, colour, surface depth and interaction chrome; geometry and
    workflow behaviour remain in styles.css. */
@@ -28,11 +28,13 @@
 }
 
 :root {
-  color-scheme: dark;
   --font-cjk: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-ui: "Inter", var(--font-cjk);
-  --font-reading: "VP Assistant WenKai", "Noto Sans SC", serif;
-  --font-display: "VP Editorial Song", "Noto Sans SC", serif;
+  /* A workstation benefits from one calm Chinese voice. The former WenKai
+     paragraphs and Song-style headings looked decorative beside compact UI
+     controls and became tiring at small sizes. */
+  --font-reading: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Noto Sans SC", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-data: "Inter", "Noto Sans SC", ui-monospace, monospace;
   --font-metric: "VP Metric Display", "Inter", ui-monospace, monospace;
   --font-body: var(--font-ui);
@@ -54,7 +56,6 @@
   --text-primary: #e8ece7;
   --text-secondary: #a0aaa1;
   --text-tertiary: #7a847c;
-  --accent: #a8c269;
   --accent-hover: #b7cf7c;
   --accent-ink: #101310;
   --line-subtle: rgba(221, 231, 222, .06);
@@ -113,19 +114,9 @@ html { scroll-behavior: smooth; }
 
 html,
 body {
-  color: var(--text-primary) !important;
-  background: var(--canvas) !important;
-  font-family: var(--font-ui) !important;
-  font-size: var(--text-body);
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
 }
-
-body,
-button,
-input,
-select,
-textarea { font-family: var(--font-ui); }
 
 :where(time, code, kbd, samp, output, [class*="time"], [class*="clock"], [class*="duration"], [class*="frame"], [class*="score"]) {
   font-variant-numeric: tabular-nums;
@@ -138,12 +129,6 @@ textarea { font-family: var(--font-ui); }
 
 :where(button, [role="button"]):active:not(:disabled) { transform: translateY(1px); }
 
-:where(button, a, input, select, textarea, summary):focus-visible {
-  outline: 2px solid var(--accent) !important;
-  outline-offset: 2px;
-  box-shadow: 0 0 0 4px var(--focus-ring) !important;
-}
-
 /* App shell ------------------------------------------------------------- */
 body:not(:has(.studio.home-mode)) {
   background:
@@ -152,10 +137,7 @@ body:not(:has(.studio.home-mode)) {
 }
 
 .ambient-grid {
-  opacity: .28 !important;
-  background-image: radial-gradient(circle at 1px 1px, rgba(208, 222, 210, .11) 1px, transparent 0) !important;
   background-size: 28px 28px !important;
-  mask-image: linear-gradient(to bottom, #000, transparent 68%);
 }
 
 .ambient-grid::before,
@@ -207,7 +189,6 @@ body:not(:has(.studio.home-mode)) {
 }
 
 .panel-resizer::before,
-.review-workbench-resizer::before,
 .timeline-resizer::before,
 .review-evidence-resizer::before {
   background: transparent !important;
@@ -215,7 +196,6 @@ body:not(:has(.studio.home-mode)) {
 }
 
 .panel-resizer::after,
-.review-workbench-resizer::after,
 .timeline-resizer::after,
 .review-evidence-resizer::after {
   border-color: transparent !important;
@@ -226,9 +206,6 @@ body:not(:has(.studio.home-mode)) {
 .panel-resizer:hover::before,
 .panel-resizer:focus-visible::before,
 .panel-resizer.dragging::before,
-.review-workbench-resizer:hover::before,
-.review-workbench-resizer:focus-visible::before,
-.review-workbench-resizer.dragging::before,
 .timeline-resizer:hover::before,
 .timeline-resizer:focus-visible::before,
 .timeline-resizer.dragging::before,
@@ -243,7 +220,7 @@ body:not(:has(.studio.home-mode)) {
   .top-button, .home-button, .engine, .download-button, .icon-button,
   .assistant-panel-toggle, .chat-compose-button, .chat-compose-recommended,
   .chat-compose-recommended-button, .chat-compose-plan-button,
-  .review-layout-switch button, .video-view-select, .asset-chip,
+  .video-view-select, .asset-chip,
   .review-panel-switch button, .review-action-dock button,
   .candidate-drawer button, .settings-panel button, .action-confirm-card button,
   .workflow-entry-card, .workflow-routing-options button,
@@ -255,7 +232,7 @@ body:not(:has(.studio.home-mode)) {
 
 :where(
   .top-button, .home-button, .engine, .download-button, .icon-button,
-  .assistant-panel-toggle, .review-layout-switch button, .video-view-select,
+  .assistant-panel-toggle, .video-view-select,
   .asset-chip, .review-panel-switch button, .candidate-drawer button,
   .settings-panel button, .action-confirm-card button,
   .workflow-routing-options button
@@ -266,7 +243,7 @@ body:not(:has(.studio.home-mode)) {
 
 :where(
   .top-button, .home-button, .engine, .download-button, .icon-button,
-  .assistant-panel-toggle, .review-layout-switch button, .video-view-select,
+  .assistant-panel-toggle, .video-view-select,
   .review-panel-switch button, .candidate-drawer button,
   .settings-panel button, .action-confirm-card button,
   .workflow-routing-options button
@@ -318,9 +295,7 @@ body:not(:has(.studio.home-mode)) {
 
 /* Homepage -------------------------------------------------------------- */
 body:has(.studio.home-mode) {
-  color-scheme: light;
   color: #20241f !important;
-  background: #f2f4ef !important;
 }
 
 body:has(.studio.home-mode) .topbar {
@@ -354,35 +329,14 @@ body:has(.studio.home-mode) .ambient-grid {
   --home-accent-deep: #5e743b;
   --home-danger: #a85f5d;
   border-color: transparent !important;
-  color: var(--home-text) !important;
-  background:
-    radial-gradient(circle at 82% 8%, rgba(112, 137, 73, .09), transparent 28%),
-    var(--home-canvas) !important;
   box-shadow: none !important;
 }
 
-.home-view .home-heading h1 {
-  color: var(--home-text) !important;
-  font-family: var(--font-display) !important;
-  font-size: clamp(38px, 4.2vw, 60px) !important;
-  font-weight: 700 !important;
-  line-height: 1.08;
-  letter-spacing: -.035em !important;
-  text-wrap: balance;
-}
-
 .home-view .home-heading p {
-  max-width: 62ch;
-  color: var(--home-body) !important;
   font-family: var(--font-ui) !important;
-  font-size: 15px !important;
-  line-height: 1.75 !important;
-  text-wrap: pretty;
 }
 
 .home-view .home-section-heading h2 {
-  color: var(--home-text) !important;
-  font-size: var(--text-section) !important;
   font-weight: 650 !important;
 }
 
@@ -1120,11 +1074,4 @@ body .studio.director-merged:not(.home-mode) #directorTaskSummary {
 @media (max-width: 760px) {
   .home-view .home-heading h1 { font-size: 36px !important; }
   .home-view .home-heading p { font-size: 14px !important; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    scroll-behavior: auto !important;
-    transition-duration: .01ms !important;
-  }
 }

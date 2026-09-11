@@ -104,6 +104,22 @@ function showToast(message, tone = "error") {
   toast.querySelector("button")?.addEventListener("click", clearToast);
   toastTimer = setTimeout(clearToast, 5200);
 }
+window.showToast = showToast;
+
+function resizeChatComposerInput() {
+  const input = $("#chatInput");
+  const form = $("#chatForm");
+  if (!input || !form) return;
+  const minHeight = 42;
+  const maxHeight = 84;
+  input.style.setProperty("height", "auto", "important");
+  const naturalHeight = Math.max(minHeight, input.scrollHeight);
+  const inputHeight = Math.min(maxHeight, naturalHeight);
+  input.style.setProperty("height", `${inputHeight}px`, "important");
+  input.style.setProperty("overflow-y", naturalHeight > maxHeight ? "auto" : "hidden", "important");
+  form.style.setProperty("--ct-composer-input-height", `${inputHeight}px`);
+  form.classList.toggle("composer-has-overflow", naturalHeight > maxHeight);
+}
 
 function updateComposerBeam() {
   const shell = $(".chat-input-shell");
@@ -128,6 +144,7 @@ function updateComposerBeam() {
       : hasText
         ? { size: "md", color: "ocean", strength: .72, duration: 2.7, brightness: 1.24, saturation: 1.04, hueRange: 24, active: true }
         : { size: "md", color: "ocean", strength: disabled ? .32 : .56, duration: disabled ? 5.2 : 3.8, brightness: disabled ? 1.12 : 1.18, saturation: disabled ? .94 : 1, hueRange: disabled ? 20 : 22, active: true });
+  resizeChatComposerInput();
 }
 
 function setComposerSending(sending) {
@@ -215,7 +232,113 @@ const localPreviewPanel = $("#localPreviewPanel");
 let currentJob = null;
 window.ClipTalkCurrentJobId = () => String(currentJob?.id || "");
 window.ClipTalkCurrentJobSnapshot = () => currentJob;
+window.ClipTalkRefreshCurrentJob = () => { if (currentJob) pollJob(); };
+window.ClipTalkSwitchWorkspaceJob = async (job) => {
+  const targetId = String(job?.id || "");
+  if (!targetId) return;
+  const sourceId = String(currentJob?.id || "");
+  let latest = job;
+  try {
+    const response = await api(`/api/jobs/${encodeURIComponent(targetId)}`);
+    if (response?.job?.id) latest = response.job;
+  } catch {
+    // The plan result still provides a usable handoff snapshot if the fresh
+    // read fails. Never block navigation solely because a refresh raced it.
+  }
+  const visibleId = String(currentJob?.id || "");
+  if (visibleId && visibleId !== sourceId && visibleId !== targetId) return;
+  if (!switchWorkspaceJob(latest)) return;
+  void window.ClipTalkAgentWorkspace?.resumeForJob?.(currentJob);
+  if (jobNeedsPolling(currentJob)) pollJob();
+};
 let currentOutput = null;
+function currentOutputIsReviewSample(output = currentOutput, version = null) {
+  const locatedVersion = version || (output?.filename && currentJob
+    ? orderedJobOutputs(currentJob).find(({ item }) => String(item?.filename || "") === String(output.filename))?.version
+    : null);
+  const kind = String(output?.outputKind || output?.kind || locatedVersion?.variantKind || "").toLowerCase();
+  const versionId = String(locatedVersion?.id || "").toLowerCase();
+  return Boolean(
+    output?.previewOnly
+    || locatedVersion?.previewOnly
+    || versionId === "agent-review-previews"
+    || kind.includes("review_preview")
+    || kind.includes("agent_review")
+  );
+}
+
+function syncOutputPreviewMode() {
+  const outputActive = Boolean(viewerMediaKind === "output" && currentOutput);
+  const active = Boolean(outputActive && currentOutputIsReviewSample(currentOutput));
+  document.body.classList.toggle("ct-output-preview-mode", outputActive);
+  document.body.classList.toggle("ct-agent-preview-mode", active);
+  document.body.dataset.viewerMode = viewerMediaKind || "source";
+  if (active) document.body.dataset.outputPreviewMode = "agent-sample";
+  else delete document.body.dataset.outputPreviewMode;
+  syncLegacyOutputPanelsForV4(outputActive);
+  syncUnifiedWorkspaceView();
+  try { window.ClipTalkWorkspaceController?.syncMaterialsSummary?.(); }
+  catch { /* summary sync is best-effort */ }
+  return active;
+}
+
+function syncLegacyOutputPanelsForV4(forceOutputMode = null) {
+  const v4 = document.body.classList.contains("ct-workbench-v4");
+  const outputMode = forceOutputMode === null
+    ? Boolean(viewerMediaKind === "output" && currentOutput)
+    : Boolean(forceOutputMode);
+  const suppress = Boolean(v4 && outputMode);
+  ["clipSection", "railOutput", "reviewWorkbench", "railBody", "ctReviewEmpty"].forEach((id) => {
+    const node = $(`#${id}`);
+    if (!node) return;
+    const wasSuppressed = node.classList.contains("ct-v4-preview-suppressed");
+    node.classList.toggle("ct-v4-preview-suppressed", suppress);
+    if (suppress) {
+      node.classList.add("hidden");
+      node.style.display = "none";
+    } else if (wasSuppressed) {
+      node.classList.remove("ct-v4-preview-suppressed");
+      node.style.removeProperty("display");
+    }
+  });
+  return suppress;
+}
+
+const selectedOutputByJob = new Map();
+const observedFormalOutputs = new Map();
+function observeFormalDelivery(job) {
+  const entries = orderedJobOutputs(job).filter(({ item, version }) => !currentOutputIsReviewSample(item, version));
+  const known = observedFormalOutputs.get(job.id);
+  observedFormalOutputs.set(job.id, new Set(entries.map(({ item }) => item.filename)));
+  const delivered = known && entries.filter(({ item }) => !known.has(item.filename)).at(-1);
+  if (!delivered) return;
+  const filename = delivered.item.filename;
+  window.setTimeout(() => {
+    if (currentJob?.id !== job.id) return;
+    showToast(`正式视频已生成：${delivered.item.displayTitle || delivered.item.title || filename}`, "success");
+    const action = document.createElement("button");
+    action.type = "button";
+    action.textContent = "下载或存入成片库";
+    action.onclick = () => {
+      if (currentJob?.id !== job.id) return void showToast("任务已切换，请在原任务查看成片");
+      window.ClipTalkWorkspaceController?.openDeliveryResult?.(filename);
+    };
+    document.querySelector(".toast-region .toast, #toastRegion .toast")?.append(action);
+  }, 0);
+}
+function selectedJobOutput(job = currentJob) {
+  const entries = orderedJobOutputs(job);
+  const filename = selectedOutputByJob.get(String(job?.id || ""));
+  return entries.find(({ item }) => item.filename === filename)
+    || entries.filter(({ item, version }) => !currentOutputIsReviewSample(item, version)).at(-1)
+    || entries.at(-1) || null;
+}
+window.ClipTalkSelectedJobOutput = selectedJobOutput;
+window.ClipTalkCurrentOutputSnapshot = () => ({
+  mediaKind: viewerMediaKind,
+  output: currentOutput,
+  isReviewSample: currentOutputIsReviewSample(currentOutput),
+});
 let currentCandidate = null;
 let currentContentPreviewSearchId = "";
 let currentEventGroup = null;
@@ -226,10 +349,25 @@ let pollFailureDelay = 2500;
 let sourcePreviewPollTimer = null;
 let localPreviewUrl = null;
 let actionBusy = false;
+let draftBootstrapBusy = false;
 let pendingCreateIntentMode = "auto";
 let pendingCreateWorkflowKind = "";
 let pendingWorkflowSwitch = "";
 let pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+let quickWorkflowValidation = "";
+let legacyWorkflowPickerOpen = false;
+let candidateRailOpen = false;
+function setCandidateRailOpen(open) {
+  candidateRailOpen = Boolean(open);
+  document.body.dataset.ctCandidateRailOpen = String(candidateRailOpen);
+  if (candidateRailOpen) {
+    window.ClipTalkWorkspaceController?.openRail?.("materials");
+  } else {
+    const body = $("#railBody");
+    const host = $("#chatStageHost");
+    if (body && host && body.parentElement !== host) host.append(body);
+  }
+}
 let contentReviewDraftTimer = null;
 let contentReviewDraftGeneration = 0;
 let contentBasketSaveTimer = null;
@@ -263,6 +401,7 @@ let mainVideoAutoplayToken = 0;
 let browserFallbackAttempts = new Set();
 let viewerMediaKind = "source";
 let waveformJobId = null;
+let waveformLoadingJobId = null;
 let waveformData = null;
 let waveformRequestToken = 0;
 let waveformRetryAt = 0;
@@ -270,16 +409,21 @@ let timelineAssetsJobId = null;
 let timelineAssetsLoadingJobId = null;
 let timelineAssets = null;
 let timelineAssetsRetryAt = 0;
+window.ClipTalkTimelineAssetsSnapshot = () => ({
+  jobId: timelineAssetsJobId,
+  assets: timelineAssets,
+});
 let timelineTranscript = [];
 let transcriptLoadingJobId = null;
 let timelineTranscriptJobId = null;
 let transcriptRetryAt = 0;
 let timelineViewStart = 0;
 let timelineViewEnd = 0;
-// The review timeline always uses source-video time. A rendered output can be
-// playing in the viewer, but its event/shot blocks remain anchored to the
-// frames they came from so every timeline click has one unambiguous meaning.
+// Source review uses source-video time; every generated version uses its own
+// playback time. Moving between the two is an explicit user action so a click
+// on an output timeline can never silently replace the video being reviewed.
 let timelineCoordinateSpace = "source";
+let timelineSelectedOutputSegmentIndex = null;
 let timelineReviewFollow = false;
 let timelineSnapEnabled = true;
 let timelineFrame = null;
@@ -320,7 +464,6 @@ let locallyExcludedCandidates = new Set();
 let currentJobRevision = "";
 let autoCompositionDockJobId = "";
 let autoCompositionLogExpanded = false;
-let lastHealth = null;
 let visionSettingsState = null;
 let selectedVisionProvider = "";
 let visionDiscoveredModels = [];
@@ -335,20 +478,49 @@ let llmSettingsBusy = false;
 let llmSettingsDirty = false;
 let selectedLlmMode = "reuse_vision";
 const studio = $(".studio");
-const panelLayoutStorageKey = "vlm-highlight-panel-layout-v2";
 const timelineLayerStorageKey = "vlm-highlight-timeline-layers-v1";
 const currentJobStorageKey = "vlm-highlight-current-job-v1";
-const reviewLayoutStorageKey = "cliptalk-review-layout-v1";
-const portraitVideoWidthStorageKey = "cliptalk-portrait-video-width-v1";
-const reviewWorkbenchHeightStorageKey = "cliptalk-review-workbench-height-v1";
+const portraitVideoWidthStorageKey = "cliptalk-portrait-video-width-v2";
 const evidencePanelWidthStorageKey = "cliptalk-evidence-panel-width-v1";
-let recommendedReviewLayout = "landscape";
+const secondaryEditorLayoutStorageKey = "cliptalk-secondary-editor-layout-v2";
+let reviewLayoutMediaIdentity = "";
+let sourceInspectionContext = null;
+
+function beginSourceInspection() {
+  if (viewerMediaKind !== "output" || !currentOutput) return;
+  sourceInspectionContext = {
+    jobId: currentJob?.id, filename: currentOutput.filename,
+    time: Number(mainVideo.currentTime) || 0,
+    layout: $("#reviewView")?.dataset.reviewLayout || "landscape",
+  };
+  let button = $("#returnInspectedVersion");
+  if (!button) {
+    button = document.createElement("button");
+    button.id = "returnInspectedVersion";
+    button.className = "download-button";
+    button.type = "button";
+    $(".asset-actions")?.prepend(button);
+    button.addEventListener("click", () => {
+      const context = sourceInspectionContext;
+      if (context?.jobId === currentJob?.id) selectOutput(context.filename, false, context.time);
+    });
+  }
+  button.textContent = `返回 ${currentOutput.title || "当前版本"}`;
+  button.classList.remove("hidden");
+}
 let directorStage = "conversation";
 let timelineExpanded = false;
 let reviewLowerPanelMode = "review";
 let personReviewMode = "correct";
 let voiceReviewMode = "correct";
 let secondaryInspectorMode = "clip";
+let secondaryEditorMaterialFilter = null;
+let secondaryEditorMaterialSearch = "";
+let secondaryEditorUpperRatio = 58;
+let secondaryEditorResizeDrag = null;
+let secondaryEditorInspectorWidth = 420;
+let secondaryEditorInspectorResizeDrag = null;
+let secondaryEditorTimelineLayoutFrame = null;
 let unifiedWorkspaceView = null;
 let timelinePrecisionDrawerOrigin = null;
 let timelinePrecisionDrawerTrigger = null;
@@ -357,10 +529,12 @@ let restoringHistory = false;
 // Invalidates in-flight restore/open/poll requests when the user starts or
 // opens a different task. A late response must never replace the active task.
 let workspaceGeneration = 0;
+let currentCreationSessionId = "";
+let pendingNewTaskInstruction = "";
+let pendingNewTaskInstructionCommitted = false;
 let activeChatController = null;
 // A user-initiated return to the home dashboard must win over an in-flight
-// history restore request.  Otherwise loadHistory() can reopen a running task
-// immediately after resetWorkspace() clears it.
+// task restore request so resetWorkspace() cannot be undone by a late response.
 let homeNavigationRequested = false;
 window.alert = (message) => showToast(message);
 const workspaceStateMachine = window.ClipTalkWorkspaceState.create((next) => {
@@ -371,23 +545,151 @@ const workspaceStateMachine = window.ClipTalkWorkspaceState.create((next) => {
 });
 
 function syncTaskCreationLayout() {
-  // The assistant has no actionable role until a durable task exists. Keep
-  // upload, workflow choice, scope, validation, and retry states on one
-  // focused canvas; renderJob() restores the assistant after creation.
-  const creating = Boolean(studio && !currentJob && !studio.classList.contains("home-mode"));
-  studio?.classList.toggle("task-creation-mode", creating);
+  const uploadView = $("#uploadView");
+  const creating = Boolean(studio
+    && !currentJob
+    && !studio.classList.contains("home-mode"));
+  studio?.classList.remove("task-creation-mode");
+  studio?.classList.toggle("new-task-workbench", creating);
   const assistant = studio?.querySelector(":scope > .chat-panel");
   if (assistant) {
-    assistant.inert = creating;
-    if (creating) assistant.setAttribute("aria-hidden", "true");
-    else assistant.removeAttribute("aria-hidden");
+    assistant.inert = false;
+    assistant.removeAttribute("aria-hidden");
+    assistant.classList.toggle("creation-assistant", creating);
   }
-  const resizer = studio?.querySelector(":scope > .panel-resizer-left");
-  if (resizer) {
-    resizer.setAttribute("aria-hidden", String(creating));
-    resizer.tabIndex = creating ? -1 : 0;
-  }
+  syncAssistantPanelResizerAvailability();
+  uploadView?.classList.toggle("new-task-upload", creating);
   return creating;
+}
+
+const ASSISTANT_WIDTH_KEYS = {
+  creation: "cliptalk-new-task-assistant-width:v1",
+  workspace: "cliptalk-workspace-assistant-width:v1",
+};
+
+function assistantPanelWidthMode() {
+  return studio?.classList.contains("new-task-workbench") ? "creation" : "workspace";
+}
+
+function assistantPanelWidthBounds(mode = assistantPanelWidthMode()) {
+  const creating = mode === "creation";
+  const min = 320;
+  const reviewRail = studio?.querySelector(":scope > #reviewRail");
+  const railVisible = !creating && reviewRail && getComputedStyle(reviewRail).display !== "none";
+  const railWidth = railVisible ? reviewRail.getBoundingClientRect().width : 0;
+  const rightDividerWidth = railVisible ? 8 : 0;
+  const centerMinimum = 480;
+  const available = Math.floor(window.innerWidth - 84 - 8 - rightDividerWidth - railWidth - centerMinimum);
+  return { min, max: Math.max(min, Math.min((window.innerWidth - 84) / 2, available)) };
+}
+
+function applyAssistantPanelWidth(width, { persist = false, mode = assistantPanelWidthMode() } = {}) {
+  if (!studio) return 0;
+  const bounds = assistantPanelWidthBounds(mode);
+  const next = Math.round(Math.min(bounds.max, Math.max(bounds.min, Number(width) || bounds.min)));
+  const property = mode === "creation" ? "--ct-new-task-left" : "--ct-user-left-pane";
+  studio.style.setProperty(property, `${next}px`);
+  const resizer = studio.querySelector(":scope > .panel-resizer-left");
+  if (resizer) {
+    resizer.setAttribute("aria-valuemin", String(bounds.min));
+    resizer.setAttribute("aria-valuemax", String(bounds.max));
+    resizer.setAttribute("aria-valuenow", String(next));
+  }
+  if (persist) {
+    try { localStorage.setItem(ASSISTANT_WIDTH_KEYS[mode], String(next)); }
+    catch { /* local preferences are optional */ }
+  }
+  return next;
+}
+
+function resetAssistantPanelWidth() {
+  const mode = assistantPanelWidthMode();
+  const property = mode === "creation" ? "--ct-new-task-left" : "--ct-user-left-pane";
+  studio?.style.removeProperty(property);
+  try { localStorage.removeItem(ASSISTANT_WIDTH_KEYS[mode]); }
+  catch { /* local preferences are optional */ }
+  const resizer = studio?.querySelector(":scope > .panel-resizer-left");
+  const fallback = 440;
+  const width = Math.round(studio?.querySelector(":scope > #assistantPanel")?.getBoundingClientRect().width || fallback);
+  if (resizer) resizer.setAttribute("aria-valuenow", String(width));
+  window.dispatchEvent(new Event("resize"));
+}
+
+function syncAssistantPanelResizerAvailability() {
+  const resizer = studio?.querySelector(":scope > .panel-resizer-left");
+  if (!resizer || !studio) return false;
+  const resizable = window.innerWidth >= 1280
+    && !studio.classList.contains("home-mode")
+    && !studio.classList.contains("assistant-collapsed");
+  resizer.classList.toggle("hidden", !resizable);
+  resizer.setAttribute("aria-hidden", String(!resizable));
+  resizer.tabIndex = resizable ? 0 : -1;
+  if (resizable) {
+    const mode = assistantPanelWidthMode();
+    let preferred = 440;
+    try {
+      const stored = Number(localStorage.getItem(ASSISTANT_WIDTH_KEYS[mode]));
+      if (Number.isFinite(stored) && stored > 0) preferred = stored;
+    } catch { /* local preferences are optional */ }
+    if (!document.body.classList.contains("assistant-panel-resizing")) applyAssistantPanelWidth(preferred, { mode });
+  }
+  return resizable;
+}
+
+function setupAssistantPanelResizer() {
+  const resizer = studio?.querySelector(":scope > .panel-resizer-left");
+  const assistant = studio?.querySelector(":scope > #assistantPanel");
+  if (!resizer || !assistant || resizer.dataset.resizeReady === "true") return;
+  resizer.dataset.resizeReady = "true";
+
+  let drag = null;
+  const finish = (event) => {
+    if (!drag) return;
+    if (event?.pointerId != null && event.pointerId !== drag.pointerId) return;
+    const width = Math.round(assistant.getBoundingClientRect().width);
+    drag = null;
+    document.body.classList.remove("assistant-panel-resizing");
+    resizer.classList.remove("is-dragging");
+    applyAssistantPanelWidth(width, { persist: true, mode: dragMode });
+    window.dispatchEvent(new Event("resize"));
+  };
+  let dragMode = assistantPanelWidthMode();
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !syncAssistantPanelResizerAvailability()) return;
+    dragMode = assistantPanelWidthMode();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: assistant.getBoundingClientRect().width,
+    };
+    resizer.setPointerCapture?.(event.pointerId);
+    document.body.classList.add("assistant-panel-resizing");
+    resizer.classList.add("is-dragging");
+    event.preventDefault();
+  });
+  resizer.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    applyAssistantPanelWidth(drag.startWidth + event.clientX - drag.startX, { mode: dragMode });
+  });
+  resizer.addEventListener("pointerup", finish);
+  resizer.addEventListener("pointercancel", finish);
+  resizer.addEventListener("dblclick", resetAssistantPanelWidth);
+  resizer.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const mode = assistantPanelWidthMode();
+    const bounds = assistantPanelWidthBounds(mode);
+    const current = assistant.getBoundingClientRect().width;
+    const next = event.key === "Home" ? bounds.min
+      : event.key === "End" ? bounds.max
+        : current + (event.key === "ArrowRight" ? 16 : -16);
+    applyAssistantPanelWidth(next, { persist: true, mode });
+    window.dispatchEvent(new Event("resize"));
+    event.preventDefault();
+  });
+  window.addEventListener("resize", () => {
+    syncAssistantPanelResizerAvailability();
+  });
+  syncAssistantPanelResizerAvailability();
 }
 
 function assistantPanelStorageKey(job = currentJob) {
@@ -405,7 +707,9 @@ function storedAssistantPanelPreference(job = currentJob) {
 
 function setAssistantPanelExpanded(expanded, { persist = false } = {}) {
   const open = Boolean(expanded);
+  const wasCollapsed = Boolean(studio?.classList.contains("assistant-collapsed"));
   studio?.classList.toggle("assistant-collapsed", !open);
+  syncAssistantPanelResizerAvailability();
   const toggle = $("#assistantPanelToggle");
   if (toggle) {
     toggle.setAttribute("aria-expanded", String(open));
@@ -417,11 +721,23 @@ function setAssistantPanelExpanded(expanded, { persist = false } = {}) {
     try { localStorage.setItem(assistantPanelStorageKey(), String(open)); }
     catch { /* local preferences are optional */ }
   }
-  window.requestAnimationFrame(() => {
-    scheduleMediaFrameFit(true);
-    scheduleTimelineResizeRender(true);
-  });
+  if (wasCollapsed !== !open) {
+    window.requestAnimationFrame(() => {
+      // The editor, player and canvas timeline all depend on their container
+      // width. Notify every owner after the grid has released/taken the
+      // assistant column so none of them keep the previous measurements.
+      window.dispatchEvent(new Event("resize"));
+      scheduleMediaFrameFit(true);
+      scheduleTimelineResizeRender(true);
+    });
+  }
   return open;
+}
+
+function portraitDesktopWorkspaceActive() {
+  return window.innerWidth >= 1280
+    && document.body.dataset.shellMode === "workspace"
+    && $("#reviewView")?.dataset.reviewLayout === "portrait";
 }
 
 function syncAssistantPanelForStage() {
@@ -478,9 +794,20 @@ function syncUnifiedWorkspaceView() {
 }
 
 $("#assistantPanelToggle")?.addEventListener("click", () => {
-  setAssistantPanelExpanded(studio?.classList.contains("assistant-collapsed"), { persist: true });
+  const opening = Boolean(studio?.classList.contains("assistant-collapsed"));
+  setAssistantPanelExpanded(opening, { persist: true });
+  if (opening && portraitDesktopWorkspaceActive()) {
+    window.ClipTalkWorkspaceController?.setRailExpanded?.(false, { persist: true, coordinate: false });
+  }
   syncUnifiedWorkspaceView();
 });
+
+window.ClipTalkWorkspacePanels = {
+  ...(window.ClipTalkWorkspacePanels || {}),
+  setAssistantExpanded: setAssistantPanelExpanded,
+  storedAssistantPreference: storedAssistantPanelPreference,
+  portraitDesktopActive: portraitDesktopWorkspaceActive,
+};
 
 function syncWorkspaceState(overrides = {}) {
   if (overrides.home === false
@@ -497,6 +824,8 @@ function syncWorkspaceState(overrides = {}) {
     ...overrides,
   });
   syncTaskCreationLayout();
+  syncPortraitWorkspaceControls();
+  requestAnimationFrame(() => window.ClipTalkWorkspaceController?.syncPortraitPanels?.(next));
   return next;
 }
 
@@ -866,10 +1195,33 @@ function invalidateWorkspaceRequests() {
   clearTimeout(pollTimer);
   pollTimer = null;
   actionBusy = false;
+  draftBootstrapBusy = false;
   clearToast();
   resetCandidateDrawerContext();
   closeSubtitleReview(null);
   dismissActionConfirmation();
+}
+
+function createClientSessionId(prefix = "session") {
+  return globalThis.crypto?.randomUUID?.() || `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function beginTaskCreationSession() {
+  currentCreationSessionId = createClientSessionId("create");
+  window.ClipTalkAppShell?.syncCurrentJob?.(null);
+  return currentCreationSessionId;
+}
+
+function activeCreationToken() {
+  if (!currentCreationSessionId) beginTaskCreationSession();
+  return { generation: workspaceGeneration, sessionId: currentCreationSessionId };
+}
+
+function creationTokenStillCurrent(token) {
+  return Boolean(token)
+    && token.generation === workspaceGeneration
+    && String(token.sessionId || "") === String(currentCreationSessionId || "")
+    && !currentJob;
 }
 
 function switchWorkspaceJob(job, { invalidate = true } = {}) {
@@ -884,8 +1236,20 @@ function switchWorkspaceJob(job, { invalidate = true } = {}) {
   if (workflowKindForJob(job) !== "speaker_edit") closeVoiceProfiles();
   if (workflowKindForJob(job) !== "person_edit") closePersonProfiles();
   pendingWorkflowSwitch = "";
+  legacyWorkflowPickerOpen = false;
+  renderQuickWorkflowPicker(null);
+  currentCreationSessionId = "";
   pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+  quickWorkflowValidation = "";
   homeNavigationRequested = false;
+  // Hard boundary between task conversations. Clear the old DOM before the
+  // new task is rendered so late Agent/SSE updates cannot visually append to
+  // the previous task's chat history.
+  $("#chatMessages")?.replaceChildren();
+  const coverTrack = $("#timelineCoverTrack");
+  if (coverTrack) coverTrack.classList.add("hidden");
+  $("#timelineCoverVariants")?.replaceChildren();
+  $("#timelineCoverEditor")?.replaceChildren();
   currentJob = null;
   currentJobRevision = "";
   restoringHistory = true;
@@ -894,6 +1258,9 @@ function switchWorkspaceJob(job, { invalidate = true } = {}) {
   } finally {
     restoringHistory = false;
   }
+  const workflowKind = workflowKindForJob(currentJob || job);
+  if (workflowKind) document.body.dataset.ctWorkflowKind = workflowKind;
+  else delete document.body.dataset.ctWorkflowKind;
   return String(currentJob?.id || "") === String(job.id);
 }
 
@@ -946,29 +1313,6 @@ function storedCurrentJobId() {
   }
 }
 
-function storedReviewLayout(jobId = currentJob?.id) {
-  if (!jobId) return null;
-  try {
-    const saved = JSON.parse(localStorage.getItem(reviewLayoutStorageKey) || "{}");
-    const value = String(saved?.[String(jobId)] || "");
-    return ["landscape", "portrait"].includes(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function rememberReviewLayout(layout, jobId = currentJob?.id) {
-  if (!jobId || !["landscape", "portrait"].includes(layout)) return;
-  let preferences = {};
-  try {
-    const saved = JSON.parse(localStorage.getItem(reviewLayoutStorageKey) || "{}");
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) preferences = saved;
-  } catch { /* replace malformed legacy data below */ }
-  preferences[String(jobId)] = layout;
-  try { localStorage.setItem(reviewLayoutStorageKey, JSON.stringify(preferences)); }
-  catch { /* storage may be disabled */ }
-}
-
 function storedPortraitVideoWidth(jobId = currentJob?.id) {
   if (!jobId) return null;
   try {
@@ -1005,10 +1349,14 @@ function forgetPortraitVideoWidth(jobId = currentJob?.id) {
 function portraitVideoWidthLimits() {
   const reviewView = $("#reviewView");
   const available = Math.max(0, reviewView?.clientWidth || 0);
-  const minimum = Math.min(280, Math.max(220, Math.round(available * .28)));
-  const leftMinimum = Math.min(440, Math.max(320, Math.round(available * .38)));
-  const maximum = Math.max(minimum, Math.min(640, available - leftMinimum - 22));
-  const fallback = Math.max(minimum, Math.min(maximum, Math.round(Math.min(440, available * .34))));
+  const availableHeight = Math.max(0, (reviewView?.clientHeight || 0) - 54);
+  const mediaAspect = Math.max(.35, Math.min(.95, activeMediaAspect()));
+  const heightFittedWidth = Math.round(Math.max(0, availableHeight - 70) * mediaAspect + 16);
+  const minimum = Math.min(320, Math.max(280, Math.round(available * .28)));
+  const leftMinimum = Math.min(460, Math.max(360, Math.round(available * .36)));
+  const maximum = Math.max(minimum, Math.min(440, available - leftMinimum - 22));
+  const widthFallback = Math.round(Math.min(420, available * .38));
+  const fallback = Math.max(minimum, Math.min(maximum, heightFittedWidth || widthFallback));
   return { minimum, maximum, fallback };
 }
 
@@ -1034,118 +1382,134 @@ function restorePortraitVideoWidth() {
   return setPortraitVideoWidth(saved ?? portraitVideoWidthLimits().fallback);
 }
 
-function storedReviewWorkbenchHeight(jobId = currentJob?.id) {
-  if (!jobId) return null;
-  try {
-    const saved = JSON.parse(localStorage.getItem(reviewWorkbenchHeightStorageKey) || "{}");
-    const height = Number(saved?.[String(jobId)]);
-    return Number.isFinite(height) && height > 0 ? height : null;
-  } catch {
-    return null;
+function syncPortraitWorkspaceControls() {
+  const reviewView = $("#reviewView");
+  const button = $("#portraitPrecisionToggle");
+  if (!button || !reviewView) return;
+  const portrait = reviewView.dataset.reviewLayout === "portrait";
+  const workspaceState = document.body.dataset.workspaceState || "";
+  const available = Boolean(portrait && currentJob && timelinePanel
+    && ["reviewing", "composing", "completed"].includes(workspaceState));
+  button.classList.toggle("hidden", !available);
+  button.setAttribute("aria-pressed", String(Boolean(available && timelineExpanded)));
+  button.setAttribute("aria-expanded", String(Boolean(available && timelineExpanded)));
+  button.textContent = timelineExpanded ? "返回预览" : "查看时间线";
+}
+
+function syncPortraitHeaderActions() {
+  const reviewView = $("#reviewView");
+  const actions = reviewView?.querySelector(".review-header .asset-actions");
+  const more = $("#reviewMoreActions");
+  const moreMenu = more?.querySelector(":scope > div");
+  const download = $("#downloadButton");
+  if (!actions || !more || !moreMenu || !download) return;
+  if (download.parentElement !== actions) {
+    actions.insertBefore(download, more);
   }
 }
 
-function rememberReviewWorkbenchHeight(height, jobId = currentJob?.id) {
-  if (!jobId || !Number.isFinite(Number(height))) return;
-  let preferences = {};
-  try {
-    const saved = JSON.parse(localStorage.getItem(reviewWorkbenchHeightStorageKey) || "{}");
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) preferences = saved;
-  } catch { /* replace malformed legacy data below */ }
-  preferences[String(jobId)] = Math.round(Number(height));
-  try { localStorage.setItem(reviewWorkbenchHeightStorageKey, JSON.stringify(preferences)); }
-  catch { /* storage may be disabled */ }
-}
-
-function forgetReviewWorkbenchHeight(jobId = currentJob?.id) {
-  if (!jobId) return;
-  try {
-    const saved = JSON.parse(localStorage.getItem(reviewWorkbenchHeightStorageKey) || "{}");
-    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
-    delete saved[String(jobId)];
-    localStorage.setItem(reviewWorkbenchHeightStorageKey, JSON.stringify(saved));
-  } catch { /* storage may be disabled */ }
-}
-
-function reviewWorkbenchResizable() {
-  return $("#reviewView")?.classList.contains("workbench-resizable") || false;
-}
-
-function reviewWorkbenchHeightLimits() {
-  const reviewView = $("#reviewView");
-  const reviewHeader = reviewView?.querySelector(".review-header");
-  const panelSwitch = $("#reviewPanelSwitch");
-  const timelinePanel = $("#timelinePanel");
-  const viewHeight = Math.max(0, reviewView?.getBoundingClientRect().height || 0);
-  const headerHeight = Math.max(0, reviewHeader?.getBoundingClientRect().height || 0);
-  const switchHeight = reviewView?.classList.contains("lower-panel-deck")
-    ? Math.max(0, panelSwitch?.getBoundingClientRect().height || 40) : 0;
-  const timelineHeight = Math.max(0, timelinePanel?.getBoundingClientRect().height || 0);
-  const timelineHandleHeight = timelineExpanded ? 8 : 0;
-  const available = Math.max(0, viewHeight - headerHeight - switchHeight - timelineHeight - timelineHandleHeight);
-  const minimum = Math.min(220, Math.max(180, Math.round(available * .24)));
-  const minimumViewer = reviewView?.classList.contains("lower-panel-deck")
-    ? Math.min(320, Math.max(240, Math.round(available * .42)))
-    : Math.min(210, Math.max(150, Math.round(available * .28)));
-  const maximum = Math.max(minimum, available - minimumViewer);
-  const fallbackRatio = reviewView?.classList.contains("lower-panel-deck") ? .42 : .54;
-  const fallback = Math.max(minimum, Math.min(maximum, Math.round(available * fallbackRatio)));
-  return { minimum, maximum, fallback };
-}
-
-function setReviewWorkbenchHeight(value, { persist = false } = {}) {
-  const reviewView = $("#reviewView");
-  const handle = $("#reviewWorkbenchResizer");
-  if (!reviewView || !handle || !reviewWorkbenchResizable() || window.innerWidth <= 760) return 0;
-  const { minimum, maximum, fallback } = reviewWorkbenchHeightLimits();
-  const requested = Number(value);
-  const height = Math.round(Math.max(minimum, Math.min(maximum, Number.isFinite(requested) ? requested : fallback)));
-  reviewView.style.setProperty("--review-workbench-height", `${height}px`);
-  reviewView.dataset.reviewWorkbenchHeight = String(height);
-  handle.setAttribute("aria-valuemin", String(minimum));
-  handle.setAttribute("aria-valuemax", String(maximum));
-  handle.setAttribute("aria-valuenow", String(height));
-  if (persist) rememberReviewWorkbenchHeight(height);
-  scheduleTimelineResizeRender(true);
-  scheduleMediaFrameFit(true);
-  return height;
-}
-
-function restoreReviewWorkbenchHeight() {
-  if (!reviewWorkbenchResizable()) return 0;
-  return setReviewWorkbenchHeight(storedReviewWorkbenchHeight() ?? reviewWorkbenchHeightLimits().fallback);
-}
-
-function updateReviewLayoutControls(layout) {
-  document.querySelectorAll("#reviewLayoutSwitch [data-review-layout-mode]").forEach((button) => {
-    const active = button.dataset.reviewLayoutMode === layout;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-}
-
-function setReviewLayout(layout, { persist = false } = {}) {
+function setReviewLayout(layout, { source = "auto" } = {}) {
   const normalized = layout === "portrait" ? "portrait" : "landscape";
   const reviewView = $("#reviewView");
-  if (reviewView) reviewView.dataset.reviewLayout = normalized;
-  updateReviewLayoutControls(normalized);
-  if (persist) rememberReviewLayout(normalized);
+  if (reviewView) {
+    reviewView.dataset.reviewLayout = normalized;
+    reviewView.dataset.reviewLayoutSource = source;
+  }
   if (normalized === "portrait") restorePortraitVideoWidth();
+  else {
+    reviewView?.style.removeProperty("--portrait-shell-width");
+    reviewView?.style.removeProperty("--portrait-shell-height");
+  }
+  syncPortraitWorkspaceControls();
+  syncPortraitHeaderActions();
   syncReviewWorkbench();
-  if (reviewWorkbenchResizable()) window.requestAnimationFrame(restoreReviewWorkbenchHeight);
   scheduleTimelineResizeRender(true);
   scheduleMediaFrameFit(true);
+  requestAnimationFrame(() => window.ClipTalkWorkspaceController?.syncPortraitPanels?.());
   return normalized;
 }
 
-function syncReviewLayoutForMedia(aspect) {
-  recommendedReviewLayout = Number(aspect) < .82 ? "portrait" : "landscape";
-  setReviewLayout(storedReviewLayout() || recommendedReviewLayout);
+function currentReviewMediaIdentity() {
+  const jobId = String(currentJob?.id || "pending");
+  if (viewerMediaKind === "output" && currentOutput) {
+    const outputId = String(currentOutput.filename || currentOutput.videoUrl || currentOutput.previewUrl || "output");
+    return `${jobId}:output:${outputId}`;
+  }
+  return `${jobId}:source`;
 }
 
-document.querySelectorAll("#reviewLayoutSwitch [data-review-layout-mode]").forEach((button) => {
-  button.addEventListener("click", () => setReviewLayout(button.dataset.reviewLayoutMode, { persist: true }));
-});
+function recommendedReviewLayout(aspect) {
+  const normalized = Number(aspect);
+  return Number.isFinite(normalized) && normalized > 0 && normalized < 1 ? "portrait" : "landscape";
+}
+
+function syncReviewLayoutForMedia(aspect) {
+  if (sourceInspectionContext && sourceInspectionContext.jobId === currentJob?.id && viewerMediaKind !== "output") {
+    setReviewLayout(sourceInspectionContext.layout, { source: "version-review" });
+    return;
+  }
+  if (sourceInspectionContext?.jobId !== currentJob?.id) {
+    sourceInspectionContext = null;
+    $("#returnInspectedVersion")?.classList.add("hidden");
+  }
+  const mediaIdentity = currentReviewMediaIdentity();
+  const nextLayout = recommendedReviewLayout(aspect);
+  const reviewView = $("#reviewView");
+  const mediaChanged = Boolean(reviewLayoutMediaIdentity && reviewLayoutMediaIdentity !== mediaIdentity);
+  const layoutChanged = Boolean(reviewView?.dataset.reviewLayout && reviewView.dataset.reviewLayout !== nextLayout);
+  reviewLayoutMediaIdentity = mediaIdentity;
+  // A timeline opened for the previous media/layout must not silently turn a
+  // newly selected portrait video into the dense precision workspace.
+  if ((layoutChanged || mediaChanged && nextLayout === "portrait") && timelineExpanded) setReviewLowerPanelMode("collapsed");
+  setReviewLayout(nextLayout, { source: "auto" });
+}
+
+async function updateCurrentProjectSettings(patch = {}) {
+  if (!currentJob?.id) throw new Error("请先创建或打开一个剪辑任务");
+  const settings = {};
+  if (Object.hasOwn(patch, "outputAspect")) {
+    if (!["source", "16:9", "9:16"].includes(patch.outputAspect)) throw new Error("成片画幅设置无效");
+    settings.outputAspect = patch.outputAspect;
+  }
+  if (Object.hasOwn(patch, "outputFit")) {
+    if (!["blur", "crop"].includes(patch.outputFit)) throw new Error("画幅适配方式无效");
+    if (!Object.hasOwn(currentJob.projectSettings || {}, "outputFit")) throw new Error("画幅设置功能已更新，请刷新页面后重试；如仍无法保存，请联系管理员重启服务");
+    settings.outputFit = patch.outputFit;
+  }
+  const actionToken = captureJobAction();
+  const { job } = await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/project-settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: settings,
+  });
+  if (!commitJobAction(job, actionToken)) throw new Error("当前任务已经切换，设置未应用到新任务");
+  window.ClipTalkWorkspaceController?.syncProjectControls?.();
+  return job;
+}
+
+async function planCurrentOutputAspect(aspect, filename = currentOutput?.filename, fit = "blur") {
+  const normalized = String(aspect || "");
+  if (!["16:9", "9:16"].includes(normalized)) return false;
+  if (!currentJob || !orderedJobOutputs(currentJob).length) {
+    showToast(`已保存 ${normalized} 成片画幅，将在生成成片时应用`, "success");
+    return false;
+  }
+  const entry = locateJobOutput(filename);
+  if (!entry) return void showToast("请先选择要转换画幅的版本");
+  const identity = `V${entry.version?.number || 1} · ${entry.output.filename}`;
+  const actionToken = captureJobAction();
+  const method = fit === "crop" ? "居中裁切填满画布，允许裁去画面边缘" : "完整保留原画面，使用虚化背景补齐画布";
+  if (!await requestActionConfirmation({ title: `生成 ${normalized} 版本`, summary: `基于 ${identity}`, details: [method, "新版本单独保留，原版本保持不变"], confirmLabel: "生成画幅方案" })) return false;
+  if (!jobActionStillCurrent(actionToken) || !locateJobOutput(entry.output.filename)) return void showToast("任务或版本已变化，请重新选择后生成");
+  const submitted = await window.ClipTalkAgentWorkspace?.submitGoal?.(
+    `基于当前任务的指定成片 ${identity} 生成 ${normalized} 画幅审核版本，${method}，不覆盖原成片。`,
+    { visibleGoal: `基于 ${identity} 生成 ${normalized} 画幅审核版本` },
+  );
+  return Boolean(submitted);
+}
+
+window.ClipTalkUpdateProjectSettings = updateCurrentProjectSettings;
+window.ClipTalkPlanOutputAspect = planCurrentOutputAspect;
 
 function setDirectorWorkspaceEmpty(visible) {
   if (visible) {
@@ -1176,6 +1540,7 @@ function setupDirectorWorkspace() {
     if (node) host.append(node);
   });
   host.dataset.ready = "true";
+  setupAssistantPanelResizer();
   studio.classList.add("director-merged");
   rail.classList.add("merged-review-rail");
   $(".panel-resizer-right")?.classList.add("hidden");
@@ -1209,7 +1574,7 @@ function reviewWorkbenchPresentation(job = currentJob) {
     if (workflow === "content_search") return { kicker: "片段边界", title: "核对片段与边界", hint: "精细时间轴已展开；返回审核列表可调整全部匹配内容" };
     return { kicker: "镜头时间", title: "核对事件与镜头时间", hint: "精细时间轴已展开；返回审核列表可调整全部推荐事件" };
   }
-  if (directorStage === "compose") return { kicker: "成片版本", title: "生成结果", hint: "选择版本即可在上方播放器中比较" };
+  if (directorStage === "compose") return { kicker: "版本与交付", title: "版本与交付", hint: "生成的审核样片和高清版本集中在这里，可播放或下载" };
   if (workflow === "speaker_edit") return { kicker: "发言片段", title: "确认说话人发言片段", hint: "预览不会改变边界，确认后才会生成" };
   if (workflow === "person_edit") return { kicker: "出镜片段", title: "第 2 步 · 核对出镜片段", hint: "勾选最终保留范围；下一步只负责合成，不会再改变片段" };
   if (workflow === "content_search") return { kicker: "匹配片段", title: "确认找到的内容", hint: "点击正文预览；需要修改时使用“调整边界”" };
@@ -1262,7 +1627,7 @@ function syncReviewPanelSwitch(available, deckEnabled) {
   switcher.classList.toggle("hidden", !deckEnabled);
   reviewView.classList.toggle("lower-panel-deck", deckEnabled);
   document.body.classList.toggle("review-lower-panel-deck", deckEnabled);
-  reviewView.dataset.lowerPanelMode = deckEnabled ? reviewLowerPanelMode : "legacy";
+  reviewView.dataset.lowerPanelMode = deckEnabled ? reviewLowerPanelMode : "review";
   const presentation = reviewPanelSwitchPresentation(currentJob);
   const subjectPresentation = reviewSubjectPanelPresentation(currentJob);
   const label = $("#reviewPanelReviewLabel");
@@ -1295,9 +1660,11 @@ function syncReviewPanelSwitch(available, deckEnabled) {
   const candidateButton = $("#openCandidateDrawer");
   const candidateCount = $("#reviewPanelCandidateCount");
   const candidateTotal = Number(currentJob?.candidates?.length || 0);
+  // Keep reviewed source candidates available after composition so users can
+  // revisit the evidence and build another version from the same task.
   const candidateVisible = deckEnabled && workflowKindForJob(currentJob) === "highlight"
-    && directorStage !== "compose" && candidateTotal > 0;
-  const candidateActive = candidateVisible && $("#candidateDrawer")?.classList.contains("open");
+    && candidateTotal > 0;
+  const candidateActive = candidateVisible && candidateRailOpen;
   if (candidateButton) {
     candidateButton.classList.toggle("hidden", !candidateVisible);
     candidateButton.classList.toggle("active", candidateActive);
@@ -1341,9 +1708,9 @@ function syncReviewWorkbench() {
   reviewView?.classList.toggle("workbench-visible", visible);
   reviewView?.classList.toggle("workbench-output-mode", visible && directorStage === "compose" && !panelOpen);
   const workbenchKind = available ? workflowKindForJob(currentJob) : "";
-  const resizable = visible && !timelineExpanded && (deckEnabled || panelOpen);
+  const contextual = visible && !timelineExpanded && (deckEnabled || panelOpen);
   if (reviewView) reviewView.dataset.workbenchKind = workbenchKind;
-  reviewView?.classList.toggle("workbench-resizable", resizable);
+  reviewView?.classList.toggle("workbench-contextual", contextual);
   workbench.dataset.reviewKind = workbenchKind;
   host.classList.toggle("subject-panel-hidden", panelOpen);
   const kicker = $("#reviewWorkbenchKicker");
@@ -1352,15 +1719,10 @@ function syncReviewWorkbench() {
   if (kicker) kicker.textContent = presentation.kicker;
   if (title) title.textContent = presentation.title;
   if (hint) hint.textContent = presentation.hint;
-  const resizer = $("#reviewWorkbenchResizer");
-  resizer?.setAttribute("aria-disabled", String(!resizable));
   syncReviewPanelSwitch(available, deckEnabled);
   syncReviewActionDock();
   syncPrecisionTimelineToolbar();
-  window.requestAnimationFrame(() => {
-    if (resizable) restoreReviewWorkbenchHeight();
-    scheduleMediaFrameFit(true);
-  });
+  window.requestAnimationFrame(() => scheduleMediaFrameFit(true));
 }
 
 function setReviewDockOptions(select, options = [], value = "") {
@@ -1452,7 +1814,7 @@ function syncReviewActionDock() {
     const selected = currentVoices.filter((voice) => selectedCurrentVoices.has(String(voice.speakerRef)));
     selectedCount = selected.length;
     duration = selected.reduce((sum, voice) => sum + Number(voice.speechSeconds || 0), 0);
-    if (kicker) kicker.textContent = "SPEAKER SELECTION";
+    if (kicker) kicker.textContent = "声音选择";
     if (title) title.textContent = selectedCount ? `已选 ${selectedCount} 个声音` : "选择要保留的声音";
     if (meta) meta.textContent = selectedCount ? `发言合计约 ${duration.toFixed(1)} 秒 · 生成前仍可审核片段` : "试听代表片段并勾选，预览不会改变选择";
     modeWrap?.classList.remove("hidden");
@@ -1473,7 +1835,7 @@ function syncReviewActionDock() {
     const selected = currentPersonCatalog(currentJob).filter((person) => selectedCurrentPersons.has(String(person.id)));
     selectedCount = selected.length;
     duration = selected.reduce((sum, person) => sum + personAppearanceSeconds(person), 0);
-    if (kicker) kicker.textContent = "PERSON SELECTION";
+    if (kicker) kicker.textContent = "人物选择";
     if (title) title.textContent = selectedCount ? `已选 ${selectedCount} 个人物` : "选择画面人物";
     if (meta) meta.textContent = selectedCount ? `原始出镜合计约 ${duration.toFixed(1)} 秒 · 实际结果会合并重叠范围` : "先播放出镜片段，再勾选需要保留的人物";
     if (selectedCount > 1) {
@@ -1500,7 +1862,7 @@ function syncReviewActionDock() {
       duration = timing.uniqueDuration;
       const output = contentRoot.querySelector("[data-content-output-mode]");
       const personContent = workflowKindForJob(currentJob) === "person_edit";
-      if (kicker) kicker.textContent = personContent ? "STEP 2 · PERSON CLIPS" : "CONTENT SELECTION";
+      if (kicker) kicker.textContent = personContent ? "第 2 步 · 出镜片段" : "内容选择";
       if (title) title.textContent = selectedCount
         ? `已核对 ${selectedCount} 个${personContent ? "出镜" : ""}片段`
         : personContent ? "核对需要保留的出镜片段" : "选择需要生成的片段";
@@ -1549,7 +1911,7 @@ function syncReviewActionDock() {
         duration = selected.reduce((sum, item) => sum + Number(item.duration || 0), 0);
         if (title) title.textContent = selectedCount ? `已选 ${selectedCount} 个高光镜头` : "选择高光镜头";
       }
-      if (kicker) kicker.textContent = "HIGHLIGHT SELECTION";
+      if (kicker) kicker.textContent = "高光选择";
       if (kind !== "highlight-groups" || !railGroupInputs.length) {
         if (meta) meta.textContent = selectedCount ? `预计 ${duration.toFixed(1)} 秒 · 生成前不会覆盖已有版本` : "预览并勾选需要进入成片的内容";
         if (primary) primary.textContent = "生成所选高光";
@@ -1665,7 +2027,7 @@ function syncPrecisionOutputContext() {
   select.classList.remove("hidden");
   const located = currentOutput?.filename ? locateJobOutput(currentOutput.filename) : null;
   if (!located) {
-    meta.textContent = "选择版本查看来源时间线";
+    meta.textContent = "选择版本查看播放时间线";
     meta.dataset.tone = "neutral";
   } else {
     const score = Number(located.version?.reviewReport?.overallScore ?? located.output?.reviewReport?.overallScore ?? located.output?.qualityReport?.score);
@@ -1819,6 +2181,7 @@ function placeAnalysisConsole() {
   // progress facts, but use #inlineAnalysisProgress as the visible pipeline
   // surface. The legacy node remains visible only when it contains the model
   // decision buttons that the user must be able to click.
+  status.classList.add("chat-analysis-console");
   host?.classList.remove("hidden", "director-stage-hidden");
   host?.style.removeProperty("display");
   if (status.parentElement !== messages) messages.append(status);
@@ -1854,50 +2217,21 @@ function isPipelineRunningStatus(status) {
 }
 
 function executionForJob(job = currentJob) {
-  if (!job) return { status: "waiting_user", operation: "none", active: false, outcome: "none", progress: {}, result: {}, capabilities: {} };
-  if (job.execution && Number(job.execution.schemaVersion) >= 1) return job.execution;
-  const autoStatus = String(job.autoComposition?.status || "");
-  const background = ["queued", "running", "cancelling"].includes(autoStatus);
-  const outer = String(job.status || "");
-  const active = background || isActiveJobStatus(outer);
-  const status = background
-    ? (autoStatus === "cancelling" ? "cancelling" : autoStatus)
-    : outer === "brief_confirmation" || outer === "awaiting_model_decision" || outer.startsWith("awaiting_")
-      ? "waiting_user" : outer;
-  const workflowKey = workflowKindForJob(job);
-  const fallbackOperation = workflowKey === "person_edit" ? "person_tracking"
-    : workflowKey === "speaker_edit" ? "speaker_discovery"
-      : workflowKey === "content_search" ? "content_search" : "analysis";
-  return {
-    status,
-    operation: background ? "auto_composition"
-      : ["rendering", "render", "edit_planning", "auto_composition"].includes(String(job.stage || "")) ? "render"
-        : fallbackOperation,
-    phase: String(job.autoComposition?.phase || job.stage || ""),
-    active,
-    background,
-    detail: String(job.autoComposition?.detail || job.currentAction || job.detail || ""),
-    actionRequired: outer === "brief_confirmation" ? "confirm_brief"
-      : outer === "awaiting_model_decision" ? "resolve_model_stage"
-        : outer === "awaiting_content_confirmation" ? "review_content"
-          : outer === "awaiting_confirmation" && !background ? "review_highlights" : null,
-    outcome: jobOutputCount(job) ? "output_ready"
-      : outer === "failed" ? "error" : outer === "cancelled" ? "cancelled" : "none",
-    progress: {},
-    result: { outputCount: jobOutputCount(job) },
-    capabilities: {
-      canCancel: active || ["brief_confirmation", "awaiting_confirmation", "awaiting_content_confirmation"].includes(outer),
-      cancelScope: background ? "operation" : "job",
-      canDelete: !active,
-    },
+  return window.ClipTalkWorkspaceState?.execution?.(job) || {
+    status: "waiting_user", operation: "none", active: false, outcome: "none",
+    progress: {}, result: {}, capabilities: {},
   };
 }
 
 function interactionCapabilitiesForJob(job = currentJob) {
-  const active = Boolean(executionForJob(job).active);
+  const executionActive = Boolean(executionForJob(job).active);
+  const agentOperation = agentInteractionStateForJob(job);
+  const active = executionActive || agentOperation.active;
   const contentTask = String(job?.taskMode || "") === "content_extract";
   const waitingForContentReview = String(job?.status || "") === "awaiting_content_confirmation";
-  const reason = active ? "当前任务正在处理，完成后即可操作" : "";
+  const reason = agentOperation.active
+    ? `Agent 正在执行${agentOperation.title ? `“${agentOperation.title}”` : "当前步骤"}，完成后即可操作`
+    : executionActive ? "当前任务正在处理，完成后即可操作" : "";
   return {
     active,
     reason,
@@ -1906,6 +2240,58 @@ function interactionCapabilitiesForJob(job = currentJob) {
     canEditContentBoundary: contentTask && !active && waitingForContentReview,
     canCorrectPerson: !active,
     canCorrectVoice: !active,
+  };
+}
+
+function agentInteractionStateForJob(job = currentJob) {
+  const agent = job?.agent && typeof job.agent === "object" ? job.agent : {};
+  const handedOff = String(job?.stage || "") === "agent_handed_off"
+    || String(job?.execution?.phase || "") === "agent_handed_off";
+  const planActive = ["approved", "running"].includes(String(agent.status || ""));
+  const workspaceActive = ["", "ready", "running"].includes(String(agent.workspaceStatus || ""));
+  const stepStatus = String(agent.currentStepStatus || "");
+  const actionRequired = stepStatus === "action_required";
+  const tool = String(agent.currentStepTool || "");
+  const operationByTool = {
+    analyze_highlights: "highlight_analysis",
+    search_content: "content_search",
+    discover_people: "person_discovery",
+    discover_speakers: "speaker_discovery",
+    prepare_subtitle_review: "subtitle_review",
+    render_review_preview: "render",
+  };
+  return {
+    active: Boolean(!handedOff && planActive && workspaceActive && !actionRequired),
+    actionRequired,
+    tool,
+    operation: operationByTool[tool] || "agent_operation",
+    status: stepStatus,
+    title: String(agent.currentStepTitle || ""),
+  };
+}
+
+function workflowOperationActive(job, { operations = [], agentTools = [] } = {}) {
+  const execution = executionForJob(job);
+  if (execution.active && (!operations.length || operations.includes(String(execution.operation || "")))) return true;
+  const agent = agentInteractionStateForJob(job);
+  return Boolean(agent.active && (!agentTools.length || agentTools.includes(agent.tool)));
+}
+
+function voiceDiscoveryPresentationForJob(job, discovery = {}) {
+  const normalized = discovery && typeof discovery === "object" ? { ...discovery } : {};
+  const status = String(normalized.status || "not_started");
+  if (["loading", "running", "ready", "failed"].includes(status)) return normalized;
+  if (!workflowOperationActive(job, {
+    operations: ["speaker_discovery"],
+    agentTools: ["discover_speakers"],
+  })) return normalized;
+  const agent = agentInteractionStateForJob(job);
+  const execution = executionForJob(job);
+  return {
+    ...normalized,
+    status: "running",
+    detail: normalized.detail || execution.detail || agent.title || "正在区分视频中的匿名说话人",
+    currentAction: normalized.currentAction || agent.title || execution.detail || "正在补全说话人证据",
   };
 }
 
@@ -1942,6 +2328,22 @@ function jobPollDelay(job = currentJob) {
   return 1400;
 }
 
+function renderJobError(message = "", source = "job") {
+  const errorNode = $("#jobError");
+  if (!errorNode) return;
+  const text = String(message || "").trim();
+  errorNode.textContent = text;
+  errorNode.classList.toggle("hidden", !text);
+  if (text) errorNode.dataset.errorSource = source;
+  else delete errorNode.dataset.errorSource;
+}
+
+function clearRecoveredPollError() {
+  const errorNode = $("#jobError");
+  if (errorNode?.dataset.errorSource !== "poll") return;
+  renderJobError(currentJob?.error || "", "job");
+}
+
 function friendlyProgressDetail(value) {
   const detail = String(value || "");
   const replacements = [
@@ -1961,7 +2363,8 @@ function analysisConsoleVisible(job) {
   // Automatic composition owns a dedicated version/review progress card.
   // Rendering the generic pipeline card as well duplicates state and can
   // compress its inner grid when the outer job is already in review.
-  return Boolean(execution.active)
+  return job?.status !== "awaiting_model_decision"
+    && Boolean(execution.active)
     && !["auto_composition", "quality_review"].includes(execution.operation);
 }
 
@@ -1969,7 +2372,7 @@ function setDirectorStage(stage = "conversation") {
   const previousStage = directorStage;
   directorStage = ["conversation", "analysis", "events", "compose"].includes(stage) ? stage : "conversation";
   if (previousStage !== directorStage && directorStage === "compose" && currentJob) {
-    reviewLowerPanelMode = jobOutputVersionCount(currentJob) > 1 ? "review" : "collapsed";
+    reviewLowerPanelMode = jobOutputCount(currentJob) > 1 ? "review" : "collapsed";
     timelineExpanded = false;
     document.body.dataset.timelineExpanded = "false";
     document.body.dataset.precisionEditing = "false";
@@ -1991,12 +2394,16 @@ function setDirectorStage(stage = "conversation") {
   // surface. Stages only decide which controls are expanded in that stream.
   messages?.classList.remove("director-stage-hidden");
   composer?.classList.remove("director-stage-hidden");
-  body.classList.toggle("director-stage-hidden", directorStage !== "events");
+  // The final three-column shell keeps the current contextual status visible
+  // in the right rail during planning and analysis. Only the version stage
+  // replaces it with generated outputs.
+  body.classList.toggle("director-stage-hidden", directorStage === "compose");
   output.classList.toggle("director-stage-hidden", directorStage !== "compose");
   clips.classList.toggle("director-stage-hidden", directorStage !== "compose");
   renderDirectorContext(currentJob);
   syncStageNavigationPlacement();
   syncAssistantPanelForStage();
+  requestAnimationFrame(() => window.ClipTalkWorkspaceController?.syncPortraitPanels?.());
   syncReviewWorkbench();
   syncUnifiedWorkspaceView();
 }
@@ -2062,15 +2469,25 @@ function workflowKindForJob(job = currentJob) {
   return String(job?.taskMode || "highlight") === "content_extract" ? "content_search" : "highlight";
 }
 
+function isAgentInstructionDraft(job = currentJob) {
+  if (!job || job.instructionSubmitted) return false;
+  if (job.agentDraft) return true;
+  if (String(job.status || "") === "awaiting_agent_instruction") return true;
+  return String(job.stage || "") === "agent_workspace_ready"
+    && String(job.request?.entryWorkflow || "") === "agent";
+}
+
 function taskModePresentation(job = currentJob) {
   const workflowKey = workflowKindForJob(job);
   const copy = window.ClipTalkCopy?.workflow(workflowKey);
+  const agentEntry = String(job?.request?.entryWorkflow || "") === "agent";
   return {
     key: workflowKey === "highlight" ? "highlight" : "content_extract",
-    label: copy?.label || "视频剪辑",
+    label: agentEntry ? "智能剪辑 Agent" : (copy?.label || "视频剪辑"),
     phaseLabels: copy?.phases || {},
     nav: copy?.navigation || [],
     workflowKey,
+    agentEntry,
   };
 }
 
@@ -2126,7 +2543,7 @@ function renderDirectorContext(job = currentJob) {
       ? `${formatTime(scope.start)} → ${formatTime(scope.end)}`
       : "整个源视频";
     const resultMode = String(search.resultMode || search.queryPlan?.result?.mode || "top_k") === "exhaustive" ? "全部匹配" : "最相关片段";
-    summary.innerHTML = `<div><small>当前查找条件</small><strong>${escapeHtml(query)}</strong></div><span>范围：${escapeHtml(scopeText)}</span><span>结果：${escapeHtml(resultMode)}</span><span>边界以真实索引证据为准</span>`;
+    summary.innerHTML = `<div><small>当前查找条件</small><strong>${escapeHtml(query)}</strong></div><span>范围：${escapeHtml(scopeText)}</span><span>结果：${escapeHtml(resultMode)}</span><span>选择片段后可预览并调整范围</span>`;
     summary.classList.remove("hidden");
     return;
   }
@@ -2159,13 +2576,15 @@ function renderDirectorTaskSummary(job = currentJob) {
   const contentMode = presentation.key === "content_extract";
   const execution = executionForJob(job);
   const autoCompositionRunning = execution.active && ["auto_composition", "quality_review"].includes(execution.operation);
-  const status = queued ? "任务已提交，正在等待后台开始处理"
+  const unifiedPresentation = window.ClipTalkWorkspaceState?.derivePresentation?.(job);
+  const status = unifiedPresentation?.label || (isAgentInstructionDraft(job) ? "待输入剪辑要求"
+    : queued ? "任务已提交，正在等待后台开始处理"
     : compositionComplete
-    ? `${outputCount} 个${vocabulary.outputPlural}已完成${!contentMode && job.status === "awaiting_confirmation" ? " · 事件和镜头均可单独下载" : ""}`
-    : autoCompositionRunning ? (job.autoComposition?.detail || "正在生成高光成片")
-      : job.status === "awaiting_content_confirmation" ? `${vocabulary.candidatePlural}已就绪 · 待确认`
-      : job.status === "awaiting_confirmation" ? "事件已就绪 · 待审核"
-      : job.status === "completed" ? `${vocabulary.output}已完成` : execution.detail || job.detail || "任务进行中";
+      ? `${outputCount} 个${vocabulary.outputPlural}已完成${!contentMode && job.status === "awaiting_confirmation" ? " · 事件和镜头均可单独下载" : ""}`
+      : autoCompositionRunning ? (job.autoComposition?.detail || "正在生成高光成片")
+        : job.status === "awaiting_content_confirmation" ? `${vocabulary.candidatePlural}已就绪 · 待确认`
+          : job.status === "awaiting_confirmation" ? "事件已就绪 · 待审核"
+            : job.status === "completed" ? `${vocabulary.output}已完成` : execution.detail || job.detail || "任务进行中");
   const flowStage = directorFlowStage(job);
   const workflowChoices = [
     ["highlight", "高光剪辑"], ["content_search", "内容探索"],
@@ -2184,8 +2603,17 @@ function renderDirectorTaskSummary(job = currentJob) {
         : flowStage === "events" ? "核对出镜"
           : flowStage === "analysis" ? "选择人物" : "准备画面"
     : "";
-  const stageLabel = queued ? "等待处理" : personStageLabel || presentation.phaseLabels[flowStage] || "处理中";
-  summary.innerHTML = `<div class="director-task-heading"><span class="task-mode-badge ${presentation.key} ${presentation.workflowKey}">${presentation.label}</span><small>当前阶段 · ${stageLabel}</small>${workflowPanelButton}<details class="workflow-switch-menu"><summary>基于此视频新建任务</summary><div>${workflowChoices.map(([key, label]) => `<button type="button" data-workflow-switch="${key}">${label}</button>`).join("")}</div></details></div><strong title="${escapeHtml(job.filename || objective)}">${escapeHtml(job.filename || objective)}</strong><p>${escapeHtml(status)}</p><div class="director-task-facts"><span>${duration ? `源视频 ${formatClock(duration)}` : "源视频待准备"}</span>${target && presentation.key === "highlight" ? `<span>目标 ${target.toFixed(1)} 秒</span>` : ""}</div>`;
+  const handedOff = String(job.stage || "") === "agent_handed_off";
+  const agentStageLabel = handedOff ? "已转到新任务" : presentation.agentEntry ? ({
+    awaiting_confirmation: "确认执行计划", approved: "执行计划", running: "执行计划",
+    action_required: "等待你处理", preview_ready: "计划完成", no_result: "未找到可用内容", failed: "计划失败",
+    cancelled: "计划已停止",
+  })[String(job.agent?.status || "")] || "生成执行计划" : "";
+  const stageLabel = queued ? "等待处理"
+    : unifiedPresentation?.railTitle || agentStageLabel || personStageLabel || presentation.phaseLabels[flowStage] || "处理中";
+  const workflowSwitchMenu = isAgentInstructionDraft(job) ? ""
+    : `<details class="workflow-switch-menu"><summary>基于此视频新建任务</summary><div>${workflowChoices.map(([key, label]) => `<button type="button" data-workflow-switch="${key}">${label}</button>`).join("")}</div></details>`;
+  summary.innerHTML = `<div class="director-task-heading"><span class="task-mode-badge ${presentation.key} ${presentation.workflowKey}">${presentation.label}</span><small>当前阶段 · ${stageLabel}</small>${workflowPanelButton}${workflowSwitchMenu}</div><strong title="${escapeHtml(job.filename || objective)}">${escapeHtml(job.filename || objective)}</strong><p>${escapeHtml(status)}</p><div class="director-task-facts"><span>${duration ? `源视频 ${formatClock(duration)}` : "源视频待准备"}</span>${target && presentation.key === "highlight" ? `<span>目标 ${target.toFixed(1)} 秒</span>` : ""}</div>`;
 }
 
 function renderReviewStatus(job = currentJob) {
@@ -2201,6 +2629,9 @@ function renderReviewStatus(job = currentJob) {
     modeBadge.classList.toggle("hidden", !job);
   }
   const stageLabels = {
+    agent_plan_available: "等待 Agent 计划",
+    agent_workspace_ready: "等待剪辑目标",
+    agent_plan_generating: "生成执行计划",
     starting: "读取素材",
     probing: "读取素材",
     audio_analysis: "理解声音",
@@ -2234,22 +2665,27 @@ function renderReviewStatus(job = currentJob) {
   const renderRunning = active && (
     execution.operation === "render" || ["rendering", "render"].includes(String(job?.stage || ""))
   );
+  const agentPlanRunning = String(job?.status || "") === "awaiting_agent_plan"
+    && ["approved", "running"].includes(String(job?.agent?.status || ""));
   const workflowStageLabel = workflowKey === "person_edit"
     ? ({ content_sampling: "准备人物画面", content_indexing: "发现画面人物", content_recognition: "扫描人物轨迹", content_search: "整理出镜片段", content_refinement: "精修人物边界" }[String(job?.stage || "")])
     : workflowKey === "speaker_edit"
       ? ({ audio_analysis: "准备声音", speech_recognition: "识别语音", voice_discovery: "区分说话人", voice_discovery_ready: "等待选择发言" }[String(job?.stage || "")])
       : "";
-  const label = !job ? "等待分析"
+  const unifiedPresentation = window.ClipTalkWorkspaceState?.derivePresentation?.(job);
+  const label = unifiedPresentation?.label || (!job ? "等待分析"
     : compositionComplete ? `${outputCount} 个${vocabulary.outputPlural}已完成`
       : autoCompositionRunning ? "AI 生成 · 高光成片"
       : renderRunning ? `正在合成${vocabulary.output}`
       : active ? `AI 分析 · ${workflowStageLabel || stageLabels[String(job.stage || "")] || "处理中"}`
+      : job.status === "awaiting_agent_plan" ? displayStatusForJob(job).text
       : job.status === "awaiting_content_confirmation" ? `等待确认${vocabulary.candidatePlural}`
         : job.status === "awaiting_confirmation" ? "等待审核"
         : job.status === "completed" ? "已完成"
-          : job.status === "failed" ? (contentGenerationFailed(job) ? `${vocabulary.output}生成失败` : "分析失败") : "已停止";
+          : job.status === "failed" ? (contentGenerationFailed(job) ? `${vocabulary.output}生成失败` : "分析失败") : "已停止");
   node.textContent = label;
-  node.classList.toggle("active", (active || autoCompositionRunning) && !compositionComplete);
+  node.classList.toggle("active", unifiedPresentation ? unifiedPresentation.running : (active || autoCompositionRunning || agentPlanRunning) && !compositionComplete);
+  if (unifiedPresentation) node.dataset.state = unifiedPresentation.key;
   node.classList.toggle("complete", compositionComplete);
 }
 
@@ -2259,141 +2695,6 @@ try {
     timelineCutsVisible = savedTimelineLayers.cuts !== false;
   }
 } catch { /* storage may be disabled */ }
-
-function panelLayoutDefaults() {
-  return window.innerWidth <= 1380 ? { left: 296, right: 300 } : { left: 312, right: 350 };
-}
-
-function panelMinimumCenterWidth() {
-  return window.innerWidth <= 1380 ? 500 : 560;
-}
-
-function setPanelWidth(side, value) {
-  const rounded = Math.round(Number(value));
-  const minimum = side === "left" ? 300 : 280;
-  const mergedLeft = side === "left" && studio?.classList.contains("director-merged") && !studio?.classList.contains("home-mode");
-  const maximum = mergedLeft ? 760 : 620;
-  const width = Math.max(minimum, Math.min(maximum, rounded || panelLayoutDefaults()[side]));
-  studio?.style.setProperty(side === "left" ? "--chat-panel-width" : "--rail-panel-width", `${width}px`);
-  const handle = $(`[data-panel-resizer="${side}"]`);
-  handle?.setAttribute("aria-valuemin", String(minimum));
-  handle?.setAttribute("aria-valuemax", String(maximum));
-  handle?.setAttribute("aria-valuenow", String(width));
-  return width;
-}
-
-function currentPanelLayout() {
-  const merged = studio?.classList.contains("director-merged") && !studio?.classList.contains("home-mode");
-  const chatPanel = $(".chat-panel");
-  const reviewRail = $(".review-rail");
-  return {
-    left: chatPanel ? Math.round(chatPanel.getBoundingClientRect().width) : panelLayoutDefaults().left,
-    right: merged ? 0 : reviewRail ? Math.round(reviewRail.getBoundingClientRect().width) : panelLayoutDefaults().right,
-  };
-}
-
-function savePanelLayout() {
-  try { localStorage.setItem(panelLayoutStorageKey, JSON.stringify(currentPanelLayout())); } catch { /* storage may be disabled */ }
-}
-
-function restorePanelLayout() {
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(panelLayoutStorageKey) || "null"); } catch { saved = null; }
-  const defaults = panelLayoutDefaults();
-  setPanelWidth("left", saved?.left || defaults.left);
-  setPanelWidth("right", saved?.right || defaults.right);
-}
-
-function availableSidePanelWidth() {
-  if (!studio) return 0;
-  const styles = getComputedStyle(studio);
-  const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-  const columnGap = parseFloat(styles.columnGap) || 0;
-  const merged = studio?.classList.contains("director-merged") && !studio?.classList.contains("home-mode");
-  const handles = [...document.querySelectorAll(".panel-resizer")]
-    .reduce((total, handle) => total + handle.getBoundingClientRect().width, 0);
-  const centerMin = panelMinimumCenterWidth();
-  const available = studio.clientWidth - horizontalPadding - handles - (merged ? columnGap * 2 : columnGap * 4) - centerMin;
-  return merged ? Math.max(300, available) : Math.max(580, available);
-}
-
-function maximumPanelWidth(side, _currentWidth) {
-  const merged = studio?.classList.contains("director-merged") && !studio?.classList.contains("home-mode");
-  if (merged && side === "left") return Math.min(760, availableSidePanelWidth());
-  const other = currentPanelLayout()[side === "left" ? "right" : "left"];
-  return Math.min(620, availableSidePanelWidth() - other);
-}
-
-function clampPanelLayoutToViewport() {
-  if (window.innerWidth <= 760) return;
-  let { left, right } = currentPanelLayout();
-  const available = availableSidePanelWidth();
-  const overflow = left + right - available;
-  if (overflow <= 0) return;
-  const leftCapacity = Math.max(0, left - 300);
-  const rightCapacity = Math.max(0, right - 280);
-  const capacity = leftCapacity + rightCapacity || 1;
-  left -= overflow * leftCapacity / capacity;
-  right -= overflow * rightCapacity / capacity;
-  setPanelWidth("left", left);
-  setPanelWidth("right", right);
-  savePanelLayout();
-}
-
-function bindPanelResizers() {
-  document.querySelectorAll("[data-panel-resizer]").forEach((handle) => {
-    const side = handle.dataset.panelResizer;
-    handle.addEventListener("pointerdown", (event) => {
-      if (window.innerWidth <= 760 || event.button !== 0) return;
-      event.preventDefault();
-      const startX = event.clientX;
-      const startWidth = currentPanelLayout()[side];
-      const maximum = maximumPanelWidth(side, startWidth);
-      let pendingWidth = startWidth;
-      let resizeFrame = null;
-      handle.classList.add("dragging");
-      document.body.classList.add("panel-resizing");
-      handle.setPointerCapture?.(event.pointerId);
-      const applyPendingWidth = () => {
-        resizeFrame = null;
-        setPanelWidth(side, pendingWidth);
-      };
-      const move = (moveEvent) => {
-        const delta = moveEvent.clientX - startX;
-        const next = side === "left" ? startWidth + delta : startWidth - delta;
-        pendingWidth = Math.min(maximum, next);
-        if (resizeFrame === null) resizeFrame = requestAnimationFrame(applyPendingWidth);
-      };
-      const finish = () => {
-        if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
-        applyPendingWidth();
-        handle.classList.remove("dragging");
-        document.body.classList.remove("panel-resizing");
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", finish);
-        handle.removeEventListener("pointercancel", finish);
-        savePanelLayout();
-        scheduleTimelineResizeRender(true);
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", finish);
-      handle.addEventListener("pointercancel", finish);
-    });
-    handle.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight"].includes(event.key) || window.innerWidth <= 760) return;
-      event.preventDefault();
-      const current = currentPanelLayout()[side];
-      const direction = event.key === "ArrowRight" ? 1 : -1;
-      const delta = side === "left" ? direction * 16 : direction * -16;
-      setPanelWidth(side, Math.min(maximumPanelWidth(side, current), current + delta));
-      savePanelLayout();
-    });
-    handle.addEventListener("dblclick", () => {
-      setPanelWidth(side, panelLayoutDefaults()[side]);
-      savePanelLayout();
-    });
-  });
-}
 
 function evidencePanelWidthLimits() {
   const stage = $("#reviewStage");
@@ -2505,141 +2806,20 @@ function bindEvidencePanelResizer() {
   requestAnimationFrame(restoreEvidencePanelWidth);
 }
 
-function bindTimelineResizer() {
-  const handle = $("#timelineResizer");
-  const reviewView = $("#reviewView");
-  if (!handle || !reviewView || handle.dataset.bound === "true") return;
-  handle.dataset.bound = "true";
-  const limits = () => {
-    const viewHeight = reviewView.getBoundingClientRect().height;
-    const minTimeline = 180;
-    const minViewer = reviewView.classList.contains("lower-panel-deck") ? 320 : 220;
-    const fixedChrome = reviewView.classList.contains("lower-panel-deck") ? 110 : 95;
-    return { min: minTimeline, max: Math.max(minTimeline, viewHeight - minViewer - fixedChrome) };
-  };
-  const setHeight = (value) => {
-    const { min, max } = limits();
-    const height = Math.round(Math.max(min, Math.min(max, Number(value) || min)));
-    reviewView.dataset.timelineHeight = String(height);
-    reviewView.style.setProperty("--timeline-track-height", `${height}px`);
-    reviewView.style.removeProperty("--viewer-track-height");
-    reviewView.style.removeProperty("grid-template-rows");
-    $("#viewerShell")?.style.removeProperty("height");
-    $("#timelinePanel")?.style.removeProperty("height");
-    handle.setAttribute("aria-valuemin", String(min));
-    handle.setAttribute("aria-valuemax", String(max));
-    handle.setAttribute("aria-valuenow", String(height));
-    scheduleTimelineResizeRender(true);
-    scheduleMediaFrameFit(true);
-    return height;
-  };
-  handle.addEventListener("pointerdown", (event) => {
-    if (!timelineExpanded || window.innerWidth <= 760 || event.button !== 0) return;
-    event.preventDefault();
-    const startY = event.clientY;
-    const startHeight = Math.round($("#timelinePanel")?.getBoundingClientRect().height || 240);
-    handle.classList.add("dragging");
-    document.body.classList.add("timeline-resizing");
-    handle.setPointerCapture?.(event.pointerId);
-    const move = (moveEvent) => setHeight(startHeight - (moveEvent.clientY - startY));
-    const finish = () => {
-      handle.classList.remove("dragging");
-      document.body.classList.remove("timeline-resizing");
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", finish);
-      handle.removeEventListener("pointercancel", finish);
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish);
-    handle.addEventListener("pointercancel", finish);
-  });
-  handle.addEventListener("keydown", (event) => {
-    if (!timelineExpanded || !["ArrowUp", "ArrowDown"].includes(event.key) || window.innerWidth <= 760) return;
-    event.preventDefault();
-    const current = Math.round($("#timelinePanel")?.getBoundingClientRect().height || 240);
-    setHeight(current + (event.key === "ArrowUp" ? 16 : -16));
-  });
-  handle.addEventListener("dblclick", () => {
-    if (!timelineExpanded) return;
-    delete reviewView.dataset.timelineHeight;
-    reviewView.style.removeProperty("--timeline-track-height");
-    reviewView.style.removeProperty("--viewer-track-height");
-    reviewView.style.removeProperty("grid-template-rows");
-    $("#viewerShell")?.style.removeProperty("height");
-    $("#timelinePanel")?.style.removeProperty("height");
-    scheduleTimelineResizeRender(true);
-    scheduleMediaFrameFit(true);
-  });
-  window.addEventListener("resize", () => {
-    if (reviewView.dataset.timelineHeight) setHeight(Number(reviewView.dataset.timelineHeight));
-  });
-}
-
-function bindReviewWorkbenchResizer() {
-  const handle = $("#reviewWorkbenchResizer");
-  const workbench = $("#reviewWorkbench");
-  const reviewView = $("#reviewView");
-  if (!handle || !workbench || !reviewView || handle.dataset.bound === "true") return;
-  handle.dataset.bound = "true";
-  handle.addEventListener("pointerdown", (event) => {
-    if (!reviewWorkbenchResizable() || window.innerWidth <= 760 || event.button !== 0) return;
-    event.preventDefault();
-    const startY = event.clientY;
-    const startHeight = Math.round(workbench.getBoundingClientRect().height || reviewWorkbenchHeightLimits().fallback);
-    let pendingHeight = startHeight;
-    let resizeFrame = null;
-    handle.classList.add("dragging");
-    document.body.classList.add("workbench-resizing");
-    handle.setPointerCapture?.(event.pointerId);
-    const applyPendingHeight = () => {
-      resizeFrame = null;
-      setReviewWorkbenchHeight(pendingHeight);
-    };
-    const move = (moveEvent) => {
-      pendingHeight = startHeight - (moveEvent.clientY - startY);
-      if (resizeFrame === null) resizeFrame = requestAnimationFrame(applyPendingHeight);
-    };
-    const finish = () => {
-      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
-      const height = setReviewWorkbenchHeight(pendingHeight, { persist: true });
-      handle.classList.remove("dragging");
-      document.body.classList.remove("workbench-resizing");
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", finish);
-      handle.removeEventListener("pointercancel", finish);
-      if (height) scheduleTimelineResizeRender(true);
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish);
-    handle.addEventListener("pointercancel", finish);
-  });
-  handle.addEventListener("keydown", (event) => {
-    if (!reviewWorkbenchResizable() || !["ArrowUp", "ArrowDown"].includes(event.key) || window.innerWidth <= 760) return;
-    event.preventDefault();
-    const current = Number(reviewView.dataset.reviewWorkbenchHeight)
-      || Math.round(workbench.getBoundingClientRect().height || reviewWorkbenchHeightLimits().fallback);
-    setReviewWorkbenchHeight(current + (event.key === "ArrowUp" ? 16 : -16), { persist: true });
-  });
-  handle.addEventListener("dblclick", () => {
-    if (!reviewWorkbenchResizable()) return;
-    forgetReviewWorkbenchHeight();
-    reviewView.style.removeProperty("--review-workbench-height");
-    delete reviewView.dataset.reviewWorkbenchHeight;
-    restoreReviewWorkbenchHeight();
-  });
-  window.addEventListener("resize", () => {
-    if (reviewView.dataset.reviewWorkbenchHeight && reviewWorkbenchResizable()) {
-      setReviewWorkbenchHeight(Number(reviewView.dataset.reviewWorkbenchHeight));
-    }
-  });
-}
-
 function setReviewLowerPanelMode(mode, { scroll = false, compact = false } = {}) {
-  const normalized = ["collapsed", "review", "timeline"].includes(mode) ? mode : "collapsed";
-  if (normalized === "timeline" && currentJob && !compact) updateTimeline();
-  if (normalized === "timeline" && $("#timelinePanel")?.classList.contains("hidden")) return reviewLowerPanelMode;
+  let normalized = ["collapsed", "review", "timeline"].includes(mode) ? mode : "collapsed";
+  // The compact completion overview is useful below a landscape preview, but
+  // in portrait it incorrectly triggers the precision split without an
+  // explicit user action. Keep portrait review focused until 精剪 is opened.
+  if (normalized === "timeline" && compact && $("#reviewView")?.dataset.reviewLayout === "portrait") {
+    normalized = "collapsed";
+    compact = false;
+  }
+  if (normalized === "timeline" && !timelineHasRenderableContent(currentJob)) return reviewLowerPanelMode;
   reviewLowerPanelMode = normalized;
   timelineExpanded = normalized === "timeline" && !compact;
+  if (normalized === "timeline" && currentJob) updateTimeline();
+  timelinePanel?.classList.toggle("hidden", normalized !== "timeline");
   document.body.dataset.timelineExpanded = String(timelineExpanded);
   document.body.dataset.precisionEditing = String(timelineExpanded);
   const toggle = $("#timelineExpandToggle");
@@ -2649,17 +2829,13 @@ function setReviewLowerPanelMode(mode, { scroll = false, compact = false } = {})
       ? (precisionTimelineKind() === "output" ? "返回版本列表" : "返回审核列表")
       : "精细查看";
   }
-  const handle = $("#timelineResizer");
-  handle?.setAttribute("aria-disabled", String(!timelineExpanded));
   if (!timelineExpanded) {
     $("#reviewView")?.style.removeProperty("--viewer-track-height");
   }
   syncReviewWorkbench();
+  syncPortraitWorkspaceControls();
+  syncPortraitPrecisionWorkbench();
   syncTimelineVisibilityLayout();
-  if (reviewWorkbenchResizable()) window.requestAnimationFrame(() => {
-    const current = Number($("#reviewView")?.dataset.reviewWorkbenchHeight);
-    if (current) setReviewWorkbenchHeight(current);
-  });
   scheduleTimelineResizeRender(true);
   scheduleMediaFrameFit(true);
   if (scroll && normalized !== "collapsed") {
@@ -2678,7 +2854,7 @@ function bindPortraitVideoResizer() {
   if (!handle || !reviewView || handle.dataset.bound === "true") return;
   handle.dataset.bound = "true";
   handle.addEventListener("pointerdown", (event) => {
-    if (window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait" || event.button !== 0) return;
+    if (window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait" || !timelineExpanded || event.button !== 0) return;
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = Math.round($("#viewerShell")?.getBoundingClientRect().width || restorePortraitVideoWidth());
@@ -2710,14 +2886,14 @@ function bindPortraitVideoResizer() {
     handle.addEventListener("pointercancel", finish);
   });
   handle.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight"].includes(event.key) || window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait") return;
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key) || window.innerWidth <= 900 || reviewView.dataset.reviewLayout !== "portrait" || !timelineExpanded) return;
     event.preventDefault();
     const current = Number(reviewView.dataset.portraitVideoWidth) || restorePortraitVideoWidth();
     const width = setPortraitVideoWidth(current + (event.key === "ArrowLeft" ? 16 : -16), { persist: true });
     if (width) scheduleTimelineResizeRender(true);
   });
   handle.addEventListener("dblclick", () => {
-    if (reviewView.dataset.reviewLayout !== "portrait") return;
+    if (reviewView.dataset.reviewLayout !== "portrait" || !timelineExpanded) return;
     forgetPortraitVideoWidth();
     reviewView.style.removeProperty("--portrait-video-width");
     delete reviewView.dataset.portraitVideoWidth;
@@ -2725,23 +2901,26 @@ function bindPortraitVideoResizer() {
     scheduleTimelineResizeRender(true);
   });
   window.addEventListener("resize", () => {
-    if (reviewView.dataset.reviewLayout === "portrait") restorePortraitVideoWidth();
+    if (reviewView.dataset.reviewLayout === "portrait" && timelineExpanded) restorePortraitVideoWidth();
   });
 }
 
-restorePanelLayout();
-bindPanelResizers();
 bindEvidencePanelResizer();
-bindTimelineResizer();
-bindReviewWorkbenchResizer();
 bindPortraitVideoResizer();
-requestAnimationFrame(clampPanelLayoutToViewport);
-window.addEventListener("resize", clampPanelLayoutToViewport);
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character]);
+}
+
+function cleanDisplayText(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  if (/^(?:|none|null|undefined|nan)$/i.test(text)) return fallback;
+  const suffixCleaned = text.replace(/\s*[·｜|:/-]\s*(?:none|null|undefined|nan)\s*$/i, "").trim();
+  if (!suffixCleaned) return fallback;
+  if (suffixCleaned !== text && /^(?:agent\s*)?审核预览$/i.test(suffixCleaned)) return fallback;
+  return suffixCleaned;
 }
 
 function applyMediaAspect(container, width, height) {
@@ -2774,13 +2953,27 @@ function activeMediaAspect() {
 
 function fitMediaFrame() {
   if (!viewerShell || !mediaFrame || viewerShell.offsetParent === null && document.fullscreenElement !== viewerShell) return;
-  const availableWidth = Math.max(0, viewerShell.clientWidth);
+  const reviewView = $("#reviewView");
+  const reviewStage = $("#reviewStage");
+  const portraitWorkspace = reviewView?.dataset.reviewLayout === "portrait"
+    && document.fullscreenElement !== viewerShell
+    && reviewStage;
   const transport = viewerShell.querySelector(":scope > .player-controls");
   const transportHeight = Math.max(0, Math.ceil(transport?.getBoundingClientRect().height || 0));
-  const availableHeight = Math.max(0, viewerShell.clientHeight - transportHeight);
+  const outputEvidenceStrip = viewerShell.querySelector(":scope > #outputEvidenceStrip:not(.hidden)");
+  const outputEvidenceStripHeight = Math.max(0, Math.ceil(outputEvidenceStrip?.getBoundingClientRect().height || 0));
+  let availableWidth = Math.max(0, viewerShell.clientWidth);
+  let availableHeight = Math.max(0, viewerShell.clientHeight - transportHeight - outputEvidenceStripHeight);
+  if (portraitWorkspace) {
+    const stageStyle = getComputedStyle(reviewStage);
+    const horizontalPadding = (Number.parseFloat(stageStyle.paddingLeft) || 0) + (Number.parseFloat(stageStyle.paddingRight) || 0);
+    const verticalPadding = (Number.parseFloat(stageStyle.paddingTop) || 0) + (Number.parseFloat(stageStyle.paddingBottom) || 0);
+    availableWidth = Math.max(0, reviewStage.clientWidth - horizontalPadding);
+    availableHeight = Math.max(0, reviewStage.clientHeight - verticalPadding - transportHeight - outputEvidenceStripHeight);
+  }
   if (availableWidth < 2 || availableHeight < 2) return;
   const aspect = Math.max(.2, Math.min(5, activeMediaAspect()));
-  let width = Math.min(availableWidth, availableHeight * aspect);
+  let width = Math.min(availableWidth, availableHeight * aspect, portraitWorkspace ? 440 : Number.POSITIVE_INFINITY);
   let height = width / aspect;
   if (height > availableHeight) {
     height = availableHeight;
@@ -2788,6 +2981,19 @@ function fitMediaFrame() {
   }
   width = Math.max(1, Math.floor(width));
   height = Math.max(1, Math.floor(height));
+  if (portraitWorkspace) {
+    reviewView.style.setProperty("--portrait-shell-width", `${width}px`);
+    reviewView.style.setProperty("--portrait-shell-height", `${height + transportHeight + outputEvidenceStripHeight}px`);
+  } else {
+    reviewView?.style.removeProperty("--portrait-shell-width");
+    reviewView?.style.removeProperty("--portrait-shell-height");
+  }
+  // The transport spans the review stage, while portrait media is centered
+  // inside it. Expose the rendered media box so portrait-only chrome (most
+  // importantly the seek rail) can align with the visible video rather than
+  // with the much wider stage.
+  viewerShell.style.setProperty("--media-rendered-width", `${width}px`);
+  viewerShell.style.setProperty("--media-rendered-height", `${height}px`);
   const fitKey = `${width}x${height}@${aspect.toFixed(6)}`;
   if (mediaFrame.dataset.fitKey !== fitKey) {
     mediaFrame.dataset.fitKey = fitKey;
@@ -2819,6 +3025,7 @@ function syncTimelineVisibilityLayout() {
     || document.body.classList.contains("person-workspace-open")
     || directorStage === "events" || directorStage === "compose");
   syncReviewPanelSwitch(available, reviewPanelDeckAvailable(available));
+  syncPortraitWorkspaceControls();
   scheduleMediaFrameFit(true);
 }
 
@@ -2837,6 +3044,80 @@ function syncEvidencePlacement() {
   evidence.style.removeProperty("--evidence-frame-top");
   evidence.style.removeProperty("--evidence-frame-height");
   evidence.style.removeProperty("--evidence-gutter-width");
+  syncPortraitPrecisionWorkbench();
+}
+
+function syncPortraitPrecisionWorkbench() {
+  const workbench = $("#portraitPrecisionWorkbench");
+  if (!workbench) return;
+  const active = $("#reviewView")?.dataset.reviewLayout === "portrait" && timelineExpanded;
+  workbench.setAttribute("aria-hidden", String(!active));
+  if (!active) return;
+
+  const outputReview = timelineOutputAxisActive();
+  const evidence = $("#evidencePanel");
+  const selected = Boolean(evidence && !evidence.classList.contains("evidence-placeholder"));
+  workbench.dataset.phase = selected ? "inspect" : "select";
+  const propertiesButton = $("#portraitWorkbenchOpenProperties");
+  propertiesButton?.classList.toggle("hidden", outputReview || !selected);
+  if (propertiesButton) propertiesButton.disabled = outputReview || !selected;
+  const title = selected
+    ? $("#clipTitle")?.textContent?.trim()
+    : $("#timelineEventSummaryTitle")?.textContent?.trim();
+  const time = selected
+    ? $("#clipTime")?.textContent?.trim()
+    : $("#timelineCurrent")?.textContent?.trim();
+  const reason = outputReview
+    ? "这里显示当前成片位置对应的源镜头，右侧播放器用于检查最终 9:16 构图。"
+    : selected
+      ? $("#clipReason")?.textContent?.trim()
+      : "在下方时间线选择片段，这里会显示源镜头与边界信息；右侧始终用于检查 9:16 成片构图。";
+  if ($("#portraitWorkbenchTitle")) $("#portraitWorkbenchTitle").textContent = title || "选择时间线中的镜头";
+  if ($("#portraitWorkbenchTime")) $("#portraitWorkbenchTime").textContent = time || "尚未选择";
+  if ($("#portraitWorkbenchReason")) $("#portraitWorkbenchReason").textContent = reason;
+  if ($("#portraitWorkbenchMode")) $("#portraitWorkbenchMode").textContent = outputReview ? "成片对应源镜头" : selected ? "已选源镜头" : "源片时间线";
+  if ($("#portraitWorkbenchPosition")) $("#portraitWorkbenchPosition").textContent = time || "尚未定位";
+
+  const frame = $("#portraitWorkbenchFrame");
+  const thumbnails = [...document.querySelectorAll("#timelineThumbnails .timeline-thumbnail")];
+  const selectedThumbnail = thumbnails.find((item) => item.classList.contains("selected-frame"));
+  const sourceItem = outputReview ? null : (currentEventSegment || currentCandidate || currentEventGroup);
+  const sourceSegments = currentEventSegment || currentCandidate ? [sourceItem] : currentEventGroup?.segments || [];
+  const rangeStart = sourceSegments.length ? Math.min(...sourceSegments.map((item) => Number(item.start) || 0)) : null;
+  const rangeEnd = sourceSegments.length ? Math.max(...sourceSegments.map((item) => Number(item.end) || Number(item.start) || 0)) : null;
+  const rangeTarget = rangeStart !== null && rangeEnd !== null ? (rangeStart + rangeEnd) / 2 : timelineAbsoluteTime();
+  const inSelectedRange = rangeStart === null ? [] : thumbnails.filter((item) => {
+    const value = Number(item.dataset.timelineFrameTime);
+    return Number.isFinite(value) && value >= rangeStart && value <= rangeEnd;
+  });
+  const thumbnail = (selectedThumbnail && (rangeStart === null || inSelectedRange.includes(selectedThumbnail)) ? selectedThumbnail : null)
+    || inSelectedRange.sort((left, right) => Math.abs(Number(left.dataset.timelineFrameTime) - rangeTarget) - Math.abs(Number(right.dataset.timelineFrameTime) - rangeTarget))[0]
+    || (rangeStart === null ? thumbnails.find((item) => item.classList.contains("playback-current")) : null)
+    || (rangeStart === null ? [...thumbnails].sort((left, right) => Math.abs(Number(left.dataset.timelineFrameTime) - rangeTarget) - Math.abs(Number(right.dataset.timelineFrameTime) - rangeTarget))[0] : null);
+  if (!frame) return;
+  const frameBadge = frame.querySelector(".portrait-workbench-frame-badge");
+  if (frameBadge) frameBadge.textContent = outputReview ? "对应源镜头" : "源镜头预览";
+  const ready = Boolean(thumbnail?.style.backgroundImage);
+  frame.dataset.state = ready ? "ready" : "empty";
+  if (ready) {
+    frame.style.backgroundImage = thumbnail.style.backgroundImage;
+    const thumbnailWidth = Number.parseFloat(thumbnail.style.width) || thumbnail.getBoundingClientRect().width || 1;
+    const thumbnailHeight = Number.parseFloat(thumbnail.style.height) || thumbnail.getBoundingClientRect().height || 1;
+    const frameBounds = frame.getBoundingClientRect();
+    const previewScale = Math.max(1, frameBounds.width / thumbnailWidth, frameBounds.height / thumbnailHeight);
+    const scalePair = (value) => String(value || "").split(/\s+/).map((part) => {
+      const number = Number.parseFloat(part);
+      return Number.isFinite(number) ? `${number * previewScale}px` : part;
+    }).join(" ");
+    frame.style.backgroundSize = scalePair(thumbnail.style.backgroundSize);
+    frame.style.backgroundPosition = scalePair(thumbnail.style.backgroundPosition);
+    frame.setAttribute("aria-label", `${outputReview ? "当前版本画面" : "当前源镜头预览"}，${time || "当前播放位置"}`);
+  } else {
+    frame.style.removeProperty("background-image");
+    frame.style.removeProperty("background-size");
+    frame.style.removeProperty("background-position");
+    frame.setAttribute("aria-label", `${outputReview ? "当前版本" : "源镜头"}缩略图正在准备`);
+  }
 }
 
 function bindAdaptiveMediaLayout() {
@@ -3061,29 +3342,8 @@ function requestMainVideoAutoplay() {
   }
 }
 
-async function autoplayLocalPreview(video) {
-  if (!video?.src) return;
-  video.muted = false;
-  try {
-    const pending = video.play();
-    if (pending && typeof pending.then === "function") await pending;
-  } catch (error) {
-    if (error?.name !== "NotAllowedError") return;
-    // The file picker normally provides a user gesture, but stricter browser
-    // policies may still require muted autoplay.
-    video.muted = true;
-    try { await video.play(); } catch { /* native controls remain available */ }
-  }
-}
-
 function formatTime(seconds) {
-  const value = Math.max(0, Number(seconds) || 0);
-  const hours = Math.floor(value / 3600);
-  const minutes = Math.floor(value % 3600 / 60);
-  const rest = (value % 60).toFixed(1).padStart(4, "0");
-  return hours
-    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${rest}`
-    : `${String(minutes).padStart(2, "0")}:${rest}`;
+  return window.ClipTalkWorkspaceState.formatTime(seconds);
 }
 
 function formatPreciseTimecode(seconds) {
@@ -3208,7 +3468,7 @@ function progressEtaText(job, waiting = false) {
     const firstResult = unit === "%" ? "首个进度样本" : `首${unit}`;
     return `等待${firstResult}结果`;
   }
-  return waiting ? "模型处理中 · 暂无耗时样本" : "等待当前阶段结果";
+  return waiting ? "模型处理中 · 暂无法估算剩余时间" : "等待当前阶段结果";
 }
 
 function stageProgressFact(job, fallbackPercent = 0, waiting = false) {
@@ -3235,7 +3495,7 @@ function stageProgressFact(job, fallbackPercent = 0, waiting = false) {
     const unit = String(stage.unit || job?.stageUnit || "项");
     return unit === "%" ? `已处理 ${completed}%` : `已完成 ${completed}/${total} ${unit}`;
   }
-  return waiting ? "模型处理中 · 暂无可靠百分比" : `阶段 ${fallbackPercent}%`;
+  return waiting ? "模型处理中 · 暂无法估算进度" : `阶段 ${fallbackPercent}%`;
 }
 
 function measuredStageProgress(job) {
@@ -3325,9 +3585,16 @@ function compositionTransitionOverlap(segments, index) {
   return Math.max(0, Math.min(.4, requested, previousDuration / 3, currentDuration / 3));
 }
 
+function segmentSourceRange(segment) {
+  const rawStart = Number(segment?.sourceStart ?? segment?.start);
+  const start = Number.isFinite(rawStart) ? Math.max(0, rawStart) : 0;
+  const rawEnd = Number(segment?.sourceEnd ?? segment?.end);
+  const end = Number.isFinite(rawEnd) ? Math.max(start, rawEnd) : start;
+  return { start, end };
+}
+
 function segmentOutputDuration(segment) {
-  const sourceStart = Math.max(0, Number(segment?.start) || 0);
-  const sourceEnd = Math.max(sourceStart, Number(segment?.end) || sourceStart);
+  const { start: sourceStart, end: sourceEnd } = segmentSourceRange(segment);
   const removed = (Array.isArray(segment?.silenceCuts) ? segment.silenceCuts : []).reduce((sum, item) => {
     const start = Math.max(sourceStart, Number(item?.start) || sourceStart);
     const end = Math.min(sourceEnd, Number(item?.end) || start);
@@ -3338,8 +3605,7 @@ function segmentOutputDuration(segment) {
 }
 
 function segmentOutputOffsetForSource(segment, sourceTime) {
-  const start = Math.max(0, Number(segment?.start) || 0);
-  const end = Math.max(start, Number(segment?.end) || start);
+  const { start, end } = segmentSourceRange(segment);
   const target = Math.max(start, Math.min(end, Number(sourceTime) || start));
   const removedBefore = (Array.isArray(segment?.silenceCuts) ? segment.silenceCuts : []).reduce((sum, item) => {
     const left = Math.max(start, Number(item?.start) || start);
@@ -3352,10 +3618,11 @@ function segmentOutputOffsetForSource(segment, sourceTime) {
 
 function compositionSchedule(composed) {
   const segments = Array.isArray(composed?.segments) ? composed.segments : [];
-  let composedEnd = 0;
+  // A generated cover intro occupies output time but has no matching source
+  // frame. Keep the first source clip aligned after that lead-in.
+  let composedEnd = Math.max(0, Number(composed?.coverIntro?.duration || composed?.leadInDuration || 0));
   return segments.map((segment, index) => {
-    const sourceStart = Math.max(0, Number(segment.start) || 0);
-    const sourceEnd = Math.max(sourceStart, Number(segment.end) || sourceStart);
+    const { start: sourceStart, end: sourceEnd } = segmentSourceRange(segment);
     const sourceDuration = Math.max(0, sourceEnd - sourceStart);
     const overlap = compositionTransitionOverlap(segments, index);
     const outputStart = Math.max(0, composedEnd - overlap);
@@ -3392,6 +3659,16 @@ function compositionSourceTimeAtOutputTime(composed, outputTime) {
     else high = middle;
   }
   return Math.max(entry.sourceStart, Math.min(entry.sourceEnd, (low + high) / 2));
+}
+
+function compositionSourceFrameAtOutputTime(composed, outputTime) {
+  const time = Math.max(0, Number(outputTime) || 0);
+  const schedule = compositionSchedule(composed);
+  const entry = [...schedule].reverse().find((item) =>
+    time >= item.outputStart - .001 && time <= item.outputEnd + .001,
+  );
+  if (!entry) return null;
+  return { entry, sourceTime: compositionSourceTimeAtOutputTime(composed, time) };
 }
 
 function seekCurrentMediaTime(second, { autoplay = true } = {}) {
@@ -3434,13 +3711,42 @@ function seekComposedMedia(composed, segmentIndex, sourceTime, kind = "output") 
   else selectOutput(composed.filename, true, outputTarget);
 }
 
+function selectOutputTimelineSegment(segmentIndex, outputTime = null) {
+  if (!timelineOutputAxisActive() || !currentOutput) return;
+  const schedule = timelineOutputComparisonModel(currentJob, currentOutput)?.schedule || [];
+  if (Number(segmentIndex) < 0) {
+    timelineSelectedOutputSegmentIndex = null;
+    timelineFrameSelectionTime = null;
+    seekCurrentMediaTime(Math.max(0, Number(outputTime) || 0));
+    renderTimelineEventSummary();
+    updateTimelinePlayhead();
+    return;
+  }
+  const index = Math.max(0, Math.min(schedule.length - 1, Number(segmentIndex) || 0));
+  const entry = schedule[index];
+  if (!entry) return;
+  timelineSelectedOutputSegmentIndex = index;
+  timelineFrameSelectionTime = null;
+  const target = Number.isFinite(Number(outputTime))
+    ? Math.max(entry.outputStart, Math.min(entry.outputEnd, Number(outputTime)))
+    : entry.outputStart;
+  seekCurrentMediaTime(target);
+  renderTimelineEventSummary();
+  updateTimelinePlayhead();
+}
+
 function speakerMatches(item) {
   return timelineSpeakerFilter === "all" || itemSpeakers(item).includes(timelineSpeakerFilter);
 }
 
 function updateSpeakerFilterOptions(job = currentJob) {
   const select = $("#speakerFilter");
-  if (!select || !job) return;
+  if (!select) return;
+  const filter = select.closest(".speaker-filter");
+  if (!job) {
+    filter?.classList.add("hidden");
+    return;
+  }
   const speakers = new Set();
   (job.candidates || []).forEach((item) => itemSpeakers(item).forEach((speaker) => speakers.add(speaker)));
   (job.eventGroups || []).forEach((group) => (group.segments || []).forEach((item) => itemSpeakers(item).forEach((speaker) => speakers.add(speaker))));
@@ -3449,6 +3755,7 @@ function updateSpeakerFilterOptions(job = currentJob) {
   if (!values.includes(timelineSpeakerFilter)) timelineSpeakerFilter = "all";
   select.innerHTML = values.map((value) => `<option value="${escapeHtml(value)}">${value === "all" ? "全部" : escapeHtml(value)}</option>`).join("");
   select.value = timelineSpeakerFilter;
+  filter?.classList.toggle("hidden", speakers.size < 2);
 }
 
 function renderTimelineInsights(job = currentJob) {
@@ -3707,7 +4014,7 @@ function renderAnalysisDecision(job) {
   const retryLabel = speechStage ? "重试语音分析" : "重试当前阶段";
   const fallbackLabel = speechStage ? "继续视觉分析" : "降级继续";
   const fallbackTitle = speechStage
-    ? "跳过语音辅助，继续使用视觉模型完成高光分析"
+    ? "跳过语音分析，继续分析画面"
     : "使用当前阶段的降级规则继续分析";
   const guidance = speechStage
     ? "语音仅用于辅助判断，不影响继续进行视觉高光分析。"
@@ -3734,7 +4041,7 @@ async function resolveModelDecision(action) {
     pending.error ? `失败原因：${pending.error}` : "当前阶段没有返回可用结果",
     "已完成的画面和分析检查点会保留",
     speechStage && action === "fallback"
-      ? "视觉模型会继续分析画面；本次结果不使用对白、情绪、声音事件和说话人信息"
+      ? "将继续分析画面；本次结果不使用对白、情绪、声音事件和说话人信息"
       : "当前操作只影响未完成阶段",
   ];
   if (!await requestActionConfirmation({ title: "分析阶段需要处理", summary: labels[action], details })) return;
@@ -3761,7 +4068,7 @@ function updatePlayerChrome() {
   const viewerShell = $("#viewerShell");
   const clock = $("#playerClock");
   const seek = $("#playerSeek");
-  const segmentNavigationAvailable = Boolean(currentJob?.candidates?.length);
+  const segmentNavigationAvailable = Number(currentJob?.candidates?.length || 0) > 1;
   const playbackAvailable = Boolean(currentJob && (mainVideo.currentSrc || mainVideo.src));
   if (play) {
     const playing = !mainVideo.paused;
@@ -3777,6 +4084,7 @@ function updatePlayerChrome() {
     button.disabled = !segmentNavigationAvailable;
     button.setAttribute("aria-disabled", String(!segmentNavigationAvailable));
   });
+  viewerShell?.querySelector(".player-segment-group")?.classList.toggle("hidden", !segmentNavigationAvailable);
   if (mute) {
     const muted = mainVideo.muted || mainVideo.volume === 0;
     mute.dataset.state = muted ? "muted" : "on";
@@ -3813,22 +4121,20 @@ function timelineOutputDurationValue(output = currentOutput) {
 }
 
 function timelineHasOutputComparison() {
-  return Boolean(viewerMediaKind === "output" && currentOutput?.segments?.length);
+  return Boolean(viewerMediaKind === "output" && currentOutput);
 }
 
 function timelineOutputAxisActive() {
-  return false;
+  return timelineHasOutputComparison() && timelineCoordinateSpace === "output";
 }
 
 function setTimelineCoordinateSpace(_space) {
   if (!timelineHasOutputComparison()) return;
-  // Kept as a compatibility boundary for older callers. Output-time editing
-  // belongs in a dedicated edit sequence, not in the source review timeline.
-  timelineCoordinateSpace = "source";
+  timelineCoordinateSpace = _space;
   timelineReviewFollow = false;
   timelineFrameSelectionTime = null;
   timelineViewStart = 0;
-  timelineViewEnd = Number(waveformData?.duration || currentJob?.videoInfo?.duration || 0);
+  timelineViewEnd = timelineOutputDurationValue(currentOutput);
   timelineMediaRenderKey = "";
   waveformRenderKey = "";
   updateTimeline();
@@ -3875,12 +4181,16 @@ function timelineDensityProfile(viewportHeight, _detailMode) {
 function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLanes = 1, layoutKind = "hierarchy") {
   const height = Math.max(190, Number(viewportHeight) || 260);
   const profile = timelineDensityProfile(height, detailMode);
+  const trackHeight = Math.max(150, height - profile.rulerHeight);
   if (layoutKind === "source-tracks") {
-    const pictureHeight = clampTimelineValue(Math.round(height * .46), 76, Math.max(76, height - 88));
-    const audioHeight = Math.max(72, height - pictureHeight);
+    const pictureHeight = clampTimelineValue(
+      Math.round(trackHeight * .56), 76, Math.max(76, trackHeight - 64),
+    );
+    const audioHeight = Math.max(64, trackHeight - pictureHeight);
     return {
       ...profile,
       height,
+      trackHeight,
       eventLabelsHeight: 0,
       labelLaneHeight: 0,
       shotLaneHeight: 0,
@@ -3896,20 +4206,33 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
   }
   const singleContentRow = ["content-review", "content-review-history"].includes(layoutKind);
   const splitContentRows = layoutKind === "content-review-history";
-  const pictureHeight = clampTimelineValue(
-    Math.round(height * (singleContentRow ? .29 : .2)),
+  let pictureHeight = clampTimelineValue(
+    Math.round(trackHeight * (singleContentRow ? .29 : .2)),
     profile.pictureMinimum,
     singleContentRow ? Math.round(profile.pictureMaximum * 1.6) : profile.pictureMaximum,
   );
   // Audio carries real waveform and speech-energy evidence, so it receives a
   // full quarter of the review surface. Event and shot hierarchy stays
   // readable but no longer consumes nearly two thirds of the timeline.
-  const audioHeight = clampTimelineValue(
-    Math.round(height * (singleContentRow ? .34 : .26)),
+  let audioHeight = clampTimelineValue(
+    Math.round(trackHeight * (singleContentRow ? .34 : .26)),
     profile.audioMinimum,
     singleContentRow ? Math.round(profile.audioMaximum * 1.7) : profile.audioMaximum,
   );
-  const hierarchyHeight = Math.max(singleContentRow ? (splitContentRows ? 92 : 70) : 96, height - pictureHeight - audioHeight);
+  const minimumHierarchy = singleContentRow
+    ? (splitContentRows ? 72 : 58)
+    : (profile.name === "compact" ? 72 : 96);
+  let hierarchyHeight = Math.max(minimumHierarchy, trackHeight - pictureHeight - audioHeight);
+  let overflow = pictureHeight + audioHeight + hierarchyHeight - trackHeight;
+  if (overflow > 0) {
+    const audioReduction = Math.min(overflow, Math.max(0, audioHeight - profile.audioMinimum));
+    audioHeight -= audioReduction;
+    overflow -= audioReduction;
+    const pictureReduction = Math.min(overflow, Math.max(0, pictureHeight - profile.pictureMinimum));
+    pictureHeight -= pictureReduction;
+  }
+  hierarchyHeight = Math.max(minimumHierarchy, trackHeight - pictureHeight - audioHeight);
+  audioHeight += Math.max(0, trackHeight - pictureHeight - audioHeight - hierarchyHeight);
   const eventRowHeight = singleContentRow ? hierarchyHeight : Math.round(hierarchyHeight * .55);
   const shotRowHeight = singleContentRow ? 0 : hierarchyHeight - eventRowHeight;
   const eventLabelsHeight = Math.max(32, eventRowHeight - (singleContentRow ? 4 : profile.relationHeight));
@@ -3920,6 +4243,7 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
   return {
     ...profile,
     height,
+    trackHeight,
     eventLabelsHeight,
     labelLaneHeight,
     shotLaneHeight,
@@ -3934,10 +4258,38 @@ function timelineTrackLayout(viewportHeight, detailMode, labelLanes = 1, shotLan
   };
 }
 
+function applyTimelineTrackGeometry(presentation, layout) {
+  const labels = $("#timelineTrackLabels");
+  if (!labels || !layout) return;
+  const kind = String(presentation?.layoutKind || "source-tracks");
+  let rows;
+  if (kind === "source-tracks") {
+    rows = [layout.pictureHeight, layout.audioHeight];
+  } else if (kind === "content-review-history") {
+    const first = Math.floor(layout.eventRowHeight / 2);
+    rows = [first, layout.eventRowHeight - first, layout.pictureHeight, layout.audioHeight];
+  } else if (kind === "content-review") {
+    rows = [layout.eventRowHeight, layout.pictureHeight, layout.audioHeight];
+  } else {
+    rows = [layout.eventRowHeight, layout.shotRowHeight, layout.pictureHeight, layout.audioHeight];
+  }
+  const labelCount = labels.children.length;
+  if (rows.length !== labelCount) {
+    const sharedHeight = Math.max(32, layout.trackHeight / Math.max(1, labelCount));
+    rows = Array.from({ length: labelCount }, () => sharedHeight);
+  }
+  labels.style.setProperty(
+    "grid-template-rows",
+    rows.map((value) => `${Math.max(0, value)}px`).join(" "),
+    "important",
+  );
+  labels.style.setProperty("padding", `0 0 ${layout.rulerHeight}px`, "important");
+  labels.dataset.trackCount = String(labelCount);
+}
+
 function currentTimelineLinkedIntervals() {
   const normalize = (item) => {
-    const start = Number(item?.start);
-    const end = Number(item?.end);
+    const { start, end } = segmentSourceRange(item);
     return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
   };
   if (currentEventSegment) return [normalize(currentEventSegment)].filter(Boolean);
@@ -3985,6 +4337,7 @@ function drawWaveform(force = false) {
     waveformJobId, Math.round(bounds.width), Math.round(bounds.height), ratio,
     view.start.toFixed(3), view.end.toFixed(3), timelineVisualMode,
     viewerMediaKind, currentOutput?.filename || "", timelineCoordinateSpace,
+    document.documentElement.dataset.theme || "",
     waveformData?.schemaVersion || 0,
     waveformData?.minimums?.length || waveformData?.peaks?.length || 0,
   ].join("|");
@@ -4001,6 +4354,11 @@ function drawWaveform(force = false) {
   const legacyPeaks = waveformData?.peaks || [];
   const sampleCount = minimums.length && minimums.length === maximums.length ? minimums.length : legacyPeaks.length;
   const timelineStyle = timelineViewport ? getComputedStyle(timelineViewport) : null;
+  const timelineColor = (name, fallback) => timelineStyle?.getPropertyValue(name)?.trim() || fallback;
+  const waveformGuideColor = timelineColor("--timeline-wave-guide", "rgba(116, 151, 135, .32)");
+  const waveformPrimaryColor = timelineColor("--timeline-wave-primary", "#72b487");
+  const waveformMutedColor = timelineColor("--timeline-wave-muted", "rgba(112, 143, 130, .24)");
+  const rulerTextColor = timelineColor("--timeline-ruler-text", "#91a8a0");
   const cssPixels = (name, fallback) => {
     const parsed = Number.parseFloat(timelineStyle?.getPropertyValue(name) || "");
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -4024,12 +4382,10 @@ function drawWaveform(force = false) {
   const waveformBottom = waveformTop + waveformHeight;
   const center = (waveformTop + waveformBottom) / 2;
   const amplitude = Math.max(4, waveformHeight / 2 - 3);
-  if (!timelineOutputAxisActive()) {
-    context.fillStyle = "#46545a";
-    context.fillRect(0, center - 0.5, bounds.width, 1);
-    context.fillRect(0, waveformTop, bounds.width, 1);
-    context.fillRect(0, waveformBottom, bounds.width, 1);
-  }
+  context.fillStyle = waveformGuideColor;
+  context.fillRect(0, center - 0.5, bounds.width, 1);
+  context.fillRect(0, waveformTop, bounds.width, 1);
+  context.fillRect(0, waveformBottom, bounds.width, 1);
   if (sampleCount && !timelineOutputAxisActive()) {
     const fullDuration = timelineDurationValue();
     const comparisonIntervals = viewerMediaKind === "output" && currentOutput?.segments?.length
@@ -4065,7 +4421,27 @@ function drawWaveform(force = false) {
       const usedByOutput = !comparisonIntervals.length || comparisonIntervals.some((range) =>
         columnTime >= range.start && columnTime <= range.end,
       );
-      context.fillStyle = usedByOutput ? "#b88a4a" : "rgba(111, 122, 126, .28)";
+      context.fillStyle = usedByOutput ? waveformPrimaryColor : waveformMutedColor;
+      context.fillRect(x, upper, width, Math.max(1, lower - upper));
+    }
+  } else if (sampleCount && timelineOutputAxisActive()) {
+    const sourceDuration = Number(waveformData?.duration || currentJob?.videoInfo?.duration || 0);
+    const columns = Math.max(1, Math.min(Math.floor(bounds.width), Math.ceil(view.duration * 12)));
+    const normalization = Math.max(.04, Number(waveformData?.normalizationPeak) ||
+      legacyPeaks.reduce((peak, value) => Math.max(peak, Number(value) || 0), 0) ||
+      maximums.reduce((peak, value, index) => Math.max(peak, Math.abs(Number(value) || 0), Math.abs(Number(minimums[index]) || 0)), 0));
+    for (let column = 0; column < columns; column += 1) {
+      const outputTime = view.start + (column + .5) / columns * view.duration;
+      const mapped = compositionSourceFrameAtOutputTime(currentOutput, outputTime);
+      if (!mapped || sourceDuration <= 0) continue;
+      const sampleIndex = Math.max(0, Math.min(sampleCount - 1, Math.floor(mapped.sourceTime / sourceDuration * sampleCount)));
+      const minimum = minimums.length ? Number(minimums[sampleIndex] || 0) : -Number(legacyPeaks[sampleIndex] || 0);
+      const maximum = maximums.length ? Number(maximums[sampleIndex] || 0) : Number(legacyPeaks[sampleIndex] || 0);
+      const upper = center - Math.min(1, maximum / normalization) * amplitude;
+      const lower = center - Math.max(-1, minimum / normalization) * amplitude;
+      const x = column / columns * bounds.width;
+      const width = Math.max(1, bounds.width / columns + .15);
+      context.fillStyle = waveformPrimaryColor;
       context.fillRect(x, upper, width, Math.max(1, lower - upper));
     }
   }
@@ -4079,7 +4455,7 @@ function drawWaveform(force = false) {
     const niceFactor = normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
     const tickStep = niceFactor * magnitude;
     const firstTick = Math.ceil((view.start - .0001) / tickStep) * tickStep;
-    context.fillStyle = "#68777e";
+    context.fillStyle = rulerTextColor;
     context.font = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
     for (let tick = firstTick; tick <= view.end + .0001; tick += tickStep) {
       const cleanTick = Math.round(tick * 1000) / 1000;
@@ -4102,7 +4478,21 @@ function updateTimelinePlayhead() {
   const overviewPlayhead = $("#timelineOverviewPlayhead");
   const locateButton = $("#timelineLocatePlayhead");
   const outsideView = duration > 0 && (value < view.start || value > view.end);
-  if (current) current.textContent = formatTime(value);
+  if (current) {
+    current.textContent = formatTime(value);
+    if (viewerMediaKind === "output" && currentOutput) {
+      const outputTime = Number(mainVideo.currentTime || 0);
+      const mapped = compositionSourceFrameAtOutputTime(currentOutput, outputTime);
+      const kind = currentOutputIsReviewSample(currentOutput) ? "样片" : "成片";
+      current.title = mapped
+        ? `${kind} ${formatTime(outputTime)} · 源片 ${formatTime(mapped.sourceTime)}`
+        : `${kind} ${formatTime(outputTime)}`;
+      current.setAttribute("aria-label", current.title);
+    } else {
+      current.removeAttribute("title");
+      current.removeAttribute("aria-label");
+    }
+  }
   if (playhead) playhead.style.left = duration > 0 ? `${timelinePercentInView(value)}%` : "0%";
   playhead?.classList.toggle("hidden", outsideView);
   if (overviewPlayhead) overviewPlayhead.style.left = duration > 0 ? `${value / duration * 100}%` : "0%";
@@ -4134,6 +4524,7 @@ function updateTimelinePlayhead() {
   });
   updateTimelineSpeakerPlayhead();
   updateTimelinePersonPlayhead();
+  syncPortraitPrecisionWorkbench();
 }
 
 function updateTimelineSelection() {
@@ -4152,6 +4543,11 @@ function updateTimelineSelection() {
   const contentLater = $("#timelineContentMoveLater");
   if (!selection) return;
   [contentToggle, contentEarlier, contentLater].forEach((button) => button?.classList.add("hidden"));
+  if (timelineOutputAxisActive()) {
+    selection.classList.add("hidden");
+    actions?.classList.add("hidden");
+    return;
+  }
   const contentEdit = contentBoundaryTimelineEdit
     && String(contentBoundaryTimelineEdit.jobId || "") === String(currentJob?.id || "")
     && contentBoundaryTimelineEdit.editor?.isConnected
@@ -4230,7 +4626,7 @@ function updateTimelineSelection() {
     actions?.classList.toggle("selection-confirmed", !pendingTimelineSelection);
     if (confirmButton) {
       confirmButton.disabled = !pendingTimelineSelection;
-      confirmButton.textContent = contentManualRange ? "保存到当前探索结果" : "确认选区";
+      confirmButton.textContent = contentManualRange ? "加入当前探索结果" : "确认选区";
     }
     if (cancelButton) cancelButton.disabled = !pendingTimelineSelection;
     if (startInput) startInput.disabled = !pendingTimelineSelection;
@@ -4455,7 +4851,7 @@ function isManualTimelineEventGroup(group) {
 
 function timelineMergedIntervals(group) {
   const ranges = (group?.segments || [])
-    .map((segment) => ({ start: Number(segment.start) || 0, end: Number(segment.end) || Number(segment.start) || 0 }))
+    .map((segment) => segmentSourceRange(segment))
     .filter((range) => range.end > range.start)
     .sort((left, right) => left.start - right.start);
   return ranges.reduce((merged, range) => {
@@ -4523,8 +4919,10 @@ function timelineGroupsAreDisplayDuplicates(left, right) {
 }
 
 function timelineRangesOverlap(left, right) {
-  const start = Math.max(Number(left?.start) || 0, Number(right?.start) || 0);
-  const end = Math.min(Number(left?.end) || 0, Number(right?.end) || 0);
+  const leftRange = segmentSourceRange(left);
+  const rightRange = segmentSourceRange(right);
+  const start = Math.max(leftRange.start, rightRange.start);
+  const end = Math.min(leftRange.end, rightRange.end);
   return Math.max(0, end - start);
 }
 
@@ -4546,7 +4944,8 @@ function timelineOutputUsesGroup(output, group) {
     if ([segment.id, segment.candidateId].filter(Boolean).map(String).some((id) => groupSegmentIds.has(id))) return true;
     const candidateIndex = Number(segment.candidateIndex ?? segment.index);
     if (Number.isFinite(candidateIndex) && candidateIndices.has(candidateIndex)) return true;
-    const segmentDuration = Math.max(.001, Number(segment.end) - Number(segment.start));
+    const segmentRange = segmentSourceRange(segment);
+    const segmentDuration = Math.max(.001, segmentRange.end - segmentRange.start);
     const overlap = groupSegments.reduce((maximum, sourceSegment) =>
       Math.max(maximum, timelineRangesOverlap(segment, sourceSegment)), 0);
     if (overlap / segmentDuration >= .45) return true;
@@ -4556,16 +4955,44 @@ function timelineOutputUsesGroup(output, group) {
 }
 
 function timelineOutputComparisonModel(job = currentJob, output = currentOutput) {
-  if (!job || !output?.segments?.length) return null;
+  if (!job || !output) return null;
   const eventDisplay = timelineEventDisplayModel(job);
   const usedGroupIds = new Set(eventDisplay.entries
     .filter((entry) => entry.groups.some((group) => timelineOutputUsesGroup(output, group)))
     .map((entry) => String(entry.group.id)));
-  const schedule = compositionSchedule(output);
+  const composedSchedule = compositionSchedule(output);
+  const outputDuration = Math.max(0, timelineOutputDurationValue(output));
+  const fallbackSourceStart = Number(output.start);
+  const fallbackSourceEnd = Number(output.end);
+  const schedule = composedSchedule.length ? composedSchedule : outputDuration > 0 ? [{
+    segment: {
+      id: `output-${String(output.filename || "version")}`,
+      title: cleanDisplayText(output.displayTitle) || cleanDisplayText(output.title, "生成版本"),
+      role: "完整版本",
+      start: Number.isFinite(fallbackSourceStart) ? fallbackSourceStart : 0,
+      end: Number.isFinite(fallbackSourceEnd) ? fallbackSourceEnd : 0,
+    },
+    index: 0,
+    sourceStart: Number.isFinite(fallbackSourceStart) ? fallbackSourceStart : 0,
+    sourceEnd: Number.isFinite(fallbackSourceEnd) ? fallbackSourceEnd : 0,
+    sourceDuration: Number.isFinite(fallbackSourceStart) && Number.isFinite(fallbackSourceEnd)
+      ? Math.max(0, fallbackSourceEnd - fallbackSourceStart) : 0,
+    outputDuration,
+    overlap: 0,
+    outputStart: 0,
+    outputEnd: outputDuration,
+    fallback: true,
+  }] : [];
   const outputSegments = schedule.map((entry) => {
     const event = timelineOutputSegmentEvent(entry.segment, entry.index, eventDisplay, output);
     return {
       ...entry.segment,
+      // The rendered version owns this axis. Preserve source coordinates as
+      // metadata for the explicit "查看源片" action only.
+      start: entry.outputStart,
+      end: entry.outputEnd,
+      sourceStart: entry.sourceStart,
+      sourceEnd: entry.sourceEnd,
       _eventGroupId: event.id,
       _eventTitle: event.title,
       _shotTitle: String(entry.segment.shotTitle || normalizedTimelineShotRole(entry.segment)),
@@ -4577,7 +5004,54 @@ function timelineOutputComparisonModel(job = currentJob, output = currentOutput)
       filename: output.filename,
     };
   });
-  return { eventDisplay, usedGroupIds, schedule, outputSegments };
+  const leadInDuration = Math.max(0, Number(schedule[0]?.outputStart || output.coverIntro?.duration || output.leadInDuration || 0));
+  const timelineSegments = leadInDuration > .001 ? [{
+    id: `output-intro-${String(output.filename || "version")}`,
+    title: "封面片头",
+    role: "片头",
+    start: 0,
+    end: leadInDuration,
+    sourceStart: null,
+    sourceEnd: null,
+    _shotTitle: "封面片头",
+    _output: output,
+    _outputIntro: true,
+    _outputSegmentIndex: -1,
+    _compositionOrder: 0,
+    _outputStart: 0,
+    _outputEnd: leadInDuration,
+    filename: output.filename,
+  }, ...outputSegments] : outputSegments;
+  const eventBuckets = new Map();
+  outputSegments.forEach((segment) => {
+    const key = String(segment._eventGroupId || `segment-${segment._outputSegmentIndex}`);
+    if (!eventBuckets.has(key)) eventBuckets.set(key, {
+      id: key,
+      title: String(segment._eventTitle || segment.chapterTitle || segment.title || "成片片段"),
+      segments: [],
+    });
+    eventBuckets.get(key).segments.push(segment);
+  });
+  const outputEvents = [...eventBuckets.values()].map((group, eventIndex) => {
+    const start = Math.min(...group.segments.map((segment) => Number(segment.start) || 0));
+    const end = Math.max(...group.segments.map((segment) => Number(segment.end) || start));
+    const first = group.segments[0];
+    const syntheticGroup = { ...group, start, end, summary: "当前版本中的连续成片段落" };
+    return {
+      ...first,
+      id: `output-event-${group.id}`,
+      start,
+      end,
+      _group: syntheticGroup,
+      _output: null,
+      _outputEvent: output,
+      _outputEventOrder: eventIndex + 1,
+      _outputSegmentIndex: Number(first?._outputSegmentIndex || 0),
+      _comparisonSource: false,
+      _usedInOutput: true,
+    };
+  });
+  return { eventDisplay, usedGroupIds, schedule, outputSegments: timelineSegments, outputEvents };
 }
 
 function timelineGenericSignalTitle(value) {
@@ -4693,56 +5167,79 @@ function timelinePresentationModel(job = currentJob, outputComparison = null) {
   const speakerMode = workflowKindForJob(job) === "speaker_edit";
   const personMode = workflowKindForJob(job) === "person_edit";
   const comparingOutput = Boolean(outputComparison);
-  if (comparingOutput) {
+  const reviewingOutput = Boolean(viewerMediaKind === "output" && currentOutput);
+  const reviewingOutputSource = Boolean(reviewingOutput && timelineCoordinateSpace === "source");
+  if (comparingOutput || (reviewingOutput && timelineCoordinateSpace !== "source")) {
+    const reviewSample = reviewingOutput && currentOutputIsReviewSample(currentOutput);
+    const outputTitle = reviewSample ? "审核样片时间轴" : "高清版本时间轴";
+    const outputHint = reviewSample
+      ? "按审核样片的最终播放顺序显示；点击片段继续播放样片"
+      : "按高清版本的最终播放顺序显示；点击片段继续播放当前版本";
     if (speakerMode) {
       return {
         contentMode: true,
         layoutKind: "content-review",
-        title: "发言视频来源时间线",
-        trackLabels: ["已选发言", "画面", "音频"],
-        hint: "已采用发言按源视频时间显示；点击可回到原始画面",
+        title: outputTitle,
+        trackLabels: ["成片发言", "画面", "音频"],
+        hint: outputHint,
         emptyTitle: "选择已采用发言",
-        emptyReason: "点击发言片段可在源视频中查看它的原始位置。",
-        ariaLabel: "发言视频源片时间线",
+        emptyReason: "点击发言片段可从对应位置继续播放当前版本。",
+        ariaLabel: reviewSample ? "审核样片播放时间线" : "高清版本播放时间线",
       };
     }
     if (personMode) {
       return {
         contentMode: true,
         layoutKind: "content-review",
-        title: "人物剪辑来源时间线",
-        trackLabels: ["已选出镜", "画面", "音频"],
-        hint: "已采用出镜片段按源视频时间显示；点击可回到原始画面",
+        title: outputTitle,
+        trackLabels: ["成片出镜", "画面", "音频"],
+        hint: outputHint,
         emptyTitle: "选择已采用出镜片段",
-        emptyReason: "点击人物出镜片段可在源视频中查看它的原始位置。",
-        ariaLabel: "人物剪辑源片时间线",
+        emptyReason: "点击人物出镜片段可从对应位置继续播放当前版本。",
+        ariaLabel: reviewSample ? "审核样片播放时间线" : "高清版本播放时间线",
       };
     }
     return contentMode ? {
       contentMode: true,
       layoutKind: "content-review",
-      title: "内容视频来源时间线",
-      trackLabels: ["匹配片段", "画面", "音频"],
-      hint: "已采用片段按源视频时间显示；点击可回到原始画面",
+      title: outputTitle,
+      trackLabels: [reviewSample ? "样片片段" : "成片片段", "画面", "音频"],
+      hint: outputHint,
       emptyTitle: "选择已采用片段",
-      emptyReason: "点击片段可在源视频中查看它的原始位置。",
-      ariaLabel: "内容视频源片时间轴",
+      emptyReason: "点击片段可从对应位置继续播放当前版本。",
+      ariaLabel: reviewSample ? "审核样片播放时间线" : "高清版本播放时间线",
     } : {
       contentMode: false,
       layoutKind: "hierarchy",
-      title: "成片来源时间线",
+      title: outputTitle,
       trackLabels: ["事件", "镜头", "画面", "音频"],
-      hint: "成片事件与镜头按源视频时间显示；点击可回到原始画面",
+      hint: outputHint,
       emptyTitle: "选择成片事件或镜头",
-      emptyReason: "点击事件或镜头可在源视频中查看它的原始位置。",
-      ariaLabel: "成片源片时间轴",
+      emptyReason: "点击事件或镜头可从对应位置继续播放当前版本。",
+      ariaLabel: reviewSample ? "审核样片播放时间线" : "高清版本播放时间线",
     };
   }
   if (!contentMode) {
+    const hasSemanticHierarchy = Boolean(
+      (job?.eventGroups || []).some((group) => Array.isArray(group?.segments) && group.segments.length)
+      || (job?.candidates || []).length,
+    );
+    if (!hasSemanticHierarchy) {
+      return {
+        contentMode: false,
+        layoutKind: "source-tracks",
+        title: "源视频时间线",
+        trackLabels: ["画面", "音频"],
+        hint: "提交剪辑要求后，事件和镜头会在这里展开",
+        emptyTitle: "等待剪辑要求",
+        emptyReason: "当前先展示源视频画面和音频；提交要求后再增加实际存在的分析轨道。",
+        ariaLabel: "源视频时间线",
+      };
+    }
     return {
       contentMode: false,
       layoutKind: "hierarchy",
-      title: "智能剪辑时间线",
+      title: reviewingOutputSource ? "成片来源时间线" : "智能剪辑时间线",
       trackLabels: ["事件", "镜头", "画面", "音频"],
       hint: "点击事件查看内容说明",
       emptyTitle: "选择事件或镜头",
@@ -4786,7 +5283,7 @@ function timelinePresentationModel(job = currentJob, outputComparison = null) {
   return {
     contentMode: true,
     layoutKind: hasRetainedSearchResults ? "content-review-history" : "content-review",
-    title: "内容检索时间轴",
+    title: reviewingOutputSource ? "内容视频来源时间线" : "内容检索时间轴",
     trackLabels: hasRetainedSearchResults
       ? ["当前检索", "已保留", "画面", "音频"]
       : ["匹配片段", "画面", "音频"],
@@ -4803,7 +5300,19 @@ function applyTimelinePresentation(presentation) {
   const title = $("#timelineTitle");
   const labels = $("#timelineTrackLabels");
   if (title) title.textContent = presentation.title;
-  if (labels) labels.innerHTML = presentation.trackLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join("");
+  const trackLabels = Array.isArray(presentation.trackLabels) ? presentation.trackLabels : [];
+  if (labels) labels.innerHTML = trackLabels.map((label) => {
+    const kind = label.includes("音频")
+      ? "audio"
+      : label.includes("字幕")
+        ? "subtitle"
+        : label.includes("音乐")
+          ? "music"
+          : label.includes("画面")
+            ? "video"
+            : "content";
+    return `<span data-track-kind="${kind}">${escapeHtml(label)}</span>`;
+  }).join("");
   if (timelinePanel) timelinePanel.setAttribute("aria-label", presentation.ariaLabel);
   if (timelineViewport) timelineViewport.dataset.trackLayout = presentation.layoutKind;
   if ($("#timelineHint")) $("#timelineHint").textContent = presentation.hint;
@@ -4833,17 +5342,19 @@ function renderTimelineEventSummary() {
   const currentEventRecommended = currentEventGroup
     ? (currentJob?.recommendedGroupIds || []).map(String).includes(String(currentEventGroup.id))
     : false;
-  if (currentOutput?.segments?.length) {
-    const schedule = compositionSchedule(currentOutput);
+  if (currentOutput && viewerMediaKind === "output") {
+    const schedule = timelineOutputComparisonModel(currentJob, currentOutput)?.schedule || [];
     const located = locateJobOutput(currentOutput.filename);
     const presentation = located ? autoVersionPresentation(currentJob, located.version) : {};
-    title = String(currentOutput.displayTitle || presentation.displayName || currentOutput.title || (contentMode ? "内容视频" : "高光成片"));
+    title = cleanDisplayText(currentOutput.displayTitle)
+      || cleanDisplayText(presentation.displayName)
+      || cleanDisplayText(currentOutput.title, contentMode ? "内容视频" : "高光成片");
     detail = schedule.map((entry, index) =>
       `${String(index + 1).padStart(2, "0")} ${contentMode ? String(entry.segment.chapterTitle || entry.segment.title || "匹配片段") : normalizedTimelineShotRole(entry.segment)}`,
     ).join(" → ");
-    start = schedule.length ? Math.min(...schedule.map((entry) => entry.sourceStart)) : 0;
-    end = schedule.length ? Math.max(...schedule.map((entry) => entry.sourceEnd)) : start;
-    type = `${presentation.sourceLabel || (contentMode ? "内容视频" : "AI 成片")} · 源片时间轴`;
+    start = 0;
+    end = timelineOutputDurationValue(currentOutput);
+    type = `${presentation.sourceLabel || (contentMode ? "内容视频" : "AI 成片")} · 播放时间轴`;
   } else if (currentEventSegment && currentEventGroup) {
     const role = String(currentEventSegment.role || "精彩镜头");
     title = `${currentEventGroup.title} · ${role}`;
@@ -4860,7 +5371,7 @@ function renderTimelineEventSummary() {
     type = `${currentEventNumber ? `${groupPrefix}${currentEventNumber} · ` : ""}${segments.length} 个${contentMode ? "内容片段" : "镜头"}${contentMode ? "" : (currentEventRecommended ? " · AI 推荐" : " · 备选")}`;
   } else if (currentCandidate) {
     title = String(currentCandidate.title || (contentMode ? "匹配片段" : "精彩镜头"));
-    detail = String(currentCandidate.reason || currentCandidate.summary || currentCandidate.matchedEvidence || (contentMode ? "与检索要求匹配的内容片段" : "视觉模型发现的精彩镜头"));
+    detail = String(currentCandidate.reason || currentCandidate.summary || currentCandidate.matchedEvidence || (contentMode ? "与检索要求匹配的内容片段" : "系统找到的精彩镜头"));
     start = Number(currentCandidate.start) || 0;
     end = Number(currentCandidate.end) || start;
     type = contentMode ? "当前匹配片段" : "当前候选镜头";
@@ -4868,24 +5379,47 @@ function renderTimelineEventSummary() {
 
   const visible = Boolean(title);
   root.classList.toggle("hidden", !visible);
-  root.classList.toggle("output-summary", Boolean(currentOutput?.segments?.length));
+  const outputTimeline = Boolean(currentOutput && viewerMediaKind === "output");
+  root.classList.toggle("output-summary", outputTimeline);
   if (focusButton) focusButton.disabled = !visible;
   if (!visible) return;
   typeNode.textContent = type;
   titleNode.textContent = title;
-  if (currentOutput?.segments?.length) {
-    textNode.textContent = "编号表示最终播放顺序；事件、镜头和播放头均定位到源视频中的原始时间。";
+  if (outputTimeline) {
+    const model = timelineOutputComparisonModel(currentJob, currentOutput);
+    const schedule = model?.schedule || [];
+    textNode.innerHTML = schedule.map((entry, index) => {
+      const label = contentMode
+        ? String(entry.segment.chapterTitle || entry.segment.title || `片段 ${index + 1}`)
+        : String(entry.segment.storyFunction || entry.segment.role || entry.segment.title || `镜头 ${index + 1}`);
+      const selected = Number(timelineSelectedOutputSegmentIndex) === index;
+      return `<button type="button" data-timeline-output-summary-segment="${index}" class="${selected ? "active" : ""}" aria-pressed="${selected}"><b>${String(index + 1).padStart(2, "0")}</b><span>${escapeHtml(label)}</span></button>`;
+    }).join('<i aria-hidden="true">→</i>');
+    if (Number.isInteger(timelineSelectedOutputSegmentIndex)) {
+      const selected = schedule[timelineSelectedOutputSegmentIndex];
+      if (selected && Number(selected.sourceEnd) > Number(selected.sourceStart)) {
+        textNode.insertAdjacentHTML("beforeend", `<button type="button" class="timeline-output-source-link" data-timeline-output-source="${timelineSelectedOutputSegmentIndex}">查看源片</button>`);
+      }
+    }
+    textNode.querySelectorAll("[data-timeline-output-summary-segment]").forEach((button) => button.addEventListener("click", () => {
+      selectOutputTimelineSegment(Number(button.dataset.timelineOutputSummarySegment));
+    }));
+    textNode.querySelector("[data-timeline-output-source]")?.addEventListener("click", (event) => {
+      const index = Number(event.currentTarget.dataset.timelineOutputSource);
+      const selected = schedule[index];
+      if (selected) previewCompositionSourceSegment(currentOutput, index, selected.sourceStart);
+    });
   } else {
     textNode.textContent = detail;
   }
-  if (currentOutput?.segments?.length) {
-    const schedule = compositionSchedule(currentOutput);
+  if (outputTimeline) {
+    const schedule = timelineOutputComparisonModel(currentJob, currentOutput)?.schedule || [];
     const outputDuration = Number(currentOutput.duration)
       || Number(schedule.at(-1)?.outputEnd || 0);
     timeNode.textContent = contentMode
       ? `${schedule.length} 个片段 · 内容视频 ${outputDuration.toFixed(1)} 秒`
       : `${schedule.length} 个镜头 · 成片 ${outputDuration.toFixed(1)} 秒`;
-    timeNode.title = `源视频覆盖 ${formatTime(start)} → ${formatTime(end)}；编号表示最终播放顺序`;
+    timeNode.title = "时间位置与播放器中的当前版本完全一致";
   } else if (currentEventGroup && !currentEventSegment) {
     const segments = currentEventGroup.segments || [];
     const contentDuration = segments.reduce((sum, segment) => sum + Math.max(0, Number(segment.duration || (Number(segment.end) - Number(segment.start)) || 0)), 0);
@@ -4900,7 +5434,7 @@ function renderTimelineEventSummary() {
 function updateTimelineReviewControls() {
   const duration = timelineDurationValue();
   const view = timelineViewRange();
-  const fitButton = $("#timelineFitReview");
+  const fitButton = $("#timelineFit");
   const focusButton = $("#timelineFocusReview");
   const outputComparison = timelineHasOutputComparison();
   const coordinateSwitch = $("#timelineCoordinateSwitch");
@@ -4920,24 +5454,36 @@ function updateTimelineReviewControls() {
       : currentEventSegment ? "当前镜头" : eventNumber ? `E${eventNumber}` : currentCandidate ? "当前镜头" : "当前事件";
   fitButton?.classList.toggle("active", fullView);
   coordinateSwitch?.classList.add("hidden");
-  outputAxisButton?.classList.remove("active");
-  sourceAxisButton?.classList.toggle("active", outputComparison);
-  outputAxisButton?.setAttribute("aria-pressed", "false");
-  sourceAxisButton?.setAttribute("aria-pressed", String(outputComparison));
-  if (clockLabel) clockLabel.textContent = "源片";
+  outputAxisButton?.classList.toggle("active", outputComparison);
+  sourceAxisButton?.classList.remove("active");
+  outputAxisButton?.setAttribute("aria-pressed", String(outputComparison));
+  sourceAxisButton?.setAttribute("aria-pressed", "false");
+  if (clockLabel) clockLabel.textContent = outputComparison
+    ? (currentOutputIsReviewSample(currentOutput) ? "样片" : "成片")
+    : "源片";
   fitButton?.setAttribute("aria-pressed", String(fullView));
   focusButton?.classList.toggle("active", focusActive);
   focusButton?.setAttribute("aria-pressed", String(focusActive));
   if (focusButton) {
-    focusButton.classList.toggle("hidden", outputComparison);
+    focusButton.classList.toggle("hidden", outputComparison || !reviewRange);
     focusButton.disabled = outputComparison || !reviewRange;
     focusButton.textContent = focusActive ? `已聚焦 ${focusTarget}` : `聚焦 ${focusTarget}`;
   }
   timelineViewport?.classList.toggle("timeline-zoomed", !fullView);
   timelineViewport?.classList.toggle("manual-select-mode", timelineManualSelectMode);
   $("#timelineOverview")?.classList.toggle("timeline-zoomed", !fullView);
+  const manualSelectionGroup = $("#timelineManualSelectToggle")?.closest(".timeline-tool-group");
+  manualSelectionGroup?.classList.toggle("hidden", outputComparison);
+  if (outputComparison && timelineManualSelectMode) {
+    timelineManualSelectMode = false;
+    $("#timelineManualSelectToggle")?.classList.remove("active");
+    $("#timelineManualSelectToggle")?.setAttribute("aria-pressed", "false");
+    timelineViewport?.classList.remove("manual-select-mode");
+  }
   if (timelineViewport) {
-    timelineViewport.title = timelineManualSelectMode
+    timelineViewport.title = outputComparison
+      ? "点击片段或时间位置可继续播放当前版本；查看原始素材请使用“查看源片”"
+      : timelineManualSelectMode
       ? "拖动生成选区；按住空格拖动或使用中键可左右移动"
       : contentMode
         ? fullView
@@ -4948,14 +5494,16 @@ function updateTimelineReviewControls() {
   }
   if (!pendingTimelineSelection) {
     const hint = $("#timelineHint");
-    if (hint) hint.textContent = timelineManualSelectMode
+    if (hint) hint.textContent = outputComparison
+      ? "位置和播放头对应当前版本；选择片段后可明确查看源片"
+      : timelineManualSelectMode
       ? "拖动生成选区，按住空格拖动可平移"
       : contentMode
         ? fullView
           ? (currentOutput ? "编号表示成片顺序，位置和播放头表示源片时间" : "点击匹配片段查看证据，使用“聚焦”按钮放大")
           : "点击片段预览，拖动左右移动"
         : fullView ? (currentOutput ? "已采用事件与镜头叠加在源视频时间轴上；点击可回看原始画面" : "点击事件查看，使用“聚焦”按钮放大")
-        : "点击预览，拖动左右移动";
+        : "点击播放，拖动左右移动";
   }
 }
 
@@ -5027,54 +5575,79 @@ function renderTimelineMediaAssets(force = false) {
   if (!force && timelineMediaRenderKey === renderKey) return;
   timelineMediaRenderKey = renderKey;
   if (!sprite?.items?.length || !timelineAssets?.spriteUrl) {
-    const loading = $("#timelineThumbnailState")?.dataset.tone === "loading";
+    const loading = timelineAssetsLoadingJobId === currentJob?.id
+      || $("#timelineThumbnailState")?.dataset.tone === "loading"
+      || (!timelineAssets && Boolean(currentJob?.id));
+    timelineViewport.dataset.thumbnailState = loading ? "loading" : "empty";
     track.innerHTML = loading ? '<span class="timeline-media-loader" data-generative-loader="image" data-loader-variant="tiles" data-loader-size="100%" data-loader-radius="6" data-loader-label="正在生成时间轴缩略图"></span>' : "";
     if (loading) syncGenerativeLoaders(track);
   } else {
+    timelineViewport.dataset.thumbnailState = timelineAssets?.partial ? "loading" : "ready";
     const displayHeight = Math.max(32, Math.round((track.getBoundingClientRect().height || 43) - 8));
     const scale = displayHeight / Number(sprite.tileHeight);
     const displayWidth = Number(sprite.tileWidth) * scale;
     const desired = Math.max(1, Math.min(sprite.items.length, Math.ceil(trackContent.clientWidth / (displayWidth + 2))));
     const selected = [];
     const selectedIndices = new Set();
+    const outputAxis = timelineOutputAxisActive();
     for (let index = 0; index < desired; index += 1) {
       const target = view.start + view.duration * (index + 0.5) / desired;
+      const mapped = outputAxis ? compositionSourceFrameAtOutputTime(currentOutput, target) : null;
+      if (outputAxis && !mapped) {
+        selected.push({ item: null, timelineTime: target, sourceTime: null });
+        continue;
+      }
+      const sourceTarget = mapped ? mapped.sourceTime : target;
       const item = sprite.items.reduce((best, current) =>
-        Math.abs(Number(current.time) - target) < Math.abs(Number(best.time) - target) ? current : best
+        Math.abs(Number(current.time) - sourceTarget) < Math.abs(Number(best.time) - sourceTarget) ? current : best
       );
-      if (!selectedIndices.has(item.index)) {
+      if (outputAxis || !selectedIndices.has(item.index)) {
         selectedIndices.add(item.index);
-        selected.push(item);
+        selected.push({ item, timelineTime: outputAxis ? target : Number(item.time) || 0, sourceTime: Number(item.time) || 0 });
       }
     }
     const linkedIntervals = currentTimelineLinkedIntervals();
-    track.innerHTML = selected.map((item) => {
+    track.innerHTML = selected.map(({ item, timelineTime, sourceTime }) => {
+      const frameTime = Number(timelineTime) || 0;
+      const selectedFrame = Number.isFinite(timelineFrameSelectionTime) && Math.abs(frameTime - timelineFrameSelectionTime) < .05;
+      if (!item) {
+        return `<button type="button" class="timeline-thumbnail output-gap${selectedFrame ? " selected-frame" : ""}" data-timeline-frame-time="${frameTime}" aria-label="预览 ${formatTime(frameTime)} 的片头画面" title="${formatTime(frameTime)} · 当前画面没有对应源片帧" style="width:${displayWidth}px;height:${displayHeight}px"></button>`;
+      }
       const isPartial = Boolean(timelineAssets?.partial);
       const quality = isPartial ? "" : item.black ? "black-frame" : item.blurred ? "blurred-frame" : "";
       const faces = isPartial ? 0 : Number(item.faces || 0);
-      const frameTime = Number(item.time) || 0;
       const linked = linkedIntervals.some((range) => frameTime >= range.start && frameTime <= range.end);
-      const selectedFrame = Number.isFinite(timelineFrameSelectionTime) && Math.abs(frameTime - timelineFrameSelectionTime) < .05;
       const hint = isPartial ? "时间轴关键帧正在补充" : item.black ? "疑似黑帧" : item.blurred ? "画面清晰度较低" : `动作强度 ${Math.round(Number(item.motion || 0) * 100)}`;
       const classes = ["timeline-thumbnail", quality, faces ? "face-frame" : "", linked ? "linked" : "", selectedFrame ? "selected-frame" : ""].filter(Boolean).join(" ");
-      return `<button type="button" class="${classes}" data-timeline-frame-time="${frameTime}" data-faces="${faces || ""}" aria-label="预览 ${formatTime(frameTime)} 的画面" title="${formatTime(frameTime)} · ${hint}${faces ? ` · 检测到 ${faces} 张人脸` : ""}" style="--motion:${Math.min(1, Number(item.motion || 0) * 4)};width:${displayWidth}px;height:${displayHeight}px;background-image:url('${timelineAssets.spriteUrl}');background-size:${Number(sprite.spriteWidth) * scale}px ${Number(sprite.spriteHeight) * scale}px;background-position:${-Number(item.column) * Number(sprite.tileWidth) * scale}px ${-Number(item.row) * Number(sprite.tileHeight) * scale}px"></button>`;
+      const timeTitle = outputAxis
+        ? `成片 ${formatTime(frameTime)} · 源片 ${formatTime(sourceTime)}`
+        : formatTime(frameTime);
+      return `<button type="button" class="${classes}" data-timeline-frame-time="${frameTime}" data-source-frame-time="${sourceTime}" data-faces="${faces || ""}" aria-label="预览 ${formatTime(frameTime)} 的画面" title="${timeTitle} · ${hint}${faces ? ` · 检测到 ${faces} 张人脸` : ""}" style="--motion:${Math.min(1, Number(item.motion || 0) * 4)};width:${displayWidth}px;height:${displayHeight}px;background-image:url('${timelineAssets.spriteUrl}');background-size:${Number(sprite.spriteWidth) * scale}px ${Number(sprite.spriteHeight) * scale}px;background-position:${-Number(item.column) * Number(sprite.tileWidth) * scale}px ${-Number(item.row) * Number(sprite.tileHeight) * scale}px"></button>`;
     }).join("");
     track.querySelectorAll("[data-timeline-frame-time]").forEach((button) => button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       const time = Number(button.dataset.timelineFrameTime || 0);
       timelineFrameSelectionTime = time;
-      const match = timelineEventSegmentAtTime(time);
-      if (match) previewEventSegment(match.group, match.segment);
+      if (timelineOutputAxisActive()) seekCurrentMediaTime(time);
       else {
-        showSource();
-        seekSourceTime(time);
-        renderTimelineEventSummary();
+        const match = timelineEventSegmentAtTime(time);
+        if (match) previewEventSegment(match.group, match.segment);
+        else {
+          showSource();
+          seekSourceTime(time);
+          renderTimelineEventSummary();
+        }
       }
       renderTimelineMediaAssets(true);
     }));
   }
-  const visibleCuts = (timelineAssets?.sceneCuts || [])
+  const outputCuts = timelineOutputAxisActive()
+    ? compositionSchedule(currentOutput).flatMap((entry) => (timelineAssets?.sceneCuts || [])
+      .filter((time) => Number(time) >= entry.sourceStart && Number(time) <= entry.sourceEnd)
+      .map((time) => entry.outputStart + segmentOutputOffsetForSource(entry.segment, Number(time))))
+    : (timelineAssets?.sceneCuts || []);
+  const visibleCuts = outputCuts
     .filter((time) => Number(time) >= view.start && Number(time) <= view.end);
   const cutGap = view.duration / Math.max(1, trackContent.clientWidth) > .32 ? 10 : 3;
   cuts.innerHTML = timelineCutsVisible ? downsampleTimelinePoints(visibleCuts, view, cutGap)
@@ -5091,6 +5664,7 @@ function setTimelineThumbnailState(message = "", tone = "") {
 }
 
 function setWaveformState(message = "", tone = "neutral") {
+  if (timelineViewport) timelineViewport.dataset.waveformState = tone || "neutral";
   setGenerativeInlineStatus("#waveformState", message, tone, "signal");
 }
 
@@ -5301,13 +5875,248 @@ function contentSearchTimelineItems(job = currentJob) {
   return items;
 }
 
-function updateTimeline() {
-  if (!timelinePanel) return;
-  if (!currentJob) {
-    timelinePanel.classList.add("hidden");
+function coverTimelineVariantSettings(job, variantId) {
+  const variants = job?.coverTimelineDraft?.variants;
+  const state = variants && typeof variants === "object" ? variants[String(variantId)] : null;
+  const fallback = String(job?.coverDraft?.approvedVariantId || "") === String(variantId || "")
+    ? Number(job?.coverIntroDraft?.duration || 1) : 1;
+  return { duration: Math.round(Math.max(.5, Math.min(5, Number(state?.duration || fallback))) * 10) / 10 };
+}
+
+function coverTimelineCurrentVariantId(job) {
+  const coverId = String(job?.currentCoverVersionId || "");
+  const version = (job?.coverVersions || []).find((item) => String(item?.id || "") === coverId);
+  return String(version?.variantId || job?.coverDraft?.approvedVariantId || "");
+}
+
+function normalizeCoverTimelineDuration(value) {
+  const number = Number(value);
+  return Math.round(Math.max(.5, Math.min(5, Number.isFinite(number) ? number : 1)) * 10) / 10;
+}
+
+function syncMainCoverTimelineEditor(root, rawDuration) {
+  if (!root) return 1;
+  const duration = normalizeCoverTimelineDuration(rawDuration);
+  const videoDuration = Math.max(0, Number(root.dataset.videoDuration || 0));
+  const videoRangeMode = String(root.dataset.videoRangeMode || "output");
+  root.style.setProperty("--cover-width", `${Math.min(42, 18 + duration * 4.8)}%`);
+  const range = root.querySelector("[data-cover-timeline-duration]");
+  const number = root.querySelector("[data-cover-timeline-duration-number]");
+  if (range) range.value = String(duration);
+  if (number) number.value = duration.toFixed(1);
+  const setText = (selector, text) => {
+    const element = root.querySelector(selector);
+    if (element) element.textContent = text;
+  };
+  setText("[data-cover-timeline-duration-label]", `${duration.toFixed(1)} 秒`);
+  setText("[data-cover-timeline-cover-range]", `0–${duration.toFixed(1)}s`);
+  const videoRangeText = videoRangeMode === "pending"
+    ? "生成成片后合入"
+    : videoDuration > 0
+      ? `${duration.toFixed(1)}–${(duration + videoDuration).toFixed(1)}s`
+      : "成片时长待同步";
+  setText("[data-cover-timeline-video-range]", videoRangeText);
+  return duration;
+}
+
+async function persistMainCoverTimelineVariant(variantId, duration, contentHash = "") {
+  if (!currentJob?.id || !variantId) throw new Error("封面候选尚未准备完成");
+  return apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/cover-timeline`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: { variantId, duration, contentHash },
+  });
+}
+
+async function selectMainCoverTimelineVariant(event) {
+  const button = event.currentTarget;
+  if (!currentJob || button.disabled) return;
+  const variantId = String(button.dataset.coverVariantId || "");
+  const variant = (currentJob.coverDraft?.variants || []).find((item) => String(item?.variantId || "") === variantId);
+  if (!variant) return;
+  button.disabled = true;
+  try {
+    const settingsState = coverTimelineVariantSettings(currentJob, variantId);
+    const { job } = await persistMainCoverTimelineVariant(variantId, settingsState.duration, String(variant.contentHash || ""));
+    renderJob(job);
+    window.requestAnimationFrame(() => $("#timelineCoverTrack")?.scrollIntoView({ block: "nearest" }));
+  } catch (error) {
+    showToast(error.message || "无法切换封面草稿");
+    button.disabled = false;
+  }
+}
+
+async function saveMainCoverTimelineDuration(event) {
+  const input = event.currentTarget;
+  const editor = input.closest("[data-cover-timeline-editor]");
+  const variantId = String(editor?.dataset.coverVariantId || "");
+  const contentHash = String(editor?.dataset.contentHash || "");
+  const duration = syncMainCoverTimelineEditor(editor, input.value);
+  try {
+    const { job } = await persistMainCoverTimelineVariant(variantId, duration, contentHash);
+    currentJob = job;
+    const state = $("#timelineCoverDraftState");
+    if (state) state.textContent = `已保存 · ${duration.toFixed(1)} 秒`;
+  } catch (error) {
+    showToast(error.message || "无法保存当前封面参数");
+  }
+}
+
+async function confirmMainCoverTimelineVariant(event) {
+  const button = event.currentTarget;
+  const editor = button.closest("[data-cover-timeline-editor]");
+  const variantId = String(editor?.dataset.coverVariantId || "");
+  const contentHash = String(editor?.dataset.contentHash || "");
+  const duration = syncMainCoverTimelineEditor(editor, editor?.querySelector("[data-cover-timeline-duration]")?.value);
+  if (!currentJob?.id || !variantId || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "正在确认…";
+  try {
+    await persistMainCoverTimelineVariant(variantId, duration, contentHash);
+    const agent = currentJob.agent || {};
+    if (
+      String(agent.status || "") === "action_required"
+      && String(agent.currentStepTool || "") === "review_cover_variants"
+      && typeof window.ClipTalkConfirmCoverTimelineSelection === "function"
+    ) {
+      await window.ClipTalkConfirmCoverTimelineSelection({ variantId, contentHash });
+      showToast("最终封面已保存；生成成片或导出时会作为片头合入。", "success");
+    } else {
+      const { job } = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/cover-timeline/activate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: { variantId, duration, contentHash },
+      });
+      renderJob(job);
+      showToast("已设为最终封面；视频尚未重新合成。", "success");
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "设为最终封面";
+    showToast(error.message || "无法确认当前封面");
+  }
+}
+
+async function exportMainCoverTimeline(event) {
+  const button = event.currentTarget;
+  const editor = button.closest("[data-cover-timeline-editor]");
+  const duration = syncMainCoverTimelineEditor(editor, editor?.querySelector("[data-cover-timeline-duration]")?.value);
+  if (!currentJob?.id || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "正在提交…";
+  try {
+    await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/cover-intro/render`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: { duration },
+    });
+    button.textContent = "正在生成…";
+    showToast("已开始生成带封面片头的成片版本，原版本保持不变。", "success");
+    pollJob();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "生成带片头成片";
+    showToast(error.message || "无法导出封面片头视频");
+  }
+}
+
+function renderTimelineCoverTrack(job = currentJob) {
+  const track = $("#timelineCoverTrack");
+  const variantsRoot = $("#timelineCoverVariants");
+  const editor = $("#timelineCoverEditor");
+  if (!track || !variantsRoot || !editor) return;
+  // Cover candidates are task-scoped.  Older snapshots without jobId are
+  // deliberately not rendered here, otherwise a late response or reused
+  // workspace can make the previous task's cover appear in this track.
+  const draftBelongsToJob = String(job?.coverDraft?.jobId || "") === String(job?.id || "");
+  const variants = draftBelongsToJob
+    ? (job?.coverDraft?.variants || []).filter((item) => item?.variantId && item?.previewUrl)
+    : [];
+  track.classList.toggle("hidden", !variants.length);
+  if (!variants.length) {
+    variantsRoot.innerHTML = "";
+    editor.innerHTML = "";
     return;
   }
-  timelinePanel.classList.remove("hidden");
+  const activeId = String(job.coverTimelineDraft?.activeVariantId || job.coverDraft?.selectedVariantId || variants[0].variantId);
+  const active = variants.find((item) => String(item.variantId) === activeId) || variants[0];
+  const currentVariantId = coverTimelineCurrentVariantId(job);
+  const duration = coverTimelineVariantSettings(job, active.variantId).duration;
+  const generatedOutputs = jobOutputVersions(job).flatMap((version) => Array.isArray(version.outputs) ? version.outputs : []);
+  const selectedOutput = currentOutput?.filename ? currentOutput : generatedOutputs[0];
+  const hasGeneratedOutput = Boolean(selectedOutput?.filename || generatedOutputs.length);
+  const videoDuration = Math.max(0, Number(selectedOutput?.duration || 0));
+  const videoRangeMode = hasGeneratedOutput ? "output" : "pending";
+  const videoRangeText = hasGeneratedOutput
+    ? (videoDuration > 0 ? `${duration.toFixed(1)}–${(duration + videoDuration).toFixed(1)}s` : "成片时长待同步")
+    : "生成成片后合入";
+  const directionLabels = {
+    source_clean: "干净源帧", source_editorial: "编辑构图", source_cinematic: "电影质感",
+  };
+  variantsRoot.innerHTML = variants.map((variant, index) => {
+    const variantId = String(variant.variantId || "");
+    const variantDuration = coverTimelineVariantSettings(job, variantId).duration;
+    return `<button type="button" class="timeline-cover-variant${variantId === String(active.variantId) ? " active" : ""}${variantId === currentVariantId ? " current" : ""}" data-cover-variant-id="${escapeHtml(variantId)}"><img src="${escapeHtml(variant.previewUrl)}" alt="封面候选 ${index + 1}"><span><b>${escapeHtml(directionLabels[variant.direction] || `方案 ${index + 1}`)}</b><em>${variantDuration.toFixed(1)}s</em></span></button>`;
+  }).join("");
+  const isCurrent = String(active.variantId) === currentVariantId;
+  const operation = job.coverIntroOperation && typeof job.coverIntroOperation === "object" ? job.coverIntroOperation : {};
+  const exportBusy = ["queued", "running"].includes(String(operation.status || ""));
+  const agentReview = String(job.agent?.status || "") === "action_required"
+    && String(job.agent?.currentStepTool || "") === "review_cover_variants";
+  editor.innerHTML = `<figure class="timeline-cover-preview"><img src="${escapeHtml(active.previewUrl)}" alt="当前编辑的封面草稿"></figure><section class="timeline-cover-settings" data-cover-timeline-editor data-cover-variant-id="${escapeHtml(active.variantId)}" data-content-hash="${escapeHtml(active.contentHash || "")}" data-video-duration="${videoDuration}" data-video-range-mode="${videoRangeMode}" style="--cover-width:${Math.min(42, 18 + duration * 4.8)}%"><header><div><strong>${escapeHtml(directionLabels[active.direction] || "封面草稿")}</strong><small>选择封面不会立刻重新渲染；生成成片时会作为片头合入成片。</small></div><span data-cover-timeline-duration-label>${duration.toFixed(1)} 秒</span></header><label class="timeline-cover-duration"><span>片头停留时长</span><input type="range" min="0.5" max="5" step="0.1" value="${duration}" data-cover-timeline-duration><input type="number" min="0.5" max="5" step="0.1" value="${duration.toFixed(1)}" data-cover-timeline-duration-number aria-label="片头停留秒数"><em>秒</em></label><div class="timeline-cover-sequence"><span class="cover"><b>封面片头</b><small data-cover-timeline-cover-range>0-${duration.toFixed(1)}s</small></span><span class="video"><b>${hasGeneratedOutput ? "当前成片" : "待生成成片"}</b><small data-cover-timeline-video-range>${videoRangeText}</small></span></div><footer><span>${agentReview ? "确认后会保存为最终封面；生成成片时会作为片头合入。" : "设为最终封面后不会立刻重渲染；生成带片头版本时再合入。"}</span><div><button type="button" data-cover-timeline-open-preview>查看封面</button><button type="button" class="${isCurrent ? "current" : "primary"}" data-cover-timeline-confirm>${isCurrent ? "已是最终封面" : agentReview ? "确认并保存最终封面" : "设为最终封面"}</button></div></footer>${isCurrent ? `<details class="timeline-cover-export"><summary>生成新版本</summary><p>从当前成片生成一个带封面片头的新版本，原版本保留。</p><button type="button" data-cover-timeline-export ${exportBusy ? "disabled" : ""}>${exportBusy ? "正在生成…" : "生成带片头成片"}</button></details>` : ""}</section>`;
+  variantsRoot.querySelectorAll("[data-cover-variant-id]").forEach((button) => button.addEventListener("click", selectMainCoverTimelineVariant));
+  editor.querySelectorAll("[data-cover-timeline-duration], [data-cover-timeline-duration-number]").forEach((input) => {
+    input.addEventListener("input", (inputEvent) => syncMainCoverTimelineEditor(inputEvent.currentTarget.closest("[data-cover-timeline-editor]"), inputEvent.currentTarget.value));
+    input.addEventListener("change", saveMainCoverTimelineDuration);
+  });
+  editor.querySelector("[data-cover-timeline-open-preview]")?.addEventListener("click", () => window.open(active.previewUrl, "_blank", "noopener"));
+  const confirm = editor.querySelector("[data-cover-timeline-confirm]");
+  if (confirm) {
+    confirm.disabled = isCurrent;
+    confirm.addEventListener("click", confirmMainCoverTimelineVariant);
+  }
+  editor.querySelector("[data-cover-timeline-export]")?.addEventListener("click", exportMainCoverTimeline);
+  const draftState = $("#timelineCoverDraftState");
+  if (draftState) draftState.textContent = isCurrent ? "当前封面" : "独立草稿";
+}
+
+function timelineHasRenderableContent(job = currentJob) {
+  if (!job) return false;
+  const sourceDuration = Number(waveformData?.duration || job?.videoInfo?.duration || mainVideo?.duration || 0);
+  if (viewerMediaKind === "source" && sourceDuration > 0) return true;
+  if (viewerMediaKind === "output" && currentOutput && timelineOutputDurationValue(currentOutput) > 0) return true;
+  if (currentOutput?.segments?.length) return true;
+  if (viewerMediaKind === "output" && String(job.taskMode || "") === "content_extract" && contentSearchTimelineItems(job).length) return true;
+  if (jobOutputVersions(job).some((version) => (
+    (version.segments || []).length
+    || (version.outputs || []).some((output) => (output.segments || []).length || (output.schedule || []).length)
+  ))) return true;
+  if (currentCandidate) return true;
+  if ((job.eventGroups || []).some((group) => (group.segments || []).length)) return true;
+  if ((job.candidates || []).length && ["awaiting_confirmation", "awaiting_content_confirmation"].includes(String(job.status || ""))) return true;
+  if (String(job.status || "") === "awaiting_content_confirmation" && contentSearchTimelineItems(job).length) return true;
+  if (job.pendingEditProposal?.status === "pending") {
+    const preview = job.pendingEditProposal.preview || {};
+    if ((preview.schedule || []).length || (preview.ranges || []).length) return true;
+    if ((preview.outputs || []).some((output) => (output.schedule || []).length)) return true;
+  }
+  if ($("#timelineSpeakerSegments")?.children.length || $("#timelinePersonSegments")?.children.length) return true;
+  if (!$("#timelineCoverTrack")?.classList.contains("hidden")) return true;
+  return false;
+}
+
+function updateTimeline() {
+  if (!timelinePanel) return;
+  const previousTimelineCoordinateSpace = timelineCoordinateSpace;
+  const placeholderTimeline = $("#ctTimelinePlaceholder");
+  if (!currentJob) {
+    timelinePanel.classList.add("hidden");
+    placeholderTimeline?.classList.remove("hidden");
+    document.body.dataset.ctTimelineReady = "false";
+    return;
+  }
+  const hasRenderableTimeline = timelineHasRenderableContent(currentJob);
+  timelinePanel.classList.toggle("hidden", !hasRenderableTimeline || reviewLowerPanelMode !== "timeline");
+  placeholderTimeline?.classList.toggle("hidden", hasRenderableTimeline || reviewLowerPanelMode !== "timeline");
+  document.body.dataset.ctTimelineReady = String(hasRenderableTimeline);
+  if (!hasRenderableTimeline) return;
+  placeholderTimeline?.classList.add("hidden");
   const duration = timelineDurationValue();
   const contentMode = String(currentJob.taskMode || "") === "content_extract";
   const contentTrimGroup = $("#timelineContentTrimGroup");
@@ -5327,7 +6136,7 @@ function updateTimeline() {
   if (durationNode) durationNode.textContent = formatTime(duration);
   const eventDisplay = timelineEventDisplayModel(currentJob);
   const displayEventGroups = eventDisplay.groups;
-  const outputComparison = viewerMediaKind === "output" && currentOutput?.segments?.length
+  const outputComparison = timelineOutputAxisActive()
     ? timelineOutputComparisonModel(currentJob, currentOutput)
     : null;
   const dedicatedSourceTracks = !outputComparison
@@ -5336,7 +6145,12 @@ function updateTimeline() {
   const contentReviewSingleLayer = ["content-review", "content-review-history"].includes(timelinePresentation.layoutKind);
   const contentHistorySplit = timelinePresentation.layoutKind === "content-review-history";
   applyTimelinePresentation(timelinePresentation);
-  timelineViewport?.setAttribute("data-coordinate-space", "source");
+  timelineCoordinateSpace = outputComparison ? "output" : "source";
+  if (!outputComparison && previousTimelineCoordinateSpace === "output") {
+    timelineViewStart = 0;
+    timelineViewEnd = duration;
+  }
+  timelineViewport?.setAttribute("data-coordinate-space", timelineCoordinateSpace);
   timelineViewport?.removeAttribute("data-composed-hierarchy");
   timelineViewport?.classList.toggle("output-comparison-mode", Boolean(outputComparison));
   timelinePanel?.classList.toggle("output-comparison-mode", Boolean(outputComparison));
@@ -5345,7 +6159,7 @@ function updateTimeline() {
     ? contentSearchTimelineItems(currentJob).filter((item) => item._contentSearchHistorical)
     : [];
   const legendLabels = outputComparison
-    ? ["采用片段", "成片顺序", "当前播放", "源片位置"]
+    ? ["成片事件", "播放顺序", "当前播放", "成片位置"]
     : (contentMode
         ? retainedContentTimelineItems.length
           ? ["当前检索", "已保留检索", "当前预览", "播放位置"]
@@ -5362,23 +6176,25 @@ function updateTimeline() {
     // already lives in the fixed tracks below. Persisted eventGroups represent
     // an earlier generated selection and must not leak back into source mode.
     items = [];
-  } else if (outputComparison && displayEventGroups.length) {
-    // Source events remain as a quiet comparison layer. Only the currently
-    // selected output contributes shot blocks; older versions must never be
-    // stacked into the same timeline.
-    const sourceEvents = displayEventGroups.flatMap((group) => (group.segments || []).map((segment) => ({
-      ...segment,
-      _group: group,
-      _sourceEvent: true,
-      _comparisonSource: true,
-      _usedInOutput: outputComparison.usedGroupIds.has(String(group.id)),
-    })));
-    items = [...sourceEvents, ...outputComparison.outputSegments];
   } else if (outputComparison) {
-    items = [...outputComparison.outputSegments];
+    // Generated versions use their own playback axis. Event labels are
+    // synthesized from the final sequence rather than reusing source-time
+    // groups, so reordered and speed-adjusted clips remain truthful.
+    items = contentReviewSingleLayer
+      ? [...outputComparison.outputSegments]
+      : [...outputComparison.outputEvents, ...outputComparison.outputSegments];
   } else if (viewerMediaKind === "candidate" && currentCandidate) {
     items = currentJob.candidates || [];
   } else if (currentJob.status === "awaiting_content_confirmation") {
+    items = contentSearchTimelineItems(currentJob);
+  } else if (viewerMediaKind === "output" && contentMode && contentSearchTimelineItems(currentJob).length) {
+    // Some Agent review samples only persist the playable MP4 and version-level
+    // metadata. Keep the "watch output" state useful by showing the confirmed
+    // content-search ranges as the source timeline instead of an empty strip.
+    items = contentSearchTimelineItems(currentJob);
+  } else if (contentMode && contentSearchTimelineItems(currentJob).length) {
+    // Completed content-search tasks should still show their matched source
+    // ranges on the timeline while the user is reviewing the source video.
     items = contentSearchTimelineItems(currentJob);
   } else if (currentJob.status === "awaiting_confirmation" && currentJob.eventGroups?.length) {
     items = displayEventGroups.flatMap((group) => group.segments.map((segment) => ({ ...segment, _group: group })));
@@ -5432,7 +6248,9 @@ function updateTimeline() {
   const chronologicalEventGroups = displayEventGroups;
   const eventSequence = new Map(chronologicalEventGroups.map((group, index) => [String(group.id), index + 1]));
   const timelineRelationForItem = (item, position = 0) => {
-    const directEventNumber = Number(eventSequence.get(String(item?._group?.id || "")) || 0);
+    const directEventNumber = outputComparison && item?._outputEvent
+      ? Number(item._outputEventOrder || 0)
+      : Number(eventSequence.get(String(item?._group?.id || "")) || 0);
     if (directEventNumber) return { eventNumber: directEventNumber, relationKey: `event-${directEventNumber}` };
     if (item?._output) {
       const relatedEventIndex = eventDisplay.entries.findIndex((entry) =>
@@ -5494,30 +6312,40 @@ function updateTimeline() {
   let shotLaneHeight = densityProfile.shotLaneHeight;
   const labelEntries = duration > 0 ? items.map((item, position) => {
     const groupSegments = item._group?.segments || [];
-    const groupIntervals = groupSegments.length ? timelineMergedIntervals(item._group) : [{ start: Number(item.start) || 0, end: Number(item.end) || Number(item.start) || 0 }];
+    const groupIntervals = outputComparison && item._outputEvent
+      ? [{ start: Number(item.start) || 0, end: Number(item.end) || Number(item.start) || 0 }]
+      : groupSegments.length
+        ? timelineMergedIntervals(item._group)
+        : [{ start: Number(item.start) || 0, end: Number(item.end) || Number(item.start) || 0 }];
     const visibleIntervals = groupIntervals.filter((range) => range.end > view.start && range.start < view.end);
     const groupStart = groupIntervals[0]?.start ?? (Number(item.start) || 0);
     const groupEnd = groupIntervals.at(-1)?.end ?? (Number(item.end) || groupStart);
     if (groupEnd <= view.start || groupStart >= view.end) return null;
     const sourceFirstSegment = [...groupSegments].sort((left, right) => Number(left.start) - Number(right.start))[0];
-    if (item._group && String(sourceFirstSegment?.id || "") !== String(item.id || "")) return null;
+    if (item._group && !item._outputEvent && String(sourceFirstSegment?.id || "") !== String(item.id || "")) return null;
     // Once an event layer exists, rendered output segments stay in the shot
     // row. Repeating their role labels in the event row produces duplicate,
     // overlapping callouts and hides the original event titles.
-    if (currentJob.eventGroups?.length && item._output && !item._group) return null;
+    if (outputComparison && !contentReviewSingleLayer && item._output && !item._group) return null;
     const title = timelineItemTitle(item, position);
     const labelEnd = groupEnd;
     const detail = item._group?.summary || item.summary || item.reason || "";
     const characterCount = Array.from(String(title)).length;
     const contentMatchId = String(item._group?.contentMatchId || item.candidateId || item.id || "");
-    const isRecommendedEvent = contentMode
+    const isRecommendedEvent = outputComparison
+      ? Boolean(item._outputEvent)
+      : contentMode
       ? (item._group
           ? recommendedEventIds.has(String(item._group.id)) || selectedContentMatches.has(contentMatchId)
           : !item._contentSearchHistorical && selectedContentMatches.has(contentMatchId))
       : item._group
         ? recommendedEventIds.has(String(item._group.id))
         : recommended.has(Number(item.index));
-    const eventNumber = item._group ? Number(eventSequence.get(String(item._group.id)) || 0) : 0;
+    const eventNumber = item._group
+      ? (outputComparison && item._outputEvent
+          ? Number(item._outputEventOrder || 0)
+          : Number(eventSequence.get(String(item._group.id)) || 0))
+      : 0;
     const relationKey = eventNumber ? `event-${eventNumber}` : `candidate-${position + 1}`;
     const duplicateCount = item._group
       ? Number(eventDisplay.entries.find((entry) => String(entry.group.id) === String(item._group.id))?.duplicateCount || 0)
@@ -5600,7 +6428,7 @@ function updateTimeline() {
   const numberedShots = contentReviewSingleLayer
     ? []
     : outputComparison
-    ? items.filter((item) => item._output)
+    ? items.filter((item) => item._output && !item._outputIntro)
     : items.filter((item) => !hasSourceReviewItems || !item._output);
   numberedShots.forEach((item, index) => {
     item._timelineShotNumber = Number(item._compositionOrder || index + 1);
@@ -5645,6 +6473,7 @@ function updateTimeline() {
   const layout = timelineTrackLayout(
     viewportHeight, timelineDetailMode, labelLanes, shotLanes, timelinePresentation.layoutKind,
   );
+  applyTimelineTrackGeometry(timelinePresentation, layout);
   labelLaneHeight = layout.labelLaneHeight;
   shotLaneHeight = layout.shotLaneHeight;
   const relationLaneHeight = layout.relationHeight;
@@ -5752,7 +6581,9 @@ function updateTimeline() {
     const retainedQueryShort = Array.from(retainedQuery).length > 10
       ? `${Array.from(retainedQuery).slice(0, 10).join("")}…`
       : retainedQuery;
-    const sequenceLabel = contentMode
+    const sequenceLabel = entry.item?._outputIntro
+      ? "片头"
+      : contentMode
       ? (outputComparison
           ? `P${String(entry.eventNumber || entry.position + 1).padStart(2, "0")}`
           : retainedSearch ? "保留" : entry.outputOrder ? `P${String(entry.outputOrder).padStart(2, "0")}` : "候选")
@@ -5791,13 +6622,14 @@ function updateTimeline() {
   labels?.querySelectorAll("[data-timeline-label-position]").forEach((button) => button.addEventListener("click", () => {
     const item = items[Number(button.dataset.timelineLabelPosition)];
     timelineFrameSelectionTime = null;
-    if (contentMode && !item?._group && !item?._output) {
-      previewContentEvidence(item, { autoplay: true, searchId: item?._contentSearchId || "" });
+    if (item?._output) selectOutputTimelineSegment(Number(item._outputSegmentIndex), Number(item.start));
+    else if (item?._outputEvent) selectOutputTimelineSegment(Number(item._outputSegmentIndex), Number(item.start));
+    else if (contentMode && !item?._group) {
+      previewContentMatch(item, { autoplay: true, loadEvidence: false, searchId: item?._contentSearchId || "" });
     }
     else if (item?._group) outputComparison || contentMode
       ? previewEventSegment(item._group, item)
       : previewEventGroup(item._group);
-    else if (item?._output) previewCompositionSourceSegment(item._output, Number(item._outputSegmentIndex), Number(item.start));
     else if (currentJob.status === "awaiting_confirmation") previewCandidate(Number(item.index));
     else if (item?.filename) selectOutput(item.filename, true);
     else seekTimeline(Number(item?.start || 0));
@@ -5826,8 +6658,8 @@ function updateTimeline() {
     event.stopPropagation();
     const item = items[Number(button.dataset.timelinePosition)];
     timelineFrameSelectionTime = null;
-    if (item._group) previewEventSegment(item._group, item);
-    else if (item?._output) previewCompositionSourceSegment(item._output, Number(item._outputSegmentIndex), Number(item.start));
+    if (item?._output) selectOutputTimelineSegment(Number(item._outputSegmentIndex), Number(item.start));
+    else if (item._group) previewEventSegment(item._group, item);
     else if (currentJob.status === "awaiting_confirmation") previewCandidate(Number(item.index));
     else selectOutput(item.filename, true);
   }));
@@ -5855,8 +6687,8 @@ function updateTimeline() {
     event.stopPropagation();
     const item = items[Number(button.dataset.timelineMarkerPosition)];
     timelineFrameSelectionTime = null;
-    if (item?._group) previewEventSegment(item._group, item);
-    else if (item?._output) previewCompositionSourceSegment(item._output, Number(item._outputSegmentIndex), Number(item.start));
+    if (item?._output) selectOutputTimelineSegment(Number(item._outputSegmentIndex), Number(item.start));
+    else if (item?._group) previewEventSegment(item._group, item);
     else if (currentJob.status === "awaiting_confirmation") previewCandidate(Number(item.index));
     else if (item?.filename) selectOutput(item.filename, true);
     else seekTimeline(Number(item?.start || 0));
@@ -5872,13 +6704,31 @@ function updateTimeline() {
   renderTimelineEventSummary();
   updateTimelineReviewControls();
   renderTimelineProposalPreview(currentJob);
+  renderTimelineCoverTrack(currentJob);
   renderTimelineSpeakerTrack();
   renderTimelinePersonTrack();
   syncPrecisionTimelineToolbar();
 }
 
+window.ClipTalkOpenCoverTimeline = () => {
+  if (!currentJob || !(currentJob.coverDraft?.variants || []).length) {
+    showToast("封面候选尚未准备完成");
+    return false;
+  }
+  setReviewLowerPanelMode("timeline", { scroll: true });
+  renderTimelineCoverTrack(currentJob);
+  window.requestAnimationFrame(() => $("#timelineCoverTrack")?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  return true;
+};
+
 async function loadWaveform(job) {
-  if (!job || waveformJobId === job.id || Date.now() < waveformRetryAt) return;
+  if (!job || waveformLoadingJobId === job.id || Date.now() < waveformRetryAt) return;
+  const loadedForJob = waveformJobId === job.id && waveformData && (
+    waveformData.schemaVersion || waveformData.hasAudio === false
+    || waveformData.rms?.length || waveformData.maximums?.length || waveformData.peaks?.length
+  );
+  if (loadedForJob) return;
+  waveformLoadingJobId = job.id;
   waveformJobId = job.id;
   waveformData = job.videoInfo ? { duration: Number(job.videoInfo.duration), hasAudio: job.videoInfo.has_audio, peaks: [], rms: [] } : null;
   const token = ++waveformRequestToken;
@@ -5891,7 +6741,11 @@ async function loadWaveform(job) {
   updateTimeline();
   try {
     const data = await api(`/api/jobs/${job.id}/waveform`);
-    if (token !== waveformRequestToken || currentJob?.id !== job.id) return;
+    if (token !== waveformRequestToken || currentJob?.id !== job.id) {
+      if (waveformJobId === job.id && !(waveformData?.schemaVersion)) waveformJobId = null;
+      return;
+    }
+    waveformJobId = job.id;
     waveformData = data;
     waveformRetryAt = 0;
     if (!timelineViewEnd) timelineViewEnd = Number(data.duration);
@@ -5907,6 +6761,7 @@ async function loadWaveform(job) {
     updateTimeline();
   } finally {
     window.clearTimeout(slowNotice);
+    if (waveformLoadingJobId === job.id) waveformLoadingJobId = null;
     if (secondaryEditorOpen() && currentJob?.id === job.id) renderSecondaryEditorTimeline();
   }
 }
@@ -5914,14 +6769,71 @@ async function loadWaveform(job) {
 let activeActionConfirmationCancel = null;
 let activeInputPromptCancel = null;
 
+function activateModalFocus(modal, { initialFocus = null, additionalActive = [], restoreFocus = true } = {}) {
+  if (!modal) return () => {};
+  const returnTarget = document.activeElement instanceof window.HTMLElement ? document.activeElement : null;
+  const returnFocusTarget = returnTarget?.closest("#sidebarHistoryDrawer")
+    ? document.querySelector("#sidebarHistoryToggle")
+    : returnTarget;
+  window.ClipTalkAppShell?.closeHistoryDrawer?.();
+  const activeRoots = new Set([modal, ...additionalActive.filter(Boolean)]);
+  // Include the global rail explicitly. Compatibility layouts can briefly
+  // nest it inside the workspace while a modal is opening.
+  const isolationCandidates = [...new Set([
+    ...document.body.children,
+    document.querySelector("#appSidebar"),
+  ].filter(Boolean))];
+  const isolated = isolationCandidates
+    .filter((node) => ![...activeRoots].some((root) => node === root || node.contains(root)))
+    .map((node) => ({ node, inert: node.inert }));
+  isolated.forEach(({ node }) => { node.inert = true; });
+  const focusable = () => [...modal.querySelectorAll(
+    'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  )].filter((node) => !node.closest(".hidden") && node.getClientRects().length);
+  const onKeydown = (event) => {
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (!items.length) {
+      event.preventDefault();
+      modal.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  modal.addEventListener("keydown", onKeydown);
+  window.requestAnimationFrame(() => {
+    const target = typeof initialFocus === "string" ? modal.querySelector(initialFocus) : initialFocus;
+    (target instanceof window.HTMLElement ? target : focusable()[0] || modal).focus();
+  });
+  return (shouldRestore = restoreFocus) => {
+    modal.removeEventListener("keydown", onKeydown);
+    isolated.forEach(({ node, inert }) => { node.inert = inert; });
+    if (shouldRestore && returnFocusTarget?.isConnected) returnFocusTarget.focus();
+  };
+}
+
 function dismissActionConfirmation() {
   if (activeActionConfirmationCancel) activeActionConfirmationCancel();
-  else $("#actionConfirm")?.classList.add("hidden");
+  else {
+    $("#actionConfirm")?.classList.add("hidden");
+    $("#actionConfirm")?.setAttribute("aria-hidden", "true");
+  }
 }
 
 function dismissInputPrompt() {
   if (activeInputPromptCancel) activeInputPromptCancel();
-  else $("#inputPrompt")?.classList.add("hidden");
+  else {
+    $("#inputPrompt")?.classList.add("hidden");
+    $("#inputPrompt")?.setAttribute("aria-hidden", "true");
+  }
 }
 
 function requestInputPrompt({
@@ -5968,8 +6880,11 @@ function requestInputPrompt({
       select.value = String(value);
     }
     modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    const releaseFocus = activateModalFocus(modal, { initialFocus: selecting ? select : input });
     const finish = (result) => {
       modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
       cleanup();
       resolve(result);
     };
@@ -5990,13 +6905,13 @@ function requestInputPrompt({
       $("#inputPromptClose").removeEventListener("click", onCancel);
       document.removeEventListener("keydown", onKey);
       if (activeInputPromptCancel === onCancel) activeInputPromptCancel = null;
+      releaseFocus();
     };
     activeInputPromptCancel = onCancel;
     form.addEventListener("submit", onSubmit);
     $("#inputPromptCancel").addEventListener("click", onCancel);
     $("#inputPromptClose").addEventListener("click", onCancel);
     document.addEventListener("keydown", onKey);
-    window.requestAnimationFrame(() => (selecting ? select : input).focus());
   });
 }
 
@@ -6008,7 +6923,7 @@ function requestChoice({ options, ...configuration }) {
   return requestInputPrompt({ ...configuration, options });
 }
 
-function requestActionConfirmation({ title, summary, details = [], warning = "", confirmLabel = "确认执行", orderMode = null, orderItems = [], showOrderOptions = false, selectionItems = [], onDraftChange = null }) {
+function requestActionConfirmation({ title, summary, details = [], warning = "", confirmLabel = "确认执行", orderMode = null, orderItems = [], showOrderOptions = false, selectionItems = [], onDraftChange = null, exportSnapshot = null }) {
   dismissActionConfirmation();
   return new Promise((resolve) => {
     const modal = $("#actionConfirm");
@@ -6016,6 +6931,7 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
     $("#actionConfirmTitle").textContent = title;
     $("#actionConfirmSummary").textContent = summary;
     $("#actionConfirmDetails").innerHTML = details.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    const exportOptions = exportSnapshot ? window.ClipTalkDelivery.mountOptions($("#actionConfirmDetails"), exportSnapshot) : null;
     $("#actionConfirmWarning").textContent = warning;
     const orderWrap = $("#actionConfirmOrderWrap");
     const orderSelect = $("#actionConfirmOrder");
@@ -6026,7 +6942,7 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
     const orderHints = {
       selection: "按照你当前勾选/加入选区的先后合成，不会自动调换。",
       source: "按镜头在源视频中的时间先后排序，适合纪实、访谈和过程记录。",
-      llm_recommend: "LLM 只推荐排列顺序，不会增加、删除或改变任何镜头起止点；完成后还会再次请你确认。",
+      llm_recommend: "根据内容连贯性调整所选片段顺序，完成后可以再次确认。",
     };
     orderWrap?.classList.toggle("content-order-enabled", Boolean(orderMode && showOrderOptions));
     orderWrap?.classList.toggle("hidden", !orderMode || !showOrderOptions);
@@ -6039,7 +6955,7 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
       if (!orderList) return;
       const selectedMode = orderSelect?.value || orderMode;
       const editable = selectedMode === "selection";
-      const heading = editable ? "可手动调整镜头顺序" : selectedMode === "llm_recommend" ? "已选镜头 · LLM 推荐后再次确认" : "已选镜头 · 将按源时间排序";
+      const heading = editable ? "可手动调整镜头顺序" : selectedMode === "llm_recommend" ? "已选镜头 · 智能排序后再次确认" : "已选镜头 · 将按视频时间排序";
       orderList.innerHTML = `<small>${heading}</small>${mutableOrder.map((item, index) => `<div><b>${index + 1}</b><span>${escapeHtml(item.label || item.title || `镜头 ${index + 1}`)}<em>${escapeHtml(item.meta || "")}</em></span>${editable ? `<button type="button" data-order-up="${index}" ${index === 0 ? "disabled" : ""}>↑</button><button type="button" data-order-down="${index}" ${index === mutableOrder.length - 1 ? "disabled" : ""}>↓</button>` : ""}</div>`).join("")}`;
       orderList?.querySelectorAll("[data-order-up]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderUp); [mutableOrder[index - 1], mutableOrder[index]] = [mutableOrder[index], mutableOrder[index - 1]]; renderOrderList(); onDraftChange?.({ orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder }); }));
       orderList?.querySelectorAll("[data-order-down]").forEach((button) => button.addEventListener("click", () => { const index = Number(button.dataset.orderDown); [mutableOrder[index], mutableOrder[index + 1]] = [mutableOrder[index + 1], mutableOrder[index]]; renderOrderList(); onDraftChange?.({ orderMode: orderSelect?.value || orderMode, orderedItems: mutableOrder }); }));
@@ -6056,8 +6972,16 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
     selectionList?.querySelectorAll("input").forEach((input) => input.addEventListener("change", syncSelectionState));
     syncSelectionState();
     modal.classList.remove("hidden");
-    const finish = (value) => { modal.classList.add("hidden"); cleanup(); resolve(value); };
+    modal.setAttribute("aria-hidden", "false");
+    const releaseFocus = activateModalFocus(modal, { initialFocus: $("#actionConfirmCancel") });
+    const finish = (value) => {
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      cleanup();
+      resolve(value);
+    };
     const cleanup = () => {
+      exportOptions?.remove();
       $("#actionConfirmOk").removeEventListener("click", onOk);
       $("#actionConfirmCancel").removeEventListener("click", onCancel);
       $("#actionConfirmClose").removeEventListener("click", onCancel);
@@ -6066,8 +6990,10 @@ function requestActionConfirmation({ title, summary, details = [], warning = "",
       confirmButton.disabled = false;
       document.removeEventListener("keydown", onKey);
       if (activeActionConfirmationCancel === onCancel) activeActionConfirmationCancel = null;
+      releaseFocus();
     };
     const onOk = () => {
+      if (exportOptions) return finish({ confirmed: true, exportSnapshot: exportOptions.read() });
       if (selectionItems.length) {
         const selectedValues = [...selectionList.querySelectorAll("input:not(:disabled):checked")].map((input) => input.value);
         if (!selectedValues.length) return;
@@ -6102,30 +7028,86 @@ function directorStatusForJob(job = currentJob) {
   return displayStatusForJob(job);
 }
 
-function jobOutputVersionCount(job = currentJob) {
-  return jobOutputVersions(job).filter((version) => (version.outputs || []).length > 0).length;
+function jobOutputMetrics(job = currentJob) {
+  const entries = orderedJobOutputs(job);
+  const formalEntries = entries.filter(({ item, version }) => (
+    !currentOutputIsReviewSample(item, version) && !item?.previewOnly && !version?.previewOnly
+  ));
+  const reviewEntries = entries.filter(({ item, version }) => (
+    currentOutputIsReviewSample(item, version) || item?.previewOnly || version?.previewOnly
+  ));
+  const formalVersionCount = new Set(formalEntries.map(({ item, version }, index) => (
+    String(version?.id || version?.number || item?.versionId || `formal-${index}`)
+  ))).size;
+  return {
+    formalVersionCount,
+    formalVideoCount: formalEntries.length,
+    reviewSampleCount: reviewEntries.length,
+    videoCount: entries.length,
+  };
 }
 
 function jobResultSummary(job = currentJob) {
-  const outputCount = jobOutputCount(job);
-  if (!outputCount) return "";
-  const versionCount = jobOutputVersionCount(job);
-  const vocabulary = workflowVocabulary(job);
-  if (workflowKindForJob(job) !== "highlight") {
-    return versionCount > 1 ? `${versionCount} 个${vocabulary.outputPlural}` : `${outputCount} 条${vocabulary.output}`;
-  }
-  return `${versionCount} 个版本${outputCount !== versionCount ? ` · ${outputCount} 条视频` : ""}`;
+  const metrics = jobOutputMetrics(job);
+  if (!metrics.videoCount) return "";
+  return [
+    metrics.formalVersionCount ? `${metrics.formalVersionCount} 个正式版本` : "",
+    metrics.reviewSampleCount ? `${metrics.reviewSampleCount} 个审核样片` : "",
+    metrics.formalVideoCount > metrics.formalVersionCount ? `${metrics.formalVideoCount} 条正式视频` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function displayStatusForJob(job = currentJob) {
   if (!job) return { text: "等待素材", running: false, className: "empty" };
+  if (String(job.stage || "") === "agent_handed_off") {
+    const workflowLabel = {
+      highlight: "高光剪辑", content_search: "内容探索",
+      person_edit: "按人物剪辑", speaker_edit: "按说话人剪辑",
+    }[String(job.agentHandoffWorkflowKind || "")] || "同源新任务";
+    return { text: `Agent 已转到${workflowLabel}任务 · 当前任务结果已保留`, running: false, className: "agent-handed-off" };
+  }
+  const unifiedPresentation = window.ClipTalkWorkspaceState?.derivePresentation?.(job);
+  if (unifiedPresentation) {
+    const preservedResult = ["failed", "cancelled"].includes(unifiedPresentation.key)
+      ? jobResultSummary(job) : "";
+    return {
+      text: `${unifiedPresentation.label}${preservedResult ? ` · 已保留 ${preservedResult}` : ""}`,
+      running: unifiedPresentation.running,
+      className: unifiedPresentation.key,
+    };
+  }
   const execution = executionForJob(job);
   const status = String(execution.status || job.status || "");
   const result = jobResultSummary(job);
   const workflow = workflowKindForJob(job);
   const vocabulary = workflowVocabulary(job);
   const suffix = result ? ` · ${result}` : "";
-  if (execution.outcome === "no_acceptable_output") return { text: "自动成片未通过质量门 · 候选仍可审核", running: false, className: "quality-rejected" };
+  const agent = job.agent && typeof job.agent === "object" ? job.agent : {};
+  const agentStatus = String(agent.status || "");
+  if (isAgentInstructionDraft(job)) {
+    return { text: "待输入剪辑要求", running: false, className: "agent-draft" };
+  }
+  const agentCompleted = Math.max(0, Number(agent.completedSteps) || 0);
+  const agentTotal = Math.max(0, Number(agent.totalSteps) || 0);
+  if (String(job.status || "") === "awaiting_agent_plan") {
+    if (agentStatus === "awaiting_confirmation") return { text: "请确认剪辑计划", running: false, className: "agent-awaiting-confirmation" };
+    if (["approved", "running"].includes(agentStatus)) {
+      const progress = agentTotal ? ` · 已完成 ${Math.min(agentCompleted, agentTotal)}/${agentTotal} 步` : "";
+      return { text: `Agent 正在执行：${agent.currentStepTitle || "准备下一步"}${progress}`, running: true, className: "agent-running" };
+    }
+    if (agentStatus === "action_required") return { text: `需要确认：${agent.currentStepTitle || "待确认步骤"}`, running: false, className: "agent-action-required" };
+    if (agentStatus === "preview_ready") return { text: `审核结果已生成${agentTotal ? ` · ${agentCompleted}/${agentTotal} 步` : ""}`, running: false, className: "agent-completed" };
+    if (agentStatus === "no_result") return { text: "未找到可用于自动剪辑的可靠内容", running: false, className: "agent-no-result" };
+    if (agentStatus === "failed") return { text: "剪辑计划执行失败 · 请查看失败步骤", running: false, className: "failed" };
+    if (agentStatus === "cancelled") return { text: "剪辑计划已停止", running: false, className: "cancelled" };
+    const planningActive = String(agent.workspaceStatus || "") === "planning";
+    return {
+      text: planningActive ? "正在生成剪辑计划" : "等待你描述剪辑目标",
+      running: planningActive,
+      className: "agent-planning",
+    };
+  }
+  if (execution.outcome === "no_acceptable_output") return { text: "自动成片未通过质量检查 · 候选仍可审核", running: false, className: "quality-rejected" };
   if (execution.outcome === "partial_output" && !execution.active) return { text: `部分完成${suffix}`, running: false, className: "partial" };
   if (status === "failed") return { text: `处理失败${result ? ` · 已保留 ${result}` : ""}`, running: false, className: "failed" };
   if (status === "cancelled") return { text: `已取消${suffix}`, running: false, className: "cancelled" };
@@ -6201,6 +7183,37 @@ function compactConversationMessages(messages = []) {
   return compacted;
 }
 
+function isSupersededConversationSetupMessage(message, job = currentJob) {
+  const text = String(message?.text || "").trim();
+  const kind = String(message?.kind || "");
+  const stillWaitingForInstruction = String(job?.status || "") === "awaiting_agent_instruction"
+    && !job?.instructionSubmitted;
+  if (message?.role === "user"
+    && /(?:已建立智能剪辑\s*Agent\s*草稿[；;]\s*等待输入剪辑要求|等待描述剪辑要求)/.test(text)) return true;
+  if (message?.role === "assistant"
+    && kind === "notice"
+    && /^视频已上传并建立\s*Agent\s*素材工作区。?请在对话框描述剪辑要求/.test(text)) return true;
+  if (stillWaitingForInstruction && !message?.inherited) return false;
+  if (message?.role === "assistant"
+    && kind === "brief-summary"
+    && /^素材范围与剪辑目标已记录。?智能剪辑\s*Agent\s*将生成计划/.test(text)) return true;
+  return false;
+}
+
+function conversationDisplayMessage(message) {
+  const next = { ...message };
+  const text = String(next.text || "").trim();
+  const uploadedAgentGoal = text.match(/^上传\s+.+?，交给智能剪辑\s*Agent[：:]\s*([\s\S]+?)[；;]\s*素材范围[：:]/);
+  if (uploadedAgentGoal?.[1]?.trim()) next.text = uploadedAgentGoal[1].trim();
+  return next;
+}
+
+function visibleConversationMessages(messages = [], job = currentJob) {
+  return compactConversationMessages(messages)
+    .filter((message) => !isSupersededConversationSetupMessage(message, job))
+    .map(conversationDisplayMessage);
+}
+
 function analysisActivityLoader(job = {}) {
   const status = String(job.status || "");
   if (status === "queued") return { variant: "orbit", label: "等待后台开始处理" };
@@ -6214,7 +7227,7 @@ function analysisActivityLoader(job = {}) {
     return { variant: "rotor", label: "正在渲染高光成片" };
   }
   if (/(?:vlm|vision|visual|视觉|候选|镜头|画面|模型响应)/.test(context)) {
-    return { variant: "matrix", label: "视觉模型正在处理候选画面" };
+    return { variant: "matrix", label: "正在分析候选画面" };
   }
   if (/(?:llm|plan|planning|编排|规划|叙事|结构)/.test(context)) {
     return { variant: "aperture", label: "正在规划高光叙事结构" };
@@ -6250,7 +7263,8 @@ function inlineAnalysisProgressMarkup(job) {
   const cancelling = execution.status === "cancelling";
   const activityRunning = queued || execution.active;
   const actionLabel = executionCancelLabel(job);
-  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}${queued ? " queued" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="dark" data-beam-strength="0.84" data-beam-duration="2.05" data-beam-brightness="1.42" data-beam-saturation="1.06" data-beam-hue-range="14" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${activityRunning}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${workflowLabel}</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>当前进度</span><b data-inline-workflow-percent>${workflowLabel}</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${showMeasuredWorkflow ? percent : 0}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-active="${activityRunning}" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed="1.08" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>当前阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>${processingElapsedLabel(job)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${queued ? "" : workflow.complete || index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel${cancelling ? " disabled" : ""}>${actionLabel}</button></section>`;
+  const beamTheme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  return `<section id="inlineAnalysisProgress" class="inline-analysis-progress stage-${stageMode}${waiting ? " indeterminate" : ""}${queued ? " queued" : ""}" data-stage-mode="${stageMode}" data-border-beam data-beam-size="pulse-inner" data-beam-color="sunset" data-beam-theme="${beamTheme}" data-beam-strength="0.84" data-beam-duration="2.05" data-beam-brightness="1.42" data-beam-saturation="1.06" data-beam-hue-range="14" data-beam-radius="13" aria-label="AI 分析进度" aria-busy="${activityRunning}"><div class="inline-progress-orb"><span>流程</span><b data-inline-percent>${workflowLabel}</b></div><div class="inline-progress-copy"><div class="inline-workflow-head"><span>当前进度</span><b data-inline-workflow-percent>${workflowLabel}</b></div><i class="inline-progress-track inline-workflow-track"><b data-inline-bar style="width:${showMeasuredWorkflow ? percent : 0}%"></b></i><div class="inline-current-stage"><div class="inline-progress-heading"><span class="inline-progress-activity" data-inline-activity data-generative-loader="inline" data-loader-active="${activityRunning}" data-loader-variant="${activity.variant}" data-loader-size="46" data-loader-speed="1.08" data-loader-label="${escapeHtml(activity.label)}"></span><div><small data-inline-stage-label>分析阶段 · ${escapeHtml(stageLabel)}</small><strong data-inline-detail>${escapeHtml(detail)}</strong></div></div><div class="inline-progress-meta"><span data-inline-stage-progress>${escapeHtml(stageFact)}</span><span data-inline-model>${escapeHtml(model)}</span><span data-inline-elapsed>${processingElapsedLabel(job)}</span><span data-inline-eta>${escapeHtml(progressEtaText(job, waiting))}</span></div><i class="inline-stage-progress-track" aria-hidden="true"><b data-inline-stage-bar style="width:${stageBarPercent}%"></b></i></div></div><ol class="inline-stage-chain">${phaseItems.map((label, index) => `<li class="${queued ? "" : workflow.complete || index < phaseIndex ? "done" : index === phaseIndex ? "current" : ""}">${label}</li>`).join("")}</ol><button type="button" class="inline-progress-cancel" data-inline-cancel${cancelling ? " disabled" : ""}>${actionLabel}</button></section>`;
 }
 
 function autoCompositionVersionFacts(job) {
@@ -6499,7 +7513,7 @@ function updateInlineAnalysisProgress(job = currentJob) {
   if (percentNode) percentNode.textContent = workflowLabel;
   if (workflowPercentNode) workflowPercentNode.textContent = workflowLabel;
   if (detailNode) detailNode.textContent = detail;
-  if (stageLabelNode) stageLabelNode.textContent = `当前阶段 · ${queued ? "等待处理" : contract.stage.label || "处理中"}`;
+  if (stageLabelNode) stageLabelNode.textContent = `分析阶段 · ${queued ? "等待处理" : contract.stage.label || "处理中"}`;
   const waiting = queued || execution.active
     && !["determinate", "completed"].includes(stageMode);
   panel.classList.toggle("queued", queued);
@@ -6584,8 +7598,28 @@ function hideTaskSetupView() {
 
 function initialConversation() {
   hideTaskSetupView();
+  const draftStatus = $("#newTaskDraftStatus");
+  if (draftStatus) {
+    draftStatus.dataset.state = "empty";
+    draftStatus.textContent = "等待添加素材";
+  }
   replaceConversationContent(`
-    <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>视频剪辑助手</small><p>请先上传视频，再用一句话描述你想得到的结果。</p></div></article>`);
+    <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>开始新任务</small><p>写下想保留的内容或成片目标，也可以先选择右侧视频。两项完成后，我会先整理剪辑计划供你确认。</p></div></article>`);
+}
+
+function showPendingNewTaskInstruction(instruction) {
+  const value = String(instruction || "").trim();
+  if (!value) return;
+  const draftStatus = $("#newTaskDraftStatus");
+  if (draftStatus) {
+    draftStatus.dataset.state = "ready";
+    draftStatus.textContent = "剪辑要求已暂存 · 选择视频后自动继续";
+  }
+  replaceConversationContent(`
+    <article class="chat-message user"><span class="avatar">你</span><div class="bubble"><small>待创建任务</small><p>${escapeHtml(value)}</p></div></article>
+    <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>下一步</small><p>要求已暂存。选择视频后，我会创建独立任务并自动开始整理剪辑计划。</p></div></article>`);
+  const messages = $("#chatMessages");
+  if (messages) messages.scrollTop = messages.scrollHeight;
 }
 
 function contentScopeBaseRange(kind, duration) {
@@ -6618,7 +7652,10 @@ function contentTextRange(text, duration) {
   const value = String(text || "");
   const total = Math.max(0, Number(duration) || 0);
   const token = "(\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?|\\d+(?:\\.\\d+)?\\s*(?:小时|分钟|分|秒))";
-  let match = value.match(new RegExp(`${token}\\s*(?:到|至|[-~～])\\s*${token}`, "i"));
+  const isDurationTarget = (index) => /(?:每|各|单)(?:个|条|段)?(?:片段|镜头|成片|视频)?\s*$|(?:总|目标|成片|片段|单段)?时长(?:控制在|约为|为)?\s*$/
+    .test(value.slice(Math.max(0, Number(index) - 16), Number(index)));
+  let match = [...value.matchAll(new RegExp(`${token}\\s*(?:到|至|[-~～])\\s*${token}`, "ig"))]
+    .find((item) => !isDurationTarget(item.index));
   if (match) {
     const start = contentClockSeconds(match[1]);
     const end = contentClockSeconds(match[2]);
@@ -6628,7 +7665,11 @@ function contentTextRange(text, duration) {
   if (match) { const span = contentClockSeconds(match[1]); if (span !== null) return [Math.max(0, total - span), total]; }
   match = value.match(new RegExp(`(?:开头|开始|最前)\\s*${token}`, "i"));
   if (match) { const span = contentClockSeconds(match[1]); if (span !== null) return [0, Math.min(total, span)]; }
-  match = value.match(new RegExp(`${token}\\s*(?:附近|左右|前后)`, "i"));
+  // A bare unit duration such as “每段 20 秒左右” describes output length,
+  // not a source-video position. Clock timestamps are unambiguous; unit-based
+  // positions must carry an explicit location cue such as “视频第 20 秒左右”.
+  match = value.match(/(\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(?:附近|左右|前后)/i)
+    || value.match(new RegExp(`(?:在|视频(?:的)?(?:第)?|素材(?:的)?(?:第)?|时间点|进度(?:到)?|第)\\s*${token}\\s*(?:附近|左右|前后|处)`, "i"));
   if (match) { const center = contentClockSeconds(match[1]); if (center !== null) return [Math.max(0, center - 120), Math.min(total, center + 120)]; }
   if (/前半段|前一半/.test(value)) return [0, total * .5];
   if (/后半段|后一半/.test(value)) return [total * .5, total];
@@ -6676,7 +7717,15 @@ function activeBriefOptions(instruction = "") {
     selectedRange = [start, Math.min(duration, end)];
   }
   if (!selectedRange) selectedRange = [0, duration];
-  const textRange = contentTextRange(instruction, duration);
+  // The UI appends a display-only “素材范围：…” suffix to the submitted
+  // message. Never parse that metadata as a user-authored time constraint;
+  // otherwise “全片” can be converted back into the previous 0–99.6s range.
+  const instructionForTimeParsing = String(instruction || "").replace(/(?:素材范围|范围)\s*[:：].*$/i, "");
+  // “开头放封面/片头加标题” describes edit order, not a source range.
+  // Only numeric time cues can narrow the selected source scope.
+  const timeCueText = instructionForTimeParsing.replace(/\b(?:9:16|16:9|4:5|1:1)\b/g, "");
+  const hasNumericTimeCue = /\d{1,2}:\d{2}|\d+(?:\.\d+)?\s*(?:小时|分钟|分|秒)/i.test(timeCueText);
+  const textRange = hasNumericTimeCue ? contentTextRange(timeCueText, duration) : null;
   const effectiveStart = textRange ? Math.max(selectedRange[0], textRange[0]) : selectedRange[0];
   const effectiveEnd = textRange ? Math.min(selectedRange[1], textRange[1]) : selectedRange[1];
   if (effectiveEnd <= effectiveStart) {
@@ -6736,6 +7785,7 @@ async function classifyBriefWorkflow(instruction) {
   actionBusy = true;
   setComposerSending(true);
   if (chatInput) chatInput.disabled = true;
+  $("#chatLegacyModeButton")?.classList.add("hidden");
   setBriefCreationStatus("AI 判断中", "正在理解你的目标并选择合适的剪辑方式……");
   try {
     const response = await apiJson("/api/workflow-intent/classify", {
@@ -6767,12 +7817,29 @@ function showBriefCard(file) {
   const portal = $("#taskSetupPortal");
   const setupView = $("#taskSetupView");
   const briefCard = conversation.querySelector(".brief-card");
+  const modePicker = briefCard?.querySelector(".brief-template-picker");
+  if (modePicker) conversation.appendChild(modePicker);
   if (portal && briefCard) {
     portal.replaceChildren(briefCard);
     setupView?.classList.remove("hidden");
     $("#uploadView")?.classList.add("task-setup-active");
   }
-  const briefRoot = portal?.contains(briefCard) ? portal : conversation;
+  const briefRoot = conversation;
+  window.ClipTalkAgentWorkspace?.loadSkills();
+
+  const activateAgentPath = () => {
+    pendingCreateWorkflowKind = "";
+    pendingCreateIntentMode = "auto";
+    briefRoot.querySelector("#briefWorkflowHelp")?.classList.remove("template-selected");
+    briefRoot.querySelectorAll("[data-workflow-choice]").forEach((button) => {
+      button.classList.remove("selected");
+      button.setAttribute("aria-pressed", "false");
+    });
+    ["#briefHighlightSettings", "#briefContentSettings", "#briefSpeakerSettings", "#briefPersonSettings"]
+      .forEach((selector) => briefRoot.querySelector(selector)?.classList.add("hidden"));
+    setBriefCreationStatus("视频已就绪", "填写目标后生成计划；确认前不会分析或渲染");
+    setBriefCreationError("");
+  };
 
   const selectWorkflow = (workflowKind) => {
     pendingCreateWorkflowKind = workflowKind;
@@ -6790,7 +7857,7 @@ function showBriefCard(file) {
     if (workflowInstruction && carriedInstruction && !workflowInstruction.value.trim()) {
       workflowInstruction.value = carriedInstruction;
     }
-    $("#briefWorkflowHelp")?.classList.toggle("hidden", Boolean(workflowKind));
+    briefRoot.querySelector("#briefWorkflowHelp")?.classList.add("template-selected");
     $("#briefHighlightSettings")?.classList.toggle("hidden", workflowKind !== "highlight");
     $("#briefContentSettings")?.classList.toggle("hidden", workflowKind !== "content_search");
     $("#briefSpeakerSettings")?.classList.toggle("hidden", workflowKind !== "speaker_edit");
@@ -6819,6 +7886,42 @@ function showBriefCard(file) {
       requestAnimationFrame(() => briefRoot.querySelector("#briefContentInstruction")?.focus({ preventScroll: true }));
     }
   };
+  const agentGoalInput = briefRoot.querySelector("#briefAgentGoal");
+  const examples = document.createElement("div");
+  examples.className = "brief-goal-examples";
+  examples.setAttribute("aria-label", "剪辑要求示例");
+  for (const [label, goal] of [["访谈精华", "剪成 3 分钟访谈精华，保留完整观点，去掉重复表达并添加字幕"], ["竖屏发布", "制作 60 秒竖屏短视频，保留重点内容，使用虚化背景补边并添加字幕"], ["查找内容", "查找视频中关于产品介绍的完整片段，保留上下文"]]) {
+    const example = document.createElement("button");
+    example.type = "button";
+    example.textContent = label;
+    example.onclick = () => {
+      activateAgentPath();
+      agentGoalInput.value = goal;
+      agentGoalInput.dispatchEvent(new Event("input", { bubbles: true }));
+      agentGoalInput.focus();
+    };
+    examples.append(example);
+  }
+  agentGoalInput?.closest("label")?.after(examples);
+  const agentSkillSelect = briefRoot.querySelector("#briefAgentSkillSelect");
+  const agentExecutionMode = briefRoot.querySelector("#briefAgentExecutionMode");
+  const submitAgent = () => createAgentJobFromBrief({
+    goal: agentGoalInput?.value || "", skillId: agentSkillSelect?.value || "",
+    executionMode: agentExecutionMode?.value || "autonomous_review",
+  });
+  briefRoot.querySelector("[data-start-agent]")?.addEventListener("click", submitAgent);
+  briefRoot.querySelector("[data-open-agent-registry]")?.addEventListener("click", () => {
+    window.ClipTalkAgentWorkspace?.openRegistry();
+  });
+  agentGoalInput?.addEventListener("focus", activateAgentPath);
+  agentGoalInput?.addEventListener("input", () => setBriefCreationError(""));
+  agentGoalInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      submitAgent();
+    }
+  });
+  agentSkillSelect?.addEventListener("change", activateAgentPath);
   briefRoot.querySelectorAll("[data-workflow-choice]").forEach((button) => button.addEventListener("click", () => selectWorkflow(button.dataset.workflowChoice)));
   briefRoot.querySelectorAll("[data-start-workflow]").forEach((button) => button.addEventListener("click", () => {
     if (button.dataset.startWorkflow === "highlight") createJobFromBrief({ allowDefaultHighlight: true });
@@ -6828,7 +7931,9 @@ function showBriefCard(file) {
   const contentInstructionInput = briefRoot.querySelector("#briefContentInstruction");
   const submitContentSearch = () => createJobFromBrief({ instructionOverride: contentInstructionInput?.value || "" });
   briefRoot.querySelector("[data-start-content-search]")?.addEventListener("click", submitContentSearch);
-  contentInstructionInput?.addEventListener("input", () => setBriefCreationError(""));
+  contentInstructionInput?.addEventListener("input", () => {
+    setBriefCreationError("");
+  });
   contentInstructionInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -6881,8 +7986,12 @@ function showBriefCard(file) {
   setAssistantPanelExpanded(true);
   syncUnifiedWorkspaceView();
 }
-async function prepareResumableUpload(file, onProgress) {
-  const storageKey = `cliptalk-upload:${file.name}:${file.size}:${file.lastModified}`;
+// Kept as a compatibility fallback for embedded clients that still open the
+// legacy creation card explicitly; the default upload path now uses a draft.
+window.ClipTalkLegacyBriefCard = showBriefCard;
+async function prepareResumableUpload(file, onProgress, { creationSessionId = currentCreationSessionId } = {}) {
+  const sessionPart = String(creationSessionId || "legacy");
+  const storageKey = `cliptalk-upload:${sessionPart}:${file.name}:${file.size}:${file.lastModified}`;
   let upload = null;
   const remembered = localStorage.getItem(storageKey);
   if (remembered) {
@@ -6917,6 +8026,74 @@ async function prepareResumableUpload(file, onProgress) {
     onProgress?.(offset / file.size);
   }
   return { id: upload.id, storageKey };
+}
+
+async function createAgentJobFromBrief({ goal = "", skillId = "", executionMode = "autonomous_review" } = {}) {
+  if (!videoInput.files.length || actionBusy) return;
+  const normalizedGoal = String(goal || "").trim();
+  if (normalizedGoal.length < 5) {
+    setBriefCreationError("请具体描述想得到的成片；例如内容重点、目标时长、人物或呈现方式。");
+    $("#briefAgentGoal")?.focus();
+    return;
+  }
+  let briefOptions;
+  try {
+    briefOptions = activeBriefOptions(normalizedGoal);
+  } catch (error) {
+    setBriefCreationError(error.message);
+    return;
+  }
+  const createGeneration = workspaceGeneration;
+  const file = videoInput.files[0];
+  const goalInput = $("#briefAgentGoal");
+  const skillSelect = $("#briefAgentSkillSelect");
+  const executionModeSelect = $("#briefAgentExecutionMode");
+  const submitButton = $("[data-start-agent]");
+  actionBusy = true;
+  setBriefCreationError("");
+  syncWorkspaceState({ uploading: true, home: false });
+  if (goalInput) goalInput.disabled = true;
+  if (skillSelect) skillSelect.disabled = true;
+  if (executionModeSelect) executionModeSelect.disabled = true;
+  if (submitButton) submitButton.disabled = true;
+  setComposerSending(true);
+  setBriefCreationStatus("上传中", "正在建立 Agent 素材工作区；此时不会启动内容分析");
+  try {
+    const resumable = file.size >= 16 * 1024 * 1024
+      ? await prepareResumableUpload(file, (fraction) => {
+          setBriefCreationStatus("上传中", `正在上传视频 ${Math.round(fraction * 100)}%`);
+        })
+      : null;
+    const form = window.ClipTalkTaskCreation.buildForm({
+      file, uploadSessionId: resumable?.id || "", instruction: normalizedGoal,
+      taskMode: "content_extract", sourceScope: briefOptions.sourceScope,
+      entryWorkflow: "agent", workflowKind: "content_search",
+    });
+    if (resumable) setBriefCreationStatus("校验中", "视频上传完成，正在校验媒体并建立工作区……");
+    const { job } = await api("/api/jobs", { method: "POST", body: form });
+    if (resumable) localStorage.removeItem(resumable.storageKey);
+    if (createGeneration !== workspaceGeneration || !homeNavigationRequested) return;
+    homeNavigationRequested = false;
+    renderJob(job);
+    await window.ClipTalkAgentWorkspace?.submitGoal(normalizedGoal, {
+      skillId: String(skillId || ""), executionMode: String(executionMode || "autonomous_review"),
+    });
+  } catch (error) {
+    if (createGeneration !== workspaceGeneration) return;
+    setBriefCreationError(error.message || "Agent 任务创建失败");
+    setBriefCreationStatus("视频已就绪", "检查配置或网络后重新生成计划");
+  } finally {
+    if (createGeneration === workspaceGeneration) {
+      actionBusy = false;
+      setComposerSending(false);
+      if (!currentJob && goalInput) goalInput.disabled = false;
+      if (!currentJob && skillSelect) skillSelect.disabled = false;
+      if (!currentJob && executionModeSelect) executionModeSelect.disabled = false;
+      if (!currentJob && submitButton) submitButton.disabled = false;
+      updateComposerBeam();
+      if (!currentJob) syncWorkspaceState({ home: false });
+    }
+  }
 }
 
 async function createJobFromBrief({ allowDefaultHighlight = false, instructionOverride = null } = {}) {
@@ -7573,7 +8750,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
   const executionMarkup = voiceCandidateSearch
     ? `<div class="recognition-coverage"><span>本次片段依据</span><b>说话人分组</b><b>对白时间轴</b><small>按已识别的匿名声音整理发言范围，不把“索引证据数”当作声音识别质量。</small></div>${warningMarkup}`
     : `<div class="recognition-coverage"><span>系统自动选择的查找依据</span>${allowedCapabilities.length ? allowedCapabilities.map((value) => `<b>${escapeHtml(capabilityLabels[value] || value)}</b>`).join("") : "<b>正在理解</b>"}<small>${executionHint}</small>${personCoverageMarkup}</div>${warningMarkup}`;
-  const diagnosticsMarkup = `<details class="content-review-diagnostics"><summary>查找依据与诊断</summary><div>${executionMarkup}${modelTraceMarkup}${completenessMarkup}</div></details>`;
+  const diagnosticsMarkup = `<details class="content-review-diagnostics"><summary>查看检索详情</summary><div><p>${escapeHtml(statsText)}</p>${executionMarkup}${modelTraceMarkup}${completenessMarkup}</div></details>`;
   const questionInterpretation = questionPredicate
     ? `<p class="content-search-scope">问题检索：${String(questionPredicate.source || questionPredicate.questionSource || "all") === "spoken" ? "只查口头提问" : String(questionPredicate.source || questionPredicate.questionSource || "all") === "screen" ? "只查画面问题" : "口头提问 + 画面问题"}；只输出问题片段，不包含回答</p>`
     : "";
@@ -7662,7 +8839,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
     const denseButton = allowedCapabilities.includes("visual")
       && search.status !== "needs_clarification"
       && (!denseSearchCompleted || (exhaustive && !coverageComplete))
-      ? `<button type="button" data-content-feedback="missed_content" title="会增加画面采样和视觉模型检查，耗时与模型调用可能增加">${denseSearchCompleted ? "继续检查未覆盖画面" : "提高采样密度并检查剩余范围"}</button>`
+      ? `<button type="button" data-content-feedback="missed_content" title="会检查更多画面，处理时间可能增加">${denseSearchCompleted ? "继续检查未覆盖画面" : "继续检查剩余画面"}</button>`
       : "";
     const scanTitle = search.scanProgress?.phaseLabel
       ? escapeHtml(String(search.scanProgress.phaseLabel))
@@ -7675,7 +8852,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
     && (exhaustive ? !coverageComplete : !denseSearchCompleted);
   const recoveryOpen = exhaustive && !coverageComplete || reliableCount === 0;
   const recoveryMarkup = recoveryAvailable
-    ? `<details class="content-search-recovery"${recoveryOpen ? " open" : ""}><summary>${exhaustive ? (denseSearchCompleted ? "仍有未覆盖画面" : "扫描尚未完整") : "结果可能有遗漏？"}</summary><div><p>${exhaustive ? "当前结果尚未覆盖完整检索范围。可以提高采样密度，继续检查尚不确定的画面区域；这会增加处理时间和视觉模型调用。" : "自动补检已经检查了召回候选；如果仍有遗漏，可以进一步提高画面采样密度并检查剩余相关范围，处理时间和视觉模型调用可能增加。"}</p><button type="button" data-content-feedback="missed_content">${denseSearchCompleted ? "继续检查未覆盖画面" : "提高采样密度并检查剩余范围"}</button></div></details>`
+    ? `<details class="content-search-recovery"${recoveryOpen ? " open" : ""}><summary>${exhaustive ? (denseSearchCompleted ? "仍有未覆盖画面" : "扫描尚未完整") : "结果可能有遗漏？"}</summary><div><p>${exhaustive ? "当前结果尚未覆盖完整检索范围。可以继续检查尚不确定的画面区域，处理时间会相应增加。" : "如果仍有遗漏，可以继续检查剩余画面，处理时间会相应增加。"}</p><button type="button" data-content-feedback="missed_content">${denseSearchCompleted ? "继续检查未覆盖画面" : "继续检查剩余画面"}</button></div></details>`
     : "";
   const possibleToggleMarkup = pendingPossibleCount
     ? `<button type="button" class="content-possible-toggle" data-content-show-possible aria-expanded="false"><span>查看待试听复核</span><b>${pendingPossibleCount} 个内容段</b><small>证据较弱，尚未人工保留</small></button>`
@@ -7698,7 +8875,7 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
     : "";
   return `<article class="chat-message assistant content-search-message" data-conversation-key="search:${escapeHtml(search.id || "")}"><span class="avatar">AI</span><div class="recommendation-wrap">
     <section class="content-search-review${personWorkflow ? " person-review" : ""}${historicalSearchClass}" data-content-search-id="${escapeHtml(search.id || "")}">
-      <header><div><small>${isCurrentSearch ? (personWorkflow ? "人物剪辑 · 第 2 步" : "当前检索 · 确认片段") : "已保留结果 · 选择片段"}</small><strong>${personWorkflow ? "人物出镜片段已整理" : exhaustive ? exhaustiveTitle : "相关片段检索完成"} · ${reliableCount} 个证据充分${keptPossibleCount ? `，${keptPossibleCount} 个已试听保留` : ""}${pendingPossibleCount ? `，${pendingPossibleCount} 个待复核` : ""}</strong><p>${escapeHtml(search.intent?.query || search.instruction || "")}</p><p class="content-search-stats">${escapeHtml(statsText)}${exhaustive ? ` · ${strictComplete ? "检索覆盖已完成" : "当前为部分覆盖结果"}` : ""}</p>${questionInterpretation}${dialogueInterpretation}${dialogueModeMarkup}${scopeMarkup}${historicalSearchToggle}</div><b>${personWorkflow ? "核对出镜" : "核对片段"}</b></header>
+      <header><div><small>${isCurrentSearch ? (personWorkflow ? "人物剪辑 · 第 2 步" : "当前检索 · 确认片段") : "已保留结果 · 选择片段"}</small><strong>${personWorkflow ? "人物出镜片段已整理" : exhaustive ? exhaustiveTitle : "相关片段检索完成"} · ${reliableCount} 个匹配片段${keptPossibleCount ? `，${keptPossibleCount} 个已试听保留` : ""}${pendingPossibleCount ? `，${pendingPossibleCount} 个待复核` : ""}</strong><p>${escapeHtml(search.intent?.query || search.instruction || "")}</p><p class="content-search-stats">本次找到 ${candidates.length} 个片段${exhaustive && !strictComplete ? " · 尚未检查完整段素材" : ""}</p>${questionInterpretation}${dialogueInterpretation}${dialogueModeMarkup}${scopeMarkup}${historicalSearchToggle}</div><b>${personWorkflow ? "核对出镜" : "核对片段"}</b></header>
       ${personClipFlowMarkup}
       ${personReviewHandoffMarkup}
       ${retainedSearchesMarkup}
@@ -7719,7 +8896,13 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
         const evidence = match.transcriptExcerpt || match.audioEvidence?.transcriptExcerpt || match.text || match.matchedEvidence || match.reason || "画面索引匹配";
         const type = contentMatchTypeLabel(match);
         const methodLabel = contentMatchMethodLabel(match);
-        const boundaryLabel = contentBoundarySourceLabel(match.boundarySource);
+        const boundaryRange = match.boundaryVerification?.verifiedRange;
+        const boundaryState = boundaryRange && (Number(boundaryRange[0]) !== Number(match.start) || Number(boundaryRange[1]) !== Number(match.end))
+          ? "pending" : String(match.boundaryVerification?.status || "");
+        const boundaryLabel = boundaryState === "verified" ? "已抽样核验（非逐帧）"
+          : boundaryState === "human_confirmed" ? "人工确认范围"
+          : boundaryState === "pending" ? "待核验，不能自动合成"
+          : contentBoundarySourceLabel(match.boundarySource);
         const voiceEvidence = match.voiceMatchEvidence;
         const voiceScoreMarkup = voiceEvidence?.score != null
           ? `<span>·</span>声纹分 ${Number(voiceEvidence.score).toFixed(3)}${voiceEvidence.margin == null ? "" : ` · 领先 ${Number(voiceEvidence.margin).toFixed(3)}`}`
@@ -7773,7 +8956,48 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
           : rejected
             ? `<button type="button" data-content-feedback="review_keep" data-content-match-id="${escapeHtml(match.id)}">恢复并保留</button>`
             : `<button type="button" data-content-feedback="not_relevant" data-content-match-id="${escapeHtml(match.id)}">不相关</button>${adjustBoundaryButton}`;
-        const boundaryEditor = canAdjustBoundary ? `<section class="content-boundary-editor hidden" data-content-boundary-editor="${escapeHtml(match.id)}" data-boundary-start="${Number(match.start) || 0}" data-boundary-end="${Number(match.end) || 0}"><header><div><strong>调整片段入点与出点</strong><small>先用逐帧或逐秒按钮微调，再预览片段；保存后直接更新当前探索结果，不会重新检索。</small><em>原范围 ${formatTime(match.automaticBoundary?.start ?? match.start)} → ${formatTime(match.automaticBoundary?.end ?? match.end)}</em></div><b data-boundary-summary>${formatTime(match.start)} → ${formatTime(match.end)}</b></header><div class="content-boundary-edges"><fieldset><legend>入点 <span data-boundary-start-label>${formatTime(match.start)}</span></legend><label class="content-boundary-time-input"><span>开始秒数</span><input type="number" min="0" value="${Number(match.start) || 0}" data-boundary-value="start" inputmode="decimal"></label><div class="content-boundary-nudges"><button type="button" data-boundary-adjust="start:-frame">前一帧</button><button type="button" data-boundary-adjust="start:frame">后一帧</button><button type="button" data-boundary-adjust="start:-1">前一秒</button><button type="button" data-boundary-adjust="start:1">后一秒</button></div><button type="button" class="content-boundary-playhead" data-boundary-playhead="start">将播放位置设为入点</button></fieldset><fieldset><legend>出点 <span data-boundary-end-label>${formatTime(match.end)}</span></legend><label class="content-boundary-time-input"><span>结束秒数</span><input type="number" min="0" value="${Number(match.end) || 0}" data-boundary-value="end" inputmode="decimal"></label><div class="content-boundary-nudges"><button type="button" data-boundary-adjust="end:-frame">前一帧</button><button type="button" data-boundary-adjust="end:frame">后一帧</button><button type="button" data-boundary-adjust="end:-1">前一秒</button><button type="button" data-boundary-adjust="end:1">后一秒</button></div><button type="button" class="content-boundary-playhead" data-boundary-playhead="end">将播放位置设为出点</button></fieldset></div><footer><span data-boundary-frame-rate>正在读取源视频帧率…</span><div><button type="button" data-boundary-preview>预览片段</button><button type="button" data-boundary-auto>自动重新识别</button>${match.manualBoundary ? `<button type="button" data-boundary-reset>恢复自动边界</button>` : ""}<button type="button" data-boundary-cancel>取消</button><button type="button" class="primary" data-boundary-save>保存修改</button></div></footer></section>` : "";
+        const boundaryEditor = canAdjustBoundary ? `
+          <section class="content-boundary-editor hidden" data-content-boundary-editor="${escapeHtml(match.id)}"
+            data-boundary-start="${Number(match.start) || 0}" data-boundary-end="${Number(match.end) || 0}"
+            data-boundary-original-start="${Number(match.start) || 0}" data-boundary-original-end="${Number(match.end) || 0}">
+            <header>
+              <div><strong>调整片段边界</strong><small>只修改当前片段，不会重新检索或改变其他片段。</small></div>
+            </header>
+            <section class="content-boundary-range" aria-label="边界修改摘要">
+              <div><span>当前范围</span><em>${formatTime(match.start)} → ${formatTime(match.end)}</em></div>
+              <div class="content-boundary-range-track" aria-hidden="true"><i></i><b></b><i></i></div>
+              <div><span>修改后</span><strong data-boundary-summary>${formatTime(match.start)} → ${formatTime(match.end)}</strong></div>
+            </section>
+            <div class="content-boundary-edges">
+              <fieldset data-boundary-edge="start">
+                <legend><b>入点</b><span data-boundary-start-label>${formatTime(match.start)}</span></legend>
+                <label class="content-boundary-time-input"><span>时间（秒）</span><input type="number" min="0" value="${Number(match.start) || 0}" data-boundary-value="start" inputmode="decimal" aria-label="入点时间，单位秒"></label>
+                <div class="content-boundary-nudges" aria-label="微调入点">
+                  <button type="button" data-boundary-adjust="start:-1" aria-label="入点前移一秒">−1秒</button>
+                  <button type="button" data-boundary-adjust="start:-frame" aria-label="入点前移一帧">−1帧</button>
+                  <button type="button" class="content-boundary-playhead" data-boundary-playhead="start" aria-label="将当前播放位置设为入点">当前帧</button>
+                  <button type="button" data-boundary-adjust="start:frame" aria-label="入点后移一帧">+1帧</button>
+                  <button type="button" data-boundary-adjust="start:1" aria-label="入点后移一秒">+1秒</button>
+                </div>
+              </fieldset>
+              <fieldset data-boundary-edge="end">
+                <legend><b>出点</b><span data-boundary-end-label>${formatTime(match.end)}</span></legend>
+                <label class="content-boundary-time-input"><span>时间（秒）</span><input type="number" min="0" value="${Number(match.end) || 0}" data-boundary-value="end" inputmode="decimal" aria-label="出点时间，单位秒"></label>
+                <div class="content-boundary-nudges" aria-label="微调出点">
+                  <button type="button" data-boundary-adjust="end:-1" aria-label="出点前移一秒">−1秒</button>
+                  <button type="button" data-boundary-adjust="end:-frame" aria-label="出点前移一帧">−1帧</button>
+                  <button type="button" class="content-boundary-playhead" data-boundary-playhead="end" aria-label="将当前播放位置设为出点">当前帧</button>
+                  <button type="button" data-boundary-adjust="end:frame" aria-label="出点后移一帧">+1帧</button>
+                  <button type="button" data-boundary-adjust="end:1" aria-label="出点后移一秒">+1秒</button>
+                </div>
+              </fieldset>
+            </div>
+            <div class="content-boundary-status"><span data-boundary-frame-rate>正在读取源视频帧率…</span><strong data-boundary-change>尚未修改</strong></div>
+            <footer>
+              <div class="content-boundary-secondary-actions"><button type="button" data-boundary-auto>重新识别边界</button>${match.manualBoundary ? `<button type="button" data-boundary-reset>恢复自动边界</button>` : ""}</div>
+              <div class="content-boundary-primary-actions"><button type="button" data-boundary-cancel>取消</button><button type="button" data-boundary-preview>试看片段</button><button type="button" class="primary" data-boundary-save disabled>保存修改</button></div>
+            </footer>
+          </section>` : "";
         const confidenceTier = String(match.confidenceTier || (pending ? "possible" : "reliable"));
         const highConfidence = confidenceTier === "reliable" && !rejected;
         const hidePossible = confidenceTier === "possible" && reviewStatus !== "kept";
@@ -7783,12 +9007,12 @@ function contentSearchReviewMarkup(job, search = job.contentSearch || {}, { hist
           ? `<details class="content-candidate-event" open data-candidate-event="${escapeHtml(event.id || "")}"><summary><span><small>${personWorkflow ? "出镜事件" : "发言事件"} ${Number(event.number || 0)}</small><strong>${escapeHtml(event.title || "连续事件")}</strong><em>${formatTime(event.start)} → ${formatTime(event.end)}</em></span><b>${Number(event.segmentCount || 0)} 个子片段 · 有效 ${Number(event.clipDuration || 0).toFixed(1)} 秒</b></summary><div class="content-candidate-event-segments">`
           : "";
         const eventSuffix = eventContext?.eventIndex === eventContext?.eventSize - 1 ? "</div></details>" : "";
-        return `${eventPrefix}<article class="content-match-row${pending ? " review-pending" : ""}${rejected ? " review-rejected" : ""}${confidenceTier === "possible" ? " content-candidate-possible" : ""}${hidePossible ? " hidden" : ""}${index >= 50 ? " content-candidate-overflow hidden" : ""}" data-content-match-row="${escapeHtml(match.id)}" data-content-question-source="${escapeHtml(questionSource || "other")}" data-content-reliable="${highConfidence ? "true" : "false"}"><div class="content-match-main"><input id="${inputId}" type="checkbox" data-content-match data-content-review-status="${escapeHtml(reviewStatus)}" value="${escapeHtml(match.id)}" ${checked ? "checked" : ""} ${rejected ? "disabled" : ""} aria-label="选择${escapeHtml(match.title || `匹配片段 ${index + 1}`)}"><div class="content-match-copy${canAdjustBoundary ? " boundary-clickable" : ""}"${canAdjustBoundary ? ` data-content-card-preview="${escapeHtml(match.id)}" role="button" tabindex="0" title="预览片段"` : ""}><div class="content-match-title"><label for="${inputId}"><strong>${escapeHtml(match.title || `匹配片段 ${index + 1}`)}</strong>${rejected ? `<i>已排除</i>` : reviewStatus === "kept" && confidenceTier === "possible" ? `<i>已试听保留</i>` : ""}</label><b class="confidence-${escapeHtml(confidenceTier)}" title="按可定位证据强度分层，不是统计概率">${confidenceTier === "reliable" ? "证据充分" : "可能相关"}</b></div><p class="content-match-meta">${formatTime(match.start)} → ${formatTime(match.end)}<span>·</span>${Number(match.duration || 0).toFixed(1)} 秒<span>·</span>${type}${match.speaker ? `<span>·</span>${escapeHtml(match.speaker)}` : ""}</p>${evidenceChips}<p class="content-match-diagnostics">${escapeHtml(methodLabel)}<span>·</span>边界：${escapeHtml(boundaryLabel)}${voiceScoreMarkup}</p>${reviewReasons.length ? `<p class="content-match-review-reasons">判断依据：${reviewReasons.map(escapeHtml).join("；")}</p>` : ""}<p class="content-match-evidence"><small>${evidenceLabel}</small>${escapeHtml(evidence)}</p></div></div><div class="content-match-buttons" aria-label="片段操作"><button type="button" class="content-match-preview" data-content-preview="${escapeHtml(match.id)}">预览</button>${reviewButtons}</div>${boundaryEditor}</article>${eventSuffix}`;
+        return `${eventPrefix}<article class="content-match-row${pending ? " review-pending" : ""}${rejected ? " review-rejected" : ""}${confidenceTier === "possible" ? " content-candidate-possible" : ""}${hidePossible ? " hidden" : ""}${index >= 50 ? " content-candidate-overflow hidden" : ""}" data-content-match-row="${escapeHtml(match.id)}" data-content-question-source="${escapeHtml(questionSource || "other")}" data-content-reliable="${highConfidence ? "true" : "false"}"><div class="content-match-main"><input id="${inputId}" type="checkbox" data-content-match data-content-review-status="${escapeHtml(reviewStatus)}" value="${escapeHtml(match.id)}" ${checked ? "checked" : ""} ${rejected ? "disabled" : ""} aria-label="选择${escapeHtml(match.title || `匹配片段 ${index + 1}`)}"><div class="content-match-copy${canAdjustBoundary ? " boundary-clickable" : ""}"${canAdjustBoundary ? ` data-content-card-preview="${escapeHtml(match.id)}" role="button" tabindex="0" title="播放片段"` : ""}><div class="content-match-title"><label for="${inputId}"><strong>${escapeHtml(match.title || `匹配片段 ${index + 1}`)}</strong>${rejected ? `<i>已排除</i>` : reviewStatus === "kept" && confidenceTier === "possible" ? `<i>已试听保留</i>` : ""}</label><b class="confidence-${escapeHtml(confidenceTier)}" title="按可定位证据强度分层，不是统计概率">${match.subjectDescription && ["unverified", "contextual"].includes(String(match.subjectStatus || "unverified")) ? "需确认对象" : confidenceTier === "reliable" ? "匹配片段" : "可能相关"}</b></div><p class="content-match-meta">${formatTime(match.start)} → ${formatTime(match.end)}<span>·</span>${Number(match.duration || 0).toFixed(1)} 秒<span>·</span>${type}${match.speaker ? `<span>·</span>${escapeHtml(match.speaker)}` : ""}</p><details class="content-match-details"><summary>查看匹配依据</summary>${evidenceChips}<p class="content-match-diagnostics">${escapeHtml(methodLabel)}<span>·</span>边界：${escapeHtml(boundaryLabel)}${voiceScoreMarkup}</p>${reviewReasons.length ? `<p class="content-match-review-reasons">判断依据：${reviewReasons.map(escapeHtml).join("；")}</p>` : ""}<p class="content-match-evidence"><small>${evidenceLabel}</small>${escapeHtml(evidence)}</p></details></div></div><div class="content-match-buttons" aria-label="片段操作"><button type="button" class="content-match-preview" data-content-preview="${escapeHtml(match.id)}">播放</button>${reviewButtons}</div>${boundaryEditor}</article>${eventSuffix}`;
       }).join("")}</div>${candidates.length > 50 ? `<button type="button" class="content-show-more" data-content-show-more>再显示 50 段</button>` : ""}
       ${bulkControlsMarkup}
       ${historyMarkup}
-      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别导出</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按源视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>LLM 推荐顺序</option></select></label><small data-content-order-hint>保持源视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "生成当前检索视频"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}${restoreButtonMarkup}</footer>`}
-      <p class="content-search-safety">人物仅使用画面描述或匿名 Speaker 标签，不进行实名识别。也可以直接在对话中输入新要求继续检索。</p>
+      ${isCurrentSearch ? `<footer class="content-search-actions"><div class="content-selection-summary" data-content-selection-summary></div><details class="content-generation-settings"><summary>生成设置</summary><div class="content-output-controls"><label data-content-output-wrap><span>输出方式</span><select data-content-output-mode><option value="single_reel" ${draftOutputMode === "single_reel" ? "selected" : ""}>合成一条视频</option><option value="separate_events" ${draftOutputMode === "separate_events" ? "selected" : ""}>每段分别生成</option></select></label><label data-content-order-wrap><span>合成顺序</span><select data-content-order-mode><option value="source" ${draftOrderMode === "source" ? "selected" : ""}>按视频时间</option><option value="selection" ${draftOrderMode === "selection" ? "selected" : ""}>自定义排列</option><option value="llm_recommend" ${draftOrderMode === "llm_recommend" ? "selected" : ""}>智能排序</option></select></label><small data-content-order-hint>保持视频中的时间先后，适合过程记录和访谈。</small></div><label class="content-subtitle-toggle"><input type="checkbox" data-content-subtitle ${reviewDraft.subtitleEnabled ? "checked" : ""}><span><b>添加 AI 字幕</b><small data-content-subtitle-status>正在检查所选片段的对白…</small></span></label></details><div class="content-search-submit-actions">${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}<button type="button" class="primary" data-confirm-content>${personWorkflow ? "核对完成，合成视频" : "用所选片段剪辑"}</button></div></footer>${recoveryMarkup}` : `<footer class="content-history-actions"><span>勾选只影响这次检索，不会自动加入成片清单</span>${contentBasketActionRelevant(job) ? `<button type="button" data-content-basket-add>加入成片清单</button>` : ""}${restoreButtonMarkup}</footer>`}
+      ${personWorkflow ? `<p class="content-search-safety">人物以画面描述区分，不进行实名识别。</p>` : ""}
     </section></div></article>`;
 }
 
@@ -7796,16 +9020,16 @@ function contentOutputResultMarkup(job, selectedVersions = null, { historical = 
   if (taskModePresentation(job).key !== "content_extract") return "";
   const versions = (selectedVersions || jobOutputVersions(job)).filter((version) => (version.outputs || []).length);
   if (!versions.length) return "";
-  const buttons = versions.flatMap((version) => (version.outputs || []).map((output, outputIndex) => {
+  const buttons = versions.flatMap((version) => (version.outputs || []).map((output) => {
     const versionLabel = `V${Number(version.number || 1)}`;
-    const separate = String(version.outputMode || job.outputMode || "single_reel") !== "single_reel" || (version.outputs || []).length > 1;
-    const label = separate ? `${versionLabel} · 内容片段 ${outputIndex + 1}` : `${versionLabel} · 内容视频`;
+    const label = `${outputVersionIdentity(version, output)} · 内容视频`;
     const segmentCount = Number(output.segmentCount || output.segments?.length || 0);
-    const sourceQuery = String(version.contentSearchInstruction || version.sourceLabel || "").trim();
-    return `<div class="auto-version-entry"><button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}"><span>${escapeHtml(label)} <em>已核对</em></span><small>${sourceQuery ? `${escapeHtml(sourceQuery)} · ` : ""}${segmentCount ? `${segmentCount} 个已确认片段 · ` : ""}${Number(output.duration || 0).toFixed(1)} 秒 · 点击预览</small></button>${outputVersionDownloadLinkMarkup(version, output, { className: "auto-version-download" })}</div>`;
+    const sourceQuery = compact ? "" : String(version.contentSearchInstruction || version.sourceLabel || "").trim();
+    const reviewLabel = [version.qualityStatus, output.qualityStatus].includes("needs_review") ? "待复核" : "已生成";
+    return `<div class="auto-version-entry"><button type="button" class="auto-version-button" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}"><span>${escapeHtml(label)} <em>${reviewLabel}</em></span><small>${sourceQuery ? `${escapeHtml(sourceQuery)} · ` : ""}${segmentCount ? `${segmentCount} 个已选片段 · ` : ""}${Number(output.duration || 0).toFixed(1)} 秒 · 点击播放</small></button></div>`;
   }));
   const singleVersion = versions.length === 1 ? `V${Number(versions[0].number || 1)}` : "";
-  return `<section class="auto-compose-result-card content-output-result-card${historical ? " historical" : ""}${compact ? " compact" : ""}"><strong>${compact && singleVersion ? `${singleVersion} 已生成` : `${historical ? "以前生成的内容视频" : "内容视频已生成"} · ${versions.length} 个版本`}</strong><p>${compact ? "对应本次确认的片段。" : historical ? "来自之前确认的片段，不会被本次检索覆盖。" : "仅包含最终确认的时间范围。"} 点击版本可预览${compact ? "。" : "或下载高清 MP4。"}</p><div>${buttons.join("")}</div></section>`;
+  return `<section class="auto-compose-result-card content-output-result-card${historical ? " historical" : ""}${compact ? " compact" : ""}"><strong>${compact && singleVersion ? `${singleVersion} 已生成` : `${historical ? "以前生成的内容视频" : "内容视频已生成"} · ${versions.length} 个版本`}</strong><p>${compact ? "对应本次确认的片段。" : historical ? "来自之前确认的片段，不会被本次检索覆盖。" : "仅包含最终确认的时间范围。"} 点击版本可预览，当前版本可从播放器顶部下载。</p><div>${buttons.join("")}</div></section>`;
 }
 
 function contentSearchRecordsForJob(job = currentJob) {
@@ -8126,7 +9350,13 @@ function conversationMessageMarkup(message, assistantRoleLabel) {
   const originTag = message.inherited
     ? `<em class="message-origin">${escapeHtml(originWorkflowLabel ? `${originWorkflowLabel} · 历史任务` : "历史任务")}</em>`
     : "";
-  return `<article class="chat-message ${role}" data-conversation-key="message:${escapeHtml(message.id || "")}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small>${role === "user" ? "你" : assistantRoleLabel}${originTag}${repeatLabel}</small><p>${escapeHtml(message.text)}</p></div></article>`;
+  const planTag = message.planLabel ? `<em class="message-origin" title="${escapeHtml(message.planGoal || "")}">${escapeHtml(message.planLabel)}</em>` : "";
+  const metaClass = originTag || repeatLabel || planTag ? "message-meta" : "message-role-only";
+  const historicalRecord = role === "assistant" && ["notice", "revision", "agent_plan"].includes(message.kind) && String(message.text || "").length > 180;
+  const messageBody = historicalRecord
+    ? `<details class="message-details"><summary>查看处理记录</summary><p>${escapeHtml(message.text)}</p></details>`
+    : `<p>${escapeHtml(message.text)}</p>`;
+  return `<article class="chat-message ${role}" data-conversation-key="message:${escapeHtml(message.id || "")}"><span class="avatar">${role === "user" ? "你" : "AI"}</span><div class="bubble"><small class="${metaClass}"><span class="message-role-label">${role === "user" ? "你" : assistantRoleLabel}</span>${originTag}${repeatLabel}${planTag}</small>${messageBody}</div></article>`;
 }
 
 function normalizedConversationInstruction(value) {
@@ -8200,9 +9430,14 @@ function conversationTimelineMarkup(job, messages, assistantRoleLabel) {
     return `<article class="chat-message assistant content-version-message" data-conversation-key="output-version:${escapeHtml(version.id || `v${version.number || 0}`)}"><div class="recommendation-wrap">${contentOutputResultMarkup(job, [version], { compact: true })}</div></article>`;
   };
   const parts = [];
-  if (unresolved.length) {
-    parts.push(`<article class="chat-message assistant content-early-history" data-conversation-key="early-history"><div class="recommendation-wrap"><details><summary>早期历史 · ${unresolved.length} 条未能可靠归位的检索记录</summary><div>${unresolved.map(searchMarkup).join("")}</div></details></div></article>`);
-  }
+  // Do not expose internal reconciliation failures such as "unresolved early
+  // history" in the user-facing chat. If the active search has no reliable
+  // conversation anchor, keep it visible; older unmatched searches remain
+  // accessible through retained/history result surfaces instead of appearing as
+  // a confusing diagnostic block in the current dialogue.
+  unresolved
+    .filter((search) => String(search?.id || "") === currentId)
+    .forEach((search) => parts.push(searchMarkup(search)));
   messages.forEach((message, index) => {
     parts.push(conversationMessageMarkup(message, assistantRoleLabel));
     const version = versionForMessage(message);
@@ -8337,7 +9572,7 @@ function syncContentSearchOutputControls(root, job = currentJob) {
   const hints = {
     source: "保持源视频中的时间先后，适合过程记录和访谈。",
     selection: "确认时可逐项上移或下移，系统严格采用你的排列。",
-    llm_recommend: "LLM 只推荐顺序，不会增删片段或修改任何起止点；推荐后还需再次确认。",
+    llm_recommend: "根据内容连贯性调整所选片段顺序，完成后可以再次确认。",
   };
   hint.classList.toggle("hidden", !multiple);
   hint.textContent = separate ? "每个片段独立输出，不涉及合成顺序。" : hints[order.value] || hints.source;
@@ -8431,9 +9666,13 @@ function chatUiContextEntries() {
     || eventSegmentIds.length > 1
     || timelineChatSelections.length > 1;
   const hasNonDefaultComposition = outputAssemblyMode !== "single_reel";
+  const contentRoot = activeContentReviewRoot(currentJob);
+  const contentDraft = contentRoot ? collectContentReviewDraft(contentRoot, currentJob) : currentJob.contentSearch?.reviewDraft;
+  const contentIds = contentDraft?.orderedMatchIds || contentDraft?.selectedMatchIds || [];
   return [
-    referencesPlayhead ? { key: "playhead", label: `播放头 ${formatTime(timelineAbsoluteTime())}`, value: { playheadSeconds: timelineAbsoluteTime() } } : null,
-    !contentMode && viewerMediaKind !== "source" ? { key: "viewer", label: viewerLabels[viewerMediaKind] || "当前预览对象", value: { viewer } } : null,
+    referencesPlayhead ? { key: "playhead", label: `${viewerMediaKind === "output" ? "样片" : "源视频"}播放头 ${formatTime(mainVideo.currentTime)}`, value: { playheadSeconds: Number(mainVideo.currentTime || 0) } } : null,
+    viewerMediaKind !== "source" ? { key: "viewer", label: viewerLabels[viewerMediaKind] || "当前预览对象", value: { viewer } } : null,
+    contentMode && currentJob.contentSearch?.id ? { key: "contentMatches", label: `本次已选 ${contentIds.length} 段 · 按所选顺序`, value: { searchId: currentJob.contentSearch.id, selected: { contentMatchIds: contentIds } } } : null,
     eventGroupIds.length ? { key: "eventGroups", label: `已勾选 ${eventGroupIds.length} 个事件`, value: { selected: { eventGroupIds } } } : null,
     eventSegmentIds.length ? { key: "eventSegments", label: `已勾选 ${eventSegmentIds.length} 个镜头`, value: { selected: { eventSegmentIds } } } : null,
     selection ? { key: "timelineSelection", label: `时间选区 ${formatTime(selection.start)}–${formatTime(selection.end)}`, value: { timelineSelection: { start: Number(selection.start), end: Number(selection.end) } } } : null,
@@ -8456,42 +9695,210 @@ function collectChatUiContext() {
   return result;
 }
 
+window.ClipTalkCollectAssistantContext = () => ({
+  ...collectChatUiContext(), jobId: currentJob?.id,
+  timeDomain: viewerMediaKind === "output" ? "preview" : "source",
+});
+window.ClipTalkRenderAssistantHistory = () => { if (currentJob) renderConversation(currentJob); };
+window.ClipTalkOpenContentEvidence = () => openCandidateDrawer();
+
+const legacyWorkflowChoices = [
+  {
+    key: "highlight",
+    label: "高光剪辑",
+    detail: "通看全片，自动发现精彩事件并生成高光版本。",
+    badge: "01",
+  },
+  {
+    key: "content_search",
+    label: "内容探索",
+    detail: "按你的描述查找画面、动作、对白、文字或声音。",
+    badge: "02",
+  },
+  {
+    key: "person_edit",
+    label: "按人物剪辑",
+    detail: "识别画面人物，再选择要保留的人物出镜片段。",
+    badge: "03",
+  },
+  {
+    key: "speaker_edit",
+    label: "按说话人剪辑",
+    detail: "区分匿名声音，试听代表片段后选择目标发言。",
+    badge: "04",
+  },
+];
+
+function legacyWorkflowPickerMarkup() {
+  return `<header>
+    <strong>今天想创作什么？</strong>
+    <p>选择一种方式开始，不会复用上一次任务进度。</p>
+  </header>
+  <div class="legacy-workflow-grid">
+    ${legacyWorkflowChoices.map((choice) => `<button type="button" class="legacy-workflow-card ${escapeHtml(choice.key)}" data-workflow-switch="${escapeHtml(choice.key)}">
+          <i class="legacy-workflow-thumb" aria-hidden="true">${escapeHtml(choice.badge)}</i>
+          <span><strong>${escapeHtml(choice.label)}</strong><small>${escapeHtml(choice.detail)}</small></span>
+          <b aria-hidden="true">${choice.key === "highlight" ? "推荐" : ""}</b>
+        </button>`).join("")}
+  </div>`;
+}
+
+function workflowLaunchLabel(workflowKind) {
+  return {
+    highlight: "高光剪辑",
+    content_search: "内容探索",
+    person_edit: "按人物剪辑",
+    speaker_edit: "按说话人剪辑",
+  }[workflowKind] || "快速剪辑";
+}
+
+function agentDraftPlaceholder() {
+  return "描述你想怎么剪辑……";
+}
+
+function quickWorkflowPlaceholder(workflowKind) {
+  return {
+    highlight: "可补充高光主题，例如“突出产品质感”。",
+    content_search: "输入要查找的内容，例如“所有汽车画面”。",
+    person_edit: "可补充人物特征，例如“穿白衣的女生”。",
+    speaker_edit: "可补充声音条件，例如“只保留主持人发言”。",
+  }[workflowKind] || "描述新任务要求……";
+}
+
+function composerSuggestionText(job = currentJob) {
+  if (!isAgentInstructionDraft(job)) return "";
+  const filename = String(job.filename || job.sourceFilename || "");
+  const briefText = [
+    filename,
+    job?.detail,
+    job?.brief?.objective,
+    job?.brief?.narrativeGoal,
+    job?.request?.contentInstruction,
+    job?.request?.instruction,
+    Array.isArray(job?.messages) ? job.messages.map((message) => message?.text || "").join(" ") : "",
+  ].join(" ").toLowerCase();
+  const duration = Number(job?.videoInfo?.duration || job?.request?.sourceScope?.end || 0);
+  const selectedWorkflow = String(pendingWorkflowSwitch || job?.request?.workflowKind || job?.workflowKind || "");
+  if (selectedWorkflow === "speaker_edit") return "识别本视频中的说话人，整理每个人的代表片段，并让我选择要保留的发言。";
+  if (selectedWorkflow === "person_edit") return "识别视频里主要出镜人物，按人物整理可用片段，并生成一版人物精剪样片。";
+  if (selectedWorkflow === "highlight" && pendingWorkflowSwitch) return "自动找出最有冲击力的高光镜头，按节奏合成一版可审核样片。";
+  if (/咖啡|coffee|品牌|访谈|创始人|founder/.test(briefText)) {
+    return "帮我剪一个 3 分钟的品牌故事短片，突出创始人的初心、产品理念和未来愿景。";
+  }
+  if (/小米|汽车|su7|车|发布会/.test(briefText)) {
+    return "找出所有汽车相关画面，合成竖屏视频，并在顶部添加对应字幕。";
+  }
+  if (/冰箱|空调|洗衣机|家电|产品宣传/.test(briefText)) {
+    return "找出产品新老替换和核心卖点画面，合成竖屏产品宣传短片，并生成审核样片。";
+  }
+  if (/学生|学校|课堂|采访|人物/.test(briefText)) {
+    return "剪成人物访谈精华，保留清晰问题和完整回答，并生成带字幕的审核样片。";
+  }
+  if (duration >= 600) return "通看全片，找出最适合做短视频的高光片段，先生成一版审核样片。";
+  return "找出这段视频里最有信息量的画面，按源视频顺序合成一版可审核短片。";
+}
+
+function syncComposerSuggestion(job = currentJob) {
+  const suggestion = $("#composerSuggestion");
+  if (!suggestion) return;
+  const hasManualText = Boolean(String(chatInput?.value || "").trim());
+  const text = !hasManualText && chatInput && !chatInput.disabled && !actionBusy ? composerSuggestionText(job) : "";
+  suggestion.classList.toggle("hidden", !text);
+  suggestion.textContent = text ? `试试：“${text}”` : "";
+  resizeChatComposerInput();
+}
+
+function workflowLaunchMarkup() {
+  if (!pendingWorkflowSwitch) return "";
+  const currentScope = currentJob?.request?.sourceScope || {};
+  const hasCurrentScope = Number(currentScope.end) > Number(currentScope.start)
+    && Boolean(currentScope.isNarrow);
+  const startLabel = {
+    highlight: "开始高光剪辑",
+    content_search: "开始内容探索",
+    person_edit: "开始人物剪辑",
+    speaker_edit: "开始说话人剪辑",
+  }[pendingWorkflowSwitch] || "";
+  const selected = legacyWorkflowChoices.find((choice) => choice.key === pendingWorkflowSwitch);
+  const contentSearchHint = pendingWorkflowSwitch === "content_search"
+    ? `<p class="workflow-launch-hint">在下方输入框描述要查找的内容，然后点击开始内容探索或按 Enter 发送。</p>`
+    : "";
+  const validation = quickWorkflowValidation
+    ? `<p class="workflow-launch-validation" role="alert">${escapeHtml(quickWorkflowValidation)}</p>`
+    : "";
+  const directStart = startLabel
+    ? `<button type="button" class="primary workflow-launch-start" data-start-workflow-switch>${startLabel}</button>`
+    : "";
+  return `<section class="workflow-launch-context quick-workflow-launch" aria-label="${escapeHtml(workflowLaunchLabel(pendingWorkflowSwitch))}启动设置">
+    <header>
+      <div><small>已选择</small><strong>${escapeHtml(workflowLaunchLabel(pendingWorkflowSwitch))}</strong>${selected?.detail ? `<p>${escapeHtml(selected.detail)}</p>` : ""}</div>
+      <button type="button" data-cancel-workflow-switch aria-label="取消快速剪辑设置">×</button>
+    </header>
+    <div class="workflow-launch-fields">
+      <label>素材范围<select data-workflow-launch-scope><option value="all" ${pendingWorkflowOptions.scope === "all" ? "selected" : ""}>整个源视频</option>${hasCurrentScope ? `<option value="current" ${pendingWorkflowOptions.scope === "current" ? "selected" : ""}>沿用当前范围 ${formatTime(currentScope.start)}–${formatTime(currentScope.end)}</option>` : ""}</select></label>
+      ${pendingWorkflowSwitch === "highlight" ? `<label>目标时长（秒）<input type="number" min="4" step="1" placeholder="自动" value="${escapeHtml(pendingWorkflowOptions.targetSeconds)}" data-workflow-target-seconds></label><label>版本数<select data-workflow-variant-count>${[1,2,3,4].map((value) => `<option value="${value}" ${Number(pendingWorkflowOptions.variantCount) === value ? "selected" : ""}>${value} 个</option>`).join("")}</select></label>` : ""}
+      ${pendingWorkflowSwitch === "speaker_edit" ? `<label>预计人数<input type="number" min="0" max="32" step="1" placeholder="自动判断" value="${Number(pendingWorkflowOptions.expectedSpeakerCount) || ""}" data-workflow-speaker-count></label>` : ""}
+    </div>
+    ${contentSearchHint}
+    ${validation}
+    ${directStart ? `<footer>${directStart}</footer>` : ""}
+  </section>`;
+}
+
+function bindWorkflowLaunchControls(root) {
+  root.querySelector("[data-cancel-workflow-switch]")?.addEventListener("click", () => {
+    pendingWorkflowSwitch = "";
+    document.querySelector(".agent-draft-modes")?.classList.remove("workflow-choice-made");
+    pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+    quickWorkflowValidation = "";
+    if (chatInput) chatInput.placeholder = isAgentInstructionDraft(currentJob)
+      ? agentDraftPlaceholder()
+      : "请输入指令或补充需求……";
+    renderQuickWorkflowPicker(currentJob);
+    renderChatContextBar();
+  });
+  root.querySelector("[data-workflow-launch-scope]")?.addEventListener("change", (event) => { pendingWorkflowOptions.scope = event.currentTarget.value; });
+  root.querySelector("[data-workflow-target-seconds]")?.addEventListener("input", (event) => { pendingWorkflowOptions.targetSeconds = event.currentTarget.value; });
+  root.querySelector("[data-workflow-variant-count]")?.addEventListener("change", (event) => { pendingWorkflowOptions.variantCount = Number(event.currentTarget.value) || 3; });
+  root.querySelector("[data-workflow-speaker-count]")?.addEventListener("input", (event) => { pendingWorkflowOptions.expectedSpeakerCount = Number(event.currentTarget.value) || 0; });
+  root.querySelectorAll("[data-workflow-target-seconds], [data-workflow-speaker-count]").forEach((input) => input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (pendingWorkflowSwitch !== "content_search") createSameSourceWorkflow(pendingWorkflowSwitch, chatInput?.value.trim() || "");
+    }
+  }));
+  root.querySelector("[data-start-workflow-switch]")?.addEventListener("click", () => {
+    createSameSourceWorkflow(pendingWorkflowSwitch, chatInput?.value.trim() || "");
+  });
+}
+
+function renderQuickWorkflowPicker(job = currentJob) {
+  const picker = $("#quickWorkflowPicker");
+  const button = $("#chatLegacyModeButton");
+  const canChooseQuickWorkflow = isAgentInstructionDraft(job);
+  const visible = Boolean(job && (pendingWorkflowSwitch || (canChooseQuickWorkflow && legacyWorkflowPickerOpen)));
+  if (button) button.setAttribute("aria-expanded", String(Boolean(canChooseQuickWorkflow && legacyWorkflowPickerOpen)));
+  if (!picker) return;
+  picker.classList.toggle("hidden", !visible);
+  if (!visible) {
+    picker.innerHTML = "";
+    return;
+  }
+  picker.innerHTML = pendingWorkflowSwitch ? workflowLaunchMarkup() : legacyWorkflowPickerMarkup();
+  if (pendingWorkflowSwitch) bindWorkflowLaunchControls(picker);
+  syncComposerSuggestion(job);
+}
+
 function renderChatContextBar() {
   const bar = $("#chatContextBar");
   if (!bar) return;
   const entries = chatUiContextEntries().filter((entry) => !ignoredChatContextKeys.has(entry.key));
-  const pendingLabel = { highlight: "新建高光剪辑", content_search: "新建内容探索", person_edit: "新建人物剪辑", speaker_edit: "新建说话人剪辑" }[pendingWorkflowSwitch];
-  const currentScope = currentJob?.request?.sourceScope || {};
-  const hasCurrentScope = Number(currentScope.end) > Number(currentScope.start)
-    && Boolean(currentScope.isNarrow);
-  const directStartLabel = {
-    highlight: "开始高光分析",
-    person_edit: "开始识别画面人物",
-    speaker_edit: "开始识别说话人",
-  }[pendingWorkflowSwitch] || "";
-  const directStart = directStartLabel
-    ? `<button type="button" class="primary workflow-launch-start" data-start-workflow-switch>${directStartLabel}</button>`
-    : "";
-  const pendingMarkup = pendingLabel ? `<section class="workflow-launch-context"><header><strong>${pendingLabel}</strong><button type="button" data-cancel-workflow-switch aria-label="取消新建任务">×</button></header><label>素材范围<select data-workflow-launch-scope><option value="all" ${pendingWorkflowOptions.scope === "all" ? "selected" : ""}>整个源视频</option>${hasCurrentScope ? `<option value="current" ${pendingWorkflowOptions.scope === "current" ? "selected" : ""}>沿用当前范围 ${formatTime(currentScope.start)}–${formatTime(currentScope.end)}</option>` : ""}</select></label>${pendingWorkflowSwitch === "highlight" ? `<label>目标时长（秒）<input type="number" min="4" step="1" placeholder="自动" value="${escapeHtml(pendingWorkflowOptions.targetSeconds)}" data-workflow-target-seconds></label><label>版本数<select data-workflow-variant-count>${[1,2,3,4].map((value) => `<option value="${value}" ${Number(pendingWorkflowOptions.variantCount) === value ? "selected" : ""}>${value} 个</option>`).join("")}</select></label>` : ""}${pendingWorkflowSwitch === "speaker_edit" ? `<label>预计人数<input type="number" min="0" max="32" step="1" placeholder="自动判断" value="${Number(pendingWorkflowOptions.expectedSpeakerCount) || ""}" data-workflow-speaker-count></label>` : ""}${directStart}</section>` : "";
-  bar.classList.toggle("hidden", !currentJob || (!entries.length && !pendingMarkup));
-  bar.innerHTML = `${pendingMarkup}${entries.length ? `<small>本次会附带</small>${entries.map((entry) => `<button type="button" data-remove-chat-context="${escapeHtml(entry.key)}" title="不在下一条消息中附带这项">${escapeHtml(entry.label)}<span aria-hidden="true">×</span></button>`).join("")}` : ""}`;
+  bar.classList.toggle("hidden", !currentJob || !entries.length);
+  bar.innerHTML = entries.length ? `<small>本次会附带</small>${entries.map((entry) => `<button type="button" data-remove-chat-context="${escapeHtml(entry.key)}" title="不在下一条消息中附带这项">${escapeHtml(entry.label)}<span aria-hidden="true">×</span></button>`).join("")}` : "";
   bar.querySelectorAll("[data-remove-chat-context]").forEach((button) => button.addEventListener("click", () => {
     ignoredChatContextKeys.add(button.dataset.removeChatContext);
     renderChatContextBar();
   }));
-  bar.querySelector("[data-cancel-workflow-switch]")?.addEventListener("click", () => {
-    pendingWorkflowSwitch = "";
-    pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
-    if (chatInput) chatInput.placeholder = "请输入指令或补充需求……";
-    renderChatContextBar();
-  });
-  bar.querySelector("[data-workflow-launch-scope]")?.addEventListener("change", (event) => { pendingWorkflowOptions.scope = event.currentTarget.value; });
-  bar.querySelector("[data-workflow-target-seconds]")?.addEventListener("input", (event) => { pendingWorkflowOptions.targetSeconds = event.currentTarget.value; });
-  bar.querySelector("[data-workflow-variant-count]")?.addEventListener("change", (event) => { pendingWorkflowOptions.variantCount = Number(event.currentTarget.value) || 3; });
-  bar.querySelector("[data-workflow-speaker-count]")?.addEventListener("input", (event) => { pendingWorkflowOptions.expectedSpeakerCount = Number(event.currentTarget.value) || 0; });
-  bar.querySelector("[data-start-workflow-switch]")?.addEventListener("click", () => {
-    createSameSourceWorkflow(pendingWorkflowSwitch, chatInput?.value.trim() || "");
-  });
 }
 
 function editProposalMarkup(proposal) {
@@ -8564,9 +9971,14 @@ function renderConversation(job) {
   // innerHTML would otherwise detach it and the next poll could no longer
   // find #jobStatus.
   const preservedAnalysisConsole = document.getElementById("jobStatus");
-  const messages = compactConversationMessages(job.messages || []);
-  const inheritedMessages = messages.filter((message) => Boolean(message.inherited));
+  const messages = visibleConversationMessages(window.ClipTalkAgentWorkspace?.conversationMessages?.(job) || job.messages || [], job);
   const currentMessages = messages.filter((message) => !message.inherited && !isAutoCompositionActivityMessage(message, job));
+  const currentUserInstructions = new Set(currentMessages
+    .filter((message) => message.role === "user")
+    .map((message) => normalizedConversationInstruction(message.text))
+    .filter(Boolean));
+  const inheritedMessages = messages.filter((message) => Boolean(message.inherited)
+    && !(message.role === "user" && currentUserInstructions.has(normalizedConversationInstruction(message.text))));
   const assistantRoleLabel = workflowAssistantLabel(job);
   const contentMode = taskModePresentation(job).key === "content_extract";
   // Older jobs were created before pendingSelectionGroupIds was persisted.
@@ -8580,16 +9992,18 @@ function renderConversation(job) {
       ? [String(manualGroups[manualGroups.length - 1].id)]
       : []);
   let eventTimelineSummary = null;
-  const inheritedMarkup = inheritedMessages.length
-    ? `<article class="conversation-task-history" data-conversation-key="task-history"><details><summary><span>此前任务对话</span><b>${inheritedMessages.length} 条</b></summary><div>${inheritedMessages.map((message) => conversationMessageMarkup(message, assistantRoleLabel)).join("")}</div></details><p><span>${escapeHtml(taskModePresentation({ taskMode: job.handoff?.fromTaskMode }).label)}</span><i>→</i><strong>${escapeHtml(taskModePresentation(job).label)}</strong> · 已创建独立任务，旧结果不会覆盖当前流程</p></article>`
-    : "";
-  let html = inheritedMarkup + (contentMode
+  // Keep inherited parent-task messages out of the active chat stream. They
+  // are useful for audit/debugging, but showing "previous task dialogue" above
+  // the current user request makes the new task look contaminated by the old
+  // one. Current task messages and retained result cards remain visible.
+  void inheritedMessages;
+  let html = (contentMode
     ? conversationTimelineMarkup(job, currentMessages, assistantRoleLabel)
     : currentMessages.map((message) => conversationMessageMarkup(message, assistantRoleLabel)).join(""));
   html += editProposalMarkup(job.pendingEditProposal);
   if (job.status === "brief_confirmation") {
     const brief = job.brief || {};
-    html += `<article class="chat-message assistant brief-confirmation-message"><span class="avatar">AI</span><div class="brief-wrap"><div class="bubble"><small>高光导演 · 需求简报待确认</small><p>我先把你的要求整理成了下面这份简报。现在还没有开始视觉分析，请先检查并修改；确认后才会调用 VLM。</p></div>${briefEditorMarkup(brief, "chat")}</div></article>`;
+    html += `<article class="chat-message assistant brief-confirmation-message"><span class="avatar">AI</span><div class="brief-wrap"><div class="bubble"><small>剪辑需求待确认</small><p>我先把你的要求整理成下面这份简报。检查并修改后，确认开始分析。</p></div>${briefEditorMarkup(brief, "chat")}</div></article>`;
   } else if (!contentMode && job.status === "awaiting_confirmation" && job.eventGroups?.length) {
     const pendingSelection = inferredPendingSelectionGroupIds.length > 0;
     const eventGroupsForReview = pendingSelection
@@ -8628,8 +10042,12 @@ function renderConversation(job) {
       && !timelineEditedSinceOutput
       && !timelineHasMatchingOutput
       && timelineOverTarget;
+    const eventAutoStatus = String(job.autoComposition?.status || "");
+    const eventAutoGenerating = ["queued", "running"].includes(eventAutoStatus);
     const timelineDescription = pendingSelection
       ? "这些是你刚从时间轴选中的片段。可以逐个预览并调整顺序，确认无误后直接合成；不会自动带入其他事件。"
+      : eventAutoGenerating
+        ? `当前时间轴展示 ${timelineSegmentCount} 个事件镜头；系统已选择 ${visibleRecommended.length} 个事件，正在后台自动生成审核样片。生成完成后会出现在播放器和版本菜单中。`
       : timelineHasUnrenderedChanges
         ? `时间轴已修改；现有 ${generatedVersions.length} 个成片版本仍基于修改前的方案，生成新版本后才会得到当前 ${allocated.toFixed(1)} 秒内容。`
         : timelineHasOptionalFullVersion
@@ -8659,16 +10077,16 @@ function renderConversation(job) {
     const budgetClass = target && Math.abs(allocated - target) > target * Number(job.durationTolerance || .1) ? " over" : "";
     html += `<article class="chat-message assistant recommendation-message"><span class="avatar">AI</span><div class="recommendation-wrap">
       <section class="recommendation-card event-recommendation">
-        <header><div><small>${pendingSelection ? "已选时间轴片段" : "VLM 精修与事件归组"}</small><strong>${pendingSelection ? `已准备 ${timelineSegmentCount} 个镜头` : `精修保留 ${refinedCandidateCount} 个候选镜头 · 归并为 ${eventGroupsForReview.length} 个事件`}</strong></div><b>${pendingSelection ? "待确认顺序" : `推荐 ${visibleRecommended.length} 个事件`}</b></header>
+        <header><div><small>${pendingSelection ? "已选时间轴片段" : "候选镜头与事件归组"}</small><strong>${pendingSelection ? `已准备 ${timelineSegmentCount} 个镜头` : `找到 ${refinedCandidateCount} 个候选镜头 · 归并为 ${eventGroupsForReview.length} 个事件`}</strong></div><b>${pendingSelection ? "待确认顺序" : `推荐 ${visibleRecommended.length} 个事件`}</b></header>
         <div class="duration-budget${budgetClass}"><span><b>${pendingSelection ? "已选片段" : timelineEditedSinceOutput ? "当前时间轴" : timelineOverTarget ? "完整推荐事件池" : "推荐时间轴"} ${allocated.toFixed(1)} 秒</b>${target ? ` / 单条目标 ${target.toFixed(1)} 秒` : " · AI 推荐"}</span><i><b style="width:${target ? Math.min(100, allocated / target * 100) : 100}%"></b></i></div>
         <p>${timelineDescription}</p>
-        ${timelineRenderNotice}<div class="review-selection-summary" data-selection-summary>正在计算选择结果…</div>
+        ${eventAutoGenerating ? "" : timelineRenderNotice}<div class="review-selection-summary" data-selection-summary>正在计算选择结果…</div>
         <div class="event-group-list">${eventGroupsForReview.map((group, groupIndex) => `<article class="event-group-row${recommended.has(group.id) ? " recommended" : ""}" data-event-group="${escapeHtml(group.id)}">
           <header><input class="event-group-check" type="checkbox" value="${escapeHtml(group.id)}" ${recommended.has(group.id) ? "checked" : ""}><span><strong>${escapeHtml(group.title)}</strong><small>${group.segments.length} 个镜头 · ${Number(group.actualDuration).toFixed(1)} 秒</small></span><b>${Math.round(group.score)}</b><button type="button" class="add-selection-event" ${job.manualSelection ? "" : "disabled"}>加选区</button><button type="button" class="rename-event">命名</button><button type="button" class="preview-event">组合预览</button></header>
           <p>${escapeHtml(group.summary)}</p>
           <details ${groupIndex === 0 ? "open" : ""}><summary>展开事件镜头</summary><div class="event-segments">${group.segments.map((segment, segmentIndex) => `<div class="event-segment" data-segment-id="${escapeHtml(segment.id)}"><span><b>${segmentIndex + 1}. ${escapeHtml(segment.role)}</b><small>${formatTime(segment.start)} → ${formatTime(segment.end)} · ${Number(segment.duration).toFixed(1)} 秒 · ${segment.transitionIn?.type === "dissolve" ? "短叠化" : "硬切"}</small></span><button type="button" class="preview-segment">看</button><button type="button" class="move-segment-up" ${segmentIndex === 0 ? "disabled" : ""}>↑</button><button type="button" class="move-segment-down" ${segmentIndex === group.segments.length - 1 ? "disabled" : ""}>↓</button><button type="button" class="move-segment-group">移</button><button type="button" class="delete-segment">删</button></div>`).join("")}</div></details>
         </article>`).join("")}</div>
-        <div class="recommendation-actions"><button type="button" class="confirm-event-groups primary">将已选事件合成 1 条</button><button type="button" class="confirm-all-events">将全部事件合成 1 条</button><button type="button" class="export-event-groups">分别导出已选事件</button>${target ? `<button type="button" class="rebalance-budget">调整到约 ${target.toFixed(0)} 秒</button>` : ""}<button type="button" class="create-event-from-selection" ${job.manualSelection ? "" : "disabled"}>用选区新建事件</button></div>
+        <div class="recommendation-actions">${eventAutoGenerating ? '<span class="auto-compose-inline-status">自动成片进行中，完成后会生成可预览版本</span>' : `<button type="button" class="confirm-event-groups primary">将已选事件合成 1 条</button><button type="button" class="confirm-all-events">将全部事件合成 1 条</button><button type="button" class="export-event-groups">分别导出已选事件</button>${target ? `<button type="button" class="rebalance-budget">调整到约 ${target.toFixed(0)} 秒</button>` : ""}<button type="button" class="create-event-from-selection" ${job.manualSelection ? "" : "disabled"}>用选区新建事件</button>`}</div>
       </section></div></article>`;
   } else if (job.status === "awaiting_confirmation" && job.candidates?.length) {
     const recommended = new Set(job.recommendedIndices || []);
@@ -8723,7 +10141,15 @@ function renderConversation(job) {
           const time = Number(issue.outputTime);
           const timeLabel = Number.isFinite(time) && time >= 0 ? `成片 ${formatTime(time)}` : "涉及所选镜头";
           const duplicate = Number(issue.duplicateCount || 1) > 1 ? ` · 已合并 ${Number(issue.duplicateCount)} 条重复诊断` : "";
-          return `<li><span class="${escapeHtml(severity)}">${severityLabel}</span><div><small>${escapeHtml(timeLabel + duplicate)}</small><p>${escapeHtml(issue.description)}</p></div></li>`;
+          const matches = orderedJobOutputs(job).filter(({ item, version }) => {
+            const report = item.reviewReport || version?.reviewReport || {};
+            const recorded = [...(report.issues || []), ...(item.qualityGate?.issues || []), ...(version?.qualityGate?.issues || [])];
+            return recorded.some((entry) => entry.description === issue.description && Number(entry.outputTime) === time);
+          });
+          const location = matches.length === 1 && Number.isFinite(time) && time >= 0
+            ? `<button type="button" data-quality-output="${escapeHtml(matches[0].item.filename)}" data-quality-time="${time}">定位问题片段</button>`
+            : '<small>请在对应版本的审片详情中核对时间</small>';
+          return `<li><span class="${escapeHtml(severity)}">${severityLabel}</span><div><small>${escapeHtml(timeLabel + duplicate)}</small><p>${escapeHtml(issue.description)}</p>${location}</div></li>`;
         }).join("")}</ol>`
       : (reasons.length ? `<ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : "");
     const recoveryAction = repair.status === "insufficient_evidence"
@@ -8735,7 +10161,7 @@ function renderConversation(job) {
     const qualityDescription = manualDraft
       ? "所有已成功渲染的独立方案都已保留。未通过版本会明确标记为“需人工复核”，不会自动推荐或导出，但仍可逐个预览比较。"
       : "独立方案会分别审片；返修版不计入方案数量。只有无法播放或渲染失败的样片会撤回，其他版本均保留供比较。";
-    html += `<article class="chat-message assistant quality-gate-result-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="quality-gate-result-card"><small>自动成片 · 质量检查完成</small><strong>${qualityHeading}</strong><p>${qualityDescription}</p>${issueMarkup}${repairCopy ? `<p class="quality-repair-state">${escapeHtml(repairCopy)}</p>` : ""}${reasons.length && issues.length ? `<details><summary>查看质量门判定</summary><ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}<div><button type="button" data-review-events-after-quality>返回事件审核</button>${recoveryAction}</div></section></div></article>`;
+    html += `<article class="chat-message assistant quality-gate-result-message"><span class="avatar">AI</span><div class="recommendation-wrap"><section class="quality-gate-result-card"><small>自动成片 · 检查完成</small><strong>${qualityHeading}</strong><p>${qualityDescription}</p>${issueMarkup}${repairCopy ? `<p class="quality-repair-state">${escapeHtml(repairCopy)}</p>` : ""}${reasons.length && issues.length ? `<details><summary>查看检查详情</summary><ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></details>` : ""}<div><button type="button" data-review-events-after-quality>返回事件审核</button>${recoveryAction}</div></section></div></article>`;
   }
   if (contentMode && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !contentSearchRecordsForJob(job).length) html += contentOutputResultMarkup(job);
   if (!contentMode && ["completed", "awaiting_confirmation"].includes(job.status) && hasGeneratedOutputs && !job.pendingSelectionGroupIds?.length && !autoCompositionComplete) {
@@ -8792,15 +10218,15 @@ function renderConversation(job) {
       ? "自动成片已完成 · 当前时间轴有修改"
       : "自动成片已完成";
     const resultDescription = hasUnrenderedTimeline
-      ? `这些版本基于修改前的时间轴，不包含当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒调整；请先生成当前时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""} 历史版本详情仍可在右侧“生成结果”查看。`
+      ? `这些版本基于修改前的时间轴，不包含当前 ${eventTimelineSummary.allocated.toFixed(1)} 秒调整；请先生成当前时间轴版本。${dedupeDescription ? ` ${dedupeDescription}` : ""} 历史版本详情仍可在右侧“成片版本”查看。`
       : hasOptionalFullTimeline
-        ? `${dedupeDescription ? `${dedupeDescription} ` : ""}${eventTimelineSummary.target ? `AI 已按 ${Number(eventTimelineSummary.target).toFixed(0)} 秒目标取舍并重编排事件镜头` : "AI 已根据推荐事件重编排镜头"}，现有版本不是未完成任务。${eventTimelineSummary.timelineOverTarget ? `如需包含完整 ${eventTimelineSummary.allocated.toFixed(1)} 秒推荐事件，可在上方另行生成。` : "如需与推荐时间轴逐段完全一致，可在上方另行生成。"} 请在右侧“生成结果”预览比较。`
-        : `${dedupeDescription || "AI 已根据画面、声音、对白和情绪线索生成多种剪辑版本。"} 版本详情、质检状态和预览入口已集中到右侧“生成结果”。`;
+        ? `${dedupeDescription ? `${dedupeDescription} ` : ""}${eventTimelineSummary.target ? `AI 已按 ${Number(eventTimelineSummary.target).toFixed(0)} 秒目标取舍并重编排事件镜头` : "AI 已根据推荐事件重编排镜头"}，现有版本不是未完成任务。${eventTimelineSummary.timelineOverTarget ? `如需包含完整 ${eventTimelineSummary.allocated.toFixed(1)} 秒推荐事件，可在上方另行生成。` : "如需与推荐时间轴逐段完全一致，可在上方另行生成。"} 请在右侧“成片版本”预览比较。`
+        : `${dedupeDescription || "AI 已根据画面、声音、对白和情绪线索生成多种剪辑版本。"} 版本详情、质检状态和预览入口已集中到右侧“成片版本”。`;
     const recovery = job.autoComposition?.recovery || {};
     const recoveryAction = recovery.canRegenerateMissingVariants
       ? `<button type="button" class="primary" data-regenerate-auto-variants data-target-count="${Number(recovery.targetVariantCount || 3)}">补生成缺少的 ${Number(recovery.missingVariantCount || 0)} 个版本</button>` : "";
     const executionArchive = autoCompositionArchiveMarkup(job);
-    html += `<section class="auto-compose-result-card compact${hasUnrenderedTimeline ? " timeline-stale" : ""}"><strong>${resultTitle}</strong><p>${resultDescription}</p><div class="auto-compose-result-summary"><span><b>${generatedVersions.length}</b> 个版本</span><span class="passed"><b>${passedVersionCount}</b> 个通过</span>${reviewVersionCount ? `<span class="review"><b>${reviewVersionCount}</b> 个需复核</span>` : ""}</div><div class="auto-version-batches compact">${batches.join("")}</div>${executionArchive}<div class="auto-compose-actions"><button type="button" class="primary" data-open-output-versions>查看生成结果</button>${recoveryAction}</div></section>`;
+    html += `<section class="auto-compose-result-card compact${hasUnrenderedTimeline ? " timeline-stale" : ""}"><strong>${resultTitle}</strong><p>${resultDescription}</p><div class="auto-compose-result-summary"><span><b>${generatedVersions.length}</b> 个版本</span><span class="passed"><b>${passedVersionCount}</b> 个通过</span>${reviewVersionCount ? `<span class="review"><b>${reviewVersionCount}</b> 个需复核</span>` : ""}</div><div class="auto-version-batches compact">${batches.join("")}</div>${executionArchive}<div class="auto-compose-actions"><button type="button" class="primary" data-open-output-versions>查看成片版本</button>${recoveryAction}</div></section>`;
   }
   if (["cancelled", "failed"].includes(job.status)) {
     const sourceIncomplete = job.failureCode === "source_incomplete";
@@ -8835,6 +10261,9 @@ function renderConversation(job) {
   renderInlineCurrentVoices(job.voiceDiscovery || { status: "not_started" });
   renderAutoCompositionDock(job);
   messagesEl.querySelector("[data-inline-cancel]")?.addEventListener("click", cancelCurrentJob);
+  messagesEl.querySelectorAll("[data-quality-output]").forEach((button) => button.addEventListener("click", () => {
+    selectOutput(button.dataset.qualityOutput, true, Number(button.dataset.qualityTime));
+  }));
   messagesEl.querySelector("[data-review-events-after-quality]")?.addEventListener("click", () => {
     setDirectorStage("events");
     messagesEl.querySelector(".event-recommendation")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -9424,6 +10853,7 @@ async function reanalyzeJob(job) {
 function renderEvidencePlaceholder({ time, title, reason } = {}) {
   const evidence = $("#evidencePanel");
   if (!evidence) return;
+  clearOutputEvidenceStrip();
   const job = currentJob;
   const groupCount = Number(job?.eventGroups?.length || 0);
   const candidateCount = Number(job?.candidates?.length || 0);
@@ -9496,6 +10926,9 @@ function showSource({ autoplay = true, preserveMappedTime = false, seekTime = nu
   currentEventSegment = null;
   candidatePreviewEnd = null;
   viewerMediaKind = "source";
+  timelineCoordinateSpace = "source";
+  timelineSelectedOutputSegmentIndex = null;
+  syncOutputPreviewMode();
   clearOutputVersionSelectionState();
   clearPlayerNotice();
   applyMediaAspect(viewerShell, currentJob.videoInfo?.width, currentJob.videoInfo?.height);
@@ -9535,6 +10968,9 @@ function showSource({ autoplay = true, preserveMappedTime = false, seekTime = nu
   $("#reviewKicker").textContent = "源视频";
   $("#reviewTitle").textContent = currentJob.filename;
   $("#downloadButton")?.classList.add("hidden");
+  $("#coverDownloadButton")?.classList.add("hidden");
+  $("#packageDownloadButton")?.classList.add("hidden");
+  $("#coverIntroButton")?.classList.add("hidden");
   $("#finalizePreviewButton")?.classList.add("hidden");
   syncOneOffFinalizeAction(currentJob);
   $("#subtitleButton")?.classList.add("hidden");
@@ -9556,6 +10992,11 @@ function jobOutputVersions(job = currentJob) {
 }
 
 function outputVersionIdentity(version, output) {
+  if (String(version?.id || "") === "agent-review-previews" || String(output?.outputKind || "") === "agent_review_preview") {
+    const outputs = Array.isArray(version?.outputs) ? version.outputs : [];
+    const outputIndex = outputs.findIndex((item) => item === output || String(item?.filename || "") === String(output?.filename || ""));
+    return `审核样片 ${Math.max(0, outputIndex) + 1}`;
+  }
   const versionLabel = `V${Number(version?.number || 1)}`;
   const outputs = Array.isArray(version?.outputs) ? version.outputs : [];
   if (outputs.length <= 1) return versionLabel;
@@ -9566,35 +11007,205 @@ function outputVersionIdentity(version, output) {
 function outputVersionDownloadLinkMarkup(version, output, { className = "" } = {}) {
   const identity = outputVersionIdentity(version, output);
   const previewOnly = Boolean(output?.previewOnly || version?.previewOnly);
-  const shortLabel = previewOnly ? `下载 ${identity} 样片` : `下载 ${identity} 高清`;
+  const shortLabel = previewOnly ? "下载样片" : "下载 MP4";
   const classes = ["output-version-download", className].filter(Boolean).join(" ");
   const downloadUrl = String(output?.downloadUrl || "").trim();
   if (!downloadUrl || downloadUrl === "undefined" || downloadUrl === "null") {
     return `<span class="${escapeHtml(classes)} unavailable" aria-disabled="true">${escapeHtml(identity)} 下载未就绪</span>`;
   }
   const filename = String(output?.downloadFilename || output?.filename || `${identity}.mp4`);
-  const qualityLabel = previewOnly ? "低清审核样片" : "高清 MP4";
+  const qualityLabel = previewOnly ? "审核样片" : "正式 MP4";
   return `<a class="${escapeHtml(classes)}" href="${escapeHtml(downloadUrl)}" download="${escapeHtml(filename)}" data-output-download="${escapeHtml(output?.filename || "")}" title="下载 ${escapeHtml(identity)} 的${qualityLabel}" aria-label="下载 ${escapeHtml(identity)} 的${qualityLabel}">${escapeHtml(shortLabel)}</a>`;
 }
 
+async function createCoverIntroOutput(version, output) {
+  if (!currentJob || actionBusy || !output?.coverIntroAvailable) return;
+  const confirmed = await requestActionConfirmation({
+    title: "生成带封面片头的新版本",
+    summary: "在当前成片前增加 1 秒静止封面，并保存为新的 MP4 版本。",
+    details: ["原成片不会被覆盖", "封面和发布包仍会单独保留", "视频需要重新编码，画面播放时会看到封面"],
+    confirmLabel: "生成 1 秒封面片头版",
+  });
+  if (!confirmed) return;
+  const actionToken = captureJobAction();
+  actionBusy = true;
+  const button = $("#coverIntroButton");
+  if (button) button.textContent = "正在生成片头…";
+  try {
+    const { job } = await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/outputs/${encodeURIComponent(output.filename)}/cover-intro`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: { duration: 1.0 },
+    });
+    if (!commitJobAction(job, actionToken)) return;
+    showToast("已开始生成封面片头版，原成片保持不变", "success");
+    clearTimeout(pollTimer);
+    pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) showToast(error.message || "封面片头生成失败");
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+    if (button) button.textContent = "生成封面片头版";
+  }
+}
+
 function jobOutputCount(job = currentJob) {
+  const orderedOutputCount = orderedJobOutputs(job).length;
+  if (orderedOutputCount) return orderedOutputCount;
   const explicitCount = job?.outputCount;
   // Number(null) is 0. Treat an absent count as absent instead of allowing it
   // to hide outputVersions that are already persisted on the job.
   if (explicitCount !== null && explicitCount !== undefined && explicitCount !== "" && Number.isFinite(Number(explicitCount))) {
     return Number(explicitCount);
   }
-  return jobOutputVersions(job).reduce((count, version) => count + (version.outputs || []).length, 0);
+  return 0;
+}
+
+function agentReviewPreviewsForJob(job = currentJob) {
+  const raw = [
+    ...(Array.isArray(job?.agentReviewPreviews) ? job.agentReviewPreviews : []),
+    ...(Array.isArray(job?.agentPreviewOutputs)
+      ? job.agentPreviewOutputs.filter((item) => String(item?.outputKind || "") === "agent_review_preview")
+      : []),
+  ];
+  const seen = new Set();
+  return raw.map((item, index) => {
+    if (!item || typeof item !== "object") return item;
+    const fallback = `审核样片 ${index + 1}`;
+    return {
+      ...item,
+      title: cleanDisplayText(item.title, fallback),
+      displayTitle: cleanDisplayText(item.displayTitle, cleanDisplayText(item.title, fallback)),
+    };
+  }).filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    const key = String(item.filename || item.previewUrl || item.videoUrl || item.sessionId || item.id || "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function agentReviewPreviewMeta(item) {
+  const duration = Number(item?.duration || 0);
+  const revision = Number(item?.revision || 0);
+  const clipCount = Number(item?.clipCount);
+  const quality = String(item?.qualityStatus || "");
+  const qualityLabel = quality === "passed" ? "时间线检查通过"
+    : quality === "needs_review" ? "有项目需人工复核"
+      : "质量信息待确认";
+  return [
+    duration > 0 ? `${duration.toFixed(1)} 秒` : "",
+    Number.isFinite(clipCount) && clipCount > 0 ? `${clipCount} 个镜头` : "",
+    revision > 0 ? `草稿 r${revision}` : "",
+    qualityLabel,
+    "审核样片",
+  ].filter(Boolean).join(" · ");
+}
+
+function agentReviewPreviewMarkup(previews) {
+  return `<div class="agent-review-preview-list">${previews.map((item, index) => `
+    <article class="agent-review-preview-card" data-agent-review-preview-card="${index}">
+      <span><strong>${escapeHtml(cleanDisplayText(item.displayTitle, cleanDisplayText(item.title, `审核样片 ${index + 1}`)))}</strong><small>${escapeHtml(agentReviewPreviewMeta(item))}</small></span>
+      <div class="agent-review-preview-actions">
+        <button type="button" data-agent-review-preview="${index}">预览样片</button>
+        <button type="button" class="primary" data-agent-review-export="${index}" ${item.timelineReady === false || !String(item.sessionId || item.sourceEditSessionId || "") ? "disabled title=\"时间线数据尚未就绪\"" : ""}>生成成片</button>
+      </div>
+    </article>
+  `).join("")}</div>`;
+}
+
+async function exportAgentReviewPreview(item = {}) {
+  if (!currentJob?.id || actionBusy) return;
+  const actionToken = captureJobAction();
+  item = window.structuredClone(item);
+  const sessionId = String(item.sourceEditSessionId || item.sessionId || "");
+  let session = (currentJob.editSessions || []).find((value) => String(value?.id || "") === sessionId);
+  if (!session) {
+    const payload = await api(`/api/jobs/${encodeURIComponent(actionToken.jobId)}`);
+    if (!jobActionStillCurrent(actionToken)) return void showToast("任务已切换，请重新选择样片");
+    currentJob = payload.job;
+    session = (currentJob.editSessions || []).find((value) => String(value?.id || "") === sessionId);
+  }
+  if (!session?.id || !session.clips?.length) return void showToast("该样片缺少可导出的时间线，请重新运行当前计划");
+  if (session.pendingProposal) return void showToast("请先打开精剪时间线并应用待确认的修改");
+  if (session.previewStatus !== "ready" || Number(session.previewRevision) !== Number(session.revision)
+      || (item.revision != null && Number(item.revision) !== Number(session.revision))) {
+    return void showToast("该样片不是当前时间线的最新预览，请进入编辑并重新生成审核样片");
+  }
+  session = window.structuredClone(session);
+  const sessionSnapshot = JSON.stringify([session.revision, session.subtitleDraftId, session.subtitleEnabled, session.subtitleStyle]);
+  const quality = String(item.qualityStatus || "");
+  const risky = quality !== "passed";
+  const issues = (item.preflight?.issues || []).filter((value) => value?.message).slice(0, 3);
+  const duration = Number(session.duration || item.duration || 0);
+  const confirmed = await requestActionConfirmation({
+    title: "生成成片",
+    summary: `当前样片 · ${session.clips.length} 个镜头${duration > 0 ? ` · ${formatTime(duration)}` : ""}`,
+    details: risky ? issues.map((value) => String(value.message)) : [],
+    warning: risky && issues.length ? "请确认以上提示后继续。" : "",
+    confirmLabel: "开始生成",
+  });
+  if (!confirmed) return;
+  const latest = (currentJob?.editSessions || []).find(value => value.id === session.id);
+  if (!jobActionStillCurrent(actionToken) || !latest || latest.pendingProposal
+      || sessionSnapshot !== JSON.stringify([latest.revision, latest.subtitleDraftId, latest.subtitleEnabled, latest.subtitleStyle])) {
+    return void showToast("任务、时间线或字幕已变化，本次生成已取消，请重新审核");
+  }
+  const warningCodes = (item.preflight?.issues || [])
+    .filter((value) => value?.severity === "warning" && value?.code)
+    .map((value) => String(value.code));
+  actionBusy = true;
+  try {
+    const payload = await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/edit-sessions/${encodeURIComponent(session.id)}/render`, {
+      method: "POST",
+      body: {
+        revision: Number(session.revision ?? item.revision ?? 0),
+        subtitleMode: session.subtitleEnabled && session.subtitleDraftId ? "burn" : "none",
+        subtitleStyle: session.subtitleStyle || "clean",
+        subtitleDraftId: session.subtitleDraftId || null,
+        versionLabel: cleanDisplayText(item.title, cleanDisplayText(session.title, "Agent 精剪版")).slice(0, 80),
+        acknowledgedWarningCodes: warningCodes,
+      },
+    });
+    if (!commitJobAction(payload.job, actionToken)) return;
+    showToast("高清版本已开始生成；当前样片会继续保留", "success");
+    clearTimeout(pollTimer);
+    pollJob();
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) showToast(error.message || "高清版本提交失败");
+  } finally {
+    if (jobActionStillCurrent(actionToken)) actionBusy = false;
+  }
+}
+
+// Agent plan surfaces use the same reviewed export flow as the result rail.
+// Keeping one entry point prevents a second set of quality-confirmation rules.
+window.ClipTalkExportAgentReviewPreview = exportAgentReviewPreview;
+
+function bindAgentReviewPreviewActions(root, previews) {
+  root?.querySelectorAll("[data-agent-review-preview]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = previews[Number(button.dataset.agentReviewPreview || 0)] || {};
+      window.ClipTalkOpenAgentPreview?.(item)
+        ?.catch?.((error) => showToast(error.message || "审核样片暂时无法打开"));
+    });
+  });
+  root?.querySelectorAll("[data-agent-review-export]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = previews[Number(button.dataset.agentReviewExport || 0)] || {};
+      exportAgentReviewPreview(item).catch((error) => showToast(error.message || "高清版本提交失败"));
+    });
+  });
 }
 
 function outputVersionQuality(version, output = null) {
-  const explicit = String(version?.qualityStatus || output?.qualityStatus || "");
+  const explicit = String(output?.qualityStatus || version?.qualityStatus || "");
+  if (["failed", "warning"].includes(explicit)) return "needs_review";
   if (["passed", "needs_review", "review_unavailable", "pending"].includes(explicit)) return explicit;
-  const gate = version?.qualityGate || output?.qualityGate || {};
+  const gate = output?.qualityGate || version?.qualityGate || {};
   if (gate.passed === true) return "passed";
   if (["degraded", "review_unavailable"].includes(String(version?.reviewStatus || output?.reviewStatus || ""))) return "review_unavailable";
   if (gate.passed === false || version?.manualReviewRequired || output?.manualReviewRequired) return "needs_review";
-  return version?.previewOnly || output?.previewOnly ? "pending" : "passed";
+  return "pending";
 }
 
 function outputVersionQualityLabel(version, output = null) {
@@ -9602,7 +11213,7 @@ function outputVersionQualityLabel(version, output = null) {
   if (quality === "passed") return version?.recommended ? "AI 推荐" : "质量通过";
   if (quality === "needs_review") return "需人工复核";
   if (quality === "review_unavailable") return "审片未完成";
-  return "检查中";
+  return "质量待确认";
 }
 
 function autoVersionPresentation(job, version) {
@@ -9617,7 +11228,7 @@ function autoVersionPresentation(job, version) {
   if (/正式导出/.test(legacyFormalTitle)) {
     return {
       displayName: legacyFormalTitle.replace(/\s*[·｜|]\s*正式导出.*$/, "").trim() || "高清成片",
-      sourceLabel: "高清导出",
+      sourceLabel: "高清版本",
       strategyDescription: "按已确认样片的镜头与顺序进行高清渲染",
     };
   }
@@ -9636,42 +11247,158 @@ function autoVersionPresentation(job, version) {
 }
 
 function orderedJobOutputs(job = currentJob) {
-  return [...jobOutputVersions(job)]
+  const previewOutputWithUrl = (item) => {
+    const output = { ...item, previewOnly: true };
+    const filename = String(output.filename || "");
+    if (filename && !output.previewUrl && job?.id) {
+      output.previewUrl = `/api/jobs/${encodeURIComponent(job.id)}/outputs/${encodeURIComponent(filename)}`;
+      output.videoUrl = output.previewUrl;
+    }
+    return output;
+  };
+  const entries = [...jobOutputVersions(job)]
     .sort((left, right) => Number(left.number || 0) - Number(right.number || 0))
-    .flatMap((version) => (version.outputs || []).map((item) => ({ item, version })));
+    .flatMap((version) => [
+      ...(version.outputs || []).map((item) => ({ item, version })),
+      ...(version.previewOutputs || []).map((item) => ({ item: previewOutputWithUrl(item), version: { ...version, previewOnly: true } })),
+    ]);
+  const agentPreviews = (Array.isArray(job?.agentPreviewOutputs) ? job.agentPreviewOutputs : [])
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return item;
+      const fallback = `审核样片 ${index + 1}`;
+      return {
+        ...item,
+        title: cleanDisplayText(item.title, fallback),
+        displayTitle: cleanDisplayText(item.displayTitle, cleanDisplayText(item.title, fallback)),
+      };
+    });
+  const agentVersion = {
+    id: "agent-review-previews", number: 0, displayName: "Agent 审核预览",
+    sourceLabel: "Agent", previewOnly: true, variantKind: "independent", outputs: agentPreviews,
+  };
+  entries.push(...agentPreviews.map((item) => ({ item, version: agentVersion })));
+  const seen = new Set();
+  return entries.filter(({ item }) => {
+    const key = String(item?.filename || item?.previewUrl || item?.videoUrl || "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
+
+window.ClipTalkOrderedJobOutputs = (job = currentJob) => orderedJobOutputs(job);
+window.ClipTalkVersionAction = async (filename, action) => {
+  const entry = locateJobOutput(filename);
+  if (!entry) return showToast("该版本已不可用，请重新选择版本");
+  if (action === "preview") return selectOutput(filename, true);
+  const agentPreview = entry.version?.id === "agent-review-previews";
+  if (action === "edit") {
+    if (!agentPreview) return openSecondaryEditor(entry.version?.id, entry.output.filename);
+    const session = sourceEditSessionForOutput(entry.output);
+    if (!session?.id) return showToast("该样片缺少可编辑的时间线，请重新生成样片");
+    return window.ClipTalkOpenAgentTimeline?.({ sessionId: session.id, reviewPendingProposal: true });
+  }
+  if (action === "keep") return saveCurrentOutputToLibrary(entry.output);
+  if (action === "export") {
+    if (agentPreview) return exportAgentReviewPreview(entry.output);
+    if (entry.output.previewOnly || entry.version?.previewOnly) {
+      return finalizePreviewVersion(entry.version, entry.output);
+    }
+    const url = String(entry.output.downloadUrl || "").trim();
+    if (!url || ["null", "undefined"].includes(url)) return showToast("该版本的下载文件尚未就绪");
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = entry.output.downloadFilename || entry.output.filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+};
 
 function renderOutputPreviewSelector(job = currentJob) {
   const select = $("#videoViewSelect");
   if (!select) return;
   const outputs = orderedJobOutputs(job);
+  const headerPicker = $("#headerVersionPicker");
+  if (headerPicker) {
+    if (!job || !outputs.length) {
+      headerPicker.innerHTML = "";
+      headerPicker.classList.add("hidden");
+    } else {
+      const sourceActive = viewerMediaKind !== "output";
+      headerPicker.innerHTML = `<span class="header-version-label">查看</span><button type="button" class="header-version-button${sourceActive ? " active" : ""}" data-header-source aria-selected="${sourceActive ? "true" : "false"}">源视频</button>${outputs.map(({ item, version }) => { const active = currentOutput?.filename === item.filename; const identity = outputVersionIdentity(version, item); return `<button type="button" class="header-version-button${active ? " active" : ""}" data-header-output="${escapeHtml(item.filename || "")}" aria-selected="${active ? "true" : "false"}">${escapeHtml(identity)}</button>`; }).join("")}`;
+      headerPicker.classList.remove("hidden");
+      headerPicker.querySelector("[data-header-source]")?.addEventListener("click", () => showSource({ preserveMappedTime: true }));
+      headerPicker.querySelectorAll("[data-header-output]").forEach((button) => button.addEventListener("click", () => selectOutput(button.dataset.headerOutput, true)));
+    }
+  }
   if (!job) {
     select.classList.add("hidden");
     select.innerHTML = "";
     return;
   }
-  const outputOptions = outputs.map(({ item, version }, index) => {
+  if (!outputs.length) {
+    select.classList.add("hidden");
+    select.innerHTML = "<option value=\"source\">源视频</option>";
+    return;
+  }
+  const outputOptions = outputs.map(({ item, version }) => {
     const presentation = autoVersionPresentation(job, version);
-    const strategyName = item.displayName || presentation.displayName || item.title;
+    const strategyName = cleanDisplayText(item.displayName)
+      || cleanDisplayText(presentation.displayName)
+      || cleanDisplayText(item.title);
     const kind = String(version.variantKind || (version.previewOnly ? "independent" : "formal_export"));
     const kindLabel = kind === "formal_export" ? "高清" : kind === "repair" ? "返修" : "样片";
     const qualityLabel = outputVersionQualityLabel(version, item);
-    const label = `成片 ${index + 1}${strategyName ? ` · ${strategyName}` : ""} · ${kindLabel} · ${qualityLabel}`;
+    const reviewSample = currentOutputIsReviewSample(item, version);
+    const identity = outputVersionIdentity(version, item);
+    const label = reviewSample
+      ? `${identity}${strategyName ? ` · ${strategyName}` : ""} · ${qualityLabel}`
+      : `${identity}${strategyName ? ` · ${strategyName}` : ""} · ${kindLabel} · ${qualityLabel}`;
     return `<option value="${escapeHtml(item.filename)}">${escapeHtml(label)}</option>`;
   }).join("");
   select.innerHTML = `<option value="source">源视频</option>${outputOptions}`;
   const selected = viewerMediaKind === "output" ? currentOutput?.filename : "source";
   select.value = selected && outputs.some(({ item }) => item.filename === selected) ? selected : "source";
   select.classList.remove("hidden");
+  const picker = $("#clipVersionPicker");
+  if (picker) {
+    const selectedFilename = viewerMediaKind === "output" ? String(currentOutput?.filename || "") : "";
+    picker.querySelectorAll("[data-clip-picker-output]").forEach((button) => {
+      const active = String(button.dataset.clipPickerOutput || "") === selectedFilename;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const sourceButton = picker.querySelector("[data-clip-picker-source]");
+    const activeSource = !selectedFilename;
+    sourceButton?.classList.toggle("active", activeSource);
+    sourceButton?.setAttribute("aria-selected", activeSource ? "true" : "false");
+  }
   syncCurrentOutputEditAction(job);
 }
 
 function locateJobOutput(filename, job = currentJob) {
-  for (const version of jobOutputVersions(job)) {
-    const output = (version.outputs || []).find((item) => item.filename === filename);
-    if (output) return { output, version };
+  const located = orderedJobOutputs(job)
+    .find(({ item }) => String(item?.filename || "") === String(filename || ""));
+  return located ? { output: located.item, version: located.version } : null;
+}
+
+function sourceEditSessionForOutput(output, job = currentJob) {
+  if (!output || !job) return null;
+  const sessions = Array.isArray(job.editSessions) ? job.editSessions : [];
+  const explicitId = String(output.sourceEditSessionId || output.editSessionId || output.sessionId || "");
+  if (explicitId) {
+    const explicit = sessions.find((session) => String(session?.id || "") === explicitId);
+    if (explicit) return explicit;
   }
-  return null;
+  const sourceFilename = String(output.sourceOutputFilename || "");
+  if (!sourceFilename) return null;
+  return sessions.find((session) => {
+    const sessionId = String(session?.id || "");
+    const previewFilename = String(session?.previewPath || "").split(/[\\/]/).pop() || "";
+    return (previewFilename && previewFilename === sourceFilename)
+      || (sessionId && (sourceFilename === sessionId || sourceFilename.startsWith(`${sessionId}-`)));
+  }) || null;
 }
 
 function syncCurrentOutputEditAction(job = currentJob) {
@@ -9680,21 +11407,39 @@ function syncCurrentOutputEditAction(job = currentJob) {
   const located = viewerMediaKind === "output" && currentOutput?.filename
     ? locateJobOutput(currentOutput.filename, job)
     : null;
-  const editable = Boolean(located?.version?.id && located?.output?.filename && located?.output?.segments?.length);
+  const realVersionIds = new Set(jobOutputVersions(job).map((version) => String(version?.id || "")));
+  const versionId = String(located?.version?.id || "");
+  const sourceSession = sourceEditSessionForOutput(located?.output, job);
+  const editableVersion = Boolean(
+    versionId && realVersionIds.has(versionId)
+    && located?.output?.filename && located?.output?.segments?.length
+  );
+  const editableSession = Boolean(sourceSession?.id && located?.output?.segments?.length);
+  const editable = editableVersion || editableSession;
   button.classList.toggle("hidden", !editable);
   button.disabled = !editable;
+  button.removeAttribute("data-secondary-edit-version");
+  button.removeAttribute("data-secondary-edit-output");
+  button.removeAttribute("data-secondary-edit-session");
   if (!editable) {
     button.onclick = null;
-    button.removeAttribute("data-secondary-edit-version");
-    button.removeAttribute("data-secondary-edit-output");
+    return;
+  }
+  if (editableSession && !editableVersion) {
+    button.dataset.secondaryEditSession = String(sourceSession.id);
+    button.textContent = "返回版本编辑";
+    button.title = "返回生成当前审核预览的 Agent 精剪时间线";
+    button.setAttribute("aria-label", "返回生成当前审核预览的 Agent 精剪时间线");
+    button.onclick = () => window.ClipTalkOpenAgentTimeline({ sessionId: button.dataset.secondaryEditSession })
+      .catch((error) => showToast(error.message));
     return;
   }
   const versionLabel = `V${Number(located.version.number || 1)}`;
-  button.dataset.secondaryEditVersion = String(located.version.id);
+  button.dataset.secondaryEditVersion = versionId;
   button.dataset.secondaryEditOutput = String(located.output.filename);
-  button.textContent = "二次精剪";
-  button.title = `进入${versionLabel}的二次精剪工作区；修改会导出为高清新版本，不覆盖当前成片`;
-  button.setAttribute("aria-label", `二次精剪当前预览的${versionLabel}成片`);
+  button.textContent = `编辑 ${versionLabel}`;
+  button.title = `打开${versionLabel}的精剪时间线；修改会导出为高清新版本，不覆盖当前成片`;
+  button.setAttribute("aria-label", `打开当前预览${versionLabel}成片的精剪时间线`);
   button.onclick = () => openSecondaryEditor(
     button.dataset.secondaryEditVersion,
     button.dataset.secondaryEditOutput,
@@ -9703,8 +11448,7 @@ function syncCurrentOutputEditAction(job = currentJob) {
 
 function transcriptForItem(item) {
   if (!item || !Array.isArray(timelineTranscript) || !timelineTranscript.length) return [];
-  const start = Number(item.start) || 0;
-  const end = Number(item.end) || start;
+  const { start, end } = segmentSourceRange(item);
   return timelineTranscript
     .filter((segment) => Number(segment.end) > start && Number(segment.start) < end)
     .sort((left, right) => Number(left.start) - Number(right.start));
@@ -9714,8 +11458,7 @@ function sourceEventContextForSegment(segment) {
   if (!segment || !currentJob?.eventGroups?.length) return null;
   const segmentId = String(segment.id || "");
   const candidateIndex = Number(segment.candidateIndex ?? segment.index);
-  const sourceStart = Number(segment.start);
-  const sourceEnd = Number(segment.end);
+  const { start: sourceStart, end: sourceEnd } = segmentSourceRange(segment);
   for (const group of currentJob.eventGroups) {
     const match = (group.segments || []).find((candidate) => {
       if (segmentId && String(candidate.id || "") === segmentId) return true;
@@ -9733,6 +11476,7 @@ function sourceEventContextForSegment(segment) {
 function previewCompositionSourceSegment(composed, segmentIndex, sourceTime) {
   const segment = composed?.segments?.[Number(segmentIndex)];
   if (!segment) return;
+  beginSourceInspection();
   const isEventGroup = (currentJob?.eventGroups || []).some((group) => String(group.id || "") === String(composed?.id || ""));
   const context = isEventGroup
     ? { group: composed, segment }
@@ -9792,19 +11536,25 @@ function fallbackOutputEditingExplanation(item = {}, version = null) {
   const segments = Array.isArray(item.segments) ? item.segments : [];
   const target = Number(item.targetSeconds);
   const actual = Number(item.duration || item.effectiveDuration || 0);
-  const sourceOrdered = segments.every((segment, index) => !index || Number(segments[index - 1].start || 0) <= Number(segment.start || 0));
+  const sourceOrdered = segments.every((segment, index) => !index
+    || segmentSourceRange(segments[index - 1]).start <= segmentSourceRange(segment).start);
   const storyPath = [...new Set(segments.map((segment) => segment.storyFunction || segment.role || "精彩镜头"))];
   const review = version?.reviewReport || item.reviewReport || {};
   const quality = item.qualityReport || {};
   return {
     title: "为什么这样剪",
-    summary: item.editorialNarrative || item.reason || `本版由 ${segments.length} 个不重复镜头组成，优先保证事件和表达完整。`,
+    summary: item.editorialNarrative || item.reason || (segments.length
+      ? `本版由 ${segments.length} 个不重复镜头组成，优先保证事件和表达完整。`
+      : "该审核样片的镜头明细尚未同步；可以正常预览，但系统不会用 0 个镜头误报其结构。"),
     strategy: {
-      name: item.displayName || version?.displayName || item.title || "高光成片",
-      description: item.strategyDescription || version?.strategyDescription || "保留真实精彩内容",
+      name: cleanDisplayText(item.displayName)
+        || cleanDisplayText(version?.displayName)
+        || cleanDisplayText(item.title, "高光成片"),
+      description: cleanDisplayText(item.strategyDescription)
+        || cleanDisplayText(version?.strategyDescription, "保留真实精彩内容"),
     },
     intent: { focus: currentJob?.brief?.focus || [], include: currentJob?.brief?.includeRules || [], exclude: currentJob?.brief?.excludeRules || [] },
-    selection: { eventCount: Number(item.eventCount || item.chapterCount || 0), shotCount: segments.length, eventTitles: [], reason: "优先保留与用户重点匹配、且可以形成完整表达的镜头。" },
+    selection: { eventCount: Number(item.eventCount || item.chapterCount || 0), shotCount: segments.length || null, eventTitles: [], reason: "优先保留与用户重点匹配、且可以形成完整表达的镜头。" },
     ordering: { label: sourceOrdered ? "按源视频时间顺序" : "按 AI 叙事顺序", reason: sourceOrdered ? "保持原视频的因果与时间关系。" : "依据事件职责和情绪递进重新排列。", storyPath },
     boundaries: { adjustmentCount: Number(item.boundaryAdjustments?.length || 0), reason: item.boundaryAdjustments?.length ? "已按完整对白、动作或自然停顿校正边界。" : "使用模型精修并经本地验证的自然边界。" },
     techniques: { summary: "根据镜头内容决定原速、硬切、转场和声音衔接；完整对白与高潮默认保持原速。" },
@@ -9856,36 +11606,186 @@ function renderOutputEditingExplanation(item, version = null) {
     ? `${Number(timing.actualSeconds || 0).toFixed(1)} 秒 / 目标 ${Number(timing.targetSeconds).toFixed(1)} 秒`
     : `${Number(timing.actualSeconds || 0).toFixed(1)} 秒 / 自动时长`;
   const omissions = (explanation.omissions || []).filter(Boolean);
-  const eventShotLabel = `${Number(selection.eventCount || 0)} 个事件 · ${Number(selection.shotCount || 0)} 个镜头`;
+  const eventCountKnown = selection.eventCount !== null && selection.eventCount !== undefined && Number(selection.eventCount) > 0;
+  const shotCountKnown = selection.shotCount !== null && selection.shotCount !== undefined && Number(selection.shotCount) > 0;
+  const eventShotLabel = [
+    eventCountKnown ? `${Number(selection.eventCount)} 个事件` : "",
+    shotCountKnown ? `${Number(selection.shotCount)} 个镜头` : "镜头明细待同步",
+  ].filter(Boolean).join(" · ");
   const orderLabel = escapeHtml(ordering.label || "按当前剪辑顺序");
   root.innerHTML = `
-    <header class="output-explanation-head">
-      <div><small>剪辑说明</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></div>
-      <span>${quality.recommended ? "推荐版本 · " : ""}依据可查看</span>
-    </header>
-    <p class="output-explanation-summary">${escapeHtml(explanation.summary || "根据已验证的画面、声音和用户要求生成。")}</p>
-    <div class="output-decision-summary">
-      <span><small>选片</small><strong>${escapeHtml(eventShotLabel)}</strong></span>
-      <span><small>顺序</small><strong>${orderLabel}</strong></span>
-      <span><small>时长 / 质检</small><strong>${escapeHtml(targetLabel)} · ${escapeHtml(qualityLabel)}</strong></span>
+    <div class="output-explanation-toggle-card">
+      <span><small>剪辑说明</small><strong>默认收起，按需查看</strong></span>
+      <button type="button" data-toggle-output-explanation aria-expanded="false">查看剪辑说明</button>
     </div>
-    <details class="output-explanation-details">
-      <summary><span>查看完整剪辑依据</span><em>选片、顺序、边界、取舍与质检</em></summary>
-      <div class="output-decision-ledger">
-        <section><small>选片</small><strong>${escapeHtml(eventShotLabel)}</strong><p>${escapeHtml(eventNames.length ? eventNames.slice(0, 3).join("、") : selection.reason || "保留高价值且不重复的镜头")}</p></section>
-        <section><small>顺序</small><strong>${orderLabel}</strong><p>${escapeHtml((ordering.storyPath || []).length ? ordering.storyPath.join(" → ") : ordering.reason || "保持叙事关系")}</p></section>
-        <section><small>时长</small><strong>${escapeHtml(targetLabel)}</strong><p>${escapeHtml(`${timing.statusLabel || "已校验"}。${timing.reason || "优先保证表达完整。"}`)}</p></section>
-        <section><small>边界与手法</small><strong>${Number(boundaries.adjustmentCount || 0)} 处安全校正</strong><p>${escapeHtml(explanation.techniques?.summary || boundaries.reason || "使用自然切点")}</p></section>
+    <div class="output-explanation-body hidden">
+      <header class="output-explanation-head">
+        <div><small>剪辑说明</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></div>
+        <span>${quality.recommended ? "推荐版本 · " : ""}依据可查看</span>
+      </header>
+      <p class="output-explanation-summary">${escapeHtml(explanation.summary || "根据已验证的画面、声音和用户要求生成。")}</p>
+      <div class="output-decision-summary">
+        <span><small>选片</small><strong>${escapeHtml(eventShotLabel)}</strong></span>
+        <span><small>顺序</small><strong>${orderLabel}</strong></span>
+        <span><small>时长 / 质检</small><strong>${escapeHtml(targetLabel)} · ${escapeHtml(qualityLabel)}</strong></span>
       </div>
-      ${(focus.length || requirements.length) ? `<div class="output-intent-line"><small>对应需求</small><span>${[...focus.map((value) => `重点 ${value}`), ...requirements].slice(0, 8).map((value) => `<b>${escapeHtml(value)}</b>`).join("")}</span></div>` : ""}
-      <section class="output-quality-detail"><header><span>取舍与质检</span><b>${escapeHtml(qualityLabel)}</b></header>${reviewDimensions.length ? `<div class="output-review-dimensions" aria-label="综合审片分项">${reviewDimensions.map((entry) => `<span><small>${escapeHtml(entry.label)}</small><b>${Math.round(entry.score)}</b></span>`).join("")}</div>` : ""}${calibrationLabel ? `<p class="output-review-calibration">${escapeHtml(calibrationLabel)}；同一根因只计一次，关键问题另由质量门决定是否可用。</p>` : ""}<p>${escapeHtml(quality.recommendationReason || quality.summary || "已完成成片检查。")}</p>${omissions.length ? `<ul>${omissions.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul>` : ""}</section>
-    </details>`;
+      <details class="output-explanation-details">
+        <summary><span>查看完整剪辑依据</span><em>选片、顺序、边界、取舍与质检</em></summary>
+        <div class="output-decision-ledger">
+          <section><small>选片</small><strong>${escapeHtml(eventShotLabel)}</strong><p>${escapeHtml(eventNames.length ? eventNames.slice(0, 3).join("、") : selection.reason || "保留高价值且不重复的镜头")}</p></section>
+          <section><small>顺序</small><strong>${orderLabel}</strong><p>${escapeHtml((ordering.storyPath || []).length ? ordering.storyPath.join(" → ") : ordering.reason || "保持叙事关系")}</p></section>
+          <section><small>时长</small><strong>${escapeHtml(targetLabel)}</strong><p>${escapeHtml(`${timing.statusLabel || "已校验"}。${timing.reason || "优先保证表达完整。"}`)}</p></section>
+          <section><small>边界与手法</small><strong>${Number(boundaries.adjustmentCount || 0)} 处安全校正</strong><p>${escapeHtml(explanation.techniques?.summary || boundaries.reason || "使用自然切点")}</p></section>
+        </div>
+        ${(focus.length || requirements.length) ? `<div class="output-intent-line"><small>对应需求</small><span>${[...focus.map((value) => `重点 ${value}`), ...requirements].slice(0, 8).map((value) => `<b>${escapeHtml(value)}</b>`).join("")}</span></div>` : ""}
+        <section class="output-quality-detail"><header><span>取舍与质检</span><b>${escapeHtml(qualityLabel)}</b></header>${reviewDimensions.length ? `<div class="output-review-dimensions" aria-label="综合审片分项">${reviewDimensions.map((entry) => `<span><small>${escapeHtml(entry.label)}</small><b>${Math.round(entry.score)}</b></span>`).join("")}</div>` : ""}${calibrationLabel ? `<p class="output-review-calibration">${escapeHtml(calibrationLabel)}；同一根因只计一次，关键问题另由质量门决定是否可用。</p>` : ""}<p>${escapeHtml(quality.recommendationReason || quality.summary || "已完成成片检查。")}</p>${omissions.length ? `<ul>${omissions.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul>` : ""}</section>
+      </details>
+    </div>`;
+  root.querySelector("[data-toggle-output-explanation]")?.addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    const body = root.querySelector(".output-explanation-body");
+    const expanded = body?.classList.toggle("hidden") === false;
+    button?.setAttribute("aria-expanded", String(expanded));
+    if (button) button.textContent = expanded ? "收起剪辑说明" : "查看剪辑说明";
+  });
   root.classList.remove("hidden");
+}
+
+function conciseEvidenceText(value, maxLength = 110) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function outputEvidenceSummary(output = {}, version = null) {
+  const explanation = output.editingExplanation || fallbackOutputEditingExplanation(output, version);
+  const review = version?.reviewReport || output.reviewReport || {};
+  const qualityScore = Number(
+    review.overallScore
+      ?? review.calibratedScore
+      ?? output.qualityReport?.score
+      ?? output.score,
+  );
+  const schedule = compositionSchedule(output);
+  const segments = Array.isArray(output.segments) ? output.segments : [];
+  const duration = Number(output.duration || output.effectiveDuration || 0);
+  const sourceStarts = schedule.map((entry) => Number(entry.sourceStart)).filter(Number.isFinite);
+  const sourceEnds = schedule.map((entry) => Number(entry.sourceEnd)).filter(Number.isFinite);
+  const sourceRange = sourceStarts.length && sourceEnds.length
+    ? `${formatTime(Math.min(...sourceStarts))} → ${formatTime(Math.max(...sourceEnds))}`
+    : "";
+  const selection = explanation.selection || {};
+  const ordering = explanation.ordering || {};
+  const timing = explanation.duration || {};
+  const reason = conciseEvidenceText(
+    explanation.summary
+      || output.editorialNarrative
+      || output.reason
+      || selection.reason
+      || "已根据用户目标、可用片段和质检结果生成当前成片。",
+  );
+  return {
+    explanation,
+    reason,
+    shotCount: segments.length || schedule.length || Number(selection.shotCount || 0),
+    duration,
+    sourceRange,
+    orderLabel: ordering.label || (schedule.length ? "按当前成片顺序" : "按当前版本"),
+    durationLabel: duration > 0 ? `${duration.toFixed(1)} 秒` : "时长已校验",
+    qualityLabel: Number.isFinite(qualityScore) ? `审片 ${Math.round(qualityScore)}/100` : "已质检",
+    timingLabel: timing.targetSeconds
+      ? `${Number(timing.actualSeconds || duration || 0).toFixed(1)} 秒 / 目标 ${Number(timing.targetSeconds).toFixed(1)} 秒`
+      : `${Number(timing.actualSeconds || duration || 0).toFixed(1)} 秒 / 自动时长`,
+  };
+}
+
+function clearOutputEvidenceStrip() {
+  const strip = $("#outputEvidenceStrip");
+  if (!strip) return;
+  if (!strip.classList.contains("hidden") || strip.innerHTML) {
+    strip.innerHTML = "";
+    strip.classList.add("hidden");
+    scheduleMediaFrameFit(true);
+  }
+}
+
+function renderOutputEvidenceStrip(output, version = null, { contentMode = false } = {}) {
+  const strip = $("#outputEvidenceStrip");
+  if (!strip || !output) return;
+  if (document.body.classList.contains("ct-workbench-v4")) {
+    clearOutputEvidenceStrip();
+    return;
+  }
+  const summary = outputEvidenceSummary(output, version);
+  const versionIdentity = outputVersionIdentity(version, output);
+  const explanation = summary.explanation || {};
+  const selection = explanation.selection || {};
+  const boundaries = explanation.boundaries || {};
+  const techniques = explanation.techniques || {};
+  const omissions = (explanation.omissions || []).filter(Boolean);
+  const review = version?.reviewReport || output.reviewReport || {};
+  const dimensionLabels = {
+    content: "内容", narrative: "叙事", rhythm: "节奏",
+    continuity: "连续性", audiovisual: "音画", goalMatch: "目标匹配",
+  };
+  const reviewDimensions = Object.entries(dimensionLabels).map(([key, label]) => ({
+    label,
+    score: Number(review.scores?.[key]),
+  })).filter((entry) => Number.isFinite(entry.score));
+  const rubricScore = Number(review.rubricScore);
+  const reviewPenalty = Number(review.deterministicPenalty);
+  const calibrationLabel = [
+    Number.isFinite(rubricScore) ? `维度加权 ${rubricScore.toFixed(1)}` : "",
+    Number.isFinite(reviewPenalty) && reviewPenalty > 0 ? `根因校准 -${reviewPenalty.toFixed(1)}` : "",
+  ].filter(Boolean).join(" · ");
+  const chips = [
+    `${versionIdentity} · ${contentMode ? "内容视频" : "成片"}依据`,
+    summary.shotCount ? `${summary.shotCount} 个${contentMode ? "内容片段" : "镜头"}` : "",
+    summary.durationLabel,
+    summary.qualityLabel,
+  ].filter(Boolean);
+  const timelineActionLabel = currentOutputIsReviewSample(output, version)
+    ? "查看样片时间线"
+    : "查看成片时间线";
+  strip.innerHTML = `
+    <div class="output-evidence-strip-copy">
+      <div class="output-evidence-strip-chips">${chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join("")}</div>
+      <p>${escapeHtml(summary.reason)}</p>
+    </div>
+    <div class="output-evidence-strip-actions">
+      <button type="button" data-output-evidence-timeline>${timelineActionLabel}</button>
+      <details class="output-evidence-popover">
+        <summary>查看说明</summary>
+        <div class="output-evidence-popover-body">
+          <header><small>成片说明</small><strong>${escapeHtml(explanation.title || "为什么这样剪")}</strong></header>
+          <p>${escapeHtml(explanation.summary || summary.reason)}</p>
+          <dl>
+            <div><dt>选片</dt><dd>${escapeHtml(selection.reason || `${summary.shotCount || 0} 个镜头已采用`)}</dd></div>
+            <div><dt>顺序</dt><dd>${escapeHtml(summary.orderLabel)}</dd></div>
+            <div><dt>时长</dt><dd>${escapeHtml(summary.timingLabel)}</dd></div>
+            ${summary.sourceRange ? `<div><dt>源片范围</dt><dd>${escapeHtml(summary.sourceRange)}</dd></div>` : ""}
+            <div><dt>边界</dt><dd>${escapeHtml(boundaries.reason || `${Number(boundaries.adjustmentCount || 0)} 处安全校正`)}</dd></div>
+            <div><dt>手法</dt><dd>${escapeHtml(techniques.summary || "按镜头内容处理节奏、转场与声音衔接")}</dd></div>
+          </dl>
+          ${reviewDimensions.length || calibrationLabel ? `<section class="output-evidence-quality"><small>质检</small>${reviewDimensions.length ? `<div>${reviewDimensions.map((entry) => `<span><b>${escapeHtml(entry.label)}</b>${Math.round(entry.score)}</span>`).join("")}</div>` : ""}${calibrationLabel ? `<p>${escapeHtml(calibrationLabel)}</p>` : ""}</section>` : ""}
+          ${omissions.length ? `<section><small>取舍</small><ul>${omissions.slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : ""}
+        </div>
+      </details>
+    </div>
+  `;
+  strip.querySelector("[data-output-evidence-timeline]")?.addEventListener("click", () => {
+    setReviewLowerPanelMode("timeline", { scroll: true, compact: false });
+    updateTimeline();
+  });
+  strip.classList.remove("hidden");
+  scheduleMediaFrameFit(true);
 }
 
 function renderClipEvidence(item, kind = "candidate", version = null) {
   if (contentBoundaryTimelineEdit) closeContentBoundaryTimelineEdit({ restorePreview: false });
   hideContentDetailModeSwitch();
+  if (kind !== "output") clearOutputEvidenceStrip();
   const meta = $("#clipEvidenceMeta");
   const list = $("#clipEvidence");
   if (!meta || !list) return;
@@ -9973,14 +11873,16 @@ function downloadCurrentFragment() {
 }
 
 function oneOffOutputEntries(job = currentJob) {
-  return orderedJobOutputs(job).map(({ item, version }, index) => {
+  return orderedJobOutputs(job).map(({ item, version }) => {
     const presentation = autoVersionPresentation(job, version);
     const previewOnly = Boolean(item.previewOnly || version.previewOnly);
     return {
       item,
       version,
       previewOnly,
-      label: item.displayTitle || presentation.displayName || item.title || `成片 ${index + 1}`,
+      label: cleanDisplayText(item.displayTitle)
+        || cleanDisplayText(presentation.displayName)
+        || cleanDisplayText(item.title, outputVersionIdentity(version, item)),
     };
   });
 }
@@ -9993,11 +11895,74 @@ function syncOneOffFinalizeAction(job = currentJob) {
   button.classList.toggle("hidden", !visible);
   if (visible) {
     const formalCount = entries.filter((entry) => !entry.previewOnly).length;
-    button.textContent = formalCount ? "保存成片并清理素材" : "成片需先导出高清";
-    button.title = formalCount ? "选择要保存的正式成片，然后清理一次性工程" : "审核样片不能作为最终文件，请先导出高清成片";
+    button.textContent = formalCount ? "保存成片并清理素材" : "请先生成成片";
+    button.title = formalCount ? "选择要保存的正式成片，然后清理一次性工程" : "审核样片不能作为最终文件，请先生成成片";
     button.onclick = finalizeOneOffTask;
   } else {
     button.onclick = null;
+  }
+}
+
+function syncLibrarySaveAction(job = currentJob, output = currentOutput) {
+  let button = $("#saveToLibraryButton");
+  if (!button) {
+    const download = $("#downloadButton");
+    if (!download?.parentElement) return;
+    button = document.createElement("button");
+    button.id = "saveToLibraryButton";
+    button.className = "download-button library-save-button hidden";
+    button.type = "button";
+    download.before(button);
+  }
+  const located = output?.filename ? locateJobOutput(output.filename, job) : null;
+  const selectedOutput = located?.output || output;
+  const previewOnly = Boolean(selectedOutput?.previewOnly || located?.version?.previewOnly);
+  const visible = Boolean(
+    job?.id
+    && selectedOutput?.filename
+    && selectedOutput.capabilities?.canKeep !== false
+    && !previewOnly
+    && String(selectedOutput.filename).toLowerCase().endsWith(".mp4")
+  );
+  const kept = Boolean(selectedOutput?.kept);
+  button.classList.toggle("hidden", !visible);
+  button.classList.toggle("is-kept", visible && kept);
+  button.disabled = !visible || kept || button.dataset.saving === "true";
+  button.textContent = button.dataset.saving === "true" ? "正在保存…" : kept ? "✓ 已存入成片库" : "存入成片库";
+  button.title = kept
+    ? "这份高清成片已保存为独立副本；删除原工程不会影响它"
+    : "保存一份独立高清副本到成片库，不会清理当前可编辑工程";
+  button.setAttribute("aria-label", kept ? "当前高清成片已存入成片库" : "将当前高清成片存入成片库");
+  button.onclick = visible && !kept ? () => saveCurrentOutputToLibrary(selectedOutput) : null;
+}
+
+async function saveCurrentOutputToLibrary(output = currentOutput) {
+  if (!currentJob?.id || !output?.filename || output.previewOnly || actionBusy) return { ok: false, error: "当前不能保存，请等待当前操作完成" };
+  if (output.capabilities?.canKeep === false) return { ok: false, error: output.capabilities.disabledReason?.keep || "当前文件不可保存" };
+  const actionToken = captureJobAction();
+  const button = $("#saveToLibraryButton");
+  actionBusy = true;
+  if (button) button.dataset.saving = "true";
+  syncLibrarySaveAction(currentJob, output);
+  try {
+    const { job } = await apiJson(
+      `/api/jobs/${encodeURIComponent(actionToken.jobId)}/outputs/${encodeURIComponent(output.filename)}/keep`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: { kept: true } },
+    );
+    if (!commitJobAction(job, actionToken)) return { ok: true, jobId: actionToken.jobId, stale: true };
+    try { await window.ClipTalkAppShell?.loadLibrary?.({ force: true }); }
+    catch { /* The independent copy was saved; list refresh can be retried. */ }
+    if (jobActionStillCurrent(actionToken)) showToast("已存入成片库；删除原工程也不会影响这份成片。", "success");
+    return { ok: true, jobId: actionToken.jobId, filename: output.filename };
+  } catch (error) {
+    if (jobActionStillCurrent(actionToken)) showToast(error.message || "成片保存失败");
+    return { ok: false, error: error.message || "成片保存失败" };
+  } finally {
+    if (button) delete button.dataset.saving;
+    if (jobActionStillCurrent(actionToken)) {
+      actionBusy = false;
+      syncLibrarySaveAction(currentJob, currentOutput);
+    }
   }
 }
 
@@ -10014,13 +11979,13 @@ async function finalizeOneOffTask() {
     title: "保存正式成片并清理一次性任务",
     summary: "勾选要保存的高清 MP4。成片副本保存成功后，源视频、时间线、分析结果和其他输出将被删除。",
     details: ["保存的 MP4 不依赖原工程", "字幕草稿不会单独保存", "清理后任务无法继续编辑"],
-    warning: formalEntries.length ? "这是不可恢复的工程清理操作。" : "当前只有审核样片，请先导出高清成片。",
+    warning: formalEntries.length ? "这是不可恢复的工程清理操作。" : "当前只有审核样片，请先生成成片。",
     confirmLabel: "保存并清理",
     selectionItems: entries.map((entry) => ({
       value: entry.item.filename,
       label: entry.label,
       meta: entry.previewOnly
-        ? "审核样片不可保留 · 请先选择该版本并导出高清成片"
+        ? "审核样片不可保留 · 请先选择该样片并生成成片"
         : `${Number(entry.item.duration || 0).toFixed(1)} 秒 · 高清 MP4`,
       disabled: entry.previewOnly,
       checked: entry.item.filename === defaultFilename,
@@ -10051,7 +12016,10 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   if (!currentJob) return;
   const located = locateJobOutput(filename);
   if (!located) return;
+  sourceInspectionContext = null;
+  $("#returnInspectedVersion")?.classList.add("hidden");
   const { output, version } = located;
+  selectedOutputByJob.set(String(currentJob.id), output.filename);
   candidatePreviewToken += 1;
   currentOutput = output;
   currentCandidate = null;
@@ -10059,16 +12027,23 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   currentEventSegment = null;
   candidatePreviewEnd = null;
   viewerMediaKind = "output";
-  timelineCoordinateSpace = "source";
+  syncOutputPreviewMode();
+  timelineCoordinateSpace = "output";
+  timelineSelectedOutputSegmentIndex = null;
+  timelineManualSelectMode = false;
   timelineViewStart = 0;
-  timelineViewEnd = Number(waveformData?.duration || currentJob.videoInfo?.duration || 0);
+  timelineViewEnd = timelineOutputDurationValue(output);
   timelineReviewFollow = false;
   timelineMediaRenderKey = "";
   waveformRenderKey = "";
   stopSourcePreviewPolling();
   const cacheKey = encodeURIComponent(output.versionCreatedAt || version.createdAt || output.filename || "output");
   clearPlayerNotice();
-  applyMediaAspect(viewerShell, currentJob.videoInfo?.width, currentJob.videoInfo?.height);
+  applyMediaAspect(
+    viewerShell,
+    Number(output.width || 0) || currentJob.videoInfo?.width,
+    Number(output.height || 0) || currentJob.videoInfo?.height,
+  );
   const outputUrl = String(output.previewUrl || output.videoUrl || "").trim();
   if (!outputUrl || outputUrl === "undefined" || outputUrl === "null") {
     setMainVideoSource("");
@@ -10077,23 +12052,29 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
     const separator = outputUrl.includes("?") ? "&" : "?";
     setMainVideoSource(`${outputUrl}${separator}v=${cacheKey}`);
   }
-  const outputNumber = orderedJobOutputs(currentJob).findIndex(({ item }) => item.filename === filename) + 1;
+  if ($("#mainVideo")) $("#mainVideo").poster = String(output.coverUrl || "");
   const presentation = autoVersionPresentation(currentJob, version);
-  const displayTitle = output.displayTitle || (currentJob.autoComposition?.status === "completed" && presentation.displayName
-    ? `${presentation.displayName} · ${presentation.sourceLabel || "AI"}`
-    : output.title);
   const contentMode = taskModePresentation(currentJob).key === "content_extract";
+  const displayTitle = cleanDisplayText(output.displayTitle)
+    || (currentJob.autoComposition?.status === "completed" && cleanDisplayText(presentation.displayName)
+      ? `${cleanDisplayText(presentation.displayName)} · ${cleanDisplayText(presentation.sourceLabel, "AI")}`
+      : cleanDisplayText(output.title, contentMode ? "内容视频" : "审核样片"));
   const qualityLabel = outputVersionQualityLabel(version, output);
   const kindLabel = version.variantKind === "formal_export" || (!version.previewOnly && !output.previewOnly) ? "高清" : version.variantKind === "repair" ? "返修" : "样片";
   const versionIdentity = outputVersionIdentity(version, output);
-  $("#viewerBadge").textContent = contentMode
-    ? `${versionIdentity} · ${outputNumber > 0 ? `内容视频 ${outputNumber}` : "内容视频"}`
+  const previewOnly = Boolean(output.previewOnly || version.previewOnly);
+  const reviewSample = currentOutputIsReviewSample(output, version);
+  $("#viewerBadge").textContent = reviewSample
+    ? `${versionIdentity} · 审核样片预览`
+    : contentMode
+    ? `${versionIdentity} · 内容视频`
     : `${versionIdentity} · ${kindLabel} · ${qualityLabel}`;
   renderOutputPreviewSelector(currentJob);
-  $("#reviewKicker").textContent = `${versionIdentity} · ${contentMode ? "内容视频" : "高光成片"}`;
-  $("#reviewTitle").textContent = currentJob.filename || displayTitle;
+  const viewSelect = $("#videoViewSelect");
+  if (viewSelect && [...viewSelect.options].some((option) => option.value === filename)) viewSelect.value = filename;
+  $("#reviewKicker").textContent = reviewSample ? "审核样片预览" : `${versionIdentity} · ${contentMode ? "内容视频" : "高光成片"}`;
+  $("#reviewTitle").textContent = displayTitle;
   const download = $("#downloadButton");
-  const previewOnly = Boolean(output.previewOnly || version.previewOnly);
   const downloadUrl = String(output.downloadUrl || "").trim();
   const downloadAvailable = Boolean(downloadUrl && downloadUrl !== "undefined" && downloadUrl !== "null");
   download.classList.toggle("hidden", !downloadAvailable);
@@ -10102,27 +12083,43 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
     download.href = downloadUrl;
     download.download = output.downloadFilename || output.filename || `${versionIdentity}.mp4`;
     download.dataset.outputVersion = versionIdentity;
-    download.textContent = previewOnly ? `下载 ${versionIdentity} 审核样片` : `下载 ${versionIdentity} 高清 MP4`;
+    download.textContent = previewOnly ? `下载 ${versionIdentity} 审核样片` : `下载 ${versionIdentity} MP4`;
     download.title = previewOnly
-      ? `立即下载当前预览的 ${versionIdentity} 低分辨率审核样片；不会创建正式高清成片`
+      ? `下载当前预览的 ${versionIdentity} 审核样片`
       : `下载当前预览的 ${versionIdentity} 高清成片`;
     download.setAttribute("aria-label", previewOnly
-      ? `下载当前预览的 ${versionIdentity} 低清审核样片，不导出高清版本`
+      ? `下载当前预览的 ${versionIdentity} 审核样片`
       : `下载当前预览的 ${versionIdentity} 高清 MP4`);
   } else {
     download.removeAttribute("href");
     download.removeAttribute("download");
     download.removeAttribute("data-output-version");
   }
+  const coverDownload = $("#coverDownloadButton");
+  const packageDownload = $("#packageDownloadButton");
+  const coverIntro = $("#coverIntroButton");
+  coverDownload?.classList.toggle("hidden", !output.coverUrl);
+  packageDownload?.classList.toggle("hidden", !output.packageUrl);
+  coverIntro?.classList.toggle("hidden", !output.coverIntroAvailable);
+  if (coverDownload && output.coverUrl) {
+    coverDownload.href = `${output.coverUrl}?download=1`;
+    coverDownload.download = `${String(output.downloadFilename || output.filename).replace(/\.[^.]+$/, "")}_封面.jpg`;
+  }
+  if (packageDownload && output.packageUrl) {
+    packageDownload.href = output.packageUrl;
+    packageDownload.download = `${String(output.downloadFilename || output.filename).replace(/\.[^.]+$/, "")}_发布包.zip`;
+  }
+  if (coverIntro) coverIntro.onclick = () => createCoverIntroOutput(version, output);
   const finalize = $("#finalizePreviewButton");
   finalize?.classList.toggle("hidden", !previewOnly);
   if (finalize) {
-    finalize.onclick = () => finalizePreviewVersion(version, output);
-    finalize.textContent = "确认版本并导出高清";
-    finalize.title = "锁定当前剪辑方案，并按源视频分辨率重新渲染正式成片";
-    finalize.setAttribute("aria-label", "确认当前版本并导出高清正式成片");
+    finalize.onclick = () => window.ClipTalkVersionAction(output.filename, "export");
+    finalize.textContent = "生成成片";
+    finalize.title = "生成当前样片的高清版本";
+    finalize.setAttribute("aria-label", "生成当前样片的高清版本");
   }
   syncOneOffFinalizeAction(currentJob);
+  syncLibrarySaveAction(currentJob, output);
   const subtitle = $("#subtitleButton");
   subtitle.dataset.subtitleUrl = `/api/jobs/${currentJob.id}/outputs/${encodeURIComponent(output.filename)}/subtitles?format=srt`;
   // Keep the subtitle download independent from the MP4 link.  Some browsers
@@ -10158,11 +12155,20 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
   // 字幕下载暂时不在界面展示，保留生成逻辑以便后续重新启用。
   subtitle.classList.add("hidden");
   subtitle.textContent = "下载字幕 SRT";
-  $("#evidencePanel")?.classList.remove("hidden");
-  $("#evidencePanel")?.classList.remove("evidence-placeholder");
-  $("#evidencePanel")?.classList.remove("candidate-mode");
-  $("#evidencePanel")?.classList.toggle("montage-mode", Boolean(output.segments?.length));
-  $("#evidencePanel")?.classList.add("output-mode");
+  const evidencePanel = $("#evidencePanel");
+  evidencePanel?.classList.add("hidden", "evidence-placeholder");
+  evidencePanel?.classList.remove(
+    "candidate-mode",
+    "montage-mode",
+    "output-mode",
+    "evidence-in-gutter",
+    "evidence-gutter-left",
+    "evidence-gutter-right",
+    "evidence-compact",
+    "evidence-expanded",
+    "content-boundary-view",
+  );
+  hideContentDetailModeSwitch();
   $("#clipTime").textContent = output.segments?.length
     ? `${output.segments.length} 个${contentMode ? "内容片段" : "镜头"} · ${contentMode ? "视频" : "成片"} ${Number(output.duration).toFixed(1)} 秒`
     : `${formatTime(output.start)} → ${formatTime(output.end)} · ${Number(output.duration).toFixed(1)} 秒`;
@@ -10173,10 +12179,17 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
       ?? output.qualityReport?.score
       ?? output.score,
   );
-  $("#clipScore").textContent = Number.isFinite(qualityScore) ? `综合审片 ${Math.round(qualityScore)}/100` : "已质检";
+  $("#clipScore").textContent = Number.isFinite(qualityScore) ? `综合审片 ${Math.round(qualityScore)}/100` : outputVersionQualityLabel(version, output);
   $("#clipScore").title = "综合审片分：内容、叙事、节奏、连续性、音画与目标匹配的加权结果";
   $("#clipReason").textContent = output.reason;
-  renderClipEvidence(output, "output", version);
+  if ($("#clipEvidenceMeta")) $("#clipEvidenceMeta").innerHTML = "";
+  if ($("#clipEvidence")) $("#clipEvidence").innerHTML = "";
+  $("#clipTranscript")?.classList.add("hidden");
+  if ($("#outputExplanation")) {
+    $("#outputExplanation").innerHTML = "";
+    $("#outputExplanation").classList.add("hidden");
+  }
+  renderOutputEvidenceStrip(output, version, { contentMode });
   // Versioning and archival are separate concepts.  A rendered output is
   // already part of V1/V2; this button only creates/removes an extra copy.
   // The legacy keep-library action was removed from the UI. Downloads remain
@@ -10210,40 +12223,44 @@ function selectOutput(filename, autoplay = false, seekTime = null) {
 
 async function finalizePreviewVersion(version, output = null) {
   if (!currentJob || !version?.id || actionBusy) return;
-  const subtitleMode = $("#subtitleMode")?.value || (output?.subtitleMode === "burn" ? "burn" : "none");
-  const subtitleStyle = $("#subtitleStyle")?.value || output?.subtitleStyle || "clean";
+  output = output || (version.outputs?.length === 1 ? version.outputs[0] : null);
+  if (!output?.filename) return void showToast("请选择要导出的具体文件");
+  const actionToken = captureJobAction();
+  let snapshot = window.ClipTalkDelivery.capture(currentJob, version, output);
+  const stillCurrent = () => jobActionStillCurrent(actionToken) && window.ClipTalkDelivery.isCurrent(snapshot, currentJob);
   const quality = outputVersionQuality(version, output);
   const review = version?.reviewReport || output?.reviewReport || {};
   const gate = version?.qualityGate || output?.qualityGate || review?.qualityGate || {};
   const risky = quality !== "passed";
   const issueDetails = (gate.reasons || []).slice(0, 3).map(String);
   const confirmed = await requestActionConfirmation({
-    title: risky ? "确认导出需复核样片" : "确认当前版本并导出高清",
-    summary: risky
-      ? (quality === "review_unavailable" ? "AI 审片未完成。请先完整预览样片；继续即表示接受当前镜头和质量风险。" : quality === "needs_review" ? "该样片未通过自动质量门。请先完整预览；继续即表示接受已提示的问题。" : "该样片尚未完成质量检查。")
-      : "将锁定当前样片的镜头、顺序、变速、转场和声音衔接，并按源分辨率重新渲染。",
-    details: [
-      ...(Number.isFinite(Number(review.overallScore)) ? [`审片得分：${Number(review.overallScore).toFixed(0)}/100`] : []),
-      ...issueDetails,
-      "审核样片会继续保留，高清成片将作为新版本加入",
-      "不会重新调用 VLM 或 LLM",
-    ],
-    warning: risky ? "此版本不会被系统自动推荐；只有确认接受风险后才能导出。" : "",
-    confirmLabel: risky ? "我已预览，接受风险并导出" : "确认并开始高清导出",
+    title: "生成成片",
+    summary: `当前样片 · ${version.title || output?.title || "未命名版本"} · ${formatTime(Number(output?.duration) || 0)}`,
+    details: risky ? issueDetails : [],
+    warning: risky && issueDetails.length ? "请确认以上提示后继续。" : "",
+    confirmLabel: "开始生成",
+    exportSnapshot: snapshot,
   });
   if (!confirmed) return;
+  if (!stillCurrent()) return void showToast("任务或版本已变化，本次生成已取消，请重新确认");
+  snapshot = confirmed.exportSnapshot || snapshot;
+  const { subtitleMode, subtitleStyle } = snapshot;
   let subtitleDraftId = null;
+  let subtitleSnapshot = null;
   if (subtitleMode === "burn") {
     if (!output?.segments?.length) return void showToast("当前样片缺少可校对的时间线");
-    const draft = await reviewSubtitlesBeforeRender([{ segments: output.segments }], subtitleStyle);
+    const draft = await reviewSubtitlesBeforeRender([{ segments: snapshot.segments }], subtitleStyle);
     if (!draft) return;
+    if (!stillCurrent()) return void showToast("任务或版本已变化，本次生成已取消，请重新确认");
     subtitleDraftId = draft.id;
+    subtitleSnapshot = draft;
   }
-  const actionToken = captureJobAction();
+  if (!stillCurrent()) return void showToast("任务或版本已变化，本次生成已取消，请重新确认");
+  if (actionBusy) return;
   actionBusy = true;
   try {
-    const { job } = await apiJson(`/api/jobs/${actionToken.jobId}/output-versions/${encodeURIComponent(version.id)}/finalize`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: { subtitleMode, subtitleStyle, subtitleDraftId, acknowledgeQualityRisk: risky },
+    const { job } = await apiJson(`/api/jobs/${encodeURIComponent(snapshot.jobId)}/output-versions/${encodeURIComponent(snapshot.versionId)}/finalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: window.ClipTalkDelivery.requestBody(snapshot, subtitleDraftId, risky, subtitleSnapshot),
     });
     if (!commitJobAction(job, actionToken)) return;
     clearTimeout(pollTimer);
@@ -10263,7 +12280,7 @@ async function regenerateMissingAutoVariants(targetVariantCount = 3) {
   if (!await requestActionConfirmation({
     title: "补生成缺少的自动版本",
     summary: `将补生成最多 ${missing} 个与已有时间线实质不同的版本。`,
-    details: ["复用现有画面、声音、对白和事件证据", "不会重新扫描整条视频", "不会加入你未选择的事件", "没有足够差异时不会用重复版本凑数"],
+    details: [],
     confirmLabel: "开始补生成",
   })) return;
   const actionToken = captureJobAction();
@@ -10288,7 +12305,7 @@ async function deleteAutoCompositionBatch(batchId) {
   if (!currentJob || !batchId || actionBusy) return;
   if (!await requestActionConfirmation({
     title: "删除这一批审核样片",
-    summary: "只删除该批次的低分辨率样片，不影响其他批次或已经导出的高清成片。",
+    summary: "删除本批审核样片，其他样片和高清版本不受影响。",
     details: ["删除后无法恢复这些样片", "源视频、分析证据和事件候选会保留"],
     warning: "这是不可恢复的样片删除操作。",
     confirmLabel: "删除本批样片",
@@ -10319,14 +12336,19 @@ function previewCandidate(index, { showEvidence = true } = {}) {
   currentEventSegment = null;
   candidatePreviewEnd = Number(candidate.end);
   viewerMediaKind = "candidate";
+  syncOutputPreviewMode();
   clearOutputVersionSelectionState();
   beginSourcePreviewPolling();
   $("#viewerBadge").textContent = `候选 ${index + 1}`;
-  $("#reviewKicker").textContent = "CANDIDATE PREVIEW";
+  $("#reviewKicker").textContent = "候选片段预览";
   $("#reviewTitle").textContent = candidate.title;
   $("#downloadButton")?.classList.add("hidden");
+  $("#coverDownloadButton")?.classList.add("hidden");
+  $("#packageDownloadButton")?.classList.add("hidden");
+  $("#coverIntroButton")?.classList.add("hidden");
   $("#finalizePreviewButton")?.classList.add("hidden");
   syncOneOffFinalizeAction(currentJob);
+  syncLibrarySaveAction(currentJob, null);
   $("#subtitleButton")?.classList.add("hidden");
   if (showEvidence) {
     $("#evidencePanel")?.classList.remove("hidden", "evidence-placeholder");
@@ -10340,7 +12362,7 @@ function previewCandidate(index, { showEvidence = true } = {}) {
     $("#keepButton")?.classList.remove("hidden");
     $("#keepButton").textContent = "下载该片段";
     $("#replaceButton")?.classList.remove("hidden");
-    $("#replaceButton").textContent = "删除片段";
+    $("#replaceButton").textContent = "从当前结果移除";
     renderClipEvidence(candidate, "candidate");
   }
   document.querySelectorAll(".candidate-row").forEach((row) => row.classList.toggle("previewing", Number(row.dataset.candidateRow) === index));
@@ -10384,14 +12406,18 @@ function previewEventGroup(group, { seekTime = null, autoplay = true } = {}) {
   currentEventGroup = group;
   candidatePreviewEnd = null;
   viewerMediaKind = "event";
+  syncOutputPreviewMode();
   clearOutputVersionSelectionState();
   stopSourcePreviewPolling();
   clearPlayerNotice();
   setMainVideoSource(`/api/jobs/${currentJob.id}/event-groups/${encodeURIComponent(group.id)}/preview?v=${encodeURIComponent(group.updatedAt || group.id)}`);
   $("#viewerBadge").textContent = `事件组合 · ${group.segments.length} 个镜头`;
-  $("#reviewKicker").textContent = "COMPOSED EVENT PREVIEW";
+  $("#reviewKicker").textContent = "事件成片预览";
   $("#reviewTitle").textContent = group.title;
   $("#downloadButton")?.classList.add("hidden");
+  $("#coverDownloadButton")?.classList.add("hidden");
+  $("#packageDownloadButton")?.classList.add("hidden");
+  $("#coverIntroButton")?.classList.add("hidden");
   $("#finalizePreviewButton")?.classList.add("hidden");
   $("#evidencePanel")?.classList.remove("hidden");
   $("#evidencePanel")?.classList.remove("evidence-placeholder");
@@ -10423,6 +12449,9 @@ function previewEventSegment(group, segment, { seekTime = null } = {}) {
   currentOutput = null;
   clearOutputVersionSelectionState();
   viewerMediaKind = "segment";
+  timelineCoordinateSpace = "source";
+  timelineSelectedOutputSegmentIndex = null;
+  syncOutputPreviewMode();
   beginSourcePreviewPolling();
   candidatePreviewEnd = Number(segment.end);
   const target = Number.isFinite(Number(seekTime)) ? Number(seekTime) : Number(segment.start);
@@ -10450,7 +12479,7 @@ function previewEventSegment(group, segment, { seekTime = null } = {}) {
   $("#keepButton")?.classList.remove("hidden");
   $("#keepButton").textContent = "下载该片段";
   $("#replaceButton")?.classList.toggle("hidden", !group || contentMode);
-  $("#replaceButton").textContent = "删除片段";
+  $("#replaceButton").textContent = "从当前结果移除";
   renderClipEvidence(segment, "segment");
   refreshTimelineAfterReviewSelection();
   syncReviewSelectionClasses();
@@ -10543,10 +12572,10 @@ async function deleteTimelineItem() {
   }
   if (!currentCandidate) return;
   if (!await requestActionConfirmation({
-    title: "删除候选片段",
+    title: "从当前结果移除片段",
     summary: `确认从当前审核中删除“${currentCandidate.title}”？`,
     details: ["对应时间轴片段、缩略图和波形标记会从本次审核中移除。", "源视频不会被修改。"],
-    confirmLabel: "删除片段",
+    confirmLabel: "从当前结果移除",
   })) return;
   const actionToken = captureJobAction();
   actionBusy = true;
@@ -10977,7 +13006,8 @@ function beginTimelineRange(event) {
 }
 
 function seekSourceTime(second) {
-  const value = Math.max(0, Math.min(timelineDurationValue(), Number(second) || 0));
+  beginSourceInspection();
+  const value = Math.max(0, Math.min(Number(currentJob?.videoInfo?.duration) || timelineDurationValue(), Number(second) || 0));
   const seek = () => {
     mainVideo.currentTime = Math.min(Math.max(0, mainVideo.duration - 0.05), value);
     updateTimelinePlayhead();
@@ -10991,6 +13021,8 @@ function seekSourceTime(second) {
   }
   if (currentCandidate) candidatePreviewEnd = value <= Number(currentCandidate.end) ? Number(currentCandidate.end) : null;
 }
+
+window.ClipTalkSeekSourceTime = (second) => seekSourceTime(second);
 
 function candidateThumbnailStyle(candidate) {
   const sprite = timelineAssets?.sprite;
@@ -11007,11 +13039,18 @@ function candidateThumbnailStyle(candidate) {
   ].join(";");
 }
 
-function closeCandidateDrawer() {
+let candidateDrawerReturnFocus = null;
+let candidateDrawerEscapeHandler = null;
+
+function closeCandidateDrawer({ restoreFocus = false } = {}) {
   $("#candidateDrawer")?.classList.remove("open");
   $("#candidateDrawer")?.setAttribute("aria-hidden", "true");
   $("#drawerBackdrop")?.classList.add("hidden");
+  if (candidateDrawerEscapeHandler) document.removeEventListener("keydown", candidateDrawerEscapeHandler);
+  candidateDrawerEscapeHandler = null;
   syncReviewWorkbench();
+  if (restoreFocus && candidateDrawerReturnFocus?.isConnected) candidateDrawerReturnFocus.focus();
+  candidateDrawerReturnFocus = null;
 }
 
 function resetCandidateDrawerContext() {
@@ -11025,7 +13064,7 @@ function resetCandidateDrawerContext() {
   const kicker = $("#candidateDrawerKicker");
   if (kicker) kicker.textContent = "源镜头候选";
   const description = $("#candidateDrawerDescription");
-  if (description) description.textContent = "这些是视觉模型精修后的源镜头，可预览或补充到事件成片中。";
+  if (description) description.textContent = "这些是从视频中找到的候选镜头，可预览或加入当前成片。";
   const list = $("#candidateDrawerList");
   if (list) list.innerHTML = "";
 }
@@ -11105,7 +13144,7 @@ function renderContentCandidateDrawer(job) {
   const kicker = $("#candidateDrawerKicker");
   const description = $("#candidateDrawerDescription");
   if (!drawerList) return;
-  if (kicker) kicker.textContent = labels.length ? "PERSON TRACK CLIPS" : "CONTENT MATCHES";
+  if (kicker) kicker.textContent = labels.length ? "人物出镜片段" : "内容匹配片段";
   if (title) title.textContent = query
     ? `搜索结果（${candidates.length}/${allCandidates.length}）`
     : `${labels.length ? "人物出镜片段" : "内容匹配片段"}（${allCandidates.length}）`;
@@ -11222,23 +13261,85 @@ function renderCandidateDrawer(job) {
   };
 }
 
+function renderCandidateRail(job) {
+  const body = $("#railBody");
+  const rail = $("#reviewRail");
+  const railTitle = $("#railTitle");
+  const candidates = Array.isArray(job?.candidates) ? job.candidates : [];
+  if (!body) return;
+  if (rail && body.parentElement !== rail) rail.append(body);
+  if (railTitle) railTitle.textContent = `素材（${candidates.length}）`;
+  body.innerHTML = `<section class="candidate-rail-panel">
+    <div class="rail-section-title"><strong>源镜头候选</strong><button type="button" data-close-candidate-rail>返回审核</button></div>
+    <p class="rail-summary">在这里快速预览素材；需要证据、对白和加入事件等详细操作时，再打开单个镜头详情。</p>
+    <div class="candidate-rail-list">${candidates.map((candidate, index) => `<article class="candidate-rail-card" data-candidate-index="${Number(candidate.index)}">
+      <div class="candidate-thumb" style="${candidateThumbnailStyle(candidate)}"><span>${formatTime(candidate.start)}</span></div>
+      <span><strong>${index + 1}. ${escapeHtml(candidate.title || "未命名镜头")}</strong><small>${formatTime(candidate.start)} → ${formatTime(candidate.end)} · ${Number(candidate.duration || 0).toFixed(1)} 秒</small></span>
+      <div><button type="button" data-preview-candidate-inline>预览</button><button type="button" data-open-candidate-detail>查看详情</button></div>
+    </article>`).join("")}</div>
+  </section>`;
+  body.querySelector("[data-close-candidate-rail]")?.addEventListener("click", () => {
+    setCandidateRailOpen(false);
+    renderReviewRail(currentJob);
+    syncReviewWorkbench();
+  });
+  body.querySelectorAll("[data-candidate-index]").forEach((row) => {
+    const candidate = candidates.find((value) => Number(value.index) === Number(row.dataset.candidateIndex));
+    row.querySelector("[data-preview-candidate-inline]")?.addEventListener("click", () => previewCandidate(Number(candidate?.index)));
+    row.querySelector("[data-open-candidate-detail]")?.addEventListener("click", () => {
+      currentCandidate = candidate || null;
+      const search = $("#candidateDrawerSearch");
+      if (search) search.value = String(candidate?.title || "");
+      renderCandidateDrawer(currentJob);
+      const drawer = $("#candidateDrawer");
+      candidateDrawerReturnFocus = row.querySelector("[data-open-candidate-detail]");
+      drawer?.classList.add("open");
+      drawer?.setAttribute("aria-hidden", "false");
+      $("#drawerBackdrop")?.classList.remove("hidden");
+      if (candidateDrawerEscapeHandler) document.removeEventListener("keydown", candidateDrawerEscapeHandler);
+      candidateDrawerEscapeHandler = (event) => {
+        if (event.key !== "Escape" || !drawer?.classList.contains("open")) return;
+        event.preventDefault();
+        closeCandidateDrawer({ restoreFocus: true });
+      };
+      document.addEventListener("keydown", candidateDrawerEscapeHandler);
+      window.requestAnimationFrame(() => $("#candidateDrawerSearch")?.focus());
+    });
+  });
+  $("#railOutput")?.classList.add("hidden");
+}
+
 function openCandidateDrawer() {
   const contentMode = taskModePresentation(currentJob).key === "content_extract";
   const candidates = contentMode ? currentJob?.contentSearch?.candidates : currentJob?.candidates;
   if (!candidates?.length) return;
-  if ($("#candidateDrawer")?.classList.contains("open")) {
-    closeCandidateDrawer();
+  if (!contentMode) {
+    setCandidateRailOpen(!candidateRailOpen);
+    closeCandidateDrawer({ restoreFocus: false });
+    if (candidateRailOpen) renderCandidateRail(currentJob);
+    else renderReviewRail(currentJob);
+    syncReviewWorkbench();
     return;
   }
+  if ($("#candidateDrawer")?.classList.contains("open")) return void closeCandidateDrawer({ restoreFocus: true });
   if (!contentMode && reviewPanelDeckAvailable(Boolean(currentJob))) {
     closePersonProfiles();
     closeVoiceProfiles();
     setReviewLowerPanelMode("collapsed");
   }
   renderCandidateDrawer(currentJob);
-  $("#candidateDrawer")?.classList.add("open");
-  $("#candidateDrawer")?.setAttribute("aria-hidden", "false");
+  const drawer = $("#candidateDrawer");
+  candidateDrawerReturnFocus = document.activeElement instanceof window.HTMLElement ? document.activeElement : $("#openCandidateDrawer");
+  drawer?.classList.add("open");
+  drawer?.setAttribute("aria-hidden", "false");
   syncReviewWorkbench();
+  candidateDrawerEscapeHandler = (event) => {
+    if (event.key !== "Escape" || !drawer?.classList.contains("open")) return;
+    event.preventDefault();
+    closeCandidateDrawer({ restoreFocus: true });
+  };
+  document.addEventListener("keydown", candidateDrawerEscapeHandler);
+  window.requestAnimationFrame(() => $("#candidateDrawerSearch")?.focus());
 }
 
 async function addCandidateToEvent(candidate) {
@@ -11461,7 +13562,7 @@ function renderRailOutput(job) {
   }
   output.classList.remove("hidden");
   output.innerHTML = `<section class="composition-workbench">
-      <header class="composition-header"><div><small>FINAL COMPOSE</small><strong>生成高光成片</strong></div><span>${selected.length} 个事件 · ${segmentCount} 个镜头</span></header>
+      <header class="composition-header"><div><small>最终合成</small><strong>生成高光成片</strong></div><span>${selected.length} 个事件 · ${segmentCount} 个镜头</span></header>
       <div class="composition-selection"><div><b>当前选择</b><span>${total.toFixed(1)} 秒${job.totalTargetSeconds ? ` · 单条目标 ${Number(job.totalTargetSeconds).toFixed(1)} 秒` : " · 当前推荐总时长"}</span></div><button type="button" class="back-to-events">返回事件审核</button></div>
       ${multipleEvents ? `<section class="composition-step"><div class="composition-step-title"><div><strong>成片形式</strong><small>将已选事件合成一条视频，或分别导出</small></div></div><div class="output-mode-switch" role="group" aria-label="成片形式"><button type="button" data-output-mode="single_reel" class="${singleReel ? "active" : ""}">已选事件合成 1 条</button><button type="button" data-output-mode="separate_events" class="${singleReel ? "" : "active"}">分别导出已选事件</button></div></section>` : ""}
       <section class="composition-step"><div class="composition-step-title"><div><strong>按当前选择生成</strong><small>保持事件审核中的镜头顺序</small></div></div><div class="manual-mode-note"><strong>${singleReel ? "生成一条成片" : "分别导出已选事件"}</strong><span>${singleReel ? "不改变镜头顺序，直接合成。" : "每个已选事件导出为一条视频。"}</span><button type="button" class="generate-events" ${selected.length ? "" : "disabled"}>${singleReel ? "生成成片" : `导出 ${selected.length} 个事件`}</button></div></section>
@@ -11557,14 +13658,52 @@ function renderReviewRail(job) {
   const generationFailed = contentGenerationFailed(job);
   const setRailTitle = (value) => { if (railTitle) railTitle.textContent = value; };
   const contentCandidates = Array.isArray(job.contentSearch?.candidates) ? job.contentSearch.candidates : [];
+  const agentReviewPreviews = agentReviewPreviewsForJob(job);
   if (openCandidates) openCandidates.disabled = contentMode || !(job.candidates?.length);
   const hasGeneratedOutputs = Boolean(
     (job.outputs || []).length
     || (job.outputVersions || []).some((version) => (version.outputs || []).length),
   );
+  if (candidateRailOpen && !contentMode && job.candidates?.length) {
+    renderCandidateRail(job);
+    return;
+  }
+  const unifiedPresentation = window.ClipTalkWorkspaceState?.derivePresentation?.(job);
+  if (unifiedPresentation?.key === "waiting_instruction") {
+    setRailTitle(unifiedPresentation.railTitle);
+    body.innerHTML = `<div class="rail-empty rail-state-action"><strong>${escapeHtml(unifiedPresentation.headline)}</strong><p>${escapeHtml(unifiedPresentation.detail)}</p><small class="rail-summary">请在左侧对话框输入剪辑要求，或选择一种快速剪辑方式。</small></div>`;
+    $("#railOutput")?.classList.add("hidden");
+    return;
+  }
+  if (unifiedPresentation?.key === "no_result") {
+    setRailTitle(unifiedPresentation.railTitle);
+    body.innerHTML = `<div class="rail-empty rail-state-action"><strong>${escapeHtml(unifiedPresentation.headline)}</strong><p>${escapeHtml(unifiedPresentation.detail)}</p><button type="button" class="primary" data-revise-no-result>修改剪辑要求</button><small class="rail-summary">不会重复上传素材；新要求会基于当前源视频继续。</small></div>`;
+    body.querySelector("[data-revise-no-result]")?.addEventListener("click", () => {
+      if (chatInput) {
+        chatInput.value = "换一种查找方式：";
+        chatInput.focus();
+        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+      }
+    });
+    $("#railOutput")?.classList.add("hidden");
+    return;
+  }
+  if (["failed", "cancelled"].includes(String(unifiedPresentation?.key || ""))
+    && !generationFailed
+    && !(job.status === "failed" && job.stage === "interrupted")) {
+    setRailTitle(unifiedPresentation.railTitle);
+    body.innerHTML = `<div class="rail-empty rail-state-action"><strong>${escapeHtml(unifiedPresentation.headline)}</strong><p>${escapeHtml(unifiedPresentation.detail)}</p><button type="button" class="primary" data-open-agent-activity>查看失败步骤</button><button type="button" data-revise-failed>修改要求后重试</button></div>`;
+    body.querySelector("[data-open-agent-activity]")?.addEventListener("click", () => {
+      $("#agentPlanDock")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      $("#agentPlanDock button")?.focus();
+    });
+    body.querySelector("[data-revise-failed]")?.addEventListener("click", () => chatInput?.focus());
+    $("#railOutput")?.classList.add("hidden");
+    return;
+  }
   if (job.status === "briefing") {
     setRailTitle("理解需求");
-    body.innerHTML = `<div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="composing" data-orb-size="64" data-orb-theme="light" data-orb-label="正在理解剪辑需求"></span><strong>正在理解剪辑需求</strong><p>${escapeHtml(job.detail || "LLM 正在整理目标、重点和限制")}</p></div>`;
+    body.innerHTML = `<div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="composing" data-orb-size="64" data-orb-theme="light" data-orb-label="正在理解剪辑需求"></span><strong>正在理解剪辑需求</strong><p>${escapeHtml(job.detail || "正在整理目标、重点和限制")}</p></div>`;
     syncThinkingOrbs(body);
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -11572,7 +13711,7 @@ function renderReviewRail(job) {
   if (job.status === "brief_confirmation") {
     const brief = job.brief || {};
     setRailTitle("需求确认");
-    body.innerHTML = `<div class="rail-section-title"><strong>高光剪辑需求简报</strong><b>等待确认</b></div><p class="rail-summary">请在剪辑需求卡中修改并保存；确认后才会调用视觉模型。</p><section class="brief-review-card"><dl><div><dt>剪辑目标</dt><dd>${escapeHtml(brief.objective || "事件高光合集")}</dd></div><div><dt>单条成片目标</dt><dd>${brief.targetDurationSeconds ? `${Number(brief.targetDurationSeconds).toFixed(1)} 秒` : "AI 推荐"}</dd></div><div><dt>关注重点</dt><dd>${escapeHtml((brief.focus || ["综合判断"]).join("、"))}</dd></div><div><dt>风格节奏</dt><dd>${escapeHtml([brief.style?.pace, brief.style?.tone].filter(Boolean).join(" · ") || "纪实自然")}</dd></div></dl><button type="button" class="confirm-brief-button" data-focus-brief>编辑并确认简报</button></section>`;
+    body.innerHTML = `<div class="rail-section-title"><strong>高光剪辑需求简报</strong><b>等待确认</b></div><p class="rail-summary">检查并修改剪辑需求，确认后开始分析。</p><section class="brief-review-card"><dl><div><dt>剪辑目标</dt><dd>${escapeHtml(brief.objective || "事件高光合集")}</dd></div><div><dt>单条成片目标</dt><dd>${brief.targetDurationSeconds ? `${Number(brief.targetDurationSeconds).toFixed(1)} 秒` : "智能推荐"}</dd></div><div><dt>关注重点</dt><dd>${escapeHtml((brief.focus || ["综合判断"]).join("、"))}</dd></div><div><dt>风格节奏</dt><dd>${escapeHtml([brief.style?.pace, brief.style?.tone].filter(Boolean).join(" · ") || "纪实自然")}</dd></div></dl><button type="button" class="confirm-brief-button" data-focus-brief>编辑并确认简报</button></section>`;
     body.querySelector("[data-focus-brief]")?.addEventListener("click", () => $("#chatMessages .brief-editor")?.scrollIntoView({ behavior: "smooth", block: "center" }));
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -11586,11 +13725,49 @@ function renderReviewRail(job) {
     $("#railOutput")?.classList.add("hidden");
     return;
   }
+  if (job.status === "awaiting_agent_plan") {
+    setRailTitle(unifiedPresentation?.railTitle || "任务状态");
+    const agent = job.agent || {};
+    const planStatus = String(agent.status || "planning");
+    const completed = Math.max(0, Number(agent.completedSteps) || 0);
+    const total = Math.max(0, Number(agent.totalSteps) || 0);
+    const step = agent.currentStepTitle || "下一步";
+    const copy = planStatus === "awaiting_confirmation"
+      ? { title: "计划已生成，等待确认", detail: "请在对话区核对目标、当前阶段和下一步；确认后才会开始分析或渲染。" }
+      : ["approved", "running"].includes(planStatus)
+        ? { title: `正在执行：${step}`, detail: total ? `已完成 ${completed}/${total} 步；结果会写入当前任务。` : "正在启动第一个计划步骤。" }
+        : planStatus === "action_required"
+          ? { title: `需要确认：${step}`, detail: "请在对话区完成当前选择，再继续执行。" }
+          : planStatus === "preview_ready"
+            ? { title: "审核结果已生成", detail: "可以查看样片、封面或继续输入新的精剪要求。" }
+            : planStatus === "failed"
+              ? { title: "任务没有完成", detail: "请查看失败原因，调整目标或重新执行失败链路。" }
+              : planStatus === "cancelled"
+                ? { title: "计划已停止", detail: "可以继续输入新的剪辑目标，重新生成计划。" }
+                : { title: "正在生成剪辑计划", detail: "素材工作区已保存。当前只整理目标、阶段和确认点；此时不会开始分析或渲染。" };
+    const previewMarkup = agentReviewPreviews.length
+      ? `<section class="agent-review-preview-panel"><div class="rail-section-title"><strong>审核样片已生成</strong><b>${agentReviewPreviews.length} 个样片</b></div><p class="rail-summary">选择样片预览，确认效果后生成成片。</p>${agentReviewPreviewMarkup(agentReviewPreviews)}</section>`
+      : "";
+    const planAction = planStatus === "awaiting_confirmation"
+      ? '<button type="button" class="primary" data-focus-agent-plan>核对并确认计划</button>'
+      : planStatus === "action_required"
+        ? '<button type="button" class="primary" data-focus-agent-plan>处理当前确认</button>'
+        : "";
+    body.innerHTML = previewMarkup || `<div class="rail-empty rail-state-action">${planStatus === "planning" ? '<span class="empty-thinking-orb" data-thinking-orb data-orb-state="composing" data-orb-size="64" data-orb-theme="light" data-orb-label="正在生成 Agent 计划"></span>' : ""}<strong>${escapeHtml(copy.title)}</strong><p>${escapeHtml(copy.detail)}</p>${planAction}</div>`;
+    body.querySelector("[data-focus-agent-plan]")?.addEventListener("click", () => {
+      $("#agentPlanDock")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      $("#agentPlanDock [data-agent-plan-confirm], #agentPlanDock button")?.focus();
+    });
+    bindAgentReviewPreviewActions(body, agentReviewPreviews);
+    if (planStatus === "planning") syncThinkingOrbs(body);
+    $("#railOutput")?.classList.add("hidden");
+    return;
+  }
   if (execution.active && !["auto_composition", "quality_review"].includes(execution.operation)) {
     const rendering = execution.operation === "render" || ["rendering", "render"].includes(String(job.stage || ""));
     setRailTitle(rendering ? `合成${vocabulary.output}` : contentMode ? "内容检索" : "实时分析");
-    body.innerHTML = `<div class="rail-section-title"><strong>${rendering ? `正在合成${vocabulary.output}` : contentMode ? "正在检索内容" : "候选审核区"}</strong><b>${rendering ? "不会改变已确认片段" : contentMode ? "完成后确认" : "分析后显示"}</b></div>
-      <p class="rail-summary">${rendering ? "正在按最终确认的时间范围合成并检查视频文件。完成后直接进入预览，不需要再次确认。" : contentMode ? `新的匹配片段会在检索完成后显示。${hasGeneratedOutputs ? "已有内容视频仍可在对话框中点击预览。" : ""}` : "候选镜头与高光事件整理完成后将在这里出现。"}</p>
+    body.innerHTML = `<div class="rail-section-title"><strong>${rendering ? `正在合成${vocabulary.output}` : contentMode ? "正在检索内容" : "候选审核区"}</strong><b>${rendering ? "按已确认片段生成" : contentMode ? "完成后确认" : "分析后显示"}</b></div>
+      <p class="rail-summary">${rendering ? "正在按最终确认的时间范围合成并检查视频文件。完成后直接进入播放器，不需要再次确认。" : contentMode ? `新的匹配片段会在检索完成后显示。${hasGeneratedOutputs ? "已有内容视频仍可在对话框中点击播放。" : ""}` : "候选镜头与高光事件整理完成后将在这里出现。"}</p>
       <div class="rail-skeleton-list" aria-hidden="true">${Array.from({ length: 4 }, () => `<i><span></span><b></b><em></em></i>`).join("")}</div>`;
     $("#railOutput")?.classList.add("hidden");
     return;
@@ -11641,15 +13818,16 @@ function renderReviewRail(job) {
   // job in awaiting_confirmation so the source event pool remains reusable.
   // Do not show an empty compose form (0 events / 0 clips) underneath it.
   if (hasGeneratedOutputs && job.status === "awaiting_confirmation") {
-    setRailTitle("生成结果");
+    setRailTitle("版本与交付");
     const autoVersions = jobOutputVersions(job).filter((version) => version.generationBatchId || version.previewOnly);
     const sampleCount = autoVersions.filter((version) => version.previewOnly && String(version.variantKind || "independent") === "independent").length;
     const formalCount = autoVersions.filter((version) => !version.previewOnly || version.variantKind === "formal_export").length;
     const versionSummary = `${sampleCount} 个独立样片${formalCount ? ` · ${formalCount} 个高清版本` : ""}`;
     body.innerHTML = contentMode
-      ? `<div class="rail-section-title"><strong>内容视频已生成</strong><b>可继续调整</b></div><p class="rail-summary">当前内容视频版本已记录在任务中，源视频保持不变。可在对话框中点击版本预览；需要调整时返回内容片段确认。</p><button type="button" class="reedit-job-button">返回片段确认</button>`
-      : `<div class="rail-section-title"><strong>高光成片已生成</strong><b>${job.autoComposition?.status === "completed" ? versionSummary : "可继续调整"}</b></div><p class="rail-summary">当前成片版本已记录在任务中，源视频保持不变。${job.autoComposition?.status === "completed" ? `当前有 ${versionSummary}，请在播放器顶部的预览菜单中比较。` : "需要更换镜头时，可返回事件审核继续调整。"}</p>${job.autoComposition?.status === "completed" ? "" : '<button type="button" class="reedit-job-button">返回事件审核</button>'}`;
+      ? `<div class="rail-section-title"><strong>内容视频已生成</strong><b>可播放或下载</b></div><p class="rail-summary">成片 MP4 已单独归档到“成片版本”。源视频保持不变；需要调整时返回片段确认。</p><button type="button" class="reedit-job-button">返回片段确认</button>`
+      : `<div class="rail-section-title"><strong>高光成片已生成</strong><b>${job.autoComposition?.status === "completed" ? versionSummary : "可播放或下载"}</b></div><p class="rail-summary">成片 MP4 已单独归档到“成片版本”，源视频保持不变。${job.autoComposition?.status === "completed" ? `当前有 ${versionSummary}，可在版本列表中播放比较。` : "需要更换镜头时，可返回事件审核继续调整。"}</p>${job.autoComposition?.status === "completed" ? "" : '<button type="button" class="reedit-job-button">返回事件审核</button>'}`;
     body.querySelector(".reedit-job-button")?.addEventListener("click", reopenCurrentJobForEditing);
+    if (jobOutputCount(job)) renderOutputs(job);
     $("#railOutput")?.classList.add("hidden");
     return;
   }
@@ -11707,14 +13885,23 @@ function renderReviewRail(job) {
     return;
   }
   if (job.status === "completed") {
-    setRailTitle(`生成结果（${job.outputs?.length || 0}）`);
+    if (!hasGeneratedOutputs && agentReviewPreviews.length) {
+      setRailTitle(`审核样片（${agentReviewPreviews.length}）`);
+      body.innerHTML = `<section class="agent-review-preview-panel"><div class="rail-section-title"><strong>审核样片已生成</strong><b>等待确认</b></div><p class="rail-summary">选择样片预览，确认时间线和封面后生成成片。</p>${agentReviewPreviewMarkup(agentReviewPreviews)}</section>`;
+      bindAgentReviewPreviewActions(body, agentReviewPreviews);
+      renderOutputPreviewSelector(job);
+      $("#railOutput")?.classList.add("hidden");
+      return;
+    }
+    setRailTitle("版本与交付");
     const autoDone = job.autoComposition?.status === "completed";
     const autoVersions = jobOutputVersions(job).filter((version) => version.generationBatchId || version.previewOnly);
     const sampleCount = autoVersions.filter((version) => version.previewOnly && String(version.variantKind || "independent") === "independent").length;
     const formalCount = autoVersions.filter((version) => !version.previewOnly || version.variantKind === "formal_export").length;
     const versionSummary = `${sampleCount} 个独立样片${formalCount ? ` · ${formalCount} 个高清版本` : ""}`;
-    body.innerHTML = `<div class="rail-section-title"><strong>${contentMode ? "内容视频与技术检查完成" : "渲染与技术检查完成"}</strong><b>${autoDone ? versionSummary : "已完成"}</b></div><p class="rail-summary">${autoDone ? `当前有 ${versionSummary}，源视频保持不变。` : contentMode ? "视频仅包含已确认的内容片段。需要调整时，可以返回片段确认并生成新版本。" : "如需调整，可以返回现有候选，重新选择事件和镜头后再次合成；不会重复调用视觉模型。"}</p>${autoDone ? "" : `<button type="button" class="reedit-job-button">${contentMode ? "返回片段确认" : "返回事件审核"}</button>`}`;
+    body.innerHTML = `<div class="rail-section-title"><strong>${contentMode ? "内容视频已生成" : "视频已生成"}</strong><b>${autoDone ? versionSummary : "已完成"}</b></div><p class="rail-summary">${autoDone ? `已生成 ${versionSummary}，可在成片版本中查看。` : contentMode ? "可以继续预览，或返回片段确认进行调整。" : "可以继续预览，或返回事件审核进行调整。"}</p>${autoDone ? "" : `<button type="button" class="reedit-job-button">${contentMode ? "返回片段确认" : "返回事件审核"}</button>`}`;
     body.querySelector(".reedit-job-button")?.addEventListener("click", reopenCurrentJobForEditing);
+    if (jobOutputCount(job)) renderOutputs(job);
     $("#railOutput")?.classList.add("hidden");
     return;
   }
@@ -11735,51 +13922,97 @@ function syncReviewSelectionClasses() {
 }
 
 function renderOutputs(job) {
-  const versions = jobOutputVersions(job);
-  const outputs = versions.flatMap((version) => version.outputs || []);
+  const entries = orderedJobOutputs(job);
+  const outputs = entries.map(({ item }) => item);
   const section = $("#clipSection");
   const strip = $("#clipStrip");
+  const picker = $("#clipVersionPicker");
   const summary = $("#clipSummary");
   const reeditButton = $("#outputReeditButton");
   section?.classList.add("hidden");
+  if (section) section.style.display = "none";
   if (!outputs.length) {
     if (strip) strip.innerHTML = "";
+    if (picker) picker.innerHTML = "";
     renderOutputPreviewSelector(job);
     showSource();
     return;
   }
   const contentMode = taskModePresentation(job).key === "content_extract";
-  if (summary) summary.textContent = `${versions.length} 个版本 · ${outputs.length} 条视频`;
-  if (strip) {
-    strip.innerHTML = versions.flatMap((version) => (version.outputs || []).map((output, outputIndex) => {
-      const versionLabel = `V${Number(version.number || 1)}`;
-      const separate = (version.outputs || []).length > 1;
-      const presentation = autoVersionPresentation(job, version);
-      const label = contentMode
-        ? separate ? `${versionLabel} · 内容片段 ${outputIndex + 1}` : `${versionLabel} · 内容视频`
-        : `${versionLabel} · ${output.displayTitle || output.title || presentation.displayName || "成片"}`;
+  if (picker) {
+    const sourceSelected = viewerMediaKind !== "output";
+    const sourceButton = `<button type="button" class="clip-picker-button${sourceSelected ? " active" : ""}" data-clip-picker-source role="tab" aria-selected="${sourceSelected ? "true" : "false"}">源视频</button>`;
+    const outputButtons = entries.map(({ item: output, version }) => {
       const selected = currentOutput?.filename === output.filename;
-      const qualityLabel = contentMode ? "人工确认" : outputVersionQualityLabel(version, output);
-      const quality = contentMode ? "passed" : outputVersionQuality(version, output);
+      const identity = outputVersionIdentity(version, output);
+      const label = contentMode && !currentOutputIsReviewSample(output, version)
+        ? `${identity} · 内容视频`
+        : identity;
+      return `<button type="button" class="clip-picker-button${selected ? " active" : ""}" data-clip-picker-output="${escapeHtml(output.filename || "")}" role="tab" aria-selected="${selected ? "true" : "false"}">${escapeHtml(label)}</button>`;
+    }).join("");
+    picker.innerHTML = sourceButton + outputButtons;
+    picker.querySelector("[data-clip-picker-source]")?.addEventListener("click", () => showSource({ preserveMappedTime: true }));
+    picker.querySelectorAll("[data-clip-picker-output]").forEach((button) => button.addEventListener("click", () => selectOutput(button.dataset.clipPickerOutput, true)));
+  }
+  if (summary) {
+    const metrics = jobOutputMetrics(job);
+    summary.textContent = [
+      metrics.formalVersionCount ? `${metrics.formalVersionCount} 个正式版本` : "",
+      metrics.reviewSampleCount ? `${metrics.reviewSampleCount} 个审核样片` : "",
+      metrics.formalVideoCount > metrics.formalVersionCount ? `${metrics.formalVideoCount} 条正式视频` : "",
+    ].filter(Boolean).join(" · ");
+  }
+  if (strip) {
+    strip.innerHTML = entries.map(({ item: output, version }) => {
+      const identity = outputVersionIdentity(version, output);
+      const presentation = autoVersionPresentation(job, version);
+      const outputTitle = cleanDisplayText(output.displayTitle)
+        || cleanDisplayText(output.title)
+        || cleanDisplayText(presentation.displayName, "成片");
+      const label = contentMode
+        ? `${identity} · 内容视频`
+        : `${identity} · ${outputTitle}`;
+      const selected = currentOutput?.filename === output.filename;
+      const qualityLabel = outputVersionQualityLabel(version, output);
+      const quality = outputVersionQuality(version, output);
       const variantKind = String(version.variantKind || (version.previewOnly || output.previewOnly ? "independent" : "formal_export"));
       const kindClass = variantKind === "formal_export" ? "formal" : variantKind === "repair" ? "repair" : "sample";
       const score = Number(version.reviewReport?.overallScore ?? output.reviewReport?.overallScore ?? output.qualityReport?.score);
       const editableSegments = (output.segments || []).filter((segment) => Number(segment?.sourceEnd ?? segment?.end) > Number(segment?.sourceStart ?? segment?.start));
-      const canFineEdit = Boolean(version.id && output.filename && editableSegments.length);
-      const editLabel = canFineEdit ? "精剪此版本" : "无可精剪时间线";
+      const canFineEdit = output.capabilities?.canEdit !== false && Boolean(output.filename && (version.id === "agent-review-previews" ? sourceEditSessionForOutput(output)?.clips?.length : version.id && editableSegments.length));
+      const editLabel = canFineEdit ? "编辑此版本" : "无可编辑时间线";
       const editReason = canFineEdit ? "在二次精剪时间线中继续调整" : "这个旧版本没有保存可编辑片段信息，可返回片段确认后生成新版本";
-      return `<div class="clip-version-entry quality-${escapeHtml(quality)} kind-${kindClass}"><button type="button" class="auto-version-button clip-version-button${selected ? " active" : ""}${version.recommended ? " recommended" : ""}" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || versionLabel)}" aria-pressed="${selected ? "true" : "false"}"><i class="clip-version-index">${escapeHtml(versionLabel)}${separate ? `.${outputIndex + 1}` : ""}</i><span><strong>${escapeHtml(label.replace(`${versionLabel} · `, ""))}</strong><em>${escapeHtml(qualityLabel)}</em></span><small>${Number(output.segmentCount || output.segments?.length || 0)} 个片段 · ${Number(output.duration || 0).toFixed(1)} 秒${Number.isFinite(score) ? ` · ${Math.round(score)} 分` : ""}</small></button><div class="clip-version-actions">${outputVersionDownloadLinkMarkup(version, output, { className: "clip-version-download" })}<button type="button" class="clip-version-edit" data-secondary-edit-version="${escapeHtml(version.id || "")}" data-secondary-edit-output="${escapeHtml(output.filename || "")}" ${canFineEdit ? "" : "disabled aria-disabled=\"true\""} title="${escapeHtml(editReason)}">${editLabel}</button></div></div>`;
-    })).join("");
+      const versionBadge = identity;
+      const coverThumb = output.coverUrl
+        ? `<i class="clip-version-index has-cover"><img src="${escapeHtml(output.coverUrl)}" alt="${escapeHtml(label)}封面" loading="lazy"><b>${escapeHtml(versionBadge)}</b></i>`
+        : `<i class="clip-version-index">${escapeHtml(versionBadge)}</i>`;
+      return `<div class="clip-version-entry quality-${escapeHtml(quality)} kind-${kindClass}"><button type="button" class="auto-version-button clip-version-button${selected ? " active" : ""}${version.recommended ? " recommended" : ""}" data-auto-output="${escapeHtml(output.filename || "")}" data-auto-version="${escapeHtml(version.id || identity)}" aria-pressed="${selected ? "true" : "false"}">${coverThumb}<span><strong>${escapeHtml(label.replace(`${identity} · `, ""))}</strong><em>${escapeHtml(qualityLabel)}</em></span><small>${Number(output.segmentCount || output.segments?.length || 0)} 个片段 · ${Number(output.duration || 0).toFixed(1)} 秒${Number.isFinite(score) ? ` · ${Math.round(score)} 分` : ""}</small></button><div class="clip-version-actions">${outputVersionDownloadLinkMarkup(version, output, { className: "clip-version-download" })}<button type="button" class="clip-version-edit" data-secondary-edit-version="${escapeHtml(version.id || "")}" data-secondary-edit-output="${escapeHtml(output.filename || "")}" ${canFineEdit ? "" : "disabled aria-disabled=\"true\""} title="${escapeHtml(editReason)}">${editLabel}</button></div></div>`;
+    }).join("");
     strip.querySelectorAll("[data-auto-output]").forEach((button) => button.addEventListener("click", () => {
       strip.querySelectorAll(".auto-version-button").forEach((item) => item.classList.toggle("active", item === button));
       selectOutput(button.dataset.autoOutput, true);
     }));
     strip.querySelectorAll("[data-secondary-edit-version]:not(:disabled)").forEach((button) => button.addEventListener("click", () => {
-      openSecondaryEditor(button.dataset.secondaryEditVersion, button.dataset.secondaryEditOutput);
+      window.ClipTalkVersionAction(button.dataset.secondaryEditOutput, "edit").catch((error) => showToast(error.message));
     }));
+    strip.querySelectorAll(".clip-version-actions").forEach((actions, index) => {
+      const { item, version } = entries[index];
+      const preview = currentOutputIsReviewSample(item, version);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = preview ? "生成成片" : item.kept ? "已存入成片库" : "存入成片库";
+      button.disabled = preview ? item.capabilities?.canExport === false : Boolean(item.kept) || item.capabilities?.canKeep === false;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try { await window.ClipTalkVersionAction(item.filename, preview ? "export" : "keep"); }
+        catch (error) { showToast(error.message); }
+        finally { if (button.isConnected) button.disabled = Boolean(!preview && item.kept); }
+      });
+      actions.append(button);
+    });
   }
   if (reeditButton) {
-    reeditButton.textContent = contentMode ? "返回片段确认" : "重新选择素材";
+    reeditButton.textContent = contentMode ? "返回片段确认" : "返回事件审核";
     reeditButton.classList.toggle("hidden", !["completed", "awaiting_confirmation"].includes(String(job.status || "")));
     reeditButton.onclick = reopenCurrentJobForEditing;
     const actions = reeditButton.parentElement;
@@ -11798,7 +14031,6 @@ function renderOutputs(job) {
       actions.append(editQueryButton);
     }
   }
-  section?.classList.remove("hidden");
   renderOutputPreviewSelector(job);
   if (contentMode && job.status === "awaiting_content_confirmation" && !currentOutput) {
     showSource();
@@ -11806,8 +14038,19 @@ function renderOutputs(job) {
   }
   const preferred = currentOutput && outputs.some((item) => item.filename === currentOutput.filename)
     ? currentOutput.filename
-    : outputs[0].filename;
+    : selectedJobOutput(job)?.item.filename || outputs.at(-1).filename;
+  const preferredOutput = outputs.find((item) => item.filename === preferred) || outputs[0];
+  const suppressLegacySection = document.body.classList.contains("ct-workbench-v4")
+    && currentOutputIsReviewSample(preferredOutput);
+  if (suppressLegacySection) {
+    section?.classList.add("hidden", "ct-v4-preview-suppressed");
+    if (section) section.style.display = "none";
+  } else {
+    section?.classList.remove("hidden", "ct-v4-preview-suppressed");
+    if (section) section.style.removeProperty("display");
+  }
   selectOutput(preferred);
+  syncLegacyOutputPanelsForV4();
 }
 
 function jobRenderRevision(job) {
@@ -11815,7 +14058,7 @@ function jobRenderRevision(job) {
   // be cheap and race-safe. DOM reconstruction is intentionally keyed only
   // to structural changes; same-stage percent updates use the live progress
   // updater below and no longer replace the conversation/timeline tree.
-  const outputs = jobOutputVersions(job).flatMap((version) => version.outputs || []);
+  const outputs = orderedJobOutputs(job).map(({ item }) => item);
   return JSON.stringify({
     id: job?.id,
     status: job?.status,
@@ -11837,8 +14080,9 @@ function jobRenderRevision(job) {
       (job?.contentSearchPersonTarget?.personIds || job?.request?.contentSearchPersonTarget?.personIds || []).join(","),
     ],
     execution: [job?.execution?.status, job?.execution?.operation, job?.execution?.phase, job?.execution?.outcome, job?.execution?.actionRequired],
+    agent: [job?.agent?.workspaceId, job?.agent?.planId, job?.agent?.status, job?.agent?.completedSteps, job?.agent?.totalSteps, job?.agent?.currentStepId],
     handoff: [job?.handoff?.fromJobId, job?.activeChildJobId],
-    outputs: outputs.map((item) => [item.filename, item.previewReady, item.kept]),
+    outputs: outputs.map((item) => [item.filename, item.previewReady, item.kept, item.previewOnly, item.outputKind]),
     messageCount: job?.messages?.length || 0,
     contentUiRevision: job?.contentUiRevision || "",
   });
@@ -11853,6 +14097,7 @@ function renderJob(job) {
   // A response for another task is stale even when the user is no longer on
   // the home screen (for example, task A finishes after task B was opened).
   if (!restoringHistory && currentJob && String(currentJob.id) !== String(job.id)) return;
+  observeFormalDelivery(job);
   window.ClipTalkAppShell?.syncCurrentJob(job);
   rememberCurrentJob(job);
   const previousId = currentJob?.id;
@@ -11865,6 +14110,8 @@ function renderJob(job) {
   const revision = jobRenderRevision(job);
   if (previousId === job?.id && currentJobRevision === revision) {
     currentJob = job;
+    renderJobError(job.error || "", "job");
+    void window.ClipTalkAgentWorkspace?.resumeForJob?.(job);
     const nextVoiceDiscoveryStatus = String(job?.voiceDiscovery?.status || "not_started");
     if (nextVoiceDiscoveryStatus !== previousVoiceDiscoveryStatus
       && ["ready", "failed"].includes(nextVoiceDiscoveryStatus)
@@ -11898,6 +14145,7 @@ function renderJob(job) {
     updateAnalysisConsole(job);
     updateInlineAnalysisProgress(job);
     updateAutoCompositionProgress(job);
+    syncComposerSuggestion(job);
     // Resource endpoints can become ready without changing the public job
     // revision. Keep their lightweight retry loops alive even when the DOM
     // itself does not need to be rebuilt.
@@ -11917,6 +14165,7 @@ function renderJob(job) {
   const activeContentCandidateId = String(currentCandidate?.id || "");
   const activeContentSearchId = String(currentContentPreviewSearchId || currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
   currentJob = job;
+  void window.ClipTalkAgentWorkspace?.resumeForJob?.(job);
   const nextPersonSearchId = String(job?.contentSearch?.id || "");
   const nextPersonCandidateCount = Number(job?.contentSearch?.candidates?.length || 0);
   const personReviewJustArrived = previousId === job.id
@@ -11938,7 +14187,11 @@ function renderJob(job) {
   renderReviewStatus(job);
   renderDirectorTaskSummary(job);
   updateDirectorFlow(job);
-  applyMediaAspect(viewerShell, job.videoInfo?.width, job.videoInfo?.height);
+  // Polling a job must not replace the active output's aspect with the source
+  // dimensions. Output selection and loadedmetadata own that media's aspect.
+  if (viewerMediaKind !== "output" || !currentOutput) {
+    applyMediaAspect(viewerShell, job.videoInfo?.width, job.videoInfo?.height);
+  }
   currentEventGroup = activeGroupId ? job.eventGroups?.find((item) => item.id === activeGroupId) || null : null;
   currentEventSegment = activeSegmentId && currentEventGroup
     ? currentEventGroup.segments.find((item) => item.id === activeSegmentId) || null
@@ -11961,6 +14214,7 @@ function renderJob(job) {
   if (previousId !== job.id) {
     clearToast();
     resetCandidateDrawerContext();
+    setCandidateRailOpen(false);
     closeSubtitleReview(null);
     dismissActionConfirmation();
     setReviewLowerPanelMode("collapsed");
@@ -11979,6 +14233,7 @@ function renderJob(job) {
     currentJobRevision = revision;
     currentOutput = null;
     viewerMediaKind = "source";
+    syncOutputPreviewMode();
     currentCandidate = null;
     currentEventGroup = null;
     currentEventSegment = null;
@@ -11996,6 +14251,7 @@ function renderJob(job) {
     timelineViewStart = 0;
     timelineViewEnd = Number(job.videoInfo?.duration || 0);
     timelineCoordinateSpace = "source";
+    timelineSelectedOutputSegmentIndex = null;
     timelineReviewFollow = false;
     timelineAssetsJobId = null;
     timelineAssetsLoadingJobId = null;
@@ -12007,6 +14263,7 @@ function renderJob(job) {
     transcriptRetryAt = 0;
     timelineMediaRenderKey = "";
     waveformRenderKey = "";
+    waveformLoadingJobId = null;
     waveformRetryAt = 0;
   }
   if (previousId === job.id && job.previewReady && !previousPreviewReady && ["source", "candidate", "segment"].includes(viewerMediaKind)) {
@@ -12037,7 +14294,24 @@ function renderJob(job) {
   chatInput.disabled = false;
   const interactionKind = String(job.contentSearch?.interactionState?.kind || "");
   const workflowKey = workflowKindForJob(job);
-  chatInput.placeholder = taskModePresentation(job).key === "content_extract"
+  const canChooseLegacyWorkflow = isAgentInstructionDraft(job);
+  // A restored upload draft must look actionable immediately.  The source
+  // summary is already persisted in conversation history; reopen the four
+  // quick starts beside it instead of making the user rediscover a tiny
+  // composer toggle on every visit.
+  if (canChooseLegacyWorkflow && previousId !== job.id && !pendingWorkflowSwitch) {
+    legacyWorkflowPickerOpen = true;
+  }
+  if (!canChooseLegacyWorkflow) {
+    legacyWorkflowPickerOpen = false;
+    pendingWorkflowSwitch = "";
+    quickWorkflowValidation = "";
+  }
+  chatInput.placeholder = pendingWorkflowSwitch
+    ? quickWorkflowPlaceholder(pendingWorkflowSwitch)
+    : isAgentInstructionDraft(job)
+      ? agentDraftPlaceholder()
+      : taskModePresentation(job).key === "content_extract"
     ? workflowKey === "speaker_edit" ? "筛选发言内容，或继续调整说话人选择……"
       : workflowKey === "person_edit" ? "补充人物出镜条件，或继续选择人物……"
       : interactionKind === "person_target" ? "回复人物 A、人物 B，或输入新的查找条件"
@@ -12046,6 +14320,9 @@ function renderJob(job) {
           : "描述要找的内容，或和 AI 讨论如何剪辑……"
     : "请输入指令或补充需求……";
   $("#sendButton").disabled = false;
+  $("#chatLegacyModeButton")?.classList.toggle("hidden", !canChooseLegacyWorkflow);
+  renderQuickWorkflowPicker(job);
+  syncComposerSuggestion(job);
   updateComposerBeam();
   const execution = executionForJob(job);
   const running = execution.active;
@@ -12064,7 +14341,8 @@ function renderJob(job) {
   const pipelineVisible = running || awaitingDecision;
   const progressVisible = analysisConsoleVisible(job);
   const compositionRunning = running && ["render", "auto_composition", "quality_review"].includes(execution.operation);
-  if (briefing) setDirectorStage("conversation");
+  if (isAgentInstructionDraft(job)) setDirectorStage("conversation");
+  else if (briefing) setDirectorStage("conversation");
   else if (awaitingDecision) setDirectorStage("analysis");
   else if (compositionRunning) setDirectorStage("compose");
   else if (running) setDirectorStage("analysis");
@@ -12088,16 +14366,18 @@ function renderJob(job) {
   const cancelButton = $("#cancelButton");
   cancelButton?.classList.toggle("hidden", !cancellable);
   if (cancelButton) cancelButton.textContent = executionCancelLabel(job);
-  if ($("#jobError")) $("#jobError").textContent = job.error || "";
-  $("#jobError")?.classList.toggle("hidden", !job.error);
+  renderJobError(job.error || "", "job");
   if ($("#assetDuration")) $("#assetDuration").textContent = `时长 ${formatClock(job.videoInfo?.duration || 0)}`;
   if ($("#assetResolution")) $("#assetResolution").textContent = job.videoInfo?.width && job.videoInfo?.height
     ? `分辨率 ${job.videoInfo.width}×${job.videoInfo.height}` : "分辨率 --";
   renderReviewRail(job);
   syncThinkingOrbs($("#railBody"));
-  if (jobOutputCount(job)) renderOutputs(job);
+  if (jobOutputCount(job)) {
+    renderOutputs(job);
+  }
   else {
     $("#clipSection")?.classList.add("hidden");
+    if ($("#clipSection")) $("#clipSection").style.display = "none";
     if (previousId !== job.id || !mainVideo.src) showSource();
   }
   updateTimeline();
@@ -12105,12 +14385,11 @@ function renderJob(job) {
     && jobOutputCount(job) > 0
     && (previousId !== job.id || previousStatus !== "completed");
   if (enteredCompletedWorkspace) {
-    // A completed video is an editing result, so its structure should be
-    // visible without making the user discover a hidden timeline tab first.
-    // Keep the overview compact: precision editing remains an explicit action.
-    setReviewLowerPanelMode("timeline", { compact: true });
+    // Preview first. Detailed source inspection is an explicit user action.
+    setReviewLowerPanelMode("collapsed");
   }
   syncReviewWorkbench();
+  syncComposerSuggestion(job);
   if (!jobNeedsPolling(job) && !briefing && !restoringHistory) {
     clearTimeout(pollTimer);
     pollTimer = null;
@@ -12131,6 +14410,7 @@ async function pollJob() {
     const response = await api(`/api/jobs/${encodeURIComponent(polledJobId)}/status?revision=${knownRevision}`);
     if (!currentJob || String(currentJob.id) !== polledJobId) return;
     pollFailureDelay = 2500;
+    clearRecoveredPollError();
     if (!response.changed) {
       if (jobNeedsPolling(currentJob)) pollTimer = setTimeout(pollJob, jobPollDelay(currentJob));
       return;
@@ -12157,11 +14437,7 @@ async function pollJob() {
     renderJob(job);
     if (jobNeedsPolling(job)) pollTimer = setTimeout(pollJob, job.status === "briefing" ? 1400 : jobPollDelay(job));
   } catch (error) {
-    const errorNode = $("#jobError");
-    if (errorNode) {
-      errorNode.textContent = error.message;
-      errorNode.classList.remove("hidden");
-    }
+    if (!currentJob?.error) renderJobError(error.message, "poll");
     pollTimer = setTimeout(pollJob, pollFailureDelay);
     pollFailureDelay = Math.min(10000, Math.round(pollFailureDelay * 1.5));
   }
@@ -12277,7 +14553,7 @@ function contentBoundaryEntryState(match = currentCandidate) {
     || (currentJob?.outputVersions || []).some((version) => (version.outputs || []).length),
   );
   if (String(currentJob?.status || "") === "completed" && hasOutputs) {
-    return { kind: "reedit", label: "返回确认后调整", reason: "返回片段确认并调整边界；不会重新分析视频，已有成片仍会保留", disabled: false, searchId: activeSearchId };
+    return { kind: "reedit", label: "返回确认后调整", reason: "返回片段确认并调整边界", disabled: false, searchId: activeSearchId };
   }
   const processing = capabilities.active;
   return {
@@ -12321,7 +14597,7 @@ function hideContentDetailModeSwitch() {
   }
 }
 
-function contentMatchEvidenceShell(match) {
+function contentMatchEvidenceShell(match, { deferred = false } = {}) {
   $("#evidencePanel")?.classList.remove("hidden", "evidence-placeholder", "output-mode", "montage-mode");
   $("#evidencePanel")?.classList.add("candidate-mode");
   $("#clipTime").textContent = `${formatTime(match.start)} → ${formatTime(match.end)} · ${Number(match.duration || 0).toFixed(1)} 秒`;
@@ -12341,7 +14617,9 @@ function contentMatchEvidenceShell(match) {
     `<span>类型 ${escapeHtml(contentMatchTypeLabel(match))}</span>`,
     ...modalities.map((value) => `<span>${escapeHtml(({ speech: "对白", visual: "画面", ocr: "屏幕文字", audio: "声音", person: "匿名人物" })[value] || value)}</span>`),
   ].join("");
-  if ($("#clipEvidence")) $("#clipEvidence").innerHTML = `<li class="content-evidence-loading"><span>正在读取该片段的识别证据…</span></li>`;
+  if ($("#clipEvidence")) $("#clipEvidence").innerHTML = deferred
+    ? `<li class="content-evidence-deferred"><span>点击“查看判断依据”后加载识别明细</span></li>`
+    : `<li class="content-evidence-loading"><span>正在读取该片段的识别证据…</span></li>`;
   $("#addToChatButton")?.classList.add("hidden");
   $("#keepButton")?.classList.add("hidden");
   $("#replaceButton")?.classList.add("hidden");
@@ -12395,6 +14673,17 @@ async function loadContentMatchEvidence(match) {
   }
 }
 
+window.ClipTalkLoadSelectedEvidence = async () => {
+  if (!currentJob) return false;
+  if (String(currentJob.taskMode || "") === "content_extract" && currentCandidate) {
+    const list = $("#clipEvidence");
+    if (list) list.innerHTML = `<li class="content-evidence-loading"><span>正在读取该片段的识别证据…</span></li>`;
+    await loadContentMatchEvidence(currentCandidate);
+    return true;
+  }
+  return Boolean(currentCandidate || currentEventGroup || currentEventSegment || currentOutput);
+};
+
 function previewContentMatchesSequentially(matches) {
   const playable = (matches || []).filter((item) => Number(item?.end) > Number(item?.start));
   if (!currentJob || !playable.length) return void showToast("当前没有可连续播放的片段", "error");
@@ -12438,7 +14727,7 @@ function playMainVideoWhenPositioned(start, isCurrent) {
   tryStart();
 }
 
-function previewContentMatch(match, { autoplay = true, loadEvidence = true, preserveSequence = false, searchId = "" } = {}) {
+function previewContentMatch(match, { autoplay = true, loadEvidence = false, preserveSequence = false, searchId = "" } = {}) {
   if (!currentJob || !match) return;
   if (!preserveSequence) contentPreviewSequence = null;
   currentContentPreviewSearchId = String(searchId || currentJob?.contentSearchSession?.activeSearchId || currentJob?.contentSearch?.id || "");
@@ -12454,10 +14743,11 @@ function previewContentMatch(match, { autoplay = true, loadEvidence = true, pres
   currentCandidate = match;
   candidatePreviewEnd = Math.max(start, end - 0.008);
   viewerMediaKind = "segment";
+  syncOutputPreviewMode();
   $("#viewerBadge").textContent = "内容匹配预览";
-  $("#reviewKicker").textContent = "CONTENT MATCH";
+  $("#reviewKicker").textContent = "内容匹配预览";
   $("#reviewTitle").textContent = match.title || "匹配内容";
-  contentMatchEvidenceShell(match);
+  contentMatchEvidenceShell(match, { deferred: !loadEvidence });
   if (loadEvidence) loadContentMatchEvidence(match);
   seekSourceTime(start);
   if (autoplay) {
@@ -12489,8 +14779,9 @@ function previewContentEvidence(match, { autoplay = false, searchId = "" } = {})
   const editingDifferentMatch = contentBoundaryTimelineEdit?.surface === "evidence-panel"
     && String(contentBoundaryTimelineEdit.matchId || "") !== String(match.id || "");
   if (editingDifferentMatch) closeContentBoundaryTimelineEdit({ restorePreview: false });
-  previewContentMatch(match, { autoplay, searchId });
+  previewContentMatch(match, { autoplay, loadEvidence: true, searchId });
   setContentDetailPanelMode("evidence");
+  window.ClipTalkWorkspaceController?.openEvidence?.({ load: false });
 }
 
 function contentBoundaryFrameRate(job = currentJob) {
@@ -12527,6 +14818,19 @@ function syncContentBoundaryEditor(editor, scopedJob, match, { seekEdge = "", pr
   editor.querySelector("[data-boundary-end-label]").textContent = formatTime(end);
   editor.querySelector("[data-boundary-summary]").textContent = `${formatTime(start)} → ${formatTime(end)} · ${(end - start).toFixed(2)} 秒`;
   editor.querySelector("[data-boundary-frame-rate]").textContent = `${fps.toFixed(Math.abs(fps - Math.round(fps)) < .001 ? 0 : 2)} fps · 1 帧约 ${(frame * 1000).toFixed(1)} ms`;
+  const originalStart = Number(editor.dataset.boundaryOriginalStart);
+  const originalEnd = Number(editor.dataset.boundaryOriginalEnd);
+  const startDelta = Number.isFinite(originalStart) ? start - originalStart : 0;
+  const endDelta = Number.isFinite(originalEnd) ? end - originalEnd : 0;
+  const changed = Math.abs(startDelta) >= frame / 2 || Math.abs(endDelta) >= frame / 2;
+  const signedDelta = (value) => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(2)}s`;
+  const changeStatus = editor.querySelector("[data-boundary-change]");
+  if (changeStatus) changeStatus.textContent = changed
+    ? `已修改 · 入点 ${signedDelta(startDelta)} · 出点 ${signedDelta(endDelta)}`
+    : "尚未修改";
+  editor.dataset.dirty = String(changed);
+  const saveButton = editor.querySelector("[data-boundary-save]");
+  if (saveButton) saveButton.disabled = !changed;
   editor.querySelectorAll("[data-boundary-value]").forEach((input) => {
     const edge = String(input.dataset.boundaryValue || "");
     input.step = String(frame);
@@ -12607,6 +14911,7 @@ function openContentBoundaryInspector(match, { root: preferredRoot = null, focus
   panel.classList.add("candidate-mode");
   showContentDetailModeSwitch();
   setContentDetailPanelMode("edit", { focus });
+  window.ClipTalkWorkspaceController?.openEvidence?.({ load: false });
   syncEvidencePlacement();
   scheduleMediaFrameFit(true);
   if (focus) window.requestAnimationFrame(() => {
@@ -12716,7 +15021,7 @@ async function toggleContentTimelineSelection() {
   await saveContentReviewDraft(context.root, currentJob);
   syncContentTimelineEditActions(match);
   updateTimeline();
-  showToast(context.input.checked ? "片段已保存到当前探索结果" : "片段已从当前探索结果移出", "success");
+  showToast(context.input.checked ? "片段已加入当前探索结果" : "片段已从当前探索结果移出", "success");
 }
 
 async function moveContentTimelineSelection(direction) {
@@ -12794,7 +15099,7 @@ function wireContentBoundaryEditors(root, scopedJob) {
   root.querySelectorAll("[data-content-card-preview]").forEach((copy) => {
     const activate = (event) => {
       if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
-      if (event.target.closest("button, input, label, a, select, textarea")) return;
+      if (event.target.closest("button, input, label, a, select, textarea, details")) return;
       event.preventDefault();
       const matchId = String(copy.dataset.contentCardPreview || "");
       const match = (scopedJob.contentSearch?.candidates || []).find((item) => String(item.id) === matchId);
@@ -13314,6 +15619,10 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
   const savedOrder = (search.reviewDraft?.orderedMatchIds || []).map(String);
   const initialOrder = [...savedOrder.filter((id) => selectedLookup.has(id)), ...matchIds.filter((id) => !savedOrder.includes(id))];
   const matches = initialOrder.map((id) => selectedLookup.get(id)).filter(Boolean);
+  const needsContentReview = matches.some((match) => match.evidenceType !== "source_scope"
+    && (!["verified", "human_confirmed"].includes(String(match.boundaryVerification?.status || ""))
+      || Number(match.boundaryVerification?.verifiedRange?.[0]) !== Number(match.start)
+      || Number(match.boundaryVerification?.verifiedRange?.[1]) !== Number(match.end)));
   const total = matches.reduce((sum, item) => sum + Number(item.duration || 0), 0);
   const orderItems = matches.map((item, index) => ({
     id: String(item.id),
@@ -13323,22 +15632,21 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
   const orderLabels = {
     source: "按源视频时间排列",
     selection: "由你自定义排列",
-    llm_recommend: "先由 LLM 推荐，再由你确认",
+    llm_recommend: "智能排序后由你确认",
   };
   const confirmation = await requestActionConfirmation({
     title: personWorkflow
       ? (outputMode === "single_reel" ? "第 3 步 · 合成人物出镜视频" : "第 3 步 · 分别导出出镜片段")
       : outputMode === "single_reel" ? "确认生成内容合集" : "确认分别导出内容",
     summary: outputMode === "single_reel"
-      ? `将把 ${matches.length} 个已核对片段合成一条，约 ${total.toFixed(1)} 秒；${orderLabels[requestedOrderMode] || orderLabels.source}。合成阶段不会再增删片段。`
-      : `将把 ${matches.length} 个已核对片段分别导出；不会再改变片段范围。`,
+      ? `将把 ${matches.length} 个已选片段合成一条，约 ${total.toFixed(1)} 秒；${orderLabels[requestedOrderMode] || orderLabels.source}。合成阶段不会再增删片段。`
+      : `将把 ${matches.length} 个已选片段分别导出；不会再改变片段范围。`,
     details: matches.map((item, index) => `${index + 1}. ${formatTime(item.start)}→${formatTime(item.end)} · ${item.title || "匹配内容"}`),
     orderMode: outputMode === "single_reel" ? requestedOrderMode : null,
     orderItems: outputMode === "single_reel" ? orderItems : [],
     showOrderOptions: outputMode === "single_reel",
-    warning: exhaustiveIncomplete
-      ? "完整性检查尚未通过：全范围覆盖或独立语义复核未完成，当前选择可能遗漏其他符合条件的片段。继续只会生成你现在勾选的内容，不会标记为“已找全”。"
-      : "",
+    warning: [needsContentReview ? "部分片段的内容或边界尚未核验，可能混入无关画面。建议先逐项预览和修剪；继续仅代表接受当前范围，不代表内容质检通过。" : "",
+      exhaustiveIncomplete ? "完整性检查尚未通过，当前选择可能遗漏其他符合条件的片段；继续不会标记为“已找全”。" : ""].filter(Boolean).join(" "),
     confirmLabel: exhaustiveIncomplete ? "接受可能遗漏并开始合成" : (personWorkflow ? "开始合成视频" : "确认并生成"),
     onDraftChange: ({ orderMode: nextOrderMode, orderedItems }) => scheduleContentReviewDraftSave(root, reviewJob, {
       orderMode: nextOrderMode,
@@ -13362,7 +15670,7 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
     actionBusy = true;
     if (confirmButton) {
       confirmButton.disabled = true;
-      confirmButton.textContent = "LLM 正在推荐顺序…";
+      confirmButton.textContent = "正在智能排序…";
     }
     try {
       const recommendation = await apiJson(`/api/jobs/${recommendationToken.jobId}/content-search/order-recommendation`, {
@@ -13380,8 +15688,8 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
       orderReason = String(recommendation.reason || "");
       const matchLookup = new Map(matches.map((item) => [String(item.id), item]));
       const recommendationConfirmed = await requestActionConfirmation({
-        title: "确认 LLM 推荐顺序",
-        summary: "LLM 只调整片段排列，不会增删片段，也不会修改任何起止点。",
+        title: "确认智能排序",
+        summary: "已根据内容连贯性调整所选片段顺序。",
         details: orderedMatchIds.map((id, index) => {
           const item = matchLookup.get(id);
           return `${index + 1}. ${item?.title || "匹配内容"} · ${formatTime(item?.start)}→${formatTime(item?.end)}`;
@@ -13434,6 +15742,7 @@ async function confirmContentSearch(root, reviewJob = currentJob) {
         subtitleStyle: "clean",
         subtitleDraftId,
         acknowledgeIncomplete: exhaustiveIncomplete,
+        acknowledgeUnverified: needsContentReview,
       },
     });
     if (!commitJobAction(job, actionToken)) return;
@@ -13468,11 +15777,13 @@ async function confirmContentSelectionBasket(job = currentJob, acknowledgements 
   }
   if (actionBusy) return void showToast("另一项操作正在提交，请稍候", "neutral");
   const timing = contentBasketTimingSummary(items);
+  const needsContentReview = items.some((item) => item.contentVerified !== true);
   const confirmed = await requestActionConfirmation({
     title: "生成清单内容",
     summary: `将成片清单中的 ${items.length} 段按源视频时间合成一条视频，去除重复时间后约 ${timing.uniqueDuration.toFixed(1)} 秒。生成成功后会清空；如果生成失败，选择会继续保留。`,
     details: items.map((item, index) => `${index + 1}. ${item.sourceQuery || "检索"} · ${formatTime(item.start)}→${formatTime(item.end)} · ${item.title || "匹配片段"}`),
-    warning: timing.overlapCount ? `存在 ${timing.overlapCount} 处时间重叠；生成时会保留你选择的片段顺序，但实际时长按时间并集计算。` : "",
+    warning: [timing.overlapCount ? `存在 ${timing.overlapCount} 处时间重叠；生成时会保留你选择的片段顺序，但实际时长按时间并集计算。` : "",
+      needsContentReview ? "清单包含内容或边界尚未核验的片段；继续表示接受当前范围，不代表内容质检通过。" : ""].filter(Boolean).join(" "),
     confirmLabel: "确认生成",
   });
   if (!confirmed) return;
@@ -13487,7 +15798,7 @@ async function confirmContentSelectionBasket(job = currentJob, acknowledgements 
         subtitleMode: job.contentSelectionBasket?.subtitleMode || "none",
         subtitleStyle: job.contentSelectionBasket?.subtitleStyle || "clean",
         targetSeconds: Number(job.contentSelectionBasket?.targetSeconds) > 0 ? Number(job.contentSelectionBasket.targetSeconds) : null,
-        acknowledgeOverlap: timing.overlapCount > 0, ...acknowledgements,
+        acknowledgeOverlap: timing.overlapCount > 0, acknowledgeUnverified: needsContentReview, ...acknowledgements,
       },
     });
     if (!commitJobAction(updated, actionToken)) return;
@@ -13959,99 +16270,22 @@ async function cancelCurrentJob() {
   }
 }
 
-function historyJobStatusText(job) {
-  return displayStatusForJob(job).text;
-}
-
-async function loadHistory() {
-  try {
-    const historyList = $("#historyList");
-    const keptList = $("#keptList");
-    if (!historyList || !keptList) return;
-    const [{ jobs }, keptResponse] = await Promise.all([
-      api("/api/jobs"),
-      lastHealth?.keptLibrary ? api("/api/kept").catch(() => ({ outputs: [] })) : Promise.resolve({ outputs: [] }),
-    ]);
-    // Restore unfinished and user-action states after a browser refresh. A
-    // pending confirmation must not disappear back into the home screen.
-    if (!currentJob && !homeNavigationRequested) {
-      const savedJobId = storedCurrentJobId();
-      const routedJobId = routeJobId();
-      const requestedJobId = routedJobId || savedJobId;
-      let activeJob = requestedJobId
-        ? jobs.find((item) => String(item.id) === String(requestedJobId))
-        : jobs.find((item) => ["briefing", "brief_confirmation", "queued", "running", "cancelling", "awaiting_model_decision", "awaiting_confirmation", "awaiting_content_confirmation"].includes(item.status));
-      // The history endpoint intentionally returns a bounded list. If the
-      // requested task is older than that list, verify it directly instead of
-      // silently falling back to another unfinished task.
-      if (requestedJobId && !activeJob) {
-        const direct = await api(`/api/jobs/${encodeURIComponent(requestedJobId)}`).catch(() => null);
-        activeJob = direct?.job || null;
-      }
-      if (requestedJobId && !activeJob) {
-        forgetCurrentJob();
-      }
-      if (activeJob) {
-        let opened = activeJob.id && activeJob.filename
-          ? await api(`/api/jobs/${encodeURIComponent(activeJob.id)}`)
-          : { job: activeJob };
-        const childId = String(opened.job?.activeChildJobId || "");
-        if (childId && String(opened.job?.latestHandoff?.status || "") === "active") {
-          const child = await api(`/api/jobs/${encodeURIComponent(childId)}`).catch(() => null);
-          if (child?.job) opened = child;
-        }
-        // The user may click Home while the restore request is in flight.
-        if (!currentJob && !homeNavigationRequested) {
-          switchWorkspaceJob(opened.job, { invalidate: false });
-          if (jobNeedsPolling(currentJob)) pollJob();
-          studio?.classList.remove("home-mode");
-          $("#homeView")?.classList.add("hidden");
-        }
-      }
-    }
-    historyList.innerHTML = jobs.length ? jobs.map((job) => `
-      <article class="history-row"><button type="button" data-history-open="${escapeHtml(job.id)}"><i class="${job.status}"></i><span><strong>${escapeHtml(job.filename)}</strong><small>${escapeHtml(job.detail)}</small></span><b>${historyJobStatusText(job)}</b></button><button type="button" class="history-delete" data-history-delete="${escapeHtml(job.id)}" title="删除任务历史">删除</button></article>`).join("") : '<p class="empty">暂无任务</p>';
-    historyList?.querySelectorAll("[data-history-open]").forEach((button) => button.addEventListener("click", async () => {
-      const generation = workspaceGeneration;
-      const { job } = await api(`/api/jobs/${button.dataset.historyOpen}`);
-      if (generation !== workspaceGeneration || homeNavigationRequested) return;
-      currentOutput = null;
-      switchWorkspaceJob(job);
-      $("#historyPanel")?.classList.add("hidden");
-      if (jobNeedsPolling(job)) pollJob();
-    }));
-    historyList?.querySelectorAll("[data-history-delete]").forEach((button) => button.addEventListener("click", () => deleteHistoryJob(button.dataset.historyDelete)));
-    const kept = keptResponse.outputs || [];
-    keptList.innerHTML = kept.length ? kept.map((item) => `<article class="kept-card">
-      <strong>${escapeHtml(item.title)}</strong>
-      <small>${escapeHtml(item.sourceFilename || "原任务已删除")} · ${Number(item.duration || 0).toFixed(1)} 秒 · ${(Number(item.sizeBytes || 0) / 1024 / 1024).toFixed(1)} MB</small>
-      <div><a href="${escapeHtml(item.videoUrl)}" target="_blank" rel="noopener">播放</a><a class="download" href="${escapeHtml(item.downloadUrl)}">下载</a><button type="button" data-delete-kept data-job-id="${escapeHtml(item.jobId)}" data-filename="${escapeHtml(item.filename)}">删除</button></div>
-    </article>`).join("") : '<p class="empty">暂无独立成片副本</p>';
-    $("#keptList")?.querySelectorAll("[data-delete-kept]").forEach((button) => button.addEventListener("click", async () => {
-      if (!await requestActionConfirmation({
-        title: "删除保留副本",
-        summary: `确认从保留库移除“${button.dataset.filename}”？`,
-        warning: "该独立成片文件将被删除，原任务中的源视频不会受影响。",
-        confirmLabel: "删除副本",
-      })) return;
-      await api(`/api/kept/${encodeURIComponent(button.dataset.jobId)}/${encodeURIComponent(button.dataset.filename)}`, { method: "DELETE" });
-      loadHistory();
-    }));
-  } catch (error) {
-    const historyRoot = $("#historyList");
-    if (historyRoot) {
-      historyRoot.innerHTML = `<div class="history-load-error"><p class="empty">${escapeHtml(error.message)}</p><button type="button" class="primary history-retry">重新加载</button></div>`;
-      historyRoot.querySelector(".history-retry")?.addEventListener("click", loadHistory);
-    }
-  }
-}
-
 async function deleteHistoryJob(jobId) {
   const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`).catch(() => null);
   if (!job?.job) return;
   const status = job.job.status;
   if (isActiveJobStatus(status)) return void showToast("任务正在运行，请先取消任务后再删除。");
-  if (!await requestActionConfirmation({ title: "删除剪辑任务", summary: `将删除“${taskModePresentation(job.job).label}”任务的分析数据和任务内成片。`, details: ["同一源视频下的其他剪辑任务不受影响", "此前另存的独立 MP4 副本不会被删除", "删除后无法恢复"] , confirmLabel: "确认删除" })) return;
+  if (!await requestActionConfirmation({
+    title: "删除剪辑任务",
+    summary: `将删除“${taskModePresentation(job.job).label}”任务的分析数据和任务内成片。`,
+    details: [
+      "若同源的其他任务仍存在，共享源视频与缓存会继续保留",
+      "删除最后一个同源任务时，共享源视频、分析证据与缓存会一并清理",
+      "此前另存的独立 MP4 副本不会被删除",
+      "删除后无法恢复",
+    ],
+    confirmLabel: "确认删除",
+  })) return;
   try {
     const intent = await api(`/api/jobs/${encodeURIComponent(jobId)}/delete-intent`, { method: "POST" });
     await apiJson(`/api/jobs/${encodeURIComponent(jobId)}`, {
@@ -14060,7 +16294,6 @@ async function deleteHistoryJob(jobId) {
       body: { revision: intent.revision, deleteIntent: intent.deleteIntent },
     });
     if (currentJob?.id === jobId) resetWorkspace();
-    loadHistory();
     window.ClipTalkAppShell?.refreshCatalog();
   } catch (error) { showToast(error.message); }
 }
@@ -14256,12 +16489,14 @@ function openNewTaskFromHome() {
   $("#uploadView")?.classList.remove("hidden");
   try {
     resetWorkspace(false, true);
+    beginTaskCreationSession();
     // Keep this explicit even if a legacy optional panel throws during
     // cleanup; the new-task screen must never retain the previous dialogue.
     initialConversation();
     homeNavigationRequested = true;
   } catch (error) {
     console.warn("Failed to fully reset the workspace before a new task", error);
+    beginTaskCreationSession();
     initialConversation();
     homeNavigationRequested = true;
     $("#homeView")?.classList.add("hidden");
@@ -14300,13 +16535,13 @@ document.addEventListener("click", (event) => {
     loadHomeTasks();
     return;
   }
-  if (target?.closest("[data-home-create]")) {
-    event.preventDefault();
-    event.stopPropagation();
-    openNewTaskFromHome();
-    return;
-  }
-  const card = target?.closest("[data-home-task]");
+	  if (target?.closest("[data-home-create]")) {
+	    event.preventDefault();
+	    event.stopPropagation();
+	    openNewTaskFromHome();
+	    return;
+	  }
+	  const card = target?.closest("[data-home-task]");
   if (card && !target.closest("[data-home-delete]")) {
     event.preventDefault();
     event.stopPropagation();
@@ -14497,8 +16732,13 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   // because legacy tasks may lack optional DOM/resource data; a missing node
   // must never make the Home button appear inert.
   invalidateWorkspaceRequests();
+  currentCreationSessionId = "";
   pendingWorkflowSwitch = "";
+  legacyWorkflowPickerOpen = false;
+  renderQuickWorkflowPicker(null);
   pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+  quickWorkflowValidation = "";
+  window.ClipTalkAgentWorkspace?.reset?.();
   closeVoiceProfiles();
   closePersonProfiles();
   homeNavigationRequested = Boolean(showHome);
@@ -14518,21 +16758,39 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   initialConversation();
   stopSourcePreviewPolling();
   currentJob = null;
+  window.ClipTalkAppShell?.syncCurrentJob?.(null);
+  timelineChatSelections = [];
+  eventGroupSelectionOrder = [];
+  ignoredChatContextKeys = new Set();
+  const contextBar = $("#chatContextBar");
+  if (contextBar) {
+    contextBar.replaceChildren();
+    contextBar.classList.add("hidden");
+  }
+  const selectionBasket = $("#contentSelectionBasket");
+  if (selectionBasket) {
+    selectionBasket.replaceChildren();
+    selectionBasket.classList.add("hidden");
+  }
   resetCurrentVoiceState();
   resetCurrentPersonState();
   syncOneOffFinalizeAction(null);
+  syncLibrarySaveAction(null, null);
   currentJobRevision = "";
   renderReviewStatus(null);
   renderDirectorTaskSummary(null);
   updateDirectorFlow(null);
   currentOutput = null;
+  reviewLayoutMediaIdentity = "";
   currentCandidate = null;
   currentEventGroup = null;
   currentEventSegment = null;
   outputAssemblyMode = "single_reel";
   candidatePreviewEnd = null;
   viewerMediaKind = "source";
+  syncOutputPreviewMode();
   waveformJobId = null;
+  waveformLoadingJobId = null;
   waveformData = null;
   waveformRetryAt = 0;
   waveformRequestToken += 1;
@@ -14551,6 +16809,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   timelineViewStart = 0;
   timelineViewEnd = 0;
   timelineCoordinateSpace = "source";
+  timelineSelectedOutputSegmentIndex = null;
   timelineReviewFollow = false;
   boundaryDrag = null;
   timelineRangeDrag = null;
@@ -14574,6 +16833,13 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   uploadForm?.reset();
   const fileLabel = $("#fileLabel");
   if (fileLabel) fileLabel.textContent = "拖入视频，或点击选择";
+  const uploadProgress = $("#uploadProgress");
+  if (uploadProgress) {
+    uploadProgress.hidden = true;
+    uploadProgress.removeAttribute("value");
+  }
+  $("#dropZone")?.removeAttribute("data-upload-state");
+  if (videoInput) videoInput.disabled = false;
   $("#uploadView")?.classList.remove("has-source");
   $("#dropZone")?.classList.remove("has-file");
   $("#localPreviewPanel")?.classList.add("hidden");
@@ -14587,12 +16853,17 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   $("#uploadView")?.classList.remove("hidden");
   $("#reviewView")?.classList.add("hidden");
   $("#reviewView")?.removeAttribute("data-review-layout");
-  recommendedReviewLayout = "landscape";
-  updateReviewLayoutControls("landscape");
   setDirectorWorkspaceEmpty(true);
   $("#keepButton")?.classList.add("hidden");
-  if (chatInput) chatInput.value = "";
-  if (chatInput) chatInput.disabled = true;
+  pendingNewTaskInstruction = "";
+  pendingNewTaskInstructionCommitted = false;
+  if (chatInput) {
+    chatInput.value = "";
+    chatInput.disabled = Boolean(showHome);
+    chatInput.placeholder = showHome
+      ? "请输入指令或补充需求……"
+      : "描述想保留的内容，例如：保留产品特写，剪成一分钟竖屏短片……";
+  }
   const sendButton = $("#sendButton");
   if (sendButton) sendButton.disabled = true;
   setDirectorState("等待素材");
@@ -14617,6 +16888,8 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   $("#timelineManualSelectToggle")?.classList.remove("active");
   $("#timelineManualSelectToggle")?.setAttribute("aria-pressed", "false");
   $("#jobStatus")?.classList.add("hidden");
+  $("#autoCompositionDock")?.classList.add("hidden");
+  autoCompositionDockJobId = "";
   $(".review-rail")?.classList.remove("pipeline-mode");
   $("#clipSection")?.classList.add("hidden");
   $("#railOutput")?.classList.add("hidden");
@@ -14624,7 +16897,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   if (railTitle) railTitle.textContent = "审核结果";
   const railBody = $("#railBody");
   if (railBody) {
-    railBody.innerHTML = '<div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="shaping" data-orb-size="64" data-orb-theme="light" data-orb-label="等待分析任务"></span><strong>等待分析任务</strong><p>上传素材后，这里会显示事件高光、内部镜头与输出状态。</p></div>';
+    railBody.innerHTML = '<div class="rail-empty"><span class="empty-thinking-orb" data-thinking-orb data-orb-state="shaping" data-orb-size="64" data-orb-theme="light" data-orb-label="等待分析任务"></span><strong>等待分析任务</strong><p>上传素材后，这里会显示事件高光、候选镜头与生成进度。</p></div>';
     syncThinkingOrbs(railBody);
   }
   $("#openCandidateDrawer")?.setAttribute("disabled", "true");
@@ -14633,11 +16906,107 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
   initialConversation();
   setDirectorStage("conversation");
   if (showHome) {
+    studio?.classList.remove("new-task-workbench");
+    $("#uploadView")?.classList.remove("new-task-upload");
     studio?.classList.add("home-mode");
     $("#homeView")?.classList.remove("hidden");
     loadHomeTasks();
   }
   syncWorkspaceState({ home: Boolean(showHome) });
+  syncComposerSuggestion(null);
+  updateComposerBeam();
+}
+
+async function bootstrapAgentDraftFromUpload(file) {
+  if (!file || draftBootstrapBusy) return;
+  const creationToken = activeCreationToken();
+  const stagedInstruction = String(chatInput?.value || pendingNewTaskInstruction || "").trim();
+  const stagedInstructionCommitted = Boolean(stagedInstruction && pendingNewTaskInstructionCommitted);
+  draftBootstrapBusy = true;
+  actionBusy = true;
+  $("#uploadView")?.classList.add("is-uploading");
+  syncWorkspaceState({ uploading: true, home: false });
+  const sessionId = createClientSessionId("draft");
+  let acceptedCreation = false;
+  const label = $("#fileLabel");
+  const uploadMeta = $("#dropZone")?.querySelector("small");
+  const uploadProgress = $("#uploadProgress");
+  const dropZone = $("#dropZone");
+  if (videoInput) videoInput.disabled = true;
+  if (dropZone) dropZone.dataset.uploadState = "uploading";
+  if (uploadProgress) {
+    uploadProgress.hidden = false;
+    uploadProgress.removeAttribute("value");
+    uploadProgress.setAttribute("aria-valuetext", "正在上传并创建任务");
+  }
+  if (uploadMeta) {
+    uploadMeta.textContent = "正在上传并创建任务，完成后自动进入工作区";
+    delete uploadMeta.dataset.uploadError;
+  }
+  if (label) label.textContent = `${file.name} · 正在上传并建立工作区`;
+  try {
+    const resumable = file.size >= 16 * 1024 * 1024
+      ? await prepareResumableUpload(file, (fraction) => {
+          if (!creationTokenStillCurrent(creationToken)) return;
+          const percent = Math.round(fraction * 100);
+          if (label) label.textContent = `${file.name} · 上传 ${percent}%`;
+          if (uploadProgress) {
+            uploadProgress.value = percent;
+            uploadProgress.setAttribute("aria-valuetext", `已上传 ${percent}%`);
+          }
+        }, { creationSessionId: creationToken.sessionId }) : null;
+    if (!creationTokenStillCurrent(creationToken)) {
+      if (resumable) localStorage.removeItem(resumable.storageKey);
+      return;
+    }
+    const form = window.ClipTalkTaskCreation.buildForm({
+      file, uploadSessionId: resumable?.id || "", instruction: "", taskMode: "highlight",
+      sourceScope: { kind: "all" }, entryWorkflow: "agent", workflowKind: "highlight",
+      agentDraft: true, draftSessionId: sessionId,
+    });
+    const { job } = await api("/api/jobs", { method: "POST", body: form });
+    if (resumable) localStorage.removeItem(resumable.storageKey);
+    if (!creationTokenStillCurrent(creationToken)) return;
+    acceptedCreation = true;
+    currentCreationSessionId = "";
+    homeNavigationRequested = false;
+    renderJob(job);
+    if (stagedInstruction && chatInput) {
+      pendingNewTaskInstruction = stagedInstruction;
+      chatInput.value = stagedInstruction;
+      chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    $("#uploadView")?.classList.add("hidden");
+    if (stagedInstructionCommitted) {
+      pendingNewTaskInstructionCommitted = false;
+      window.setTimeout(() => {
+        if (String(currentJob?.id || "") !== String(job?.id || "") || actionBusy || !chatInput) return;
+        pendingNewTaskInstruction = "";
+        submitComposer();
+      }, 0);
+    }
+  } catch (error) {
+    if (!creationTokenStillCurrent(creationToken)) return;
+    const uploadError = error.message || "视频上传失败，请重试";
+    showToast(uploadError, "error");
+    if (label) label.textContent = `${file.name} · 上传失败，请重试`;
+    if (uploadMeta) {
+      uploadMeta.textContent = uploadError;
+      uploadMeta.dataset.uploadError = "true";
+    }
+    if (dropZone) dropZone.dataset.uploadState = "error";
+    if (uploadProgress) uploadProgress.hidden = true;
+    setDirectorState("上传失败");
+  } finally {
+    if (acceptedCreation || creationTokenStillCurrent(creationToken) || String(currentJob?.draftSessionId || "") === sessionId) {
+      $("#uploadView")?.classList.remove("is-uploading");
+      draftBootstrapBusy = false;
+      actionBusy = false;
+      if (videoInput) videoInput.disabled = false;
+      syncComposerSuggestion(currentJob);
+      updateComposerBeam();
+    }
+  }
 }
 
 videoInput.addEventListener("change", () => {
@@ -14645,24 +17014,25 @@ videoInput.addEventListener("change", () => {
   $("#fileLabel").textContent = file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB` : "拖入视频，或点击选择";
   if (localPreviewUrl) URL.revokeObjectURL(localPreviewUrl);
   if (file) {
+    // A new upload starts with the complete source by default. Do not carry a
+    // stale custom range from the previous video into the next task.
+    const scopeSelect = $("#briefSourceScope");
+    if (scopeSelect) scopeSelect.value = "all";
     localPreviewUrl = URL.createObjectURL(file);
     const localVideo = $("#localPreviewVideo");
     localVideo.src = localPreviewUrl;
-    autoplayLocalPreview(localVideo);
-    $("#localPreviewPanel")?.classList.remove("hidden");
-    $("#uploadView")?.classList.add("has-source");
+    // The browser can decode a local file before the upload is complete, but
+    // showing that player here makes the unfinished source look server-ready.
+    // Keep it hidden for metadata probing and use one honest upload surface.
+    $("#localPreviewPanel")?.classList.add("hidden");
+    $("#uploadView")?.classList.remove("has-source");
     $("#dropZone")?.classList.add("has-file");
-    setDirectorState("等待确认");
-    showBriefCard(file);
+    setDirectorState("上传中");
+    bootstrapAgentDraftFromUpload(file);
     syncWorkspaceState({ home: false });
   } else {
     resetWorkspace();
   }
-});
-
-$("#replaceVideoButton")?.addEventListener("click", () => {
-  if (actionBusy) return;
-  videoInput.click();
 });
 
 $("#localPreviewVideo").addEventListener("loadedmetadata", (event) => {
@@ -14675,15 +17045,33 @@ $("#localPreviewVideo").addEventListener("loadedmetadata", (event) => {
 ].forEach(([names, active]) => names.forEach((name) => $("#dropZone")?.addEventListener(name, () => $("#dropZone")?.classList.toggle("dragging", active))));
 
 function submitComposer() {
+  if (chatInput?.disabled || $("#sendButton")?.disabled) return;
+  const draftText = String(chatInput?.value || "").trim();
+  const agentWorkspace = Boolean(
+    String(currentJob?.request?.entryWorkflow || "") === "agent" || currentJob?.agent?.workspaceId
+  );
   if (currentJob && pendingWorkflowSwitch) createSameSourceWorkflow(pendingWorkflowSwitch, chatInput?.value.trim() || "");
+  else if (currentJob && agentWorkspace && window.ClipTalkAgentWorkspace?.submitGoal) {
+    window.ClipTalkAgentWorkspace.submitGoal(chatInput?.value.trim() || "");
+  }
+  else if (currentJob && window.ClipTalkAgentWorkspace?.submitGoal && !chatInput?.dataset.timelineCompose) window.ClipTalkAgentWorkspace.submitGoal(draftText);
   else if (currentJob) sendChat();
   else if (videoInput.files.length) createJobFromBrief();
+  else if (draftText) {
+    pendingNewTaskInstruction = draftText;
+    pendingNewTaskInstructionCommitted = true;
+    showPendingNewTaskInstruction(draftText);
+    showToast("剪辑要求已暂存，选择视频后会自动继续。", "success");
+    videoInput?.click();
+  }
 }
 
 async function createSameSourceWorkflow(workflowKind, instruction = "") {
   if (!currentJob?.id || actionBusy) return;
   const needsInstruction = workflowKind === "content_search";
   if (needsInstruction && !instruction) {
+    quickWorkflowValidation = "请先在输入框描述要查找的内容。";
+    renderQuickWorkflowPicker(currentJob);
     showToast("请描述要查找的内容");
     chatInput?.focus();
     return;
@@ -14701,9 +17089,7 @@ async function createSameSourceWorkflow(workflowKind, instruction = "") {
     const currentScope = currentJob?.request?.sourceScope || {};
     const useCurrentScope = pendingWorkflowOptions.scope === "current"
       && Number(currentScope.end) > Number(currentScope.start);
-    const response = await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/tasks`, {
-      method: "POST",
-      body: {
+    const body = {
         workflowKind, instruction: effectiveInstruction,
         sourceScopeKind: useCurrentScope ? "custom" : "all",
         sourceScopeStart: useCurrentScope ? Number(currentScope.start) : null,
@@ -14711,17 +17097,29 @@ async function createSameSourceWorkflow(workflowKind, instruction = "") {
         ...(workflowKind === "highlight" && Number(pendingWorkflowOptions.targetSeconds) >= 4 ? { targetSeconds: Number(pendingWorkflowOptions.targetSeconds) } : {}),
         ...(workflowKind === "highlight" ? { variantCount: Number(pendingWorkflowOptions.variantCount) || 3 } : {}),
         ...(workflowKind === "speaker_edit" && Number(pendingWorkflowOptions.expectedSpeakerCount) > 0 ? { expectedSpeakerCount: Number(pendingWorkflowOptions.expectedSpeakerCount) } : {}),
-      },
-    });
+      };
+    const activatingDraft = isAgentInstructionDraft(currentJob);
+    const response = activatingDraft
+      ? await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/activate`, { method: "POST", body })
+      : await apiJson(`/api/jobs/${encodeURIComponent(actionToken.jobId)}/tasks`, { method: "POST", body });
     if (!jobActionStillCurrent(actionToken) || !response.job) return;
     pendingWorkflowSwitch = "";
+    legacyWorkflowPickerOpen = false;
     pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+    quickWorkflowValidation = "";
     if (chatInput) chatInput.value = "";
-    switchWorkspaceJob(response.job);
+    if (currentJob?.agentDraft && String(response.job.id || "") === String(actionToken.jobId || "")) {
+      renderJob(response.job);
+    } else {
+      switchWorkspaceJob(response.job);
+    }
     if (workflowKind === "speaker_edit") {
       setVoiceProfileStatus("同一视频的说话人任务已创建，可以在对话中开始识别。", "success");
     }
-    if (jobNeedsPolling(currentJob)) {
+    // Draft activation always hands work to a background worker.  Pull at
+    // least once even if an older server briefly returns the pre-queue state;
+    // current servers also return execution.active=true immediately.
+    if (activatingDraft || jobNeedsPolling(currentJob)) {
       pollJob();
     }
   } catch (error) {
@@ -14754,15 +17152,13 @@ document.addEventListener("click", (event) => {
   const workflowKind = button.dataset.workflowSwitch;
   button.closest("details")?.removeAttribute("open");
   pendingWorkflowSwitch = workflowKind;
+  document.querySelector(".agent-draft-modes")?.classList.add("workflow-choice-made");
+  legacyWorkflowPickerOpen = false;
   pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+  quickWorkflowValidation = "";
+  renderQuickWorkflowPicker(currentJob);
   if (chatInput) {
-    chatInput.value = "";
-    chatInput.placeholder = {
-      highlight: "可补充新高光任务的主题或重点，或点击上方按钮直接开始……",
-      content_search: "描述新内容探索任务要查找的内容，发送后创建独立任务……",
-      person_edit: "可补充人物范围，或点击上方按钮直接开始……",
-      speaker_edit: "可补充说话人要求，或点击上方按钮直接开始……",
-    }[workflowKind] || "描述新任务要求……";
+    chatInput.placeholder = quickWorkflowPlaceholder(workflowKind);
     chatInput.focus();
   }
   renderChatContextBar();
@@ -14771,21 +17167,84 @@ document.addEventListener("click", (event) => {
     : "确认参数后点击开始，将基于同一视频创建独立任务");
 });
 
+$("#chatLegacyModeButton")?.addEventListener("click", () => {
+  if (!isAgentInstructionDraft(currentJob)) return;
+  if (pendingWorkflowSwitch) {
+    pendingWorkflowSwitch = "";
+    document.querySelector(".agent-draft-modes")?.classList.remove("workflow-choice-made");
+    pendingWorkflowOptions = { scope: "all", targetSeconds: "", expectedSpeakerCount: 0, variantCount: 3 };
+    quickWorkflowValidation = "";
+    if (chatInput) chatInput.placeholder = agentDraftPlaceholder();
+    legacyWorkflowPickerOpen = true;
+    renderQuickWorkflowPicker(currentJob);
+    renderChatContextBar();
+    return;
+  }
+  // Draft quick starts are intentionally persistent. Clicking the toolbar
+  // entry is a "show and focus" action, not a surprising hide toggle.
+  legacyWorkflowPickerOpen = true;
+  quickWorkflowValidation = "";
+  renderQuickWorkflowPicker(currentJob);
+  renderChatContextBar();
+  const picker = $("#quickWorkflowPicker");
+  if (picker) {
+    picker.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+});
+
+function setChatInputDraft(text, { append = false } = {}) {
+  if (!chatInput || chatInput.disabled) return;
+  const value = String(text || "").trim();
+  if (!value) return;
+  const current = String(chatInput.value || "").trim();
+  chatInput.value = append && current ? `${current}\n${value}` : value;
+  chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+  chatInput.focus();
+  chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+}
+
+$("#composerContextButton")?.addEventListener("click", () => {
+  const time = Number(mainVideo?.currentTime || timelineAbsoluteTime?.() || 0);
+  const kind = viewerMediaKind === "output" ? "当前成片画面" : "当前源视频画面";
+  setChatInputDraft(`引用${kind} ${formatTime(time)}：`, { append: true });
+});
+
+$("#composerMagicButton")?.addEventListener("click", () => {
+  const current = String(chatInput?.value || "").trim();
+  const template = current
+    ? `请按可执行剪辑任务整理这个需求：${current}`
+    : "请根据当前视频自动规划一个可审核的剪辑方案，说明要查找的内容、成片比例、字幕和封面要求。";
+  setChatInputDraft(template);
+});
+
+$("#composerSuggestion")?.addEventListener("click", () => {
+  const text = composerSuggestionText(currentJob);
+  if (!text) return;
+  setChatInputDraft(text);
+  syncComposerSuggestion(currentJob);
+});
+
 chatForm.addEventListener("submit", (event) => { event.preventDefault(); submitComposer(); });
 chatInput.addEventListener("input", () => {
   if (!currentJob) {
+    pendingNewTaskInstruction = chatInput.value;
     if (!pendingCreateWorkflowKind) pendingCreateIntentMode = "auto";
     $("#briefIntentClarification")?.classList.add("hidden");
     setBriefCreationError("");
   } else {
+    if (pendingWorkflowSwitch === "content_search" && quickWorkflowValidation && chatInput.value.trim()) {
+      quickWorkflowValidation = "";
+      renderQuickWorkflowPicker(currentJob);
+    }
     renderChatContextBar();
   }
+  syncComposerSuggestion(currentJob);
   updateComposerBeam();
 });
 chatInput.addEventListener("focus", updateComposerBeam);
 chatInput.addEventListener("blur", updateComposerBeam);
 chatInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitComposer(); }
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); submitComposer(); }
 });
 mainVideo.addEventListener("timeupdate", () => {
   updateTimelinePlayhead();
@@ -15014,6 +17473,7 @@ timelineViewport?.addEventListener("click", (event) => {
 }, true);
 $("#timelineManualSelectToggle")?.addEventListener("click", async () => {
   if (!currentJob) return;
+  if (timelineOutputAxisActive()) return void showToast("当前版本时间轴仅用于审看；修改请进入精剪");
   if (!["awaiting_confirmation", "awaiting_content_confirmation", "completed"].includes(currentJob.status)) {
     showToast("请等待视频分析完成后再选择时间段");
     return;
@@ -15038,8 +17498,17 @@ $("#timelineContentTrim")?.addEventListener("click", () => {
 $("#timelineExpandToggle")?.addEventListener("click", () => {
   setTimelineExpanded(!timelineExpanded);
 });
+$("#portraitPrecisionToggle")?.addEventListener("click", () => {
+  setTimelineExpanded(!timelineExpanded, { scroll: !timelineExpanded });
+});
+$("#portraitWorkbenchOpenProperties")?.addEventListener("click", () => {
+  window.ClipTalkWorkspaceController?.setRailExpanded?.(true, { persist: true });
+  document.querySelector('#ctV4RailTabs [data-ct-v4-rail="properties"]')?.click();
+  requestAnimationFrame(() => $("#ctV4PropertiesPanel")?.focus?.({ preventScroll: true }));
+});
 document.querySelectorAll("[data-review-panel-mode]").forEach((button) => button.addEventListener("click", () => {
   const requested = button.dataset.reviewPanelMode;
+  setCandidateRailOpen(false);
   closeCandidateDrawer();
   if (requested === "review") {
     const subjectOpen = document.body.classList.contains("person-workspace-open")
@@ -15054,6 +17523,7 @@ document.querySelectorAll("[data-review-panel-mode]").forEach((button) => button
   setReviewLowerPanelMode(reviewLowerPanelMode === requested ? "collapsed" : requested, { scroll: requested === "timeline" });
 }));
 $("#reviewPanelSubjectTab")?.addEventListener("click", () => {
+  setCandidateRailOpen(false);
   closeCandidateDrawer();
   const kind = $("#reviewPanelSubjectTab")?.dataset.subjectKind;
   const subjectOpen = kind === "person"
@@ -15140,17 +17610,21 @@ $("#timelineContentMoveEarlier")?.addEventListener("click", () => { void moveCon
 $("#timelineContentMoveLater")?.addEventListener("click", () => { void moveContentTimelineSelection(1); });
 function scheduleTimelineResizeRender(force = false) {
   clearTimeout(timelineResizeTimer);
-  if (document.body.classList.contains("panel-resizing")) {
-    timelineResizeTimer = setTimeout(() => scheduleTimelineResizeRender(true), 120);
-    return;
-  }
   if (timelineResizeFrame !== null) cancelAnimationFrame(timelineResizeFrame);
   timelineResizeFrame = requestAnimationFrame(() => {
     timelineResizeFrame = null;
     scheduleMediaFrameFit();
-    const nextLayoutBounds = (timelineTrackContent || timelineViewport)?.getBoundingClientRect();
-    const nextLayoutWidth = Math.round(nextLayoutBounds?.width || 0);
-    const nextLayoutHeight = Math.round(nextLayoutBounds?.height || 0);
+    // updateTimeline measures horizontal layout from the track content, but
+    // vertical layout from the viewport. Comparing both values against the
+    // track bounds made their different heights look like a resize forever:
+    // each render notified ResizeObserver and rebuilt the timeline again.
+    const nextTrackBounds = (timelineTrackContent || timelineViewport)?.getBoundingClientRect();
+    const nextViewportBounds = (timelineViewport || timelineTrackContent)?.getBoundingClientRect();
+    const nextLayoutWidth = Math.round(nextTrackBounds?.width || 0);
+    // Match updateTimeline's minimum logical layout height. Compact viewport
+    // CSS may render below 190px; comparing that raw height with the clamped
+    // layout baseline would also keep the observer loop alive.
+    const nextLayoutHeight = Math.max(190, Math.round(nextViewportBounds?.height || 0));
     if (nextLayoutWidth && (
       Math.abs(nextLayoutWidth - timelineLabelLayoutWidth) > 2
       || Math.abs(nextLayoutHeight - timelineLabelLayoutHeight) > 2
@@ -15164,6 +17638,16 @@ function scheduleTimelineResizeRender(force = false) {
     renderTimelineMediaAssets(force);
   });
 }
+window.addEventListener("cliptalk:themechange", (event) => {
+  const theme = event.detail?.theme === "light" ? "light" : "dark";
+  const progress = $("#inlineAnalysisProgress");
+  if (progress) {
+    progress.dataset.beamTheme = theme;
+    updateBorderBeam(progress, { theme });
+  }
+  waveformRenderKey = "";
+  requestAnimationFrame(() => { drawWaveform(true); drawSecondaryEditorWaveforms(); });
+});
 if (timelineViewport && window.ResizeObserver) {
   const resizeObserver = new ResizeObserver(() => scheduleTimelineResizeRender());
   resizeObserver.observe(timelineViewport);
@@ -15171,10 +17655,7 @@ if (timelineViewport && window.ResizeObserver) {
 }
 $("#timelineZoomIn")?.addEventListener("click", () => zoomTimeline(.5));
 $("#timelineZoomOut")?.addEventListener("click", () => zoomTimeline(2));
-$("#timelineZoomInReview")?.addEventListener("click", () => zoomTimeline(.5));
-$("#timelineZoomOutReview")?.addEventListener("click", () => zoomTimeline(2));
 $("#timelineFit")?.addEventListener("click", () => setTimelineView(0, timelineDurationValue()));
-$("#timelineFitReview")?.addEventListener("click", () => setTimelineView(0, timelineDurationValue()));
 $("#timelineFocusReview")?.addEventListener("click", focusCurrentTimelineReview);
 $("#timelineOutputAxis")?.addEventListener("click", () => setTimelineCoordinateSpace("output"));
 $("#timelineSourceAxis")?.addEventListener("click", () => setTimelineCoordinateSpace("source"));
@@ -15234,6 +17715,8 @@ timelineViewport?.addEventListener("wheel", (event) => {
 }, { passive: false });
 $("#cancelButton")?.addEventListener("click", cancelCurrentJob);
 $("#videoViewSelect")?.addEventListener("change", (event) => {
+  sourceInspectionContext = null;
+  $("#returnInspectedVersion")?.classList.add("hidden");
   if (event.target.value === "source") return showSource({ preserveMappedTime: true });
   selectOutput(event.target.value, true);
 });
@@ -15254,8 +17737,8 @@ $("#addToChatButton")?.addEventListener("click", () => {
   if (item) selectTimelineItemForChat(item);
 });
 $("#openCandidateDrawer")?.addEventListener("click", openCandidateDrawer);
-$("#closeCandidateDrawer")?.addEventListener("click", closeCandidateDrawer);
-$("#drawerBackdrop")?.addEventListener("click", closeCandidateDrawer);
+$("#closeCandidateDrawer")?.addEventListener("click", () => closeCandidateDrawer({ restoreFocus: true }));
+$("#drawerBackdrop")?.addEventListener("click", () => closeCandidateDrawer({ restoreFocus: true }));
 function setVisionConnectionStatus(message, tone = "neutral") {
   const node = $("#visionConnectionStatus");
   if (!node) return;
@@ -15723,7 +18206,7 @@ async function saveLlmConfiguration(event) {
 }
 
 function setModelSettingsRole(role) {
-  const selected = role === "llm" ? "llm" : "vision";
+  const selected = ["vision", "llm", "agent"].includes(role) ? role : "vision";
   document.querySelectorAll("[data-model-role]").forEach((button) => {
     const active = button.dataset.modelRole === selected;
     button.classList.toggle("active", active);
@@ -15941,7 +18424,10 @@ function renderCurrentPersons() {
   }
   ensureCurrentPersonState(currentJob);
   const persons = currentPersonCatalog(currentJob);
-  const running = executionForJob(currentJob).active;
+  const running = workflowOperationActive(currentJob, {
+    operations: ["person_discovery", "person_tracking"],
+    agentTools: ["discover_people"],
+  });
   const correctionLocked = !interactionCapabilitiesForJob(currentJob).canCorrectPerson;
   const correctionLockAttributes = correctionLocked
     ? `disabled aria-disabled="true" title="${escapeHtml(unavailableInteractionMessage(currentJob))}"`
@@ -16201,6 +18687,7 @@ function renderInlineCurrentVoices(discovery = {}) {
   const root = $("#inlineCurrentVoices");
   const narratorMode = Boolean(currentJob?.narratorSelectionPending?.active);
   if (!root || (workflowKindForJob(currentJob) !== "speaker_edit" && !narratorMode)) return;
+  discovery = voiceDiscoveryPresentationForJob(currentJob, discovery);
   const interactionLocked = !interactionCapabilitiesForJob(currentJob).canCorrectVoice || voiceCorrectionBusy;
   const interactionLockAttributes = interactionLocked
     ? `disabled aria-disabled="true" title="${escapeHtml(voiceCorrectionBusy ? "正在保存声音校正" : unavailableInteractionMessage(currentJob))}"`
@@ -16249,6 +18736,7 @@ function renderCurrentVoices(discovery = {}) {
   const list = $("#currentVoiceList");
   const button = $("#discoverCurrentVoices");
   if (!list || !button) return;
+  discovery = voiceDiscoveryPresentationForJob(currentJob, discovery);
   const status = String(discovery.status || "not_started");
   const voiceLocked = !interactionCapabilitiesForJob(currentJob).canCorrectVoice || voiceCorrectionBusy;
   const voiceLockAttributes = voiceLocked
@@ -16492,8 +18980,11 @@ function renderTimelinePersonTrack() {
   if (!root || !labelsRoot || !segmentsRoot || !count) return;
   const personMode = currentJob && workflowKindForJob(currentJob) === "person_edit";
   const persons = personMode ? currentPersonCatalog(currentJob) : [];
-  const running = personMode && executionForJob(currentJob).active;
-  const visible = personMode && (persons.length > 0 || running);
+  const running = personMode && workflowOperationActive(currentJob, {
+    operations: ["person_discovery", "person_tracking"],
+    agentTools: ["discover_people"],
+  });
+  const visible = !timelineOutputAxisActive() && personMode && (persons.length > 0 || running);
   root.classList.toggle("hidden", !visible);
   if (!visible) {
     labelsRoot.innerHTML = "";
@@ -16594,7 +19085,7 @@ function renderTimelineSpeakerTrack() {
   if (!root || !segmentsRoot || !labelsRoot || !count) return;
   const sameJob = Boolean(currentJob?.id) && currentVoiceJobId === String(currentJob.id);
   const status = sameJob ? currentVoiceDiscoveryStatus : "not_started";
-  const visible = ["loading", "running", "ready", "failed"].includes(status);
+  const visible = !timelineOutputAxisActive() && ["loading", "running", "ready", "failed"].includes(status);
   root.classList.toggle("hidden", !visible);
   root.dataset.status = status;
   if (!visible) {
@@ -16734,9 +19225,10 @@ async function loadCurrentVoices() {
     currentVoiceTimeline = Array.isArray(result.timeline) ? result.timeline : [];
     currentVoiceRevision = Number(result.revision || 0);
     currentVoiceCanUndo = Boolean(result.canUndo);
+    const presentedStatus = voiceDiscoveryPresentationForJob(currentJob, result.status || {});
     renderCurrentVoices(result.status || {});
     if (secondaryEditorOpen() && workflowKindForJob(currentJob) === "speaker_edit") renderSecondaryEditorLibrary();
-    if (result.status?.status === "running" && !$("#voiceProfilePanel")?.classList.contains("hidden")) {
+    if (presentedStatus.status === "running" && !$("#voiceProfilePanel")?.classList.contains("hidden")) {
       voiceDiscoveryTimer = setTimeout(loadCurrentVoices, 1500);
     }
   } catch (error) {
@@ -17329,21 +19821,11 @@ async function loadHealth() {
   if (document.hidden) return;
   try {
     const health = await api("/api/health");
-    lastHealth = health;
     const visionConfigured = health.visionConfigured ?? health.arkConfigured;
     const visionModel = health.visionModel || health.arkModel;
     const visionProvider = health.visionProviderLabel || "视觉模型接口";
     const llmModel = health.llmModel || "未配置";
     const llmProvider = health.llmUsesVision ? "复用视觉配置" : (health.llmProviderLabel || "剪辑规划接口");
-    const engineState = $("#engineState");
-    engineState?.classList.toggle("offline", !visionConfigured);
-    const engineLabel = $("#engineState span");
-    if (engineLabel) engineLabel.textContent = visionConfigured ? "服务正常" : "服务需配置";
-    if (engineState) {
-      const detail = visionConfigured ? `服务正常 · 视觉 ${visionModel} · 规划 ${llmModel}` : "服务需配置 · 视觉模型未配置";
-      engineState.title = detail;
-      engineState.setAttribute("aria-label", `${detail}，点击查看详情`);
-    }
     const settingsModel = $("#settingsModel");
     if (settingsModel) settingsModel.textContent = visionConfigured ? `${visionModel} · ${visionProvider}` : "未配置";
     const settingsBackend = $("#settingsBackend");
@@ -17358,15 +19840,6 @@ async function loadHealth() {
     const settingsSpeechDevice = $("#settingsSpeechDevice");
     if (settingsSpeechDevice) settingsSpeechDevice.textContent = health.speechDevice || "自动选择";
   } catch {
-    lastHealth = null;
-    const engineState = $("#engineState");
-    engineState?.classList.add("offline");
-    const engineLabel = $("#engineState span");
-    if (engineLabel) engineLabel.textContent = "服务离线";
-    if (engineState) {
-      engineState.title = "服务连接失败";
-      engineState.setAttribute("aria-label", "服务连接失败，点击查看详情");
-    }
     ["#settingsModel", "#settingsLlmModel", "#settingsBackend", "#settingsFfmpeg", "#settingsSpeech", "#settingsSpeechDevice"].forEach((selector) => {
       const node = $(selector);
       if (node) node.textContent = selector === "#settingsFfmpeg" ? "未知" : selector === "#settingsSpeechDevice" ? "未知" : "服务连接失败";
@@ -17408,6 +19881,8 @@ let secondaryEditInsertionIndexOverride = null;
 let secondaryEditPreviewMaterialId = null;
 let secondaryEditPreviewMaterialRange = null;
 
+let secondaryEditActivationToken = 0;
+
 function secondaryEditorOpen() {
   return !$("#secondaryEditor")?.classList.contains("hidden");
 }
@@ -17417,7 +19892,7 @@ function secondaryEditClip(clipId = null) {
   return secondaryEditSession?.clips?.find((clip) => String(clip.id) === String(id)) || null;
 }
 
-function setSecondaryEditorBusy(busy, label = "") {
+function setSecondaryEditorBusy(busy, label = "", operation = "working") {
   secondaryEditBusy = Boolean(busy);
   $("#secondaryEditor")?.querySelectorAll("button,input,select,textarea").forEach((node) => {
     if (node.closest("video")) return;
@@ -17428,7 +19903,11 @@ function setSecondaryEditorBusy(busy, label = "") {
   });
   if (label) {
     const state = $("#secondaryEditorSaveState");
-    if (state) { state.textContent = label; state.dataset.state = busy ? "saving" : "saved"; }
+    if (state) {
+      state.textContent = label;
+      state.dataset.operation = busy ? operation : "idle";
+      if (operation === "save") state.dataset.state = busy ? "saving" : "saved";
+    }
   }
   syncSecondaryEditorControls();
 }
@@ -17481,14 +19960,14 @@ function secondaryEditorMaterialGroups(job = currentJob, session = secondaryEdit
       speaker_edit: "目标说话人尚未采用的可靠发言片段",
     })[workflow] || "当前模式建议补入的源片段",
     kept: workflow === "content_search"
-      ? "历史检索结果和已由你确认保留的片段"
+      ? "历史检索结果和你此前选中的片段"
       : "已由你确认，但尚未放入当前时间线的片段",
     review: "低置信候选、已排除内容和从本草稿移除的片段",
   };
   const groups = [
     { id: "timeline", title: "当前成片素材", description: groupDescriptions.timeline, items: [], open: true },
     { id: "recommended", title: "推荐补充", description: groupDescriptions.recommended, items: [], open: true },
-    { id: "kept", title: "已保留素材", description: groupDescriptions.kept, items: [], open: false },
+    { id: "kept", title: "历史已选素材", description: groupDescriptions.kept, items: [], open: false },
     { id: "review", title: "待确认与已移除", description: groupDescriptions.review, items: [], open: false },
   ];
   const groupLookup = new Map(groups.map((group) => [group.id, group]));
@@ -17567,7 +20046,7 @@ function secondaryEditorMaterialGroups(job = currentJob, session = secondaryEdit
       sourceKind: "event_segment",
       sourceLabel: `高光事件 · ${event.title || "未命名事件"}`,
       title: segment.title || segment.role || `${event.title || "高光事件"} · 镜头 ${index + 1}`,
-      reason: segment.reason || event.summary || "来自高光分析确认的事件内部镜头",
+      reason: segment.reason || event.summary || "来自高光分析的候选镜头",
       retained: Boolean(segment.selected || event.selected),
     })));
     (job?.candidates || []).forEach((candidate) => addCatalog(candidate, {
@@ -17669,8 +20148,23 @@ function renderSecondaryEditorLibrary() {
   const workflow = String(secondaryEditSession?.workflowKind || workflowKindForJob(currentJob));
   const groups = secondaryEditorMaterialGroups(currentJob, secondaryEditSession);
   const materials = groups.flatMap((group) => group.items);
+  const groupLookup = new Map(groups.map((group) => [group.id, group]));
+  if (!groupLookup.has(secondaryEditorMaterialFilter)) {
+    secondaryEditorMaterialFilter = groupLookup.get("recommended")?.items.length ? "recommended" : "timeline";
+  }
+  const query = secondaryEditorMaterialSearch.trim().toLocaleLowerCase("zh-CN");
+  const matchesSearch = (item) => !query || [item.title, item.reason, item.sourceLabel, formatPreciseTimecode(item.start), formatPreciseTimecode(item.end)]
+    .some((value) => String(value || "").toLocaleLowerCase("zh-CN").includes(query));
   $("#secondaryEditorLibraryTitle").textContent = secondaryEditorWorkflowLabel(workflow);
   $("#secondaryEditorLibraryCount").textContent = `${materials.length} 段`;
+  $("#secondaryEditorLibraryFilters")?.querySelectorAll("[data-secondary-material-filter]").forEach((button) => {
+    const group = groupLookup.get(button.dataset.secondaryMaterialFilter);
+    const active = group?.id === secondaryEditorMaterialFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    const count = button.querySelector("b");
+    if (count) count.textContent = String(group?.items.length || 0);
+  });
   const context = $("#secondaryEditorLibraryContext");
   const sourceRangeActive = $("#secondaryEditor [data-secondary-library='source']")?.classList.contains("active");
   if (context) context.textContent = sourceRangeActive
@@ -17680,7 +20174,7 @@ function renderSecondaryEditorLibrary() {
     const previewing = String(item.id) === String(secondaryEditPreviewMaterialId);
     const usedClipIds = secondaryEditorMaterialClipIds(item);
     const stateLabel = ({
-      timeline: "成片中", recommended: "建议补充", kept: "已保留", historical: "历史结果",
+      timeline: "成片中", recommended: "建议补充", kept: "历史已选", historical: "历史结果",
       pending: "待确认", rejected: "已排除", removed: "已移除",
     })[item.state] || "源素材";
     const insertLabel = item.state === "removed" || item.state === "rejected"
@@ -17688,14 +20182,20 @@ function renderSecondaryEditorLibrary() {
     return `<article draggable="true" tabindex="0" class="secondary-library-item${previewing ? " previewing" : ""}" data-secondary-material="${escapeHtml(item.id)}" aria-label="${escapeHtml(`${item.title}，源片 ${formatPreciseTimecode(item.start)} 到 ${formatPreciseTimecode(item.end)}`)}">
       <button class="secondary-library-thumb" data-secondary-material-preview type="button" aria-label="预览${escapeHtml(item.title)}" aria-pressed="${previewing}"><span class="secondary-clip-media" aria-hidden="true">${secondaryEditorClipMediaMarkup({ sourceStart: item.start, sourceEnd: item.end })}</span><i aria-hidden="true"></i><em>${previewing ? "正在预览" : "预览"}</em></button>
       <div class="secondary-library-copy"><strong title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</strong><small>源片 ${formatPreciseTimecode(item.start)} → ${formatPreciseTimecode(item.end)}</small><span><b>${(item.end - item.start).toFixed(2)} 秒</b><b class="source">${escapeHtml(item.sourceLabel)}</b><b class="state-${escapeHtml(item.state)}">${stateLabel}</b>${usedClipIds.length ? `<b class="used">时间线 ${usedClipIds.length} 处</b>` : ""}</span></div>
-      <p>${escapeHtml(item.reason)}</p>
-      <footer class="${usedClipIds.length ? "has-used-clips" : ""}"><button data-secondary-material-preview type="button">${previewing ? "重新播放" : "预览"}</button><button class="primary" data-secondary-material-insert type="button">${insertLabel}</button>${usedClipIds.length ? `<button class="secondary-library-remove" data-secondary-material-remove type="button">从时间线移除${usedClipIds.length > 1 ? `（${usedClipIds.length}）` : ""}</button>` : ""}</footer>
+      <details class="secondary-library-reason"><summary>查看依据</summary><p>${escapeHtml(item.reason)}</p></details>
+      <footer class="${usedClipIds.length ? "has-used-clips" : ""}"><button class="primary" data-secondary-material-insert type="button">${insertLabel}</button>${usedClipIds.length ? `<button class="secondary-library-remove" data-secondary-material-remove type="button">移出时间线${usedClipIds.length > 1 ? `（${usedClipIds.length}）` : ""}</button>` : ""}</footer>
     </article>`;
   };
-  body.innerHTML = groups.map((group) => `<details class="secondary-library-group" data-secondary-material-group="${group.id}" ${group.open && group.items.length ? "open" : ""}>
-    <summary><span><strong>${group.title}</strong><small>${escapeHtml(group.description)}</small></span><b>${group.items.length}</b></summary>
-    <div class="secondary-library-group-items">${group.items.length ? group.items.map(itemMarkup).join("") : `<p class="secondary-library-group-empty">${group.id === "timeline" ? "当前时间线还没有片段" : group.id === "recommended" ? "暂时没有新的建议素材" : group.id === "kept" ? "还没有单独保留的素材" : "没有待确认或已移除的素材"}</p>`}</div>
-  </details>`).join("");
+  body.innerHTML = groups.map((group) => {
+    const visibleItems = group.items.filter(matchesSearch);
+    const emptyText = query
+      ? "没有匹配当前搜索的素材"
+      : group.id === "timeline" ? "当前时间线还没有片段" : group.id === "recommended" ? "暂时没有新的建议素材" : group.id === "kept" ? "还没有单独保留的素材" : "没有待确认或已移除的素材";
+    return `<details class="secondary-library-group${group.id === secondaryEditorMaterialFilter ? " active" : ""}" data-secondary-material-group="${group.id}" ${group.id === secondaryEditorMaterialFilter ? "open" : ""}>
+    <summary><span><strong>${group.title}</strong><small>${escapeHtml(group.description)}</small></span><b>${query ? `${visibleItems.length}/${group.items.length}` : group.items.length}</b></summary>
+    <div class="secondary-library-group-items">${visibleItems.length ? visibleItems.map(itemMarkup).join("") : `<p class="secondary-library-group-empty">${emptyText}</p>`}</div>
+  </details>`;
+  }).join("");
   body.querySelectorAll("[data-secondary-material]").forEach((node) => {
     const item = materials.find((value) => value.id === node.dataset.secondaryMaterial);
     node.querySelectorAll("[data-secondary-material-preview]").forEach((button) => button.addEventListener("click", (event) => {
@@ -17711,7 +20211,7 @@ function renderSecondaryEditorLibrary() {
       const clipIds = secondaryEditorMaterialClipIds(item);
       if (clipIds.length) void secondaryEditorOperation({ type: "delete_clips", clipIds });
     });
-    node.addEventListener("click", (event) => { if (!event.target.closest("button")) secondaryEditorPreviewMaterial(item); });
+    node.addEventListener("click", (event) => { if (!event.target.closest("button, details, summary")) secondaryEditorPreviewMaterial(item); });
     node.addEventListener("keydown", (event) => {
       if (event.target !== node || (event.key !== "Enter" && event.key !== " ")) return;
       event.preventDefault();
@@ -17838,7 +20338,7 @@ function secondaryEditorInspectorHasChanges() {
   return Boolean(secondaryEditInspectorDraft?.dirty);
 }
 
-function secondaryEditorMarkPreviewStale(message = "时间线已变化 · 预览样片需要重新生成") {
+function secondaryEditorMarkPreviewStale(message = "需更新预览") {
   secondaryEditPreviewRequestToken += 1;
   secondaryEditPreviewPending = false;
   if (secondaryEditSession) secondaryEditSession.previewStatus = "stale";
@@ -17850,6 +20350,28 @@ function secondaryEditorMarkPreviewStale(message = "时间线已变化 · 预览
     state.classList.remove("hidden");
   }
   syncSecondaryEditorControls();
+}
+
+function secondaryEditorPreviewIsCurrent(session = secondaryEditSession) {
+  return Boolean(
+    session
+    && session.previewStatus === "ready"
+    && Number(session.previewRevision) === Number(session.revision),
+  );
+}
+
+function syncSecondaryEditorAiScope() {
+  const scope = $("#secondaryEditorAiScope");
+  const summary = $("#secondaryEditorAiScopeSummary");
+  if (!scope || !summary) return;
+  const selected = secondaryEditSelectedClips.size;
+  const total = secondaryEditSession?.clips?.length || 0;
+  if (!selected && scope.value === "selection") scope.value = "timeline";
+  scope.querySelector('option[value="selection"]').disabled = !selected;
+  summary.textContent = scope.value === "timeline"
+    ? `将检查整个成片，共 ${total} 个片段`
+    : `只检查当前选择的 ${selected} 个片段`;
+  summary.dataset.tone = scope.value === "timeline" ? "timeline" : "selection";
 }
 
 function secondaryEditorPlayheadContext(outputTime = secondaryEditPlayheadTime) {
@@ -17953,6 +20475,11 @@ function secondaryEditorTimelineTickStep(duration, width) {
     .find((value) => value >= raw) || 1200;
 }
 
+function secondaryEditorRulerLabel(time, tickStep) {
+  if (tickStep < 1) return `${Number(time).toFixed(tickStep < .5 ? 2 : 1)}s`;
+  return formatClock(time);
+}
+
 function secondaryEditorFrameRate() {
   return contentBoundaryFrameRate(currentJob);
 }
@@ -17963,18 +20490,19 @@ function secondaryEditorClipMediaMarkup(clip) {
   const start = Number(clip.sourceStart || 0);
   const end = Math.max(start, Number(clip.sourceEnd || start));
   const frameCount = 4;
-  const scale = 48 / Math.max(1, Number(sprite.tileHeight || 1));
+  const spriteWidth = Math.max(1, Number(sprite.spriteWidth || 1));
+  const spriteHeight = Math.max(1, Number(sprite.spriteHeight || 1));
+  const tileWidth = Math.max(1, Number(sprite.tileWidth || 1));
+  const tileHeight = Math.max(1, Number(sprite.tileHeight || 1));
+  const spriteUrl = escapeHtml(timelineAssets.spriteUrl);
   return Array.from({ length: frameCount }, (_unused, index) => {
     const target = start + (end - start) * (index + .5) / frameCount;
     const item = sprite.items.reduce((best, current) => (
       Math.abs(Number(current.time) - target) < Math.abs(Number(best.time) - target) ? current : best
     ));
-    const style = [
-      `background-image:url('${timelineAssets.spriteUrl}')`,
-      `background-size:${Number(sprite.spriteWidth) * scale}px ${Number(sprite.spriteHeight) * scale}px`,
-      `background-position:${-Number(item.column) * Number(sprite.tileWidth) * scale}px ${-Number(item.row) * Number(sprite.tileHeight) * scale}px`,
-    ].join(";");
-    return `<i style="${style}"></i>`;
+    const viewX = Math.max(0, Number(item.column || 0) * tileWidth);
+    const viewY = Math.max(0, Number(item.row || 0) * tileHeight);
+    return `<i class="secondary-clip-frame"><svg viewBox="${viewX} ${viewY} ${tileWidth} ${tileHeight}" preserveAspectRatio="xMidYMid slice" focusable="false"><image href="${spriteUrl}" width="${spriteWidth}" height="${spriteHeight}"></image></svg></i>`;
   }).join("");
 }
 
@@ -17995,7 +20523,9 @@ function drawSecondaryEditorWaveforms() {
     context.clearRect(0, 0, width, height);
     const gain = Math.max(0, Math.min(2, Number(canvas.dataset.audioGain || 1)));
     const muted = canvas.dataset.muted === "true";
-    context.strokeStyle = muted ? "rgba(128, 143, 147, .32)" : `rgba(202, 226, 112, ${Math.min(.9, .4 + gain * .22)})`;
+    const theme = getComputedStyle(canvas);
+    context.strokeStyle = theme.getPropertyValue(muted ? "--ct-on-media" : "--ct-waveform-on-media").trim() || "#cbe7aa";
+    context.globalAlpha = muted ? .45 : Math.min(1, .65 + gain * .25);
     context.lineWidth = 1;
     context.beginPath();
     const start = Number(canvas.dataset.sourceStart || 0);
@@ -18050,7 +20580,7 @@ function secondaryEditorSnapSourceTime(value, { altKey = false, clipId = "" } = 
     candidates.push({ time: Number(clip.sourceStart), label: "片段入点" }, { time: Number(clip.sourceEnd), label: "片段出点" });
   });
   const canvas = $("#secondaryEditorTimelineCanvas");
-  const threshold = Math.max(3 / fps, Number(secondaryEditSession?.duration || 0) / Math.max(1, canvas?.clientWidth || 1) * 10);
+  const threshold = Math.max(3 / fps, secondaryEditorTimelineDuration() / Math.max(1, canvas?.clientWidth || 1) * 10);
   const match = candidates.filter((item) => Number.isFinite(item.time) && Math.abs(item.time - frameValue) <= threshold)
     .sort((left, right) => Math.abs(left.time - frameValue) - Math.abs(right.time - frameValue))[0];
   return match || { time: frameValue, label: `帧 ${Math.round(frameValue * fps)}` };
@@ -18089,9 +20619,10 @@ function beginSecondaryEditorTrim(event, clipId, boundary) {
     adjacentPlaybackRate: Math.max(.01, Number(adjacentClip?.playbackRate || 1)),
     adjacentOutputStart: Number(schedule[adjacentIndex]?.outputStart || 0),
     adjacentOutputEnd: Number(schedule[adjacentIndex]?.outputEnd || 0),
+    rollMode: Boolean(event.shiftKey && adjacentClip),
   };
   node.classList.add("trimming");
-  secondaryEditTrimDrag.adjacentNode?.classList.add("roll-trimming");
+  secondaryEditTrimDrag.adjacentNode?.classList.toggle("roll-trimming", secondaryEditTrimDrag.rollMode);
   document.addEventListener("pointermove", moveSecondaryEditorTrim);
   document.addEventListener("pointerup", finishSecondaryEditorTrim, { once: true });
 }
@@ -18099,15 +20630,22 @@ function beginSecondaryEditorTrim(event, clipId, boundary) {
 function moveSecondaryEditorTrim(event) {
   const drag = secondaryEditTrimDrag;
   if (!drag || !secondaryEditSession) return;
+  const rollMode = Boolean(event.shiftKey && drag.adjacentClip);
+  drag.rollMode = rollMode;
+  drag.adjacentNode?.classList.toggle("roll-trimming", rollMode);
+  drag.previewStart = drag.sourceStart;
+  drag.previewEnd = drag.sourceEnd;
+  drag.adjacentPreviewStart = drag.adjacentSourceStart;
+  drag.adjacentPreviewEnd = drag.adjacentSourceEnd;
   const canvas = $("#secondaryEditorTimelineCanvas");
   const sourceDuration = Math.max(0, Number(currentJob?.videoInfo?.duration || 0));
-  const outputDelta = (event.clientX - drag.startX) / Math.max(1, canvas?.clientWidth || 1) * Number(secondaryEditSession.duration || 0);
+  const outputDelta = (event.clientX - drag.startX) / Math.max(1, canvas?.clientWidth || 1) * drag.timelineDuration;
   const originalBoundary = drag.boundary === "start" ? drag.sourceStart : drag.sourceEnd;
   const raw = originalBoundary + outputDelta * drag.playbackRate;
   const snapped = secondaryEditorSnapSourceTime(raw, { altKey: event.altKey, clipId: drag.clipId });
   let actualBoundary = snapped.time;
   let outputBoundary = 0;
-  if (drag.adjacentClip) {
+  if (rollMode) {
     let delta = (snapped.time - originalBoundary) / drag.playbackRate;
     if (drag.boundary === "start") {
       const minimum = Math.max(
@@ -18149,21 +20687,21 @@ function moveSecondaryEditorTrim(event) {
   }
   const effectiveDuration = (drag.previewEnd - drag.previewStart) / drag.playbackRate;
   const previewOutputStart = drag.boundary === "start" ? outputBoundary : drag.outputStart;
-  drag.node.style.width = `${Math.max(.05, effectiveDuration / Math.max(.01, Number(secondaryEditSession.duration || 0)) * 100)}%`;
+  drag.node.style.width = `${Math.max(.05, effectiveDuration / drag.timelineDuration * 100)}%`;
   drag.node.style.left = `${Math.max(0, previewOutputStart) / drag.timelineDuration * 100}%`;
   const sourceLabel = drag.node.querySelector("[data-secondary-clip-source]");
   if (sourceLabel) sourceLabel.textContent = `源片 ${formatPreciseTimecode(drag.previewStart)} → ${formatPreciseTimecode(drag.previewEnd)}`;
   if (drag.adjacentClip && drag.adjacentNode) {
     const adjacentDuration = (drag.adjacentPreviewEnd - drag.adjacentPreviewStart) / drag.adjacentPlaybackRate;
-    const adjacentOutputStart = drag.boundary === "end" ? outputBoundary : drag.adjacentOutputStart;
+    const adjacentOutputStart = rollMode && drag.boundary === "end" ? outputBoundary : drag.adjacentOutputStart;
     drag.adjacentNode.style.left = `${Math.max(0, adjacentOutputStart) / drag.timelineDuration * 100}%`;
     drag.adjacentNode.style.width = `${Math.max(.05, adjacentDuration / drag.timelineDuration * 100)}%`;
     const adjacentLabel = drag.adjacentNode.querySelector("[data-secondary-clip-source]");
     if (adjacentLabel) adjacentLabel.textContent = `源片 ${formatPreciseTimecode(drag.adjacentPreviewStart)} → ${formatPreciseTimecode(drag.adjacentPreviewEnd)}`;
   }
   const trimLabel = drag.node.querySelector("[data-secondary-trim-readout]");
-  if (trimLabel) trimLabel.textContent = `${drag.boundary === "start" ? "源片入点" : "源片出点"} ${formatPreciseTimecode(actualBoundary)} · ${drag.adjacentClip ? "滚动边界，后续位置不变" : snapped.label}`;
-  secondaryEditorShowSnapGuide(outputBoundary, drag.adjacentClip ? "滚动裁剪" : snapped.label);
+  if (trimLabel) trimLabel.textContent = `${drag.boundary === "start" ? "源片入点" : "源片出点"} ${formatPreciseTimecode(actualBoundary)} · ${rollMode ? "滚动边界，总时长不变" : "当前片段，后续自动顺延"}`;
+  secondaryEditorShowSnapGuide(outputBoundary, rollMode ? "Shift 滚动裁剪" : snapped.label);
   const video = $("#secondaryEditorVideo");
   if (video && !secondaryEditExactPreview) {
     try { video.currentTime = actualBoundary; } catch {}
@@ -18181,7 +20719,7 @@ async function finishSecondaryEditorTrim() {
   const changed = Math.abs(drag.previewStart - drag.sourceStart) > .0005
     || Math.abs(drag.previewEnd - drag.sourceEnd) > .0005;
   if (!changed) return renderSecondaryEditorTimeline();
-  if (drag.adjacentClip) {
+  if (drag.rollMode && drag.adjacentClip) {
     await secondaryEditorOperation({
       type: "roll_trim", clipId: drag.clipId, boundary: drag.boundary,
       sourceStart: drag.previewStart, sourceEnd: drag.previewEnd,
@@ -18296,6 +20834,7 @@ function renderSecondaryEditorTextCanvas() {
 }
 
 function renderSecondaryEditorTextTrack() {
+  $("#secondaryEditorTextTrack")?.classList.toggle("hidden", !secondaryEditorTextLayers().length);
   const summary = $("#secondaryEditorTextSummary");
   const blocks = $("#secondaryEditorTextBlocks");
   if (!summary || !blocks || !secondaryEditSession) return;
@@ -18402,6 +20941,7 @@ function renderSecondaryEditorSubtitleTrack() {
   const blocks = $("#secondaryEditorSubtitleBlocks");
   if (!summary || !blocks || !secondaryEditSession) return;
   const enabled = Boolean(secondaryEditSession.subtitleEnabled);
+  $("#secondaryEditorSubtitleTrack")?.classList.toggle("hidden", !enabled && !(secondaryInspectorMode === "subtitle" && $("#secondaryEditor")?.classList.contains("inspector-open")));
   const draftId = String(secondaryEditSession.subtitleDraftId || "");
   const draftReady = draftId && String(secondaryEditSubtitleDraft?.id || "") === draftId;
   const timingPreview = secondaryEditorTimelineModel().preview;
@@ -18418,35 +20958,98 @@ function renderSecondaryEditorSubtitleTrack() {
     const start = Math.max(0, Number(cue.start || 0));
     const end = Math.min(duration, Number(cue.end || start));
     const textBox = cue.kind === "text_box";
-    return `<article class="secondary-editor-subtitle-block${textBox ? " text-box" : ""}${secondaryEditSelectedCueId === String(cue.id) ? " selected" : ""}" data-secondary-cue="${escapeHtml(cue.id)}" data-secondary-cue-kind="${textBox ? "text_box" : "subtitle"}" style="left:${start / duration * 100}%;width:${Math.max(.08, (end - start) / duration * 100)}%" title="${textBox ? "文本框" : "字幕"} · 成片 ${escapeHtml(formatPreciseTimecode(start))} → ${escapeHtml(formatPreciseTimecode(end))}"><span class="secondary-subtitle-handle start" data-secondary-cue-handle="start" role="button" tabindex="0" aria-label="调整字幕成片入点"></span><span data-secondary-cue-text contenteditable="plaintext-only" spellcheck="false">${escapeHtml(cue.text || "")}</span><span class="secondary-subtitle-handle end" data-secondary-cue-handle="end" role="button" tabindex="0" aria-label="调整字幕成片出点"></span></article>`;
+    const cueLabel = `${textBox ? "文本框" : "字幕"} · 成片 ${formatPreciseTimecode(start)} → ${formatPreciseTimecode(end)}`;
+    const interactionHint = timingPreview ? "单击定位；保存排期后可编辑" : "单击定位，双击或按 Enter 编辑";
+    return `<article class="secondary-editor-subtitle-block${textBox ? " text-box" : ""}${secondaryEditSelectedCueId === String(cue.id) ? " selected" : ""}" data-secondary-cue="${escapeHtml(cue.id)}" data-secondary-cue-kind="${textBox ? "text_box" : "subtitle"}" role="group" tabindex="0" aria-label="${escapeHtml(`${cueLabel}；${interactionHint}`)}" style="left:${start / duration * 100}%;width:${Math.max(.08, (end - start) / duration * 100)}%" title="${escapeHtml(`${cueLabel} · ${interactionHint}`)}"><span class="secondary-subtitle-handle start" data-secondary-cue-handle="start" role="button" tabindex="0" aria-label="调整字幕成片入点"></span><span data-secondary-cue-text contenteditable="false" tabindex="-1" aria-label="字幕文字，双击编辑" spellcheck="false">${escapeHtml(cue.text || "")}</span><span class="secondary-subtitle-handle end" data-secondary-cue-handle="end" role="button" tabindex="0" aria-label="调整字幕成片出点"></span></article>`;
   }).join("");
   blocks.querySelectorAll("[data-secondary-cue]").forEach((node) => {
     const cue = cues.find((item) => String(item.id) === String(node.dataset.secondaryCue));
     if (!cue) return;
-    node.addEventListener("click", (event) => {
-      if (event.target.closest("[contenteditable],[data-secondary-cue-handle]")) return;
-      secondaryEditSelectedCueId = String(cue.id);
-      secondaryEditorSeekOutputTime(Number(cue.start || 0), false);
-      renderSecondaryEditorSubtitleTrack();
-    });
+    const cueId = String(cue.id);
+    const currentCue = () => secondaryEditSubtitleDraft?.cues?.find((item) => String(item.id) === cueId) || null;
     const editor = node.querySelector("[data-secondary-cue-text]");
-    editor?.addEventListener("click", (event) => event.stopPropagation());
-    editor?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") { event.preventDefault(); editor.blur(); }
+    const selectCue = () => {
+      const activeCue = currentCue();
+      if (!activeCue) return;
+      secondaryEditSelectedCueId = cueId;
+      secondaryEditorSeekOutputTime(Number(activeCue.start || 0), false, true);
+      const activeClip = secondaryEditorTimelineModel().clips[secondaryEditSequenceIndex];
+      if (activeClip) {
+        secondaryEditSelectedClips = new Set([String(activeClip.id)]);
+        secondaryEditSelectionAnchorId = String(activeClip.id);
+        $("#secondaryEditorTimeline")?.querySelectorAll("[data-secondary-clip]").forEach((clipNode) => {
+          clipNode.classList.toggle("selected", String(clipNode.dataset.secondaryClip) === String(activeClip.id));
+        });
+        renderSecondaryEditorInspector();
+      }
+      blocks.querySelectorAll("[data-secondary-cue]").forEach((cueNode) => {
+        cueNode.classList.toggle("selected", cueNode === node);
+      });
+      syncSecondaryEditorControls();
+    };
+    const beginEditing = () => {
+      if (!editor || timingPreview) return;
+      selectCue();
+      editor.setAttribute("contenteditable", "true");
+      editor.tabIndex = 0;
+      node.classList.add("is-editing");
+      editor.focus({ preventScroll: true });
+      const selection = window.getSelection?.();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    };
+    node.addEventListener("click", (event) => {
+      if (event.target.closest("[data-secondary-cue-handle]")) return;
+      selectCue();
     });
-    editor?.addEventListener("input", () => {
-      cue.text = String(editor.textContent || "").slice(0, 500);
+    node.addEventListener("keydown", (event) => {
+      if (event.target.closest("[data-secondary-cue-handle]") || editor?.isContentEditable) return;
+      if (event.key === "Enter") {
+        event.preventDefault(); event.stopPropagation();
+        if (timingPreview) selectCue(); else beginEditing();
+      } else if (event.key === " ") {
+        event.preventDefault(); event.stopPropagation(); selectCue();
+      }
+    });
+    editor?.addEventListener("dblclick", (event) => {
+      event.preventDefault(); event.stopPropagation(); beginEditing();
+    });
+    editor?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation(); editor.blur();
+      }
+    });
+    const syncEditorText = () => {
+      const activeCue = currentCue();
+      if (!activeCue) return;
+      const value = String(editor?.textContent || "").slice(0, 500);
+      if (value === String(activeCue.text || "")) return;
+      activeCue.text = value;
       secondaryEditorMarkPreviewStale("字幕已变化 · 预览样片需要重新生成");
+    };
+    editor?.addEventListener("input", () => {
+      syncEditorText();
       scheduleSecondaryEditorSubtitleSave(650);
     });
-    editor?.addEventListener("blur", () => scheduleSecondaryEditorSubtitleSave(0));
+    editor?.addEventListener("blur", () => {
+      syncEditorText();
+      editor.setAttribute("contenteditable", "false");
+      editor.tabIndex = -1;
+      node.classList.remove("is-editing");
+      scheduleSecondaryEditorSubtitleSave(0);
+    });
     node.querySelectorAll("[data-secondary-cue-handle]").forEach((handle) => {
-      handle.addEventListener("pointerdown", (event) => beginSecondaryEditorCueDrag(event, cue.id, handle.dataset.secondaryCueHandle));
+      handle.addEventListener("pointerdown", (event) => beginSecondaryEditorCueDrag(event, cueId, handle.dataset.secondaryCueHandle));
       handle.addEventListener("keydown", (event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
         event.stopPropagation();
-        nudgeSecondaryEditorCue(cue.id, handle.dataset.secondaryCueHandle, event.key === "ArrowLeft" ? -1 : 1);
+        nudgeSecondaryEditorCue(cueId, handle.dataset.secondaryCueHandle, event.key === "ArrowLeft" ? -1 : 1);
       });
     });
   });
@@ -19007,7 +21610,9 @@ function renderSecondaryEditorTimeline() {
   const clips = model.clips;
   const schedule = model.schedule;
   const duration = Math.max(.01, model.duration);
-  const viewportWidth = Math.max(360, viewport.clientWidth || 720);
+  const viewportStyle = window.getComputedStyle(viewport);
+  const viewportInlinePadding = (Number.parseFloat(viewportStyle.paddingLeft) || 0) + (Number.parseFloat(viewportStyle.paddingRight) || 0);
+  const viewportWidth = Math.max(360, (viewport.clientWidth || 720) - viewportInlinePadding);
   const canvasWidth = Math.max(
     viewportWidth,
     secondaryEditTimelinePixelsPerSecond ? duration * secondaryEditTimelinePixelsPerSecond : viewportWidth,
@@ -19015,10 +21620,11 @@ function renderSecondaryEditorTimeline() {
   canvas.style.width = `${Math.round(canvasWidth)}px`;
   const tickStep = secondaryEditorTimelineTickStep(duration, canvasWidth);
   const tickCount = Math.max(1, Math.ceil(duration / tickStep));
-  ruler.innerHTML = Array.from({ length: tickCount + 1 }, (_unused, index) => {
-    const time = Math.min(duration, index * tickStep);
+  const tickTimes = Array.from({ length: tickCount + 1 }, (_unused, index) => Math.min(duration, index * tickStep))
+    .filter((time, index, values) => index === 0 || time - values[index - 1] >= tickStep * .4);
+  ruler.innerHTML = tickTimes.map((time) => {
     const left = time / duration * 100;
-    return `<span class="secondary-editor-ruler-tick" style="left:${left}%"><i></i><b>${formatClock(time)}</b></span>`;
+    return `<span class="secondary-editor-ruler-tick" style="left:${left}%"><i></i><b>${secondaryEditorRulerLabel(time, tickStep)}</b></span>`;
   }).join("");
   timeline.innerHTML = clips.length ? clips.map((clip, index) => {
     const item = schedule[index] || {};
@@ -19028,7 +21634,8 @@ function renderSecondaryEditorTimeline() {
     const width = Math.max(.05, (end - start) / duration * 100);
     const transition = ({ dissolve: "叠化", fade_black: "淡黑", cut: "硬切" })[clip.transitionIn?.type || "cut"];
     const pending = model.preview && String(clip.id) === model.draftClipId;
-    return `<article draggable="true" tabindex="0" role="button" class="secondary-timeline-clip${secondaryEditSelectedClips.has(String(clip.id)) ? " selected" : ""}${pending ? " pending-settings" : ""}" data-secondary-clip="${escapeHtml(clip.id)}" style="left:${left}%;width:${width}%;--clip-order:${index}" aria-label="${escapeHtml(`${clip.title || "片段"}，成片 ${formatPreciseTimecode(start)} 到 ${formatPreciseTimecode(end)}${pending ? "，待保存预览" : ""}`)}">${index > 0 ? `<span class="secondary-transition-chip" data-secondary-transition role="button" tabindex="0" title="点击编辑转场">${escapeHtml(transition)}${clip.transitionIn?.type !== "cut" ? ` · ${Number(clip.transitionIn?.duration || 0).toFixed(2)}s` : ""}</span>` : ""}<button class="secondary-clip-delete" data-secondary-clip-delete type="button" aria-label="从时间线删除${escapeHtml(clip.title || "片段")}" title="从时间线删除并自动闭合空隙">×</button><span class="secondary-clip-media" aria-hidden="true">${secondaryEditorClipMediaMarkup(clip)}<canvas data-secondary-waveform data-source-start="${Number(clip.sourceStart || 0)}" data-source-end="${Number(clip.sourceEnd || 0)}" data-audio-gain="${Number(clip.audioGain ?? 1)}" data-muted="${Boolean(clip.muted)}"></canvas></span><span class="secondary-clip-copy"><strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(clip.title || "片段")}${pending ? " · 待保存" : ""}</strong><small>成片 ${formatPreciseTimecode(start)} → ${formatPreciseTimecode(end)}</small><em data-secondary-clip-source>源片 ${formatPreciseTimecode(clip.sourceStart)} → ${formatPreciseTimecode(clip.sourceEnd)} · ${Number(clip.playbackRate || 1)}× · ${transition}${clip.muted ? " · 静音" : Number(clip.audioGain ?? 1) !== 1 ? ` · ${Math.round(Number(clip.audioGain) * 100)}%` : ""}</em></span><span class="secondary-trim-readout" data-secondary-trim-readout>拖动边缘调整源片入点 / 出点</span><span class="secondary-trim-handle start" data-secondary-trim="start" role="button" tabindex="0" aria-label="调整片段源片入点"></span><span class="secondary-trim-handle end" data-secondary-trim="end" role="button" tabindex="0" aria-label="调整片段源片出点"></span></article>`;
+    const clipLabel = escapeHtml(`${clip.title || "片段"}，成片 ${formatPreciseTimecode(start)} 到 ${formatPreciseTimecode(end)}${pending ? "，待保存预览" : ""}`);
+    return `<article draggable="true" role="group" class="secondary-timeline-clip${secondaryEditSelectedClips.has(String(clip.id)) ? " selected" : ""}${pending ? " pending-settings" : ""}" data-secondary-clip="${escapeHtml(clip.id)}" style="left:${left}%;width:${width}%;--clip-order:${index}" aria-label="${clipLabel}"><button class="secondary-clip-select" data-secondary-clip-select type="button" aria-label="选择并定位${clipLabel}"></button>${index > 0 ? `<button class="secondary-transition-chip" data-secondary-transition type="button" aria-label="编辑${escapeHtml(clip.title || "片段")}的入场转场" title="点击编辑转场">${escapeHtml(transition)}${clip.transitionIn?.type !== "cut" ? ` · ${Number(clip.transitionIn?.duration || 0).toFixed(2)}s` : ""}</button>` : ""}<button class="secondary-clip-delete" data-secondary-clip-delete type="button" aria-label="从时间线删除${escapeHtml(clip.title || "片段")}" title="从时间线删除并自动闭合空隙">×</button><span class="secondary-clip-media" aria-hidden="true">${secondaryEditorClipMediaMarkup(clip)}<canvas data-secondary-waveform data-source-start="${Number(clip.sourceStart || 0)}" data-source-end="${Number(clip.sourceEnd || 0)}" data-audio-gain="${Number(clip.audioGain ?? 1)}" data-muted="${Boolean(clip.muted)}"></canvas></span><span class="secondary-clip-copy"><strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(clip.title || "片段")}${pending ? " · 待保存" : ""}</strong><small>${Number(end - start).toFixed(1)} 秒</small><em data-secondary-clip-source>源片 ${formatPreciseTimecode(clip.sourceStart)} → ${formatPreciseTimecode(clip.sourceEnd)} · ${Number(clip.playbackRate || 1)}× · ${transition}${clip.muted ? " · 静音" : Number(clip.audioGain ?? 1) !== 1 ? ` · ${Math.round(Number(clip.audioGain) * 100)}%` : ""}</em></span><span class="secondary-trim-readout" data-secondary-trim-readout>拖动边缘调整源片入点 / 出点</span><button class="secondary-trim-handle start" data-secondary-trim="start" type="button" aria-label="调整片段源片入点"></button><button class="secondary-trim-handle end" data-secondary-trim="end" type="button" aria-label="调整片段源片出点"></button></article>`;
   }).join("") : '<div class="secondary-editor-timeline-empty">时间线为空。从左侧素材库加入片段后再导出。</div>';
   timeline.querySelectorAll("[data-secondary-clip]").forEach((node) => {
     const clipId = String(node.dataset.secondaryClip);
@@ -19065,19 +21672,15 @@ function renderSecondaryEditorTimeline() {
       const outputTime = Number(item.outputStart || 0) + fraction * Math.max(0, Number(item.outputEnd || 0) - Number(item.outputStart || 0));
       secondaryEditorSeekOutputTime(outputTime, false);
     });
-    node.addEventListener("keydown", (event) => {
-      if (event.target.closest("[data-secondary-clip-delete]")) return;
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      const index = Math.max(0, clips.findIndex((clip) => String(clip.id) === clipId));
-      secondaryEditorSeekOutputTime(Number(schedule[index]?.outputStart || 0), false);
-    });
     node.querySelector("[data-secondary-clip-delete]")?.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       void secondaryEditorOperation({ type: "delete_clips", clipIds: [clipId] });
     });
     node.querySelectorAll("[data-secondary-trim]").forEach((handle) => {
+      const adjacentDirection = handle.dataset.secondaryTrim === "start" ? "前一片段" : "后一片段";
+      handle.title = "拖动调整当前片段；Shift+拖动进行滚动裁剪";
+      handle.setAttribute("aria-label", `调整当前片段源片${handle.dataset.secondaryTrim === "start" ? "入点" : "出点"}；按住 Shift 联动${adjacentDirection}`);
       handle.addEventListener("pointerdown", (event) => beginSecondaryEditorTrim(event, clipId, handle.dataset.secondaryTrim));
       handle.addEventListener("keydown", (event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -19273,12 +21876,13 @@ function syncSecondaryEditorInspectorDraftState() {
   if ($("#secondaryInspectorReset")) $("#secondaryInspectorReset").disabled = secondaryEditBusy || !dirty;
   if ($("#secondaryInspectorSave")) $("#secondaryInspectorSave").disabled = secondaryEditBusy || !dirty || !valid;
   const state = $("#secondaryEditorSaveState");
-  if (state && !secondaryEditBusy) {
+  if (state && !secondaryEditBusy && state.dataset.state !== "error") {
     state.textContent = dirty
-      ? `片段设置尚未保存${secondaryEditInspectorDraft?.timingChanged ? " · 时间线为预览" : ""}`
-      : `已自动保存 · 草稿 r${secondaryEditSession?.revision || 0}`;
+      ? "未保存"
+      : "已保存";
     state.dataset.state = dirty ? "draft" : "saved";
   }
+  renderSecondaryEditorPreflight();
   syncSecondaryEditorControls();
 }
 
@@ -19322,28 +21926,83 @@ function renderSecondaryEditorInspectorTiming(clip = secondaryEditClip()) {
   if (!summary) return;
   const overlap = Number(schedule.transitionOverlap || 0);
   const savedDuration = Number(secondaryEditSession?.duration || 0);
-  summary.innerHTML = `<div><span>源片长度</span><b>${sourceDuration.toFixed(2)} 秒</b></div><div><span>${changed ? "预计成片位置" : "成片位置"}</span><b>${formatPreciseTimecode(outputStart)} → ${formatPreciseTimecode(outputEnd)}</b></div><div><span>片段播放时长</span><b>${playbackDuration.toFixed(2)} 秒${rate !== 1 ? ` · ${rate}×` : ""}</b></div><div><span>${changed ? "预计成片总长" : "成片总长"}</span><b>${changed ? `${savedDuration.toFixed(2)} → ` : ""}${model.duration.toFixed(2)} 秒</b></div>${overlap ? `<small>与前一片段存在 ${overlap.toFixed(2)} 秒转场重叠，整条成片时长会相应缩短。</small>` : ""}`;
+  summary.innerHTML = `<div class="secondary-inspector-timing-line"><span>源片 <b>${sourceDuration.toFixed(2)} 秒</b></span><span>播放 <b>${playbackDuration.toFixed(2)} 秒${rate !== 1 ? ` / ${rate}×` : ""}</b></span><span>${changed ? "预计位置" : "成片位置"} <b>${formatPreciseTimecode(outputStart)} - ${formatPreciseTimecode(outputEnd)}</b></span><span>${changed ? "预计总长" : "成片总长"} <b>${changed ? `${savedDuration.toFixed(2)} - ` : ""}${model.duration.toFixed(2)} 秒</b></span></div>${overlap ? `<small>与前一片段有 ${overlap.toFixed(2)} 秒转场重叠，成片总长会相应缩短。</small>` : ""}`;
 }
 
 function renderSecondaryEditorProposal() {
   const host = $("#secondaryEditorProposal");
   const proposal = secondaryEditSession?.pendingProposal;
   if (!host) return;
+  host.closest(".secondary-ai-editor")?.classList.toggle("has-proposal", Boolean(proposal));
   host.classList.toggle("hidden", !proposal);
   if (!proposal) { host.innerHTML = ""; return; }
   const preview = proposal.preview || {};
-  host.innerHTML = `<strong>${escapeHtml(proposal.title || "快捷编辑提案")}</strong><span>${escapeHtml(proposal.summary || "待确认修改")}</span><em>结构预览 · ${Number(preview.operationCount || proposal.operations?.length || 0)} 项修改<br>时长 ${Number(preview.durationBefore || 0).toFixed(1)} → ${Number(preview.durationAfter || 0).toFixed(1)} 秒 · 片段 ${Number(preview.clipCountBefore || 0)} → ${Number(preview.clipCountAfter || 0)}</em><small>尚未修改草稿。应用后如需检查实际画面，请点击顶部“生成预览样片”。</small><footer><button type="button" data-secondary-proposal-cancel>取消</button><button class="primary" type="button" data-secondary-proposal-apply>应用到草稿</button></footer>`;
+  const variants = Array.isArray(secondaryEditSession?.proposalVariants) ? secondaryEditSession.proposalVariants : [];
+  const variantNav = variants.length > 1
+    ? `<nav class="secondary-proposal-variants" aria-label="时间线结构方案">${variants.map((item, index) => `<button type="button" class="${String(item.id) === String(proposal.id) ? "active" : ""}" data-secondary-proposal-select="${escapeHtml(String(item.id || ""))}"><b>方案 ${index + 1}</b><span>${escapeHtml(item.title || item.direction || "结构方案")}</span></button>`).join("")}</nav>`
+    : "";
+  const clipsById = new Map((secondaryEditSession?.clips || []).map((clip, index) => [String(clip.id), { ...clip, index }]));
+  const operationLabels = (proposal.operations || []).map((operation) => {
+    const ids = operation.type === "update_clip" || operation.type === "trim_clip" || operation.type === "split_clip"
+      ? [String(operation.clipId || "")]
+      : (operation.clipIds || []).map(String);
+    const names = ids.map((id) => clipsById.get(id)).filter(Boolean).map((clip) => `${String(clip.index + 1).padStart(2, "0")} · ${clip.title || "片段"}`);
+    const target = names.length ? ` · ${names.slice(0, 2).join("、")}${names.length > 2 ? ` 等 ${names.length} 段` : ""}` : "";
+    if (operation.type === "delete_clips") return `移除 ${ids.length || 1} 个片段${target}`;
+    if (operation.type === "reorder_clips") return `重新排列整个成片，共 ${ids.length} 个片段`;
+    if (operation.type === "split_clip") return `拆分片段${target}`;
+    if (operation.type === "trim_clip") return `调整片段入点或出点${target}`;
+    if (operation.type === "add_marker") return `添加时间线标记${target}`;
+    if (["update_clip", "update_clips"].includes(operation.type)) {
+      const settings = [];
+      if (operation.playbackRate) settings.push(`速度 ${Number(operation.playbackRate)}×`);
+      if (operation.transitionType) settings.push(`转场 ${({ cut: "硬切", dissolve: "短叠化", fade_black: "淡黑" })[operation.transitionType] || operation.transitionType}`);
+      if (operation.muted === true) settings.push("静音");
+      if (operation.muted === false) settings.push("恢复声音");
+      return `${settings.length ? settings.join("、") : "更新片段设置"}${target}`;
+    }
+    return `更新时间线${target}`;
+  });
+  const preflightIssues = preview.preflight?.issues || [];
+  const issueMarkup = preflightIssues.length
+    ? `<div class="secondary-proposal-warning"><strong>应用前提示</strong><span>${preflightIssues.map((item) => escapeHtml(item.message || "请检查此项修改")).join("；")}</span></div>`
+    : "";
+  host.innerHTML = `${variantNav}<div class="secondary-proposal-heading"><b>待确认提案</b><strong>${escapeHtml(proposal.title || "快捷编辑提案")}</strong></div><p>${escapeHtml(proposal.summary || "待确认修改")}</p><dl class="secondary-proposal-impact"><div><dt>修改</dt><dd>${Number(preview.operationCount || proposal.operations?.length || 0)} 项</dd></div><div><dt>时长</dt><dd>${Number(preview.durationBefore || 0).toFixed(1)} → ${Number(preview.durationAfter || 0).toFixed(1)} 秒</dd></div><div><dt>片段</dt><dd>${Number(preview.clipCountBefore || 0)} → ${Number(preview.clipCountAfter || 0)}</dd></div></dl>${operationLabels.length ? `<section class="secondary-proposal-operations"><strong>具体会修改</strong><ol>${operationLabels.map((label) => `<li>${escapeHtml(label)}</li>`).join("")}</ol></section>` : ""}${issueMarkup}<small>当前时间线尚未改变。${variants.length > 1 ? "先比较结构方案，再应用其中一份。" : ""}应用后请生成审核样片，核对实际画面。</small><footer><button type="button" data-secondary-proposal-cancel>放弃提案</button><button class="primary" type="button" data-secondary-proposal-apply>应用到时间线</button></footer>`;
+  host.querySelectorAll("[data-secondary-proposal-select]").forEach((button) => button.addEventListener("click", () => selectSecondaryEditorProposal(button.dataset.secondaryProposalSelect)));
   host.querySelector("[data-secondary-proposal-cancel]")?.addEventListener("click", cancelSecondaryEditorProposal);
   host.querySelector("[data-secondary-proposal-apply]")?.addEventListener("click", applySecondaryEditorProposal);
 }
 
+async function selectSecondaryEditorProposal(proposalId) {
+  if (!proposalId || !currentJob?.id || !secondaryEditSession?.id || secondaryEditBusy) return;
+  const context = captureSecondaryEditorAction();
+  setSecondaryEditorBusy(true, "正在切换结构方案");
+  try {
+    const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/proposals/${encodeURIComponent(proposalId)}/select`, { method: "POST", body: {} });
+    if (!context.current()) return;
+    secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
+    renderSecondaryEditorProposal();
+  } catch (error) { if (context.current()) showToast(error.message); }
+  finally { if (context.current(false)) setSecondaryEditorBusy(false, "方案待确认"); }
+}
+
 function renderSecondaryEditor() {
   if (!secondaryEditSession) return;
-  $("#secondaryEditorTitle").textContent = `${currentJob?.filename || "当前任务"} · ${secondaryEditSession.title || "二次精剪"}`;
+  const outputHint = $("#secondaryEditorOutputSettingsHint");
+  if (outputHint) outputHint.textContent = secondaryEditSession.reframe?.aspect
+    ? `成片 ${secondaryEditSession.reframe.aspect} · ${secondaryEditSession.reframe.fit === "crop" ? "居中裁切" : "完整画面、虚化补边"}`
+    : "使用当前精剪的画幅和清晰度设置。";
+  const base = (currentJob?.outputVersions || []).find((version) => version.id === secondaryEditSession.baseVersionId);
+  const identity = base ? `V${base.number || 1}` : "当前方案";
+  $("#secondaryEditorTitle").textContent = `正在编辑 ${identity} 草稿 · 已采用 ${secondaryEditSession.clips?.length || 0} 段，共 ${secondaryEditorTimelineDuration().toFixed(1)} 秒`;
+  $("#secondaryEditorClose").textContent = base ? `← 返回 ${identity}` : "← 返回当前任务";
+  $("#secondaryEditorClose").setAttribute("aria-label", base ? `返回 ${identity} 预览` : "返回当前任务");
+  $("#secondaryEditorDelete").textContent = "从当前结果移除";
   const state = $("#secondaryEditorSaveState");
-  if (state && !secondaryEditBusy) {
-    state.textContent = secondaryEditSession.status === "rendering" ? "正在生成高清新版本" : `已自动保存 · 草稿 r${secondaryEditSession.revision}`;
-    state.dataset.state = secondaryEditSession.status === "failed" ? "error" : "saved";
+  if (state && !secondaryEditBusy && state.dataset.state !== "error" && state.dataset.state !== "draft") {
+    state.textContent = secondaryEditSession.status === "rendering" ? "正在生成版本" : "草稿已加载";
+    state.dataset.operation = secondaryEditSession.status === "rendering" ? "render" : "idle";
   }
   renderSecondaryEditorLibrary();
   renderSecondaryEditorTimeline();
@@ -19352,27 +22011,16 @@ function renderSecondaryEditor() {
   const subtitleEnabled = Boolean(secondaryEditSession.subtitleEnabled);
   $("#secondaryEditorSubtitleEnabled").checked = subtitleEnabled;
   $("#secondaryEditorSubtitleStatus").textContent = secondaryEditSubtitleNeedsReview && secondaryEditSession.subtitleDraftId
-    ? "时间线已变化，导出前需要重新对齐字幕"
+    ? "时间线已变化，生成成片前需要重新对齐字幕"
     : secondaryEditSession.subtitleDraftId ? "字幕草稿已确认并绑定当前时间线" : "字幕必须确认后才能烧录";
   const summary = $("#secondaryEditorSubtitleSummary");
   if (summary) { summary.textContent = subtitleEnabled ? (secondaryEditSession.subtitleDraftId ? "已确认字幕" : "待校对") : "未启用"; summary.classList.toggle("active", subtitleEnabled); }
   void loadSecondaryEditorSubtitleDraft();
-  const preflight = secondaryEditSession.preflight || {};
-  const preflightNode = $("#secondaryEditorPreflight");
-  if (preflightNode) {
-    const blocking = (preflight.issues || []).filter((item) => item.severity === "error");
-    const warnings = (preflight.issues || []).filter((item) => item.severity === "warning");
-    const changedSpeed = (preflight.issues || []).filter((item) => item.code === "speed_changed").length;
-    const muted = (preflight.issues || []).filter((item) => item.code === "muted").length;
-    preflightNode.dataset.tone = blocking.length ? "error" : warnings.length ? "warning" : "ready";
-    preflightNode.innerHTML = blocking.length
-      ? `<strong>导出前需修正</strong><small>${blocking.map((item) => escapeHtml(item.message)).join("；")}</small>`
-      : `<strong>导出检查通过</strong><small>${secondaryEditSession.clipCount || 0} 个片段 · 成片 ${formatPreciseTimecode(secondaryEditSession.duration || 0)}${changedSpeed ? ` · ${changedSpeed} 段变速` : ""}${muted ? ` · ${muted} 段静音` : ""}${warnings.length ? ` · ${warnings.map((item) => escapeHtml(item.message)).join("；")}` : ""}</small>`;
-  }
+  renderSecondaryEditorPreflight();
   const previewState = $("#secondaryEditorPreviewState");
   if (previewState && !secondaryEditPreviewPending && !secondaryEditExactPreview) {
     if (secondaryEditSession.previewStatus === "stale") {
-      previewState.textContent = "时间线已变化 · 预览样片需要重新生成";
+      previewState.textContent = "需更新预览";
       previewState.dataset.tone = "stale";
       previewState.classList.remove("hidden");
     } else if (secondaryEditSession.previewStatus === "failed") {
@@ -19383,6 +22031,21 @@ function renderSecondaryEditor() {
   }
   syncSecondaryInspectorMode();
   syncSecondaryEditorControls();
+}
+
+function renderSecondaryEditorPreflight() {
+  const node = $("#secondaryEditorPreflight");
+  if (!node || !secondaryEditSession) return;
+  const model = secondaryEditorTimelineModel();
+  const preflight = secondaryEditSession.preflight || {};
+  const dirty = secondaryEditorInspectorHasChanges();
+  const blocking = (preflight.issues || []).filter(item => item.severity === "error");
+  const warnings = (preflight.issues || []).filter(item => item.severity === "warning");
+  const title = dirty ? "修改预览 · 保存后重新检查" : blocking.length ? "生成前需修正"
+    : warnings.length ? "时间线检查有提醒" : preflight.ready === true ? "时间线检查通过" : "时间线尚未检查";
+  const details = dirty ? [] : [...blocking, ...warnings].map(item => escapeHtml(item.message));
+  node.dataset.tone = dirty ? "pending" : blocking.length ? "error" : warnings.length ? "warning" : preflight.ready === true ? "ready" : "pending";
+  node.innerHTML = `<strong>${title}</strong><small>${model.clips.length} 个片段 · 成片 ${formatPreciseTimecode(model.duration)}${details.length ? ` · ${details.join("；")}` : ""}</small>`;
 }
 
 function syncSecondaryInspectorMode() {
@@ -19400,11 +22063,12 @@ function setSecondaryInspectorMode(mode = "clip") {
   secondaryInspectorMode = ["clip", "subtitle", "ai", "export"].includes(mode) ? mode : "clip";
   syncSecondaryInspectorMode();
   const editor = $("#secondaryEditor");
-  if (window.innerWidth <= 1180 && editor) {
+  if (editor) {
     editor.classList.add("inspector-open");
     editor.classList.remove("library-open");
-    $("#secondaryEditorInspectorToggle")?.setAttribute("aria-expanded", "true");
-    $("#secondaryEditorLibraryToggle")?.setAttribute("aria-expanded", "false");
+    syncSecondaryEditorPanelAria();
+    persistSecondaryEditorLayout();
+    scheduleSecondaryEditorTimelineLayout();
   }
 }
 
@@ -19430,6 +22094,42 @@ function syncSecondaryEditorControls() {
   if ($("#secondaryInspectorTransitionDuration")) $("#secondaryInspectorTransitionDuration").disabled = secondaryEditBusy || $("#secondaryInspectorTransition")?.value === "cut";
   if ($("#secondaryEditorInsertTarget")) $("#secondaryEditorInsertTarget").disabled = secondaryEditBusy;
   if ($("#secondaryEditorInsertFollow")) $("#secondaryEditorInsertFollow").disabled = secondaryEditBusy || secondaryEditInsertionIndexOverride === null;
+  const previewCurrent = secondaryEditorPreviewIsCurrent();
+  const previewButton = $("#secondaryEditorPreview");
+  const exportButton = $("#secondaryEditorExport");
+  const freshness = $("#secondaryEditorPreviewFreshness");
+  if (previewButton) {
+    previewButton.textContent = previewCurrent ? "重新生成审核样片" : secondaryEditPreviewPending ? "正在生成审核样片" : "生成审核样片";
+    previewButton.dataset.state = previewCurrent ? "current" : "required";
+  }
+  if (exportButton) {
+    exportButton.textContent = "生成成片";
+    exportButton.disabled ||= !previewCurrent;
+    exportButton.dataset.state = previewCurrent ? "ready" : "blocked";
+    exportButton.title = previewCurrent
+      ? "生成当前剪辑的高清版本"
+      : "请先更新审核样片";
+  }
+  if (freshness) {
+    const proposalPending = Boolean(secondaryEditSession?.pendingProposal);
+    freshness.textContent = proposalPending
+      ? "提案待确认"
+      : secondaryEditPreviewPending
+        ? "正在生成预览"
+        : previewCurrent
+          ? "预览为最新"
+          : secondaryEditSession?.previewStatus === "failed"
+            ? "预览生成失败"
+            : "预览待更新";
+    freshness.dataset.tone = proposalPending
+      ? "proposal"
+      : secondaryEditPreviewPending
+        ? "loading"
+        : previewCurrent
+          ? "ready"
+          : secondaryEditSession?.previewStatus === "failed" ? "error" : "stale";
+  }
+  syncSecondaryEditorAiScope();
   const textDelete = $("#secondaryTextDelete");
   if (textDelete) {
     textDelete.classList.toggle("hidden", !secondaryEditSelectedTextLayerId);
@@ -19437,18 +22137,24 @@ function syncSecondaryEditorControls() {
   }
 }
 
-async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null) {
-  if (!currentJob?.id || (!versionId && !sourceDraft?.sourceSearchId) || secondaryEditBusy) return;
-  const jobId = String(currentJob.id);
-  $("#secondaryEditor")?.classList.remove("hidden");
-  document.body.classList.add("secondary-editor-open");
-  setSecondaryEditorBusy(true, sourceDraft ? "正在建立内容精剪草稿" : "正在建立版本草稿");
-  try {
-    const body = sourceDraft || { baseVersionId: versionId, outputFilename };
-    const payload = await apiJson(`/api/jobs/${encodeURIComponent(jobId)}/edit-sessions`, { method: "POST", body });
-    if (!currentJob || String(currentJob.id) !== jobId) return closeSecondaryEditor();
-    secondaryEditSession = payload.session;
-    currentJob = payload.job || currentJob;
+function syncSecondaryEditorSessionToJob(session = secondaryEditSession) {
+  if (!currentJob || !session?.id) return;
+  const sessions = Array.isArray(currentJob.editSessions) ? [...currentJob.editSessions] : [];
+  const index = sessions.findIndex((item) => String(item?.id || "") === String(session.id));
+  if (index >= 0) sessions[index] = session;
+  else sessions.push(session);
+  currentJob.editSessions = sessions;
+  currentJob.activeEditSessionId = String(session.id);
+  currentJob.activeEditSession = session;
+}
+
+function activateSecondaryEditorSession(session, job = currentJob, { inspectorMode = "clip", instruction = "" } = {}) {
+    secondaryEditActivationToken += 1;
+    secondaryEditSession = session;
+    const saveState = $("#secondaryEditorSaveState");
+    if (saveState) { saveState.dataset.state = "saved"; saveState.dataset.operation = "idle"; }
+    currentJob = job || currentJob;
+    syncSecondaryEditorSessionToJob(session);
     secondaryEditSelectedClips = new Set(secondaryEditSession.clips?.[0]?.id ? [String(secondaryEditSession.clips[0].id)] : []);
     secondaryEditSequenceIndex = 0;
     secondaryEditView = "sequence";
@@ -19456,8 +22162,11 @@ async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null
     secondaryEditInsertionIndexOverride = null;
     secondaryEditPreviewMaterialId = null;
     secondaryEditPreviewMaterialRange = null;
+    secondaryEditorMaterialFilter = null;
+    secondaryEditorMaterialSearch = "";
+    if ($("#secondaryEditorLibrarySearch")) $("#secondaryEditorLibrarySearch").value = "";
     secondaryEditExactPreview = false;
-    secondaryInspectorMode = "clip";
+    secondaryInspectorMode = ["clip", "subtitle", "ai", "export"].includes(inspectorMode) ? inspectorMode : "clip";
     secondaryEditTimelinePixelsPerSecond = null;
     secondaryEditPlayheadTime = 0;
     secondaryEditSnapEnabled = true;
@@ -19478,28 +22187,345 @@ async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null
     secondaryEditTextTimeDrag = null;
     secondaryEditPreviewPending = false;
     secondaryEditPreviewRequestToken += 1;
+    const aiScope = $("#secondaryEditorAiScope");
+    if (aiScope) aiScope.value = instruction ? "timeline" : "selection";
+    restoreSecondaryEditorLayout();
     setSecondaryEditorSourceVideo();
     syncSecondaryEditorViewButtons();
     renderSecondaryEditor();
+    secondaryEditorSeekOutputTime(0, false);
+    const aiInput = $("#secondaryEditorAiInput");
+    if (aiInput && instruction && !secondaryEditSession.pendingProposal) aiInput.value = String(instruction).slice(0, 500);
     void loadTimelineAssets(currentJob).finally(() => { if (secondaryEditorOpen()) renderSecondaryEditorTimeline(); });
     void loadWaveform(currentJob).finally(() => { if (secondaryEditorOpen()) renderSecondaryEditorTimeline(); });
+}
+
+function secondaryEditorStoredLayout() {
+  try {
+    const value = JSON.parse(localStorage.getItem(secondaryEditorLayoutStorageKey) || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch { return null; }
+}
+
+function persistSecondaryEditorLayout() {
+  const editor = $("#secondaryEditor");
+  if (!editor) return;
+  try {
+    localStorage.setItem(secondaryEditorLayoutStorageKey, JSON.stringify({
+      upperRatio: secondaryEditorUpperRatio,
+      inspectorWidth: secondaryEditorInspectorWidth,
+      libraryOpen: editor.classList.contains("library-open"),
+      inspectorOpen: editor.classList.contains("inspector-open"),
+    }));
+  } catch { /* Layout persistence is optional. */ }
+}
+
+function secondaryEditorInspectorWidthBounds() {
+  const layoutWidth = $(".secondary-editor-layout")?.getBoundingClientRect()?.width || window.innerWidth || 1024;
+  const min = 360;
+  const max = Math.max(min, Math.min(560, layoutWidth - 620));
+  return { min, max };
+}
+
+function secondaryEditorDefaultInspectorWidth() {
+  return Math.max(380, Math.min(460, Math.round((window.innerWidth || 1440) * .24)));
+}
+
+function scheduleSecondaryEditorTimelineLayout() {
+  if (!secondaryEditorOpen()) return;
+  if (secondaryEditorTimelineLayoutFrame !== null) window.cancelAnimationFrame(secondaryEditorTimelineLayoutFrame);
+  secondaryEditorTimelineLayoutFrame = window.requestAnimationFrame(() => {
+    secondaryEditorTimelineLayoutFrame = null;
+    renderSecondaryEditorTimeline();
+  });
+}
+
+function setSecondaryEditorInspectorWidth(value, { persist = false } = {}) {
+  const { min, max } = secondaryEditorInspectorWidthBounds();
+  secondaryEditorInspectorWidth = Math.max(min, Math.min(max, Number(value) || secondaryEditorDefaultInspectorWidth()));
+  const editor = $("#secondaryEditor");
+  editor?.style.setProperty("--secondary-inspector-width", `${secondaryEditorInspectorWidth}px`);
+  const handle = $("#secondaryEditorInspectorResize");
+  handle?.setAttribute("aria-valuemin", String(Math.round(min)));
+  handle?.setAttribute("aria-valuemax", String(Math.round(max)));
+  handle?.setAttribute("aria-valuenow", String(Math.round(secondaryEditorInspectorWidth)));
+  if (persist) persistSecondaryEditorLayout();
+  if (secondaryEditTimelinePixelsPerSecond === null) scheduleSecondaryEditorTimelineLayout();
+}
+
+function setSecondaryEditorUpperRatio(value, { persist = false } = {}) {
+  secondaryEditorUpperRatio = Math.max(36, Math.min(58, Number(value) || 58));
+  const editor = $("#secondaryEditor");
+  editor?.style.setProperty("--secondary-editor-upper-ratio", `${secondaryEditorUpperRatio}%`);
+  const handle = $("#secondaryEditorWorkspaceResize");
+  handle?.setAttribute("aria-valuenow", String(Math.round(secondaryEditorUpperRatio)));
+  if (persist) persistSecondaryEditorLayout();
+  if (secondaryEditTimelinePixelsPerSecond === null) scheduleSecondaryEditorTimelineLayout();
+}
+
+function syncSecondaryEditorPanelAria() {
+  const editor = $("#secondaryEditor");
+  if (!editor) return;
+  $("#secondaryEditorLibraryToggle")?.setAttribute("aria-expanded", String(editor.classList.contains("library-open")));
+  $("#secondaryEditorInspectorToggle")?.setAttribute("aria-expanded", String(editor.classList.contains("inspector-open")));
+  renderSecondaryEditorSubtitleTrack();
+}
+
+function restoreSecondaryEditorLayout() {
+  const editor = $("#secondaryEditor");
+  if (!editor) return;
+  const stored = secondaryEditorStoredLayout();
+  setSecondaryEditorUpperRatio(stored?.upperRatio ?? 58);
+  setSecondaryEditorInspectorWidth(stored?.inspectorWidth ?? secondaryEditorDefaultInspectorWidth());
+  editor.classList.remove("library-open", "inspector-open");
+  if (stored?.inspectorOpen) editor.classList.add("inspector-open");
+  else if (stored?.libraryOpen) editor.classList.add("library-open");
+  syncSecondaryEditorPanelAria();
+}
+
+function setSecondaryEditorShellIsolation(open) {
+  document.body.classList.toggle("secondary-editor-open", open);
+  const sidebar = $("#appSidebar");
+  if (!sidebar) return;
+  sidebar.inert = open;
+  if (open) sidebar.setAttribute("aria-hidden", "true");
+  else sidebar.removeAttribute("aria-hidden");
+}
+
+async function openSecondaryEditor(versionId, outputFilename, sourceDraft = null) {
+  if (!currentJob?.id || (!versionId && !sourceDraft?.sourceSearchId) || secondaryEditBusy) return;
+  const jobId = String(currentJob.id);
+  const activation = ++secondaryEditActivationToken;
+  const action = captureJobAction();
+  const current = () => jobActionStillCurrent(action) && activation === secondaryEditActivationToken && secondaryEditorOpen();
+  $("#secondaryEditor")?.classList.remove("hidden");
+  setSecondaryEditorShellIsolation(true);
+  restoreSecondaryEditorLayout();
+  setSecondaryEditorBusy(true, sourceDraft ? "正在建立内容精剪草稿" : "正在建立版本草稿");
+  try {
+    const body = sourceDraft || { baseVersionId: versionId, outputFilename };
+    const payload = await apiJson(`/api/jobs/${encodeURIComponent(jobId)}/edit-sessions`, { method: "POST", body });
+    if (!current()) return;
+    setSecondaryEditorBusy(false);
+    activateSecondaryEditorSession(payload.session, payload.job || currentJob);
   } catch (error) {
+    if (!current()) return;
     closeSecondaryEditor();
     showToast(error.message);
   } finally {
-    setSecondaryEditorBusy(
+    if (current()) setSecondaryEditorBusy(
       false,
-      secondaryEditSession ? `已自动保存 · 草稿 r${secondaryEditSession.revision}` : "",
+      secondaryEditSession ? "已保存" : "",
     );
   }
 }
 
+window.ClipTalkOpenAgentTimeline = async ({ sessionId = "", instruction = "", variantCount = 1, reviewPendingProposal = false } = {}) => {
+  if (!currentJob?.id || secondaryEditBusy) return false;
+  const jobId = String(currentJob.id);
+  let job = currentJob;
+  let session = (job.editSessions || []).find((item) => String(item?.id || "") === String(sessionId));
+  if (!session) {
+    const payload = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    if (!currentJob || String(currentJob.id) !== jobId) return false;
+    job = payload.job || currentJob;
+    session = (job.editSessions || []).find((item) => String(item?.id || "") === String(sessionId));
+  }
+  if (!session) throw new Error("Agent 创建的精剪时间线不存在，请重新运行当前计划");
+  closeCandidateDrawer();
+  $("#secondaryEditor")?.classList.remove("hidden");
+  setSecondaryEditorShellIsolation(true);
+  restoreSecondaryEditorLayout();
+  setSecondaryEditorBusy(true, "正在打开 Agent 精剪时间线");
+  try {
+    const request = session.agentTimelineRequest || {};
+    const proposalInstruction = String(instruction || request.instruction || "").trim();
+    activateSecondaryEditorSession(session, job, { inspectorMode: "ai", instruction: proposalInstruction });
+    setSecondaryInspectorMode("ai");
+    const count = Math.max(1, Math.min(4, Number(variantCount || request.variantCount || 1)));
+    const hasPendingProposal = Boolean(session.pendingProposal);
+    if (hasPendingProposal && !reviewPendingProposal) {
+      const apply = $("#secondaryEditorProposal [data-secondary-proposal-apply]");
+      if (apply) {
+        apply.disabled = true;
+        apply.textContent = "核对后返回 Agent";
+        apply.title = "下一步确认时间线时再应用草案";
+      }
+    }
+    showToast(reviewPendingProposal
+      ? (hasPendingProposal
+        ? "请再次核对草案；确认无误后点击“应用到草稿”，再返回 Agent 继续。"
+        : String(session.previewStatus || "") === "ready"
+        ? "审核样片已经就绪。"
+        : "已打开 Agent 时间线结果。")
+      : hasPendingProposal
+        ? "Agent 已生成草案。请先核对但暂不应用，返回 Agent 点击“草案已核对，继续”。"
+        : count > 1
+        ? (Array.isArray(session.proposalVariants) && session.proposalVariants.length > 1
+          ? `已生成 ${session.proposalVariants.length} 个结构方向；请切换比较后选择一份。`
+          : `计划要求 ${count} 个结构方向；当前仅生成一份有效草案，可修改指令后重新生成。`)
+        : "计划指令已填入“AI 修改”，点击“查看修改预案”生成待审核草案。", "success");
+    if (!reviewPendingProposal && !hasPendingProposal) $("#secondaryEditorAiInput")?.focus();
+    return true;
+  } catch (error) {
+    closeSecondaryEditor();
+    throw error;
+  } finally {
+    setSecondaryEditorBusy(false, secondaryEditSession?.pendingProposal ? "提案待确认" : secondaryEditSession ? "精剪已载入" : "");
+  }
+};
+
+window.ClipTalkOpenAgentReview = async ({ sessionId = "" } = {}) => {
+  const opened = await window.ClipTalkOpenAgentTimeline({ sessionId, reviewPendingProposal: true });
+  if (!opened || !secondaryEditSession) return false;
+  const previewUrl = String(secondaryEditSession.previewUrl || "");
+  if (!previewUrl || String(secondaryEditSession.previewStatus || "") !== "ready") {
+    throw new Error("审核样片尚未就绪，请稍后刷新计划状态");
+  }
+  const video = $("#secondaryEditorVideo");
+  if (!video) throw new Error("审核播放器不可用");
+  secondaryEditView = "sequence";
+  secondaryEditExactPreview = true;
+  const fingerprint = encodeURIComponent(String(secondaryEditSession.previewFingerprint || ""));
+  video.dataset.sourceUrl = previewUrl;
+  video.src = `${previewUrl}${previewUrl.includes("?") ? "&" : "?"}fingerprint=${fingerprint}`;
+  video.load();
+  syncSecondaryEditorViewButtons();
+  renderSecondaryEditor();
+  $("#secondaryEditorVideoBadge").textContent = "审核样片";
+  $("#secondaryEditorVideoBadge").classList.remove("hidden");
+  setSecondaryEditorBusy(false, `审核样片 · 草稿 r${secondaryEditSession.revision}`);
+  video.play().catch(() => {});
+  showToast("已打开审核样片", "success");
+  return true;
+};
+
+window.ClipTalkOpenAgentSubtitleReview = async ({ sessionId = "" } = {}) => {
+  if (!currentJob?.id) return false;
+  const targetSessionId = String(sessionId || currentJob.activeEditSessionId || "");
+  const session = (currentJob.editSessions || []).find(
+    (item) => String(item?.id || "") === targetSessionId,
+  );
+  if (!session?.clips?.length) throw new Error("当前计划没有可用于生成字幕的时间线");
+  const actionToken = captureJobAction();
+  const segments = session.clips.map((clip) => ({
+    id: clip.id,
+    start: Number(clip.sourceStart),
+    end: Number(clip.sourceEnd),
+    playbackRate: Number(clip.playbackRate || 1),
+    silenceCuts: Array.isArray(clip.silenceCuts) ? clip.silenceCuts : [],
+    transitionIn: clip.transitionIn || { type: "cut", duration: 0 },
+  }));
+  const draft = await reviewSubtitlesBeforeRender(
+    [{ segments }],
+    session.subtitleStyle || "clean",
+  );
+  if (!draft || !jobActionStillCurrent(actionToken)) return false;
+  const payload = await apiJson(
+    `/api/jobs/${encodeURIComponent(actionToken.jobId)}/edit-sessions/${encodeURIComponent(session.id)}`,
+    {
+      method: "PATCH",
+      body: {
+        revision: Number(session.revision || 0),
+        operation: {
+          type: "set_subtitle",
+          enabled: true,
+          subtitleDraftId: draft.id,
+          subtitleStyle: session.subtitleStyle || "clean",
+        },
+      },
+    },
+  );
+  if (!jobActionStillCurrent(actionToken)) return false;
+  syncSecondaryEditorSessionToJob(payload.session);
+  window.ClipTalkRefreshCurrentJob?.();
+  showToast("字幕文字与断句已保存；将继续生成带字幕审核样片。", "success");
+  return true;
+};
+
+window.ClipTalkOpenAgentPreview = async ({
+  id = "", filename = "", previewUrl = "", videoUrl = "", title = "审核样片",
+  width = 0, height = 0, duration = 0, aspect = "", sessionId = "", revision = 0,
+  sourceEditSessionId = "", outputKind = "", segments = [], clipCount = null,
+  qualityStatus = "", preflight = null, reframe = null, socialReframe = false,
+  sourceOutputFilename = "", subtitleMode = "", subtitleStrategy = "",
+  subtitleBurned = false, subtitleUrl = "", coverUrl = "",
+  coverIntroAvailable = false, coverIncluded = false, introIncluded = false,
+  displayName = "", displayTitle = "", reason = "", editingExplanation = null,
+  timelineEvents = [], timelineHierarchyVersion = null,
+} = {}) => {
+  if (!currentJob?.id) return false;
+  const safePreviewUrl = String(previewUrl || videoUrl || "").trim();
+  const previewKey = String(filename || id || sessionId || sourceEditSessionId || safePreviewUrl).trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  const safeFilename = String(filename || (previewKey ? `${previewKey}.mp4` : "")).trim();
+  if (!safePreviewUrl && !safeFilename) throw new Error("审核预览地址不存在，请重新运行当前计划");
+  const locatedPreview = locateJobOutput(safeFilename);
+  if (!locatedPreview || locatedPreview.output?.previewOnly || locatedPreview.version?.previewOnly) {
+    const previous = locatedPreview?.output || {};
+    const item = {
+      ...previous,
+      filename: safeFilename,
+      title: String(title || previous.title || "审核样片"),
+      displayName: String(displayName || previous.displayName || "Agent 审核预览"),
+      displayTitle: String(displayTitle || title || previous.displayTitle || previous.title || "审核样片"),
+      previewUrl: safePreviewUrl || previous.previewUrl || previous.videoUrl || "",
+      videoUrl: safePreviewUrl || previous.videoUrl || previous.previewUrl || "",
+      width: Number(width || previous.width || 0),
+      height: Number(height || previous.height || 0),
+      duration: Number(duration || previous.duration || 0),
+      previewOnly: true,
+      outputKind: String(outputKind || previous.outputKind || "agent_review_preview"),
+      sourceEditSessionId: String(sourceEditSessionId || sessionId || previous.sourceEditSessionId || ""),
+      editSessionId: String(sourceEditSessionId || sessionId || previous.editSessionId || ""),
+      revision: Number(revision || previous.revision || 0),
+      segments: Array.isArray(segments) && segments.length ? segments : (Array.isArray(previous.segments) ? previous.segments : []),
+      clipCount: Number.isFinite(Number(clipCount)) ? Number(clipCount) : previous.clipCount,
+      qualityStatus: String(qualityStatus || previous.qualityStatus || ""),
+      sourceOutputFilename: String(sourceOutputFilename || previous.sourceOutputFilename || ""),
+      subtitleMode: String(subtitleMode || previous.subtitleMode || ""),
+      subtitleStrategy: String(subtitleStrategy || previous.subtitleStrategy || ""),
+      subtitleBurned: Boolean(subtitleBurned || previous.subtitleBurned),
+      subtitleUrl: String(subtitleUrl || previous.subtitleUrl || ""),
+      coverUrl: String(coverUrl || previous.coverUrl || ""),
+      coverIntroAvailable: Boolean(coverIntroAvailable || previous.coverIntroAvailable),
+      coverIncluded: Boolean(coverIncluded || previous.coverIncluded),
+      introIncluded: Boolean(introIncluded || previous.introIncluded),
+      reason: String(reason || previous.reason || ""),
+      socialReframe: Boolean(socialReframe || previous.socialReframe || aspect || reframe?.aspect || previous.reframe?.aspect),
+      reframe: reframe && typeof reframe === "object"
+        ? { ...reframe }
+        : (aspect ? { ...(previous.reframe || {}), aspect: String(aspect) } : previous.reframe),
+      editingExplanation: editingExplanation && typeof editingExplanation === "object"
+        ? editingExplanation : previous.editingExplanation,
+      timelineEvents: Array.isArray(timelineEvents) && timelineEvents.length ? timelineEvents : (previous.timelineEvents || []),
+      timelineHierarchyVersion: Number.isFinite(Number(timelineHierarchyVersion))
+        ? Number(timelineHierarchyVersion) : previous.timelineHierarchyVersion,
+      ...(preflight && typeof preflight === "object" ? { preflight } : {}),
+    };
+    currentJob.agentPreviewOutputs = [
+      ...(currentJob.agentPreviewOutputs || []).filter((output) => String(output?.filename || "") !== safeFilename),
+      item,
+    ];
+  }
+  renderOutputs(currentJob);
+  selectOutput(safeFilename, true);
+  renderOutputPreviewSelector(currentJob);
+  window.ClipTalkWorkspaceController?.syncMaterialsSummary?.();
+  showToast(`已打开${aspect ? ` ${aspect}` : ""}审核样片`, "success");
+  return true;
+};
+
 function closeSecondaryEditor() {
+  secondaryEditActivationToken += 1;
+  secondaryEditBusy = false;
   const video = $("#secondaryEditorVideo");
   video?.pause();
   if (video) { video.removeAttribute("src"); video.load(); }
   $("#secondaryEditor")?.classList.add("hidden");
-  document.body.classList.remove("secondary-editor-open");
+  setSecondaryEditorShellIsolation(false);
   secondaryEditSession = null;
   secondaryEditSelectedClips = new Set();
   secondaryEditExactPreview = false;
@@ -19528,6 +22554,10 @@ function closeSecondaryEditor() {
   secondaryEditTextTimeDrag = null;
   secondaryEditPreviewPending = false;
   secondaryEditPreviewRequestToken += 1;
+  secondaryEditorResizeDrag = null;
+  secondaryEditorInspectorResizeDrag = null;
+  if (secondaryEditorTimelineLayoutFrame !== null) window.cancelAnimationFrame(secondaryEditorTimelineLayoutFrame);
+  secondaryEditorTimelineLayoutFrame = null;
   $("#secondaryEditor")?.classList.remove("library-open", "inspector-open");
   window.clearTimeout(secondaryEditSubtitleSaveTimer);
   secondaryEditSubtitleSaveTimer = null;
@@ -19536,6 +22566,12 @@ function closeSecondaryEditor() {
   document.removeEventListener("pointermove", moveSecondaryEditorSubtitleCanvasTransform);
   document.removeEventListener("pointermove", moveSecondaryEditorTextLayerTransform);
   document.removeEventListener("pointermove", moveSecondaryEditorTextTimeDrag);
+  document.removeEventListener("pointermove", moveSecondaryEditorWorkspaceResize);
+  document.removeEventListener("pointerup", finishSecondaryEditorWorkspaceResize);
+  document.removeEventListener("pointercancel", finishSecondaryEditorWorkspaceResize);
+  document.removeEventListener("pointermove", moveSecondaryEditorInspectorResize);
+  document.removeEventListener("pointerup", finishSecondaryEditorInspectorResize);
+  document.removeEventListener("pointercancel", finishSecondaryEditorInspectorResize);
 }
 
 async function requestCloseSecondaryEditor() {
@@ -19548,7 +22584,9 @@ async function requestCloseSecondaryEditor() {
     });
     if (!confirmed) return;
   }
+  const filename = secondaryEditSession?.baseOutputFilename;
   closeSecondaryEditor();
+  if (filename && locateJobOutput(filename)) selectOutput(filename, false);
 }
 
 function secondaryEditorMediaControlModel() {
@@ -19602,14 +22640,18 @@ function setSecondaryEditorSourceVideo() {
   const video = $("#secondaryEditorVideo");
   if (!video || !currentJob) return;
   const sourceUrl = currentJob.previewUrl || currentJob.sourceUrl;
-  if (video.dataset.sourceUrl !== sourceUrl || secondaryEditExactPreview) {
+  if (!video.getAttribute("src") || video.dataset.sourceUrl !== sourceUrl || secondaryEditExactPreview) {
     video.dataset.sourceUrl = sourceUrl;
     video.src = sourceUrl;
     video.load();
   }
   secondaryEditExactPreview = false;
   if (secondaryEditView === "source") video.playbackRate = 1;
-  $("#secondaryEditorVideoBadge").textContent = secondaryEditView === "sequence" ? "成片顺序预览" : "源视频 · 完整时间线";
+  const badge = $("#secondaryEditorVideoBadge");
+  if (badge) {
+    badge.textContent = secondaryEditView === "sequence" ? "成片顺序预览" : "源视频 · 完整时间线";
+    badge.classList.toggle("hidden", secondaryEditView === "sequence");
+  }
   syncSecondaryEditorMediaControls();
 }
 
@@ -19661,6 +22703,7 @@ function switchSecondaryEditorView(view, sourceTime = null) {
 function secondaryEditorSeekOutputTime(outputTime, autoplay = false, preserveSelection = false) {
   if (!secondaryEditSession) return;
   const video = $("#secondaryEditorVideo");
+  const activation = secondaryEditActivationToken;
   const model = secondaryEditorTimelineModel();
   const clips = model.clips;
   const schedule = model.schedule;
@@ -19691,6 +22734,7 @@ function secondaryEditorSeekOutputTime(outputTime, autoplay = false, preserveSel
     renderSecondaryEditorInspector();
   }
   const seek = () => {
+    if (activation !== secondaryEditActivationToken || !secondaryEditorOpen()) return;
     if (secondaryEditExactPreview) {
       video.playbackRate = 1;
       video.currentTime = time;
@@ -19758,13 +22802,20 @@ async function secondaryEditorOperation(operation, { allowInspectorDraft = false
     showToast("请先保存或取消当前片段设置");
     return null;
   }
+  const activation = secondaryEditActivationToken;
+  const jobId = String(currentJob.id);
+  const sessionId = String(secondaryEditSession.id);
+  const current = () => secondaryEditorOpen() && activation === secondaryEditActivationToken && String(currentJob?.id) === jobId && String(secondaryEditSession?.id) === sessionId;
+  let failed = false;
   const previousClips = secondaryEditSession.clips || [];
   const previousTextLayerIds = new Set(secondaryEditorTextLayers().map((layer) => String(layer.id)));
   const selectedIndex = Math.max(0, previousClips.findIndex((clip) => secondaryEditSelectedClips.has(String(clip.id))));
-  setSecondaryEditorBusy(true, "正在自动保存");
+  setSecondaryEditorBusy(true, "保存中", "save");
   try {
     const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}`, { method: "PATCH", body: { revision: secondaryEditSession.revision, operation } });
+    if (!current()) return null;
     secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
     secondaryEditInspectorDraft = null;
     const subtitleInvalidatingOperations = new Set(["trim_clip", "roll_trim", "trim_to_playhead", "split_clip", "delete_clips", "duplicate_clips", "reorder_clips", "insert_clip", "update_clip", "update_clips"]);
     const timelineChangingOperations = new Set([...subtitleInvalidatingOperations, "add_marker", "update_marker", "delete_marker", "add_text_layer", "update_text_layer", "delete_text_layer"]);
@@ -19773,7 +22824,7 @@ async function secondaryEditorOperation(operation, { allowInspectorDraft = false
     if (timelineChangingOperations.has(operation.type) || operation.type === "set_subtitle") secondaryEditorMarkPreviewStale();
     secondaryEditSelectedClips = new Set([...secondaryEditSelectedClips].filter((id) => secondaryEditSession.clips.some((clip) => String(clip.id) === id)));
     secondaryEditSequenceIndex = Math.max(0, Math.min(secondaryEditSequenceIndex, Math.max(0, secondaryEditSession.clips.length - 1)));
-    secondaryEditPlayheadTime = Math.min(secondaryEditPlayheadTime, Number(secondaryEditSession.duration || 0));
+    secondaryEditPlayheadTime = Math.min(secondaryEditPlayheadTime, secondaryEditorTimelineDuration());
     let insertedClip = null;
     if (operation.type === "add_text_layer") {
       const added = secondaryEditorTextLayers().find((layer) => !previousTextLayerIds.has(String(layer.id)));
@@ -19803,23 +22854,54 @@ async function secondaryEditorOperation(operation, { allowInspectorDraft = false
     renderSecondaryEditor();
     if (insertedClip) secondaryEditorSeekOutputTime(secondaryEditPlayheadTime, false);
     return payload.session;
-  } catch (error) { showToast(error.message); return null; }
-  finally { setSecondaryEditorBusy(false, "已自动保存"); }
+  } catch (error) { failed = true; if (current()) showToast(error.message); return null; }
+  finally {
+    if (current()) {
+      setSecondaryEditorBusy(false, failed ? "保存失败" : "已保存", "save");
+      if (failed) $("#secondaryEditorSaveState").dataset.state = "error";
+    }
+  }
 }
 
 async function secondaryEditorHistory(direction) {
   if (!currentJob?.id || !secondaryEditSession || secondaryEditBusy) return;
   if (secondaryEditorInspectorHasChanges()) return void showToast("请先保存或取消当前片段设置");
-  setSecondaryEditorBusy(true, direction === "undo" ? "正在撤销" : "正在重做");
+  const activation = secondaryEditActivationToken;
+  const jobId = String(currentJob.id);
+  const sessionId = String(secondaryEditSession.id);
+  const current = () => secondaryEditorOpen() && activation === secondaryEditActivationToken && String(currentJob?.id) === jobId && String(secondaryEditSession?.id) === sessionId;
+  let failed = false;
+  setSecondaryEditorBusy(true, direction === "undo" ? "正在撤销" : "正在重做", "save");
   try {
     const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/${direction}`, { method: "POST", body: { revision: secondaryEditSession.revision } });
+    if (!current()) return null;
     secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
     secondaryEditorMarkPreviewStale();
     if (secondaryEditSession.subtitleDraftId) secondaryEditSubtitleNeedsReview = true;
     secondaryEditSelectedClips = new Set([...secondaryEditSelectedClips].filter((id) => secondaryEditSession.clips.some((clip) => String(clip.id) === id)));
     renderSecondaryEditor();
-  } catch (error) { showToast(error.message); }
-  finally { setSecondaryEditorBusy(false, "已自动保存"); }
+  } catch (error) { failed = true; if (current()) showToast(error.message); }
+  finally {
+    if (current()) {
+      setSecondaryEditorBusy(false, failed ? "保存失败" : "已保存", "save");
+      if (failed) $("#secondaryEditorSaveState").dataset.state = "error";
+    }
+  }
+}
+
+function captureSecondaryEditorAction() {
+  const jobId = String(currentJob?.id || "");
+  const sessionId = String(secondaryEditSession?.id || "");
+  const revision = Number(secondaryEditSession?.revision || 0);
+  const activationToken = secondaryEditActivationToken;
+  return Object.freeze({ jobId, sessionId, revision, activationToken,
+    current: (checkRevision = true) => secondaryEditorOpen()
+      && activationToken === secondaryEditActivationToken
+      && jobId === String(currentJob?.id || "") && sessionId === String(secondaryEditSession?.id || "")
+      && (!checkRevision || revision === Number(secondaryEditSession?.revision || 0)),
+    path: `/api/jobs/${encodeURIComponent(jobId)}/edit-sessions/${encodeURIComponent(sessionId)}`,
+  });
 }
 
 async function reviewSecondaryEditorSubtitles() {
@@ -19828,18 +22910,22 @@ async function reviewSecondaryEditorSubtitles() {
     showToast("请先保存或取消当前片段设置，再重新对齐字幕");
     return null;
   }
-  const draft = await reviewSubtitlesBeforeRender([{ segments: secondaryEditSession.clips.map((clip) => ({ id: clip.id, start: Number(clip.sourceStart), end: Number(clip.sourceEnd), playbackRate: Number(clip.playbackRate || 1), transitionIn: clip.transitionIn || { type: "cut", duration: 0 } })) }], secondaryEditSession.subtitleStyle || "clean");
-  if (!draft) return null;
-  await secondaryEditorOperation({ type: "set_subtitle", enabled: true, subtitleDraftId: draft.id, subtitleStyle: secondaryEditSession.subtitleStyle || "clean" });
-  return draft;
+  const context = captureSecondaryEditorAction();
+  const style = secondaryEditSession.subtitleStyle || "clean";
+  const draft = await reviewSubtitlesBeforeRender([{ segments: secondaryEditSession.clips.map((clip) => ({ ...clip, id: clip.id, start: Number(clip.sourceStart), end: Number(clip.sourceEnd), playbackRate: Number(clip.playbackRate || 1), transitionIn: clip.transitionIn || { type: "cut", duration: 0 } })) }], style);
+  if (!draft || !context.current()) return null;
+  const saved = await secondaryEditorOperation({ type: "set_subtitle", enabled: true, subtitleDraftId: draft.id, subtitleStyle: style });
+  return saved && context.current(false) ? draft : null;
 }
 
 async function requestSecondaryEditorPreview() {
   if (!currentJob?.id || !secondaryEditSession || secondaryEditBusy) return;
   if (secondaryEditorInspectorHasChanges()) return void showToast("请先保存或取消当前片段设置");
+  let context = captureSecondaryEditorAction();
   if (secondaryEditSession.subtitleEnabled && secondaryEditSubtitleNeedsReview) {
     const draft = await reviewSecondaryEditorSubtitles();
-    if (!draft) return;
+    if (!draft || !context.current(false)) return;
+    context = captureSecondaryEditorAction();
   }
   if (secondaryEditPreviewPending) return;
   secondaryEditPreviewPending = true;
@@ -19848,17 +22934,19 @@ async function requestSecondaryEditorPreview() {
   syncSecondaryEditorControls();
   const state = $("#secondaryEditorPreviewState");
   try {
-    if (state) { state.textContent = "正在提交预览样片 · 编辑器仍可继续使用"; state.dataset.tone = "loading"; state.classList.remove("hidden"); }
+    if (state) { state.textContent = "生成中"; state.dataset.tone = "loading"; state.classList.remove("hidden"); }
     const sessionId = String(secondaryEditSession.id);
-    const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(sessionId)}/preview`, { method: "POST", body: { revision: requestedRevision } });
-    if (token !== secondaryEditPreviewRequestToken) return;
+    const payload = await apiJson(`${context.path}/preview`, { method: "POST", body: { revision: requestedRevision } });
+    if (!context.current() || token !== secondaryEditPreviewRequestToken) return;
     const requestedFingerprint = String(payload.session?.previewFingerprint || "");
     if (Number(secondaryEditSession?.revision || -1) === requestedRevision) secondaryEditSession = payload.session;
-    if (state) { state.textContent = payload.reused ? "正在打开已有预览样片" : "后台正在生成预览样片"; state.dataset.tone = "loading"; state.classList.remove("hidden"); }
+    if (state) { state.textContent = payload.reused ? "正在打开已有预览样片" : "生成中"; state.dataset.tone = "loading"; state.classList.remove("hidden"); }
     for (let attempt = 0; attempt < 120; attempt += 1) {
       if (!secondaryEditorOpen() || token !== secondaryEditPreviewRequestToken) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      const response = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}`);
+      if (!context.current() || token !== secondaryEditPreviewRequestToken) return;
+      const response = await api(`/api/jobs/${encodeURIComponent(context.jobId)}`);
+      if (!context.current() || token !== secondaryEditPreviewRequestToken) return;
       const session = response.job?.editSessions?.find((item) => String(item.id) === sessionId);
       if (!session) throw new Error("编辑草稿已不存在");
       if (Number(secondaryEditSession?.revision || -1) !== requestedRevision || String(session.previewFingerprint || "") !== requestedFingerprint) {
@@ -19874,7 +22962,8 @@ async function requestSecondaryEditorPreview() {
         video.load();
         video.play().catch(() => {});
         $("#secondaryEditorVideoBadge").textContent = "预览样片";
-        if (state) { state.textContent = "预览样片已生成"; state.dataset.tone = "ready"; }
+        $("#secondaryEditorVideoBadge").classList.remove("hidden");
+        if (state) { state.textContent = "预览已就绪"; state.dataset.tone = "ready"; }
         renderSecondaryEditor();
         return;
       }
@@ -19882,82 +22971,108 @@ async function requestSecondaryEditorPreview() {
     }
     throw new Error("预览样片生成时间较长，请稍后重试")
   } catch (error) {
+    if (!context.current() || token !== secondaryEditPreviewRequestToken) return;
     if (state) { state.textContent = error.message; state.dataset.tone = "error"; state.classList.remove("hidden"); }
     showToast(error.message);
   } finally {
-    if (token === secondaryEditPreviewRequestToken) {
+    if (context.current(false) && token === secondaryEditPreviewRequestToken) {
       secondaryEditPreviewPending = false;
       syncSecondaryEditorControls();
     }
   }
 }
 
-async function exportSecondaryEditor() {
+async function generateSecondaryEditorVersion() {
   if (!currentJob?.id || !secondaryEditSession?.clips?.length || secondaryEditBusy) return;
   if (secondaryEditorInspectorHasChanges()) return void showToast("请先保存或取消当前片段设置");
-  let subtitleDraftId = secondaryEditSession.subtitleDraftId || null;
+  let context = captureSecondaryEditorAction();
+  let subtitleDraftId = secondaryEditSession.subtitleEnabled ? secondaryEditSession.subtitleDraftId || null : null;
   if ($("#secondaryEditorSubtitleEnabled")?.checked && (!subtitleDraftId || secondaryEditSubtitleNeedsReview)) {
     const draft = await reviewSecondaryEditorSubtitles();
-    if (!draft) return;
+    if (!draft || !context.current(false)) return;
+    context = captureSecondaryEditorAction();
     subtitleDraftId = draft.id;
   }
   const versionLabel = String($("#secondaryEditorVersionLabel")?.value || "精剪版").trim() || "精剪版";
   const previewCurrent = secondaryEditSession.previewStatus === "ready" && Number(secondaryEditSession.previewRevision) === Number(secondaryEditSession.revision);
-  const confirmed = await requestActionConfirmation({ title: "导出高清新版本", summary: `“${versionLabel}”将基于 V${secondaryEditSession.baseVersionNumber} 按源视频质量生成，共 ${secondaryEditSession.clips.length} 个片段、约 ${Number(secondaryEditSession.duration || 0).toFixed(1)} 秒。`, details: [`当前草稿 r${secondaryEditSession.revision} · ${previewCurrent ? "预览样片已生成" : "预览样片未生成或已过期（不影响导出）"}`, subtitleDraftId ? "导出时烧录已确认字幕" : "导出时不添加字幕", "保持源视频画幅，原成片版本不会被覆盖"], confirmLabel: "生成高清新版本" });
+  if (!previewCurrent) {
+    const generate = await requestActionConfirmation({ title: "先生成审核样片", summary: "审核样片需要更新", details: [], confirmLabel: "生成审核样片" });
+    if (generate && context.current()) await requestSecondaryEditorPreview();
+    return;
+  }
+  const confirmed = await requestActionConfirmation({ title: "生成成片", summary: `${versionLabel} · ${secondaryEditorTimelineDuration().toFixed(1)} 秒 · ${secondaryEditSession.subtitleEnabled && subtitleDraftId ? "带字幕" : "无字幕"}`, details: [], confirmLabel: "开始生成" });
   if (!confirmed) return;
-  setSecondaryEditorBusy(true, "正在提交高清新版本");
+  if (!context.current()) return void showToast("任务或精剪时间线已变化，请重新审核后生成");
+  setSecondaryEditorBusy(true, "正在生成成片", "render");
   try {
-    const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/render`, { method: "POST", body: { revision: secondaryEditSession.revision, subtitleMode: subtitleDraftId ? "burn" : "none", subtitleStyle: secondaryEditSession.subtitleStyle || "clean", subtitleDraftId, versionLabel } });
+    const payload = await apiJson(`${context.path}/render`, { method: "POST", body: { revision: context.revision, subtitleMode: subtitleDraftId ? "burn" : "none", subtitleStyle: secondaryEditSession.subtitleStyle || "clean", subtitleDraftId, versionLabel } });
+    if (!context.current()) return;
+    setSecondaryEditorBusy(false);
     currentJob = payload.job || currentJob;
     closeSecondaryEditor();
     renderJob(currentJob);
     clearTimeout(pollTimer);
     pollJob();
-  } catch (error) { showToast(error.message); }
-  finally { setSecondaryEditorBusy(false); }
+  } catch (error) { if (context.current()) showToast(error.message); }
+  finally { if (context.current(false)) setSecondaryEditorBusy(false); }
 }
 
-async function createSecondaryEditorProposal(text) {
+async function createSecondaryEditorProposal(text, selectedClipIds = [...secondaryEditSelectedClips]) {
   if (!currentJob?.id || !secondaryEditSession || secondaryEditBusy) return;
+  const context = captureSecondaryEditorAction();
   setSecondaryEditorBusy(true, "正在解析编辑指令");
   try {
-    const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/proposals`, { method: "POST", body: { revision: secondaryEditSession.revision, text, selectedClipIds: [...secondaryEditSelectedClips] } });
+    const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/proposals`, { method: "POST", body: { revision: secondaryEditSession.revision, text, selectedClipIds } });
+    if (!context.current()) return;
     secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
     secondaryEditorMarkPreviewStale();
     renderSecondaryEditorProposal();
-  } catch (error) { showToast(error.message); }
-  finally { setSecondaryEditorBusy(false, "提案待确认"); }
+  } catch (error) { if (context.current()) showToast(error.message); }
+  finally { if (context.current(false)) setSecondaryEditorBusy(false, "提案待确认"); }
 }
 
 async function applySecondaryEditorProposal() {
   const proposal = secondaryEditSession?.pendingProposal;
   if (!proposal || secondaryEditBusy) return;
-  setSecondaryEditorBusy(true, "正在应用提案");
+  const context = captureSecondaryEditorAction();
+  let failed = false;
+  setSecondaryEditorBusy(true, "正在应用提案", "save");
   try {
     const payload = await apiJson(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/proposals/${encodeURIComponent(proposal.id)}/apply`, { method: "POST", body: {} });
+    if (!context.current()) return;
     secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
     if (secondaryEditSession.subtitleDraftId) secondaryEditSubtitleNeedsReview = true;
     secondaryEditSelectedClips = new Set([...secondaryEditSelectedClips].filter((id) => secondaryEditSession.clips.some((clip) => String(clip.id) === id)));
     renderSecondaryEditor();
-  } catch (error) { showToast(error.message); }
-  finally { setSecondaryEditorBusy(false, "已自动保存"); }
+  } catch (error) { failed = true; if (context.current()) showToast(error.message); }
+  finally {
+    if (context.current(false)) {
+      setSecondaryEditorBusy(false, failed ? "保存失败" : "已保存", "save");
+      if (failed && $("#secondaryEditorSaveState")) $("#secondaryEditorSaveState").dataset.state = "error";
+    }
+  }
 }
 
 async function cancelSecondaryEditorProposal() {
   const proposal = secondaryEditSession?.pendingProposal;
   if (!proposal || secondaryEditBusy) return;
+  const context = captureSecondaryEditorAction();
   try {
     const payload = await api(`/api/jobs/${encodeURIComponent(currentJob.id)}/edit-sessions/${encodeURIComponent(secondaryEditSession.id)}/proposals/${encodeURIComponent(proposal.id)}`, { method: "DELETE" });
+    if (!context.current()) return;
     secondaryEditSession = payload.session;
+    syncSecondaryEditorSessionToJob();
     renderSecondaryEditorProposal();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { if (context.current()) showToast(error.message); }
 }
 
 $("#secondaryEditorClose")?.addEventListener("click", requestCloseSecondaryEditor);
 $("#secondaryEditorUndo")?.addEventListener("click", () => secondaryEditorHistory("undo"));
 $("#secondaryEditorRedo")?.addEventListener("click", () => secondaryEditorHistory("redo"));
 $("#secondaryEditorPreview")?.addEventListener("click", requestSecondaryEditorPreview);
-$("#secondaryEditorExport")?.addEventListener("click", exportSecondaryEditor);
+$("#secondaryEditorExport")?.addEventListener("click", generateSecondaryEditorVersion);
 $("#secondaryEditorZoomOut")?.addEventListener("click", () => adjustSecondaryEditorTimelineZoom("out"));
 $("#secondaryEditorZoomFit")?.addEventListener("click", () => adjustSecondaryEditorTimelineZoom("fit"));
 $("#secondaryEditorZoomIn")?.addEventListener("click", () => adjustSecondaryEditorTimelineZoom("in"));
@@ -20067,11 +23182,20 @@ $("#secondaryEditor")?.querySelectorAll("[data-secondary-library]").forEach((but
   $("#secondaryEditor")?.querySelectorAll("[data-secondary-library]").forEach((item) => { item.classList.toggle("active", item === button); item.setAttribute("aria-selected", String(item === button)); });
   $("#secondaryEditorLibraryBody")?.classList.toggle("hidden", button.dataset.secondaryLibrary !== "mode");
   $("#secondaryEditorRangeForm")?.classList.toggle("hidden", button.dataset.secondaryLibrary !== "source");
+  $("#secondaryEditorLibrary")?.classList.toggle("source-range-active", button.dataset.secondaryLibrary === "source");
   const context = $("#secondaryEditorLibraryContext");
   if (context) context.textContent = button.dataset.secondaryLibrary === "source"
     ? "输入源视频的真实入点与出点，片段只会作为虚拟范围加入时间线。"
     : secondaryEditorWorkflowContext(secondaryEditSession?.workflowKind || workflowKindForJob(currentJob));
 }));
+$("#secondaryEditorLibraryFilters")?.querySelectorAll("[data-secondary-material-filter]").forEach((button) => button.addEventListener("click", () => {
+  secondaryEditorMaterialFilter = button.dataset.secondaryMaterialFilter;
+  renderSecondaryEditorLibrary();
+}));
+$("#secondaryEditorLibrarySearch")?.addEventListener("input", (event) => {
+  secondaryEditorMaterialSearch = String(event.currentTarget.value || "");
+  renderSecondaryEditorLibrary();
+});
 $("#secondaryEditor")?.querySelectorAll("[data-secondary-view]").forEach((button) => button.addEventListener("click", () => {
   if (button.dataset.secondaryView === "source") clearSecondaryEditorMaterialPreview();
   switchSecondaryEditorView(button.dataset.secondaryView);
@@ -20147,11 +23271,20 @@ $("#secondaryEditorAiForm")?.addEventListener("submit", (event) => {
   const input = $("#secondaryEditorAiInput");
   const text = String(input?.value || "").trim();
   if (!text) return;
-  createSecondaryEditorProposal(text);
+  const scope = $("#secondaryEditorAiScope")?.value || "selection";
+  const selectedClipIds = scope === "timeline"
+    ? (secondaryEditSession?.clips || []).map((clip) => String(clip.id))
+    : [...secondaryEditSelectedClips];
+  if (!selectedClipIds.length) return void showToast("请先选择片段，或将修改范围改为整个成片");
+  createSecondaryEditorProposal(text, selectedClipIds);
 });
+$("#secondaryEditorAiScope")?.addEventListener("change", syncSecondaryEditorAiScope);
 $("#secondaryEditor")?.querySelectorAll("[data-secondary-command]").forEach((button) => button.addEventListener("click", () => {
   const input = $("#secondaryEditorAiInput");
   if (input) { input.value = button.dataset.secondaryCommand || ""; input.focus(); }
+  const scope = $("#secondaryEditorAiScope");
+  if (scope && button.dataset.secondaryCommandScope) scope.value = button.dataset.secondaryCommandScope;
+  syncSecondaryEditorAiScope();
 }));
 const secondaryEditorRuler = $("#secondaryEditorRuler");
 $("#secondaryEditorTimelineViewport")?.addEventListener("wheel", (event) => {
@@ -20294,7 +23427,80 @@ $("#secondaryEditorVideo")?.addEventListener("timeupdate", (event) => {
   updateSecondaryEditorPlayhead(outputTime, true);
   $("#secondaryEditorClock").textContent = `成片 ${formatPreciseTimecode(outputTime)} / ${formatPreciseTimecode(model.duration)}`;
 });
+
+function moveSecondaryEditorWorkspaceResize(event) {
+  if (!secondaryEditorResizeDrag) return;
+  event.preventDefault();
+  const ratio = (event.clientY - secondaryEditorResizeDrag.top) / Math.max(1, secondaryEditorResizeDrag.height) * 100;
+  setSecondaryEditorUpperRatio(ratio);
+}
+
+function finishSecondaryEditorWorkspaceResize() {
+  if (!secondaryEditorResizeDrag) return;
+  secondaryEditorResizeDrag = null;
+  $("#secondaryEditorWorkspaceResize")?.classList.remove("dragging");
+  document.removeEventListener("pointermove", moveSecondaryEditorWorkspaceResize);
+  document.removeEventListener("pointerup", finishSecondaryEditorWorkspaceResize);
+  document.removeEventListener("pointercancel", finishSecondaryEditorWorkspaceResize);
+  persistSecondaryEditorLayout();
+}
+
+$("#secondaryEditorWorkspaceResize")?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  const layout = $(".secondary-editor-layout");
+  const rect = layout?.getBoundingClientRect();
+  if (!rect?.height) return;
+  event.preventDefault();
+  secondaryEditorResizeDrag = { top: rect.top, height: rect.height };
+  event.currentTarget.classList.add("dragging");
+  document.addEventListener("pointermove", moveSecondaryEditorWorkspaceResize);
+  document.addEventListener("pointerup", finishSecondaryEditorWorkspaceResize, { once: true });
+  document.addEventListener("pointercancel", finishSecondaryEditorWorkspaceResize, { once: true });
+});
+$("#secondaryEditorWorkspaceResize")?.addEventListener("dblclick", () => setSecondaryEditorUpperRatio(58, { persist: true }));
+$("#secondaryEditorWorkspaceResize")?.addEventListener("keydown", (event) => {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 36 : event.key === "End" ? 58 : secondaryEditorUpperRatio + (event.key === "ArrowUp" ? -2 : 2);
+  setSecondaryEditorUpperRatio(next, { persist: true });
+});
+
+function moveSecondaryEditorInspectorResize(event) {
+  if (!secondaryEditorInspectorResizeDrag) return;
+  event.preventDefault();
+  const width = secondaryEditorInspectorResizeDrag.width - (event.clientX - secondaryEditorInspectorResizeDrag.clientX);
+  setSecondaryEditorInspectorWidth(width);
+}
+
+function finishSecondaryEditorInspectorResize() {
+  if (!secondaryEditorInspectorResizeDrag) return;
+  secondaryEditorInspectorResizeDrag = null;
+  $("#secondaryEditorInspectorResize")?.classList.remove("dragging");
+  document.removeEventListener("pointermove", moveSecondaryEditorInspectorResize);
+  document.removeEventListener("pointerup", finishSecondaryEditorInspectorResize);
+  document.removeEventListener("pointercancel", finishSecondaryEditorInspectorResize);
+  persistSecondaryEditorLayout();
+}
+
+$("#secondaryEditorInspectorResize")?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || window.innerWidth < 1024) return;
+  event.preventDefault();
+  secondaryEditorInspectorResizeDrag = { clientX: event.clientX, width: secondaryEditorInspectorWidth };
+  event.currentTarget.classList.add("dragging");
+  document.addEventListener("pointermove", moveSecondaryEditorInspectorResize);
+  document.addEventListener("pointerup", finishSecondaryEditorInspectorResize, { once: true });
+  document.addEventListener("pointercancel", finishSecondaryEditorInspectorResize, { once: true });
+});
+$("#secondaryEditorInspectorResize")?.addEventListener("dblclick", () => setSecondaryEditorInspectorWidth(secondaryEditorDefaultInspectorWidth(), { persist: true }));
+$("#secondaryEditorInspectorResize")?.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const { min, max } = secondaryEditorInspectorWidthBounds();
+  const next = event.key === "Home" ? min : event.key === "End" ? max : secondaryEditorInspectorWidth + (event.key === "ArrowLeft" ? 16 : -16);
+  setSecondaryEditorInspectorWidth(next, { persist: true });
+});
 window.addEventListener("resize", () => {
+  if (secondaryEditorOpen()) restoreSecondaryEditorLayout();
   if (secondaryEditorOpen() && secondaryEditTimelinePixelsPerSecond === null) renderSecondaryEditorTimeline();
   if (secondaryEditorOpen()) { renderSecondaryEditorSubtitlePreview(); renderSecondaryEditorTextCanvas(); }
 });
@@ -20327,13 +23533,27 @@ function toggleSecondaryEditorPanel(panel) {
   const open = !editor.classList.contains(className);
   editor.classList.toggle(className, open);
   if (open) editor.classList.remove(other);
-  $("#secondaryEditorLibraryToggle")?.setAttribute("aria-expanded", String(editor.classList.contains("library-open")));
-  $("#secondaryEditorInspectorToggle")?.setAttribute("aria-expanded", String(editor.classList.contains("inspector-open")));
+  syncSecondaryEditorPanelAria();
+  persistSecondaryEditorLayout();
+  scheduleSecondaryEditorTimelineLayout();
 }
 $("#secondaryEditorLibraryToggle")?.addEventListener("click", () => toggleSecondaryEditorPanel("library"));
 $("#secondaryEditorInspectorToggle")?.addEventListener("click", () => toggleSecondaryEditorPanel("inspector"));
 $("#secondaryInspectorTabs")?.querySelectorAll("[data-secondary-inspector-tab]").forEach((button) => {
   button.addEventListener("click", () => setSecondaryInspectorMode(button.dataset.secondaryInspectorTab));
+});
+
+const reviewMoreActions = $("#reviewMoreActions");
+document.addEventListener("pointerdown", (event) => {
+  if (reviewMoreActions?.open && !reviewMoreActions.contains(event.target)) reviewMoreActions.open = false;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !reviewMoreActions?.open) return;
+  reviewMoreActions.open = false;
+  reviewMoreActions.querySelector("summary")?.focus();
+});
+reviewMoreActions?.querySelectorAll("a, button").forEach((control) => {
+  control.addEventListener("click", () => { reviewMoreActions.open = false; });
 });
 
 loadHealth();
@@ -20390,3 +23610,30 @@ restoreCurrentJob();
 syncThinkingOrbs(document);
 syncBorderBeams(document);
 updateComposerBeam();
+
+
+document.querySelectorAll("[data-secondary-open-panel]").forEach(button => {
+  button.addEventListener("click", () => {
+    setSecondaryInspectorMode(button.dataset.secondaryOpenPanel);
+    renderSecondaryEditorSubtitleTrack();
+    button.closest("details")?.removeAttribute("open");
+  });
+});
+document.querySelector("[data-secondary-add-material]")?.addEventListener("click", () => {
+  const editor = $("#secondaryEditor");
+  editor?.classList.remove("inspector-open");
+  editor?.classList.add("library-open");
+  syncSecondaryEditorPanelAria();
+  persistSecondaryEditorLayout();
+});
+document.querySelectorAll("[data-secondary-close-panel]").forEach(button => {
+  button.addEventListener("click", () => {
+    $("#secondaryEditor")?.classList.remove("library-open", "inspector-open");
+    syncSecondaryEditorPanelAria();
+    persistSecondaryEditorLayout();
+  });
+});
+
+$("#secondaryEditor .secondary-editor-action-overflow")?.addEventListener("click", event => {
+  if (event.target.closest("button")) event.currentTarget.removeAttribute("open");
+});

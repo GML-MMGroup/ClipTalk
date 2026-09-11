@@ -45,6 +45,7 @@ def composition_edl_hash(
     variant_label: str,
     order_mode: str = "source",
     subtitle_draft_revision: str = "",
+    reframe: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "sourceHash": source_hash,
@@ -77,6 +78,8 @@ def composition_edl_hash(
         "cutaways": [cutaway for item in selections for cutaway in (item.get("cutaways") or [])],
         "techniquePolicy": [item.get("techniquePolicy") for item in selections],
     }
+    if reframe:
+        payload["reframe"] = reframe
     if subtitle_mode == "burn":
         payload["subtitleStyle"] = subtitle_style
         payload["subtitleDraftRevision"] = subtitle_draft_revision

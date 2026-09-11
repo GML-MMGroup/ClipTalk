@@ -15,7 +15,20 @@ def build_health_snapshot(
         active_vision.get("apiKey") and active_vision.get("model") and active_vision.get("baseUrl")
     )
     llm_configured = bool(active_llm.get("apiKey") and active_llm.get("model") and active_llm.get("baseUrl"))
+    unavailable = []
+    if not vision_configured:
+        unavailable.append("视觉分析未配置")
+    if not llm_configured:
+        unavailable.append("剪辑规划未配置")
+    if speech_state.get("status") == "failed":
+        unavailable.append("语音识别不可用")
+    if not Path(settings.ffmpeg).is_file() or not Path(settings.ffprobe).is_file():
+        unavailable.append("视频处理工具不可用")
+    preparing = speech_state.get("status") == "preparing"
     return {
+        "capabilityStatus": "degraded" if unavailable else "preparing" if preparing else "ready",
+        "capabilityIssues": unavailable,
+        "capabilityLabel": "部分功能不可用" if unavailable else "语音模型准备中" if preparing else "服务正常",
         "ok": True,
         "service": "cliptalk",
         "visionConfigured": vision_configured,

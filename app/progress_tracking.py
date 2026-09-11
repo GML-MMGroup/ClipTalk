@@ -72,7 +72,7 @@ def structured_progress(
     model = {
         "speech_recognition": "SenseVoice", "speech_analysis": "SenseVoice",
         "content_recognition": "多模态识别",
-        "coarse_vlm": "VLM", "refine_vlm": "VLM", "event_grouping": "VLM", "event_director": "VLM",
+        "coarse_embedding": "WeMM", "coarse_vlm": "VLM", "refine_vlm": "VLM", "event_grouping": "VLM", "event_director": "VLM",
         "edit_planning": "LLM", "auto_composition": "LLM + VLM", "rendering": "FFmpeg",
     }.get(stage, "系统")
     started = job.get("startedAt") or job.get("createdAt")

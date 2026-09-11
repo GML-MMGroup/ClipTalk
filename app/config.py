@@ -90,6 +90,12 @@ class Settings:
     llm_base_url: str
     llm_thinking_type: str
     llm_timeout_seconds: float
+    agent_api_key: str
+    agent_model: str
+    agent_base_url: str
+    agent_thinking_type: str
+    agent_timeout_seconds: float
+    agent_service_url: str
     anthropic_base_url: str
     anthropic_auth_token: str
     anthropic_model: str
@@ -125,8 +131,14 @@ class Settings:
     recognition_profile: str
     recognition_model_cache: Path
     recognition_worker_python: str
+    recognition_visual_backend: str
     recognition_text_model: str
     recognition_siglip_model: str
+    recognition_wemm_model: str
+    recognition_wemm_dimension: int
+    recognition_wemm_video_index: bool
+    recognition_wemm_recall_threshold: float
+    recognition_wemm_exhaustive_vlm_fallback: bool
     recognition_clap_model: str
     recognition_grounding_model: str
     recognition_yunet_model: Path
@@ -176,6 +188,12 @@ class Settings:
             llm_base_url=(os.environ.get("LLM_BASE_URL", "").strip() or ark_base_url).rstrip("/"),
             llm_thinking_type=os.environ.get("LLM_THINKING_TYPE", os.environ.get("ARK_THINKING_TYPE", "disabled")).strip().lower(),
             llm_timeout_seconds=_positive_float("LLM_TIMEOUT_SECONDS", 60.0),
+            agent_api_key=os.environ.get("AGENT_API_KEY", "").strip(),
+            agent_model=os.environ.get("AGENT_MODEL", "").strip(),
+            agent_base_url=os.environ.get("AGENT_BASE_URL", "").strip().rstrip("/"),
+            agent_thinking_type=os.environ.get("AGENT_THINKING_TYPE", "enabled").strip().lower(),
+            agent_timeout_seconds=_positive_float("AGENT_TIMEOUT_SECONDS", 120.0),
+            agent_service_url=os.environ.get("CLIPTALK_AGENT_SERVICE_URL", "http://127.0.0.1:5190").strip().rstrip("/"),
             anthropic_base_url=os.environ.get("ANTHROPIC_BASE_URL", "").strip().rstrip("/"),
             anthropic_auth_token=os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip(),
             anthropic_model=os.environ.get("ANTHROPIC_MODEL", "").strip(),
@@ -224,8 +242,24 @@ class Settings:
             recognition_profile=(os.environ.get("HIGHLIGHT_RECOGNITION_PROFILE", "auto").strip().lower() or "auto"),
             recognition_model_cache=Path(os.environ.get("HIGHLIGHT_RECOGNITION_MODEL_CACHE", data_root / "models" / "recognition")).resolve(),
             recognition_worker_python=os.environ.get("HIGHLIGHT_RECOGNITION_PYTHON", "").strip(),
+            recognition_visual_backend=(
+                os.environ.get("HIGHLIGHT_VISUAL_EMBEDDING_BACKEND", "siglip").strip().lower()
+                if os.environ.get("HIGHLIGHT_VISUAL_EMBEDDING_BACKEND", "siglip").strip().lower() in {"siglip", "wemm"}
+                else "siglip"
+            ),
             recognition_text_model=os.environ.get("HIGHLIGHT_TEXT_EMBEDDING_MODEL", "intfloat/multilingual-e5-base").strip(),
             recognition_siglip_model=os.environ.get("HIGHLIGHT_SIGLIP_MODEL", "google/siglip2-base-patch16-224").strip(),
+            recognition_wemm_model=os.environ.get(
+                "HIGHLIGHT_WEMM_MODEL", "tencent/WeMM-Embedding-2B",
+            ).strip(),
+            recognition_wemm_dimension=_positive_int("HIGHLIGHT_WEMM_DIMENSION", 256),
+            recognition_wemm_video_index=_boolean("HIGHLIGHT_WEMM_VIDEO_INDEX", True),
+            recognition_wemm_recall_threshold=_bounded_float(
+                "HIGHLIGHT_WEMM_RECALL_THRESHOLD", .18, -1.0, 1.0,
+            ),
+            recognition_wemm_exhaustive_vlm_fallback=_boolean(
+                "HIGHLIGHT_WEMM_EXHAUSTIVE_VLM_FALLBACK", False,
+            ),
             recognition_clap_model=os.environ.get("HIGHLIGHT_CLAP_MODEL", "laion/clap-htsat-fused").strip(),
             recognition_grounding_model=os.environ.get("HIGHLIGHT_GROUNDING_MODEL", "IDEA-Research/grounding-dino-tiny").strip(),
             recognition_yunet_model=Path(os.environ.get("HIGHLIGHT_YUNET_MODEL", data_root / "models" / "recognition" / "face_detection_yunet_2023mar.onnx")).resolve(),
