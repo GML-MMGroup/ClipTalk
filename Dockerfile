@@ -1,3 +1,9 @@
+FROM node:22-bookworm-slim AS motion-renderer-dependencies
+
+WORKDIR /renderer
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev
+
 FROM python:3.10-slim-bookworm
 
 ARG CLIPTALK_INSTALL_PROFILE=cpu
@@ -8,12 +14,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CLIPTALK_INSTALL_PROFILE=${CLIPTALK_INSTALL_PROFILE} \
     HIGHLIGHT_HOST=0.0.0.0 \
     HIGHLIGHT_PORT=5180 \
-    HIGHLIGHT_DATA_ROOT=/app/data
+    HIGHLIGHT_DATA_ROOT=/app/data \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg fonts-wqy-zenhei libgomp1 libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=motion-renderer-dependencies /usr/local/bin/node /usr/local/bin/node
+COPY --from=motion-renderer-dependencies /renderer/node_modules ./node_modules
+RUN node node_modules/playwright/cli.js install-deps chromium \
+    && node node_modules/playwright/cli.js install chromium \
+    && chmod -R a+rX /ms-playwright \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-cpu.txt requirements-gpu.txt ./
@@ -29,8 +43,10 @@ RUN python -m pip install --upgrade pip \
 COPY app ./app
 COPY static ./static
 COPY skills ./skills
+COPY fonts/SourceHanSansSC-Bold.otf ./fonts/SourceHanSansSC-Bold.otf
 COPY tools/prepare_speech_models.py ./tools/prepare_speech_models.py
 COPY tools/container_smoke.py ./tools/container_smoke.py
+COPY tools/render_html_motion.mjs ./tools/render_html_motion.mjs
 
 RUN useradd --create-home --uid 10001 cliptalk \
     && mkdir -p /app/data \

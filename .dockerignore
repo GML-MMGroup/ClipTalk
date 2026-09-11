@@ -10,6 +10,7 @@ __pycache__
 *.pyc
 .pytest_cache
 node_modules
+agent-service
 data
 local-artifacts
 assets

@@ -1,0 +1,7 @@
+node_modules
+test
+coverage
+.env
+.env.*
+*.log
+npm-debug.log*
