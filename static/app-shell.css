@@ -1377,6 +1377,7 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
   gap: 0 !important;
 }
 .app-settings-page > header,
+.app-settings-page .setup-readiness,
 .app-settings-page .model-role-tabs,
 .app-settings-page .model-settings-view,
 .app-settings-page .runtime-settings-summary {
@@ -1432,7 +1433,7 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
 
 .app-settings-page .model-role-tabs {
   grid-column: 1 !important;
-  grid-row: 2 !important;
+  grid-row: 3 !important;
   margin: 0 !important;
   padding: 0 !important;
   display: grid !important;
@@ -1479,7 +1480,7 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
 
 .app-settings-page .model-settings-view {
   grid-column: 1 !important;
-  grid-row: 3 !important;
+  grid-row: 4 !important;
   min-width: 0 !important;
   margin: 18px 0 0 !important;
   padding: 30px 34px 0 !important;
@@ -1681,7 +1682,7 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
 
 .app-settings-page .runtime-settings-summary {
   grid-column: 1 !important;
-  grid-row: 4 !important;
+  grid-row: 6 !important;
   margin: 20px 0 0 !important;
   padding: 18px 22px !important;
   border: 1px solid #263641 !important;
@@ -1692,6 +1693,36 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
     linear-gradient(145deg, #15232c, #0d181f) !important;
   box-shadow: 0 14px 32px rgba(25, 37, 45, .12) !important;
 }
+
+.app-settings-page .setup-readiness {
+  grid-column: 1 !important;
+  grid-row: 2 !important;
+  margin: 18px 0 0 !important;
+  padding: 20px 22px !important;
+  border: 1px solid #d8dfe2 !important;
+  border-radius: 15px !important;
+  color: #263138 !important;
+  background: rgba(255, 255, 255, .82) !important;
+  box-shadow: 0 12px 30px rgba(61, 76, 85, .07) !important;
+}
+.app-settings-page .setup-readiness > header,
+.app-settings-page .setup-readiness > footer { display: flex !important; align-items: center !important; justify-content: space-between !important; gap: 16px !important; }
+.app-settings-page .setup-readiness > header small { color: #a6532b !important; font-size: 9px !important; font-weight: 750 !important; letter-spacing: .1em !important; }
+.app-settings-page .setup-readiness > header strong { display: block !important; margin-top: 4px !important; color: #20292f !important; font-size: 16px !important; }
+.app-settings-page .setup-readiness > header p,
+.app-settings-page .setup-readiness > footer span { margin: 4px 0 0 !important; color: #66747b !important; font-size: 10.5px !important; }
+.app-settings-page .setup-readiness button { min-height: 34px !important; padding: 0 12px !important; border: 1px solid #d5dde1 !important; border-radius: 8px !important; color: #49565d !important; background: #f7f9fa !important; }
+.app-settings-page .setup-readiness button:hover { border-color: #eda078 !important; color: #87401f !important; background: #fff5ef !important; }
+.app-settings-page .setup-readiness ol { margin: 16px 0 !important; padding: 0 !important; display: grid !important; grid-template-columns: repeat(5, minmax(0, 1fr)) !important; gap: 8px !important; list-style: none !important; }
+.app-settings-page .setup-readiness li { min-width: 0 !important; padding: 11px !important; border: 1px solid #dfe5e8 !important; border-radius: 9px !important; background: #f6f8f9 !important; }
+.app-settings-page .setup-readiness li[data-status="ready"] { border-color: #bcd9c8 !important; background: #f0f8f3 !important; }
+.app-settings-page .setup-readiness li[data-status="required"] { border-color: #efc2aa !important; background: #fff6f0 !important; }
+.app-settings-page .setup-readiness li button { width: 100% !important; padding: 0 !important; border: 0 !important; background: transparent !important; text-align: left !important; }
+.app-settings-page .setup-readiness li b { display: block !important; overflow: hidden !important; color: #29343a !important; font-size: 11px !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+.app-settings-page .setup-readiness li small { display: block !important; margin-top: 5px !important; color: #738087 !important; font-size: 9.5px !important; line-height: 1.45 !important; }
+.app-settings-page .setup-readiness li[data-status="ready"] b::before { content: "✓ "; color: #347b56; }
+.app-settings-page .setup-readiness li[data-status="required"] b::before { content: "! "; color: #b75b30; }
+.app-settings-page #localCapabilities { grid-column: 1 !important; grid-row: 5 !important; }
 .app-settings-page .runtime-settings-summary summary { color: #e6edef !important; }
 .app-settings-page .runtime-settings-summary summary > span { display: grid !important; gap: 4px !important; }
 .app-settings-page .runtime-settings-summary summary strong { color: #eef3f4 !important; font-size: 13px !important; }
@@ -1721,6 +1752,7 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
   .app-settings-page { padding: 36px 28px 70px !important; }
   .app-settings-page .model-role-tabs { grid-template-columns: repeat(3, minmax(170px, 1fr)) !important; }
   .app-settings-page .vision-provider-list { grid-template-columns: 1fr !important; }
+  .app-settings-page .setup-readiness ol { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
 }
 
 @media (max-width: 760px) {
@@ -1732,6 +1764,9 @@ body[data-shell-mode="workspace"] .secondary-editor-player:fullscreen .secondary
   .app-settings-page .llm-mode-options,
   .app-settings-page .runtime-settings-summary dl { grid-template-columns: 1fr !important; }
   .app-settings-page .settings-save-bar { margin-inline: -22px !important; padding-inline: 22px !important; }
+  .app-settings-page .setup-readiness ol { grid-template-columns: 1fr !important; }
+  .app-settings-page .setup-readiness > header,
+  .app-settings-page .setup-readiness > footer { align-items: flex-start !important; flex-direction: column !important; }
 }
 
 /* Compact application rail and task drawer --------------------------------- */

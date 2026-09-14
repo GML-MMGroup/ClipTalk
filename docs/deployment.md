@@ -22,17 +22,41 @@ HIGHLIGHT_ACCESS_TOKEN=
 
 ## 启动方式
 
+Docker 部署建议使用 Docker Engine 24+ 与 Docker Compose 2.24+；GPU 配置还需要 NVIDIA Container Toolkit。
+
 - `bash start.sh`：前台统一管理网页和本地 AI 助手，优先使用项目 `.venv`。
 - `bash start.sh --check`：只检查，不启动。
 - `bash start.sh --external-agent`：网页使用独立部署的助手，不尝试启动助手。
 - `bash restart.sh`：原有服务器维护脚本，仅重启网页后端；独立助手保持运行。
-- `docker compose up --build -d`：Compose 分别管理网页和助手，默认安装 CPU 版 TalkNet。
+- `docker compose up --build -d`：Compose 分别管理网页和助手，默认安装 CPU 版 TalkNet，只发布到 `127.0.0.1`。
 - `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d`：GPU 部署；需支持 NVIDIA GPU 的容器运行环境。
 
 不要同时使用前台启动器和 `restart.sh` 管理同一个网页实例。长期部署应选择一个服务管理方式。
 独立助手使用 `CLIPTALK_AGENT_SERVICE_URL`；跨容器或跨主机时，双方必须配置相同的独立服务令牌。
 本机默认通过数据目录中的 `agent/service-token` 自动共享令牌。
 启动器只会复用健康且凭据匹配的本地助手，不会接管或终止其他进程。
+
+Compose 不会把宿主机 `.env` 整份注入容器，只传递明确列出的模型、资源和安全参数，因此本机 TalkNet 绝对路径或显卡编号不会覆盖镜像内配置。远程发布示例：
+
+```dotenv
+CLIPTALK_BIND_ADDRESS=0.0.0.0
+HIGHLIGHT_PORT=5180
+HIGHLIGHT_ACCESS_TOKEN=请替换为至少16字符的随机令牌
+```
+
+非回环发布地址缺少有效令牌时，容器会拒绝启动。默认 CPU 构建建议为 Docker 预留约 20 GiB，GPU 构建建议预留约 30 GiB（包括构建缓存）。
+
+## 更新、日志与备份
+
+```bash
+docker compose ps
+docker compose logs -f cliptalk agent
+docker compose down
+git pull --ff-only
+docker compose up --build -d
+```
+
+`docker compose down` 不会删除 `cliptalk-data` 命名卷；不要使用 `down -v`，除非明确要删除任务、模型配置和输出。升级前可将卷内容复制到备份目录，恢复时必须保持文件权限并同时恢复 `agent/service-token`。本机前台启动使用 `Ctrl+C` 停止，任务与输出仍保存在配置的数据目录中。
 
 ## TalkNet 默认安装
 

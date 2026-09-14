@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
+from .config import resolve_subtitle_font
 from .process_supervisor import process_supervisor
 
 from .editing_techniques import (
@@ -1488,7 +1489,7 @@ def render_composition(
             )
             text_path.write_text(rendered_text, encoding="utf-8")
             escaped_text_path = str(text_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            escaped_font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc".replace(":", "\\:")
+            escaped_font_path = str(resolve_subtitle_font()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             next_label = f"vsub{cue_index}"
             horizontal = str(layout.get("horizontal") or "center")
             vertical = str(layout.get("vertical") or "bottom")

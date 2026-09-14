@@ -132,6 +132,7 @@ from .api_schemas import (
     SubtitleStyleCommandRequest,
 )
 from .system_api import build_system_router
+from .setup_readiness import agent_probe_ready, build_setup_status, render_runtime_ready
 from .kept_api import build_kept_router
 from .kept_library import KeptLibraryService
 from .output_naming import apply_output_naming, build_output_naming
@@ -544,6 +545,17 @@ def agent_model_config() -> dict[str, Any]:
     if all(str(dedicated.get(key) or "").strip() for key in required):
         return {**dedicated, "configSource": "agent_settings"}
     fallback = llm_store.resolve()
+    if fallback.get("mode") == "reuse_vision":
+        visual = vision_store.resolve()
+        fallback = {
+            **fallback,
+            "provider": visual["provider"],
+            "protocol": visual.get("protocol") or "openai",
+            "apiKey": visual["apiKey"],
+            "model": visual["model"],
+            "baseUrl": visual["baseUrl"],
+            "thinkingType": visual["thinkingType"],
+        }
     if all(str(fallback.get(key) or "").strip() for key in required):
         return {**fallback, "configSource": "llm_fallback"}
     return {**dedicated, "configSource": "unconfigured"}
@@ -702,6 +714,8 @@ app.include_router(build_settings_router(
     llm_store=llm_store,
     agent_store=agent_model_store,
     agent_probe=lambda model: agent_platform.client.probe(model),
+    effective_agent_model=agent_model_config,
+    agent_probe_record=settings.data_root / "agent/agent-probe.json",
     allow_private_model_endpoints=settings.allow_private_model_endpoints,
 ))
 runtime_services = RuntimeServices.create(settings.maximum_workers)
@@ -21365,6 +21379,16 @@ def health() -> dict[str, Any]:
     )
 
 
+def setup_status() -> dict[str, Any]:
+    model = agent_model_config()
+    return build_setup_status(
+        health=health(),
+        agent_model=model,
+        probe_ready=agent_probe_ready(settings.data_root / "agent/agent-probe.json", model),
+        runtime_ready=render_runtime_ready(settings.ffmpeg, settings.ffprobe),
+    )
+
+
 def runtime_metrics() -> dict[str, Any]:
     with jobs_lock:
         job_statuses = [str(job.get("status") or "unknown") for job in jobs.values()]
@@ -36936,6 +36960,7 @@ app.include_router(build_system_router(
     runtime_metrics=runtime_metrics,
     classify_workflow_intent=classify_workflow_intent,
     local_capabilities=lambda: local_capabilities(settings, probe=True),
+    setup_status=setup_status,
 ))
 app.include_router(build_client_observability_router(
     report_client_error=report_client_error,

@@ -37,6 +37,16 @@ def service_ready(url: str, service: str) -> bool:
         return False
 
 
+def json_response(url: str, *, token: str = "") -> dict:
+    headers = {"X-Highlight-Token": token} if token else {}
+    try:
+        with urlopen(Request(url, headers=headers), timeout=2) as response:
+            value = json.load(response)
+            return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, URLError, HTTPError):
+        return {}
+
+
 def agent_matches_credentials(url: str, settings: Settings) -> bool:
     token = os.environ.get("CLIPTALK_AGENT_SERVICE_TOKEN", "").strip()
     if not token:
@@ -77,17 +87,28 @@ def main() -> int:
     parser.add_argument("--external-agent", action="store_true", help="不启动本地助手，使用已配置的独立服务")
     parser.add_argument("--check", action="store_true", help="只检查运行环境，不启动服务")
     args = parser.parse_args()
+    settings = Settings.from_environment()
     from tools.doctor import inspect_environment
     report = inspect_environment("visual")
     for check in report["checks"]:
         if check["status"] != "ok":
             print(f"{check['name']}：{check['detail']}", flush=True)
-    if not report["ready"]:
+    parsed_agent_url = urlparse(settings.agent_service_url.rstrip("/"))
+    managed_agent = (
+        not args.external_agent
+        and parsed_agent_url.scheme == "http"
+        and parsed_agent_url.hostname in {"localhost", "127.0.0.1"}
+        and parsed_agent_url.path in {"", "/"}
+    )
+    agent_dependency = ROOT / "agent-service/node_modules/@earendil-works/pi-coding-agent"
+    local_agent_missing = managed_agent and not agent_dependency.is_dir()
+    if local_agent_missing:
+        print("AI 助手依赖：未安装；请运行 python3 tools/setup.py。", flush=True)
+    if not report["ready"] or local_agent_missing:
         print("启动条件不满足，请先运行 python3 tools/setup.py。", file=sys.stderr)
         return 1
     if args.check:
         return 0
-    settings = Settings.from_environment()
     probe_host = "127.0.0.1" if settings.host in {"0.0.0.0", "::"} else settings.host
     if port_open(probe_host, settings.port):
         print(f"端口 {settings.port} 已被使用；不会停止或覆盖已有服务。", file=sys.stderr)
@@ -103,8 +124,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     try:
         agent_url = settings.agent_service_url.rstrip("/")
-        parsed = urlparse(agent_url)
-        managed = not args.external_agent and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"} and parsed.path in {"", "/"}
+        parsed = parsed_agent_url
+        managed = managed_agent
         if managed:
             port = parsed.port or 80
             if port_open(parsed.hostname, port):
@@ -138,7 +159,19 @@ def main() -> int:
             if any(process.poll() is not None for process in owned):
                 raise RuntimeError("服务已退出，正在停止本次启动的其他服务。请查看上方错误信息。")
             if not announced and service_ready(f"http://{probe_host}:{settings.port}/api/health", "cliptalk"):
-                print(f"ClipTalk 已就绪：http://{probe_host}:{settings.port}；按 Ctrl+C 停止。", flush=True)
+                base_url = f"http://{probe_host}:{settings.port}"
+                web_health = json_response(base_url + "/api/health")
+                agent_health = json_response(base_url + "/api/agent/health", token=settings.access_token)
+                configured = bool(
+                    (web_health.get("visionConfigured") or web_health.get("arkConfigured"))
+                    and web_health.get("llmConfigured")
+                    and (agent_health.get("model") or {}).get("configured")
+                )
+                if configured:
+                    print(f"ClipTalk 剪辑能力已就绪：{base_url}；按 Ctrl+C 停止。", flush=True)
+                else:
+                    print(f"ClipTalk 网页服务已启动：{base_url}", flush=True)
+                    print("首次配置尚未完成：请打开页面“设置”，按就绪清单配置并验证模型。", flush=True)
                 announced = True
             if not announced and time.monotonic() > deadline:
                 raise RuntimeError("网页服务启动超时，请检查日志和运行环境。")

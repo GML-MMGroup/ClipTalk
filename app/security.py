@@ -23,6 +23,7 @@ def is_loopback_bind_host(host: str) -> bool:
 
 def validate_deployment_access(
     host: str, access_token: str, *, allow_unauthenticated_remote: bool = False,
+    setting_name: str = "HIGHLIGHT_HOST",
 ) -> None:
     """Refuse an externally reachable bind without a meaningful bearer token."""
     if is_loopback_bind_host(host) or allow_unauthenticated_remote:
@@ -30,7 +31,7 @@ def validate_deployment_access(
     token = str(access_token or "").strip()
     if len(token) < 16:
         raise SecurityConfigurationError(
-            "HIGHLIGHT_HOST 不是本机回环地址时，必须配置至少 16 字符的 "
+            f"{setting_name} 不是本机回环地址时，必须配置至少 16 字符的 "
             "HIGHLIGHT_ACCESS_TOKEN"
         )
 

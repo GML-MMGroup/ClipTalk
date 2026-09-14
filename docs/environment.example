@@ -60,6 +60,10 @@ HIGHLIGHT_MAX_STORAGE_BYTES=53687091200
 HIGHLIGHT_RETENTION_DAYS=0
 # 非回环地址必须启用至少 16 字符的 API 访问令牌；浏览器会安全地提示输入
 HIGHLIGHT_ACCESS_TOKEN=
+# Docker 发布地址；非回环地址必须同时配置至少 16 字符的访问令牌
+CLIPTALK_BIND_ADDRESS=127.0.0.1
+# Compose 内部传入实际发布地址，普通用户不要手动设置
+CLIPTALK_PUBLISHED_BIND_ADDRESS=
 # 默认禁止模型接口指向本机、内网或云元数据地址；仅可信的本地模型部署可显式开启
 HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS=false
 # JSON 结构化日志级别：DEBUG、INFO、WARNING 或 ERROR
@@ -131,5 +135,7 @@ HIGHLIGHT_TALKNET_DEVICE=auto
 HIGHLIGHT_TALKNET_TIMEOUT_SECONDS=900
 FFMPEG_BIN=
 FFPROBE_BIN=
+# 留空时优先使用仓库自带的 Source Han Sans 字体，再回退系统文泉驿字体
+HIGHLIGHT_SUBTITLE_FONT=
 # Maximum concurrent text/vision model calls inside one content search (1-4).
 CONTENT_SEARCH_MODEL_CONCURRENCY=3

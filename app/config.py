@@ -9,6 +9,8 @@ from .security import validate_deployment_access
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BUNDLED_SUBTITLE_FONT = ROOT / "fonts/SourceHanSansSC-Bold.otf"
+SYSTEM_SUBTITLE_FONT = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
 
 
 def _local_path(name: str, default: Path) -> str:
@@ -20,6 +22,16 @@ def _local_path(name: str, default: Path) -> str:
 def _binary(name: str, executable: str) -> str:
     configured = os.environ.get(name, "").strip()
     return shutil.which(configured or executable) or configured or executable
+
+
+def resolve_subtitle_font() -> Path:
+    configured = os.environ.get("HIGHLIGHT_SUBTITLE_FONT", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        return (ROOT / candidate).resolve() if not candidate.is_absolute() else candidate
+    if BUNDLED_SUBTITLE_FONT.is_file():
+        return BUNDLED_SUBTITLE_FONT
+    return SYSTEM_SUBTITLE_FONT
 
 
 def load_env(path: Path = ROOT / ".env") -> None:
@@ -113,8 +125,10 @@ class Settings:
     anthropic_model: str
     host: str
     port: int
+    published_bind_address: str
     ffmpeg: str
     ffprobe: str
+    subtitle_font: Path
     maximum_upload_bytes: int
     maximum_workers: int
     content_search_model_concurrency: int
@@ -214,8 +228,10 @@ class Settings:
             # with HIGHLIGHT_ACCESS_TOKEN plus an HTTPS reverse proxy.
             host=os.environ.get("HIGHLIGHT_HOST", "127.0.0.1"),
             port=_positive_int("HIGHLIGHT_PORT", 5180),
+            published_bind_address=os.environ.get("CLIPTALK_PUBLISHED_BIND_ADDRESS", "").strip(),
             ffmpeg=_binary("FFMPEG_BIN", "ffmpeg"),
             ffprobe=_binary("FFPROBE_BIN", "ffprobe"),
+            subtitle_font=resolve_subtitle_font(),
             maximum_upload_bytes=_positive_int("HIGHLIGHT_MAX_UPLOAD_BYTES", 8 * 1024**3),
             maximum_workers=min(4, _positive_int("HIGHLIGHT_MAX_WORKERS", 1)),
             content_search_model_concurrency=_bounded_positive_int(
@@ -306,6 +322,12 @@ class Settings:
             self.host, self.access_token,
             allow_unauthenticated_remote=self.allow_unauthenticated_remote,
         )
+        if self.published_bind_address:
+            validate_deployment_access(
+                self.published_bind_address,
+                self.access_token,
+                setting_name="CLIPTALK_BIND_ADDRESS",
+            )
 
     def validate_vision(self) -> None:
         missing = [name for name, value in (

@@ -5,20 +5,40 @@ services:
       dockerfile: Dockerfile
       args:
         CLIPTALK_INSTALL_PROFILE: ${CLIPTALK_INSTALL_PROFILE:-cpu}
-    env_file:
-      - path: .env
-        required: false
     ports:
-      - "127.0.0.1:5180:5180"
+      - "${CLIPTALK_BIND_ADDRESS:-127.0.0.1}:${HIGHLIGHT_PORT:-5180}:5180"
     environment:
       HIGHLIGHT_HOST: 0.0.0.0
       HIGHLIGHT_PORT: 5180
       HIGHLIGHT_DATA_ROOT: /app/data
-      # The published port is loopback-only, so a clean local deployment does
-      # not need a login token. Set HIGHLIGHT_ACCESS_TOKEN before exposing the
-      # service through a reverse proxy or a non-loopback host port.
+      CLIPTALK_PUBLISHED_BIND_ADDRESS: ${CLIPTALK_BIND_ADDRESS:-127.0.0.1}
       HIGHLIGHT_ACCESS_TOKEN: ${HIGHLIGHT_ACCESS_TOKEN:-}
-      HIGHLIGHT_ALLOW_UNAUTHENTICATED_REMOTE: ${HIGHLIGHT_ALLOW_UNAUTHENTICATED_REMOTE:-true}
+      # Uvicorn must listen across the container network. The published bind
+      # address above is checked separately and refuses unsafe remote exposure.
+      HIGHLIGHT_ALLOW_UNAUTHENTICATED_REMOTE: "true"
+      HIGHLIGHT_MAX_WORKERS: ${HIGHLIGHT_MAX_WORKERS:-1}
+      HIGHLIGHT_MAX_UPLOAD_BYTES: ${HIGHLIGHT_MAX_UPLOAD_BYTES:-8589934592}
+      HIGHLIGHT_MAX_STORAGE_BYTES: ${HIGHLIGHT_MAX_STORAGE_BYTES:-53687091200}
+      HIGHLIGHT_RETENTION_DAYS: ${HIGHLIGHT_RETENTION_DAYS:-0}
+      HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS: ${HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS:-false}
+      HIGHLIGHT_ACTIVE_SPEAKER_MODE: ${HIGHLIGHT_ACTIVE_SPEAKER_MODE:-primary}
+      HIGHLIGHT_TALKNET_DEVICE: auto
+      VISION_PROVIDER: ${VISION_PROVIDER:-ark}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+      VISION_BASE_URL: ${VISION_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
+      AGENT_MODEL: ${AGENT_MODEL:-}
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_MODEL: ${ARK_MODEL:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       CLIPTALK_AGENT_SERVICE_URL: http://agent:5190
       # When empty, both services atomically share an auto-generated token from
       # the cliptalk-data volume.

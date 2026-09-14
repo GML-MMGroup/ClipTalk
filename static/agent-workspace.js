@@ -2030,6 +2030,7 @@
       $("#agentSettingsState").textContent = "已验证并保存";
       agentSettingsBaseline = agentSettingsSignature();
       global.showToast?.("Agent 模型已验证并保存", "success");
+      void global.refreshSetupReadiness?.();
     } catch (error) {
       if (error.name === "StaleWorkspaceError") return;
       $("#agentProbeStatus").textContent = error.message || "探测失败";

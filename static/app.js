@@ -8029,6 +8029,7 @@ async function prepareResumableUpload(file, onProgress, { creationSessionId = cu
 }
 
 async function createAgentJobFromBrief({ goal = "", skillId = "", executionMode = "autonomous_review" } = {}) {
+  if (!requireSetupCapability("agent")) return;
   if (!videoInput.files.length || actionBusy) return;
   const normalizedGoal = String(goal || "").trim();
   if (normalizedGoal.length < 5) {
@@ -8097,6 +8098,7 @@ async function createAgentJobFromBrief({ goal = "", skillId = "", executionMode 
 }
 
 async function createJobFromBrief({ allowDefaultHighlight = false, instructionOverride = null } = {}) {
+  if (!requireSetupCapability("create")) return;
   if (!videoInput.files.length || actionBusy) return;
   const createGeneration = workspaceGeneration;
   let taskMode = pendingCreateIntentMode || "auto";
@@ -8233,6 +8235,7 @@ async function createJobFromBrief({ allowDefaultHighlight = false, instructionOv
 }
 
 async function createVoiceDiscoveryJobFromUpload({ autoStart = false } = {}) {
+  if (!requireSetupCapability("create")) return;
   if (!videoInput.files.length || actionBusy) return;
   const createGeneration = workspaceGeneration;
   const file = videoInput.files[0];
@@ -8305,6 +8308,7 @@ async function createVoiceDiscoveryJobFromUpload({ autoStart = false } = {}) {
 }
 
 async function createPersonDiscoveryJobFromUpload() {
+  if (!requireSetupCapability("create")) return;
   if (!videoInput.files.length || actionBusy) return;
   const createGeneration = workspaceGeneration;
   const file = videoInput.files[0];
@@ -17050,6 +17054,8 @@ function submitComposer() {
   const agentWorkspace = Boolean(
     String(currentJob?.request?.entryWorkflow || "") === "agent" || currentJob?.agent?.workspaceId
   );
+  if (currentJob && agentWorkspace && !requireSetupCapability("agent")) return;
+  if (!currentJob && videoInput.files.length && !requireSetupCapability("create")) return;
   if (currentJob && pendingWorkflowSwitch) createSameSourceWorkflow(pendingWorkflowSwitch, chatInput?.value.trim() || "");
   else if (currentJob && agentWorkspace && window.ClipTalkAgentWorkspace?.submitGoal) {
     window.ClipTalkAgentWorkspace.submitGoal(chatInput?.value.trim() || "");
@@ -18238,6 +18244,69 @@ function openSettings() {
     loadLlmSettings();
   }
 }
+
+let setupReadinessState = null;
+let setupReadinessLoading = false;
+
+function renderSetupReadiness(state) {
+  setupReadinessState = state;
+  window.ClipTalkSetupStatus = state;
+  const root = $("#setupReadiness");
+  if (!root) return;
+  const title = $("#setupReadinessTitle");
+  const summary = $("#setupReadinessSummary");
+  if (title) title.textContent = state.complete ? "剪辑能力已就绪" : "完成以下设置后开始剪辑";
+  if (summary) summary.textContent = state.complete
+    ? "运行环境、模型和 Agent Tool Calling 均已验证。"
+    : state.canCreateTask ? "基础剪辑已可用；继续验证 Agent 后可使用完整对话工作流。" : "仍有必需配置未完成。";
+  const steps = $("#setupReadinessSteps");
+  if (steps) steps.innerHTML = (state.steps || []).map((item) => `
+    <li data-status="${escapeHtml(item.status || "required")}">
+      <button type="button" data-setup-action="${escapeHtml(item.action || "runtime")}">
+        <b>${escapeHtml(item.title || "待检查")}</b><small>${escapeHtml(item.detail || "")}</small>
+      </button>
+    </li>`).join("");
+  const agentStep = (state.steps || []).find((item) => item.id === "agent");
+  const plannerReady = (state.steps || []).some((item) => item.id === "planner" && item.status === "ready");
+  $("#probeEffectiveAgent")?.classList.toggle("hidden", agentStep?.status === "ready" || !plannerReady);
+}
+
+async function loadSetupReadiness({ autoOpen = false } = {}) {
+  if (setupReadinessLoading) return setupReadinessState;
+  setupReadinessLoading = true;
+  try {
+    const state = await api("/api/setup/status");
+    if (!Array.isArray(state?.steps) || typeof state.canCreateTask !== "boolean" || typeof state.canUseAgent !== "boolean") {
+      throw new Error("部署状态响应无效");
+    }
+    renderSetupReadiness(state);
+    if (autoOpen && !state.complete && !sessionStorage.getItem("cliptalk-setup-readiness-shown")) {
+      sessionStorage.setItem("cliptalk-setup-readiness-shown", "1");
+      openSettings();
+    }
+    return state;
+  } catch {
+    const title = $("#setupReadinessTitle");
+    if (title) title.textContent = "无法读取部署状态";
+    return null;
+  } finally {
+    setupReadinessLoading = false;
+  }
+}
+
+function requireSetupCapability(capability) {
+  if (!setupReadinessState) return true;
+  const allowed = capability === "agent" ? setupReadinessState.canUseAgent : setupReadinessState.canCreateTask;
+  if (allowed) return true;
+  openSettings();
+  const targetRole = capability === "agent" ? "agent" :
+    (setupReadinessState.steps || []).find((item) => ["vision", "planner"].includes(item.id) && item.status !== "ready")?.action || "vision";
+  if (["vision", "llm", "agent"].includes(targetRole)) setModelSettingsRole(targetRole);
+  showToast(capability === "agent" ? "请先验证 Agent 模型的 Tool Calling 能力" : "请先完成视觉分析和剪辑规划配置");
+  return false;
+}
+
+window.refreshSetupReadiness = loadSetupReadiness;
 
 function closeSettings() {
   $("#settingsPanel")?.classList.add("hidden");
@@ -19846,6 +19915,32 @@ $("#checkLocalCapabilities")?.addEventListener("click", async (event) => {
   }
 });
 
+$("#refreshSetupReadiness")?.addEventListener("click", () => loadSetupReadiness());
+$("#setupReadinessSteps")?.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-setup-action]")?.dataset.setupAction;
+  if (["vision", "llm", "agent"].includes(action)) setModelSettingsRole(action);
+  if (action === "runtime") {
+    const runtime = $("#settingsPanel .runtime-settings-summary");
+    if (runtime) runtime.open = true;
+  }
+});
+$("#probeEffectiveAgent")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "正在验证 Tool Calling…";
+  try {
+    await apiJson("/api/settings/agent/probe-effective", { method: "POST" });
+    showToast("当前模型已通过 Agent Tool Calling 验证", "success");
+    await loadSetupReadiness();
+  } catch (error) {
+    showToast(error.message || "Agent Tool Calling 验证失败");
+    setModelSettingsRole("agent");
+  } finally {
+    button.disabled = false;
+    button.textContent = "验证当前模型的 Tool Calling";
+  }
+});
+
 async function loadHealth() {
   if (document.hidden) return;
   try {
@@ -19869,6 +19964,7 @@ async function loadHealth() {
     if (settingsSpeech) settingsSpeech.textContent = `${health.senseVoiceModel || health.speechEngine} · ${speechStatus}`;
     const settingsSpeechDevice = $("#settingsSpeechDevice");
     if (settingsSpeechDevice) settingsSpeechDevice.textContent = health.speechDevice || "自动选择";
+    void loadSetupReadiness();
   } catch {
     ["#settingsModel", "#settingsLlmModel", "#settingsBackend", "#settingsFfmpeg", "#settingsSpeech", "#settingsSpeechDevice"].forEach((selector) => {
       const node = $(selector);
@@ -23587,6 +23683,7 @@ reviewMoreActions?.querySelectorAll("a, button").forEach((control) => {
 });
 
 loadHealth();
+loadSetupReadiness({ autoOpen: true });
 setInterval(loadHealth, 15000);
 clearInterval(elapsedTicker);
 elapsedTicker = setInterval(() => {

@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.config import Settings  # noqa: E402
+from app.config import Settings, resolve_subtitle_font  # noqa: E402
 from app.security import SecurityConfigurationError  # noqa: E402
 from app.local_capabilities import local_capabilities  # noqa: E402
 
@@ -52,9 +52,6 @@ RECOGNITION_MODULES = {
     "PaddleOCR": "paddleocr",
 }
 
-SUBTITLE_FONT = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
-
-
 def _result(name: str, status: str, detail: str) -> dict[str, str]:
     return {"name": name, "status": status, "detail": detail}
 
@@ -72,6 +69,20 @@ def _binary_version(binary: str) -> tuple[bool, str]:
     first_line = (completed.stdout or completed.stderr or "").splitlines()
     detail = first_line[0].strip() if first_line else str(resolved)
     return completed.returncode == 0, detail[:180]
+
+
+def _ffmpeg_feature(binary: str, flag: str, feature: str) -> tuple[bool, str]:
+    resolved = binary if Path(binary).is_file() else shutil.which(binary)
+    if not resolved:
+        return False, f"未找到 {binary}"
+    try:
+        completed = subprocess.run(
+            [resolved, "-hide_banner", flag], capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"无法检查：{error}"
+    available = completed.returncode == 0 and feature in (completed.stdout + completed.stderr)
+    return available, f"{feature} {'可用' if available else '不可用'}"
 
 
 def _writable_location(path: Path) -> tuple[bool, str]:
@@ -103,9 +114,16 @@ def inspect_environment(profile: str = "visual") -> dict[str, Any]:
     for label, binary in (("FFmpeg", settings.ffmpeg), ("FFprobe", settings.ffprobe)):
         ready, detail = _binary_version(binary)
         checks.append(_result(label, "ok" if ready else "blocker", detail))
+    for label, flag, feature in (
+        ("H.264 编码", "-encoders", "libx264"),
+        ("字幕渲染", "-filters", "drawtext"),
+    ):
+        ready, detail = _ffmpeg_feature(settings.ffmpeg, flag, feature)
+        checks.append(_result(label, "ok" if ready else "blocker", detail))
+    subtitle_font = resolve_subtitle_font()
     checks.append(_result(
-        "中文字幕字体", "ok" if SUBTITLE_FONT.is_file() else "blocker",
-        str(SUBTITLE_FONT) if SUBTITLE_FONT.is_file() else f"缺少 {SUBTITLE_FONT}（Debian/Ubuntu 包：fonts-wqy-zenhei）",
+        "中文字幕字体", "ok" if subtitle_font.is_file() else "blocker",
+        str(subtitle_font) if subtitle_font.is_file() else f"缺少字幕字体：{subtitle_font}",
     ))
 
     writable, detail = _writable_location(settings.data_root)

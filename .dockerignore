@@ -15,6 +15,7 @@ data
 local-artifacts
 assets
 benchmarks
+cest-video
 docs
 photo
 design
@@ -31,3 +32,5 @@ tmp
 *.webm
 *-preview.html
 readme-preview-assets
+fonts/*
+!fonts/SourceHanSansSC-Bold.otf

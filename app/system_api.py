@@ -12,6 +12,7 @@ def build_system_router(
     runtime_metrics: Callable[..., Any],
     classify_workflow_intent: Callable[..., Any] | None = None,
     local_capabilities: Callable[..., Any] | None = None,
+    setup_status: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """Own operational health and metrics endpoints."""
     router = APIRouter(prefix="/api", tags=["system"])
@@ -19,6 +20,8 @@ def build_system_router(
     router.add_api_route("/metrics", runtime_metrics, methods=["GET"])
     if local_capabilities is not None:
         router.add_api_route("/capabilities/local", local_capabilities, methods=["GET"])
+    if setup_status is not None:
+        router.add_api_route("/setup/status", setup_status, methods=["GET"])
     if classify_workflow_intent is not None:
         router.add_api_route("/workflow-intent/classify", classify_workflow_intent, methods=["POST"])
     return router

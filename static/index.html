@@ -627,6 +627,11 @@
     </aside>
     <section id="settingsPanel" class="settings-panel model-settings-panel app-settings-page hidden" aria-labelledby="settingsTitle">
       <header><div><small>系统设置</small><strong id="settingsTitle">设置</strong><p>管理画面分析、剪辑规划与运行环境。新模型配置用于之后创建的任务。</p></div><button id="closeSettings" type="button" aria-label="返回之前的页面">返回</button></header>
+      <section id="setupReadiness" class="setup-readiness" aria-labelledby="setupReadinessTitle">
+        <header><div><small>首次使用检查</small><strong id="setupReadinessTitle">正在检查剪辑能力</strong><p id="setupReadinessSummary">确认运行环境与模型配置后再开始任务。</p></div><button id="refreshSetupReadiness" type="button">重新检查</button></header>
+        <ol id="setupReadinessSteps" aria-live="polite"></ol>
+        <footer><button id="probeEffectiveAgent" type="button" class="hidden">验证当前模型的 Tool Calling</button><span>人物说话识别属于可选增强能力，不会阻断基础剪辑。</span></footer>
+      </section>
       <nav class="model-role-tabs" aria-label="模型职责">
         <button type="button" class="active" data-model-role="vision" aria-selected="true"><strong>视觉分析</strong><small>发现事件与镜头边界</small></button>
         <button type="button" data-model-role="llm" aria-selected="false"><strong>剪辑规划</strong><small>理解需求与编排成片</small></button>

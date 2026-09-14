@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from .ark_client import VisionRequestError, vision_provider_label
 from .security import SecurityConfigurationError, validate_public_http_endpoint
+from .setup_readiness import save_agent_probe
 from .vision_settings import (
     LLM_PROVIDER_DEFINITIONS,
     LlmConfigurationStore,
@@ -108,6 +110,8 @@ def build_settings_router(
     llm_store: LlmConfigurationStore,
     agent_store: LlmConfigurationStore | None = None,
     agent_probe: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    effective_agent_model: Callable[[], dict[str, Any]] | None = None,
+    agent_probe_record: Path | None = None,
     allow_private_model_endpoints: bool,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -322,11 +326,34 @@ def build_settings_router(
             provider_id, base_url, api_key = resolve_agent_request(request)
             resolved = agent_store.resolve(provider_id)
             try:
-                return agent_probe({
+                model = {
                     "provider": provider_id, "protocol": resolved.get("protocol") or "openai",
                     "apiKey": api_key, "model": request.model.strip(), "baseUrl": base_url,
                     "thinkingType": request.thinkingType.strip().lower(),
-                })
+                }
+                result = agent_probe(model)
+                if not result.get("toolCalling"):
+                    raise ValueError("模型未通过 Tool Calling 探测")
+                if agent_probe_record is not None:
+                    save_agent_probe(agent_probe_record, model, result)
+                return result
+            except Exception as error:
+                raise HTTPException(400, f"Agent Tool Calling 探测失败：{error}") from error
+
+        @router.post("/agent/probe-effective")
+        def probe_effective_agent_model() -> dict[str, Any]:
+            if agent_probe is None or effective_agent_model is None:
+                raise HTTPException(503, "Agent Tool Calling 探测服务不可用")
+            model = effective_agent_model()
+            if not all(str(model.get(key) or "").strip() for key in ("apiKey", "model", "baseUrl")):
+                raise HTTPException(400, "未找到可验证的 Agent 或剪辑规划模型")
+            try:
+                result = agent_probe(model)
+                if not result.get("toolCalling"):
+                    raise ValueError("当前模型不支持 Tool Calling")
+                if agent_probe_record is not None:
+                    save_agent_probe(agent_probe_record, model, result)
+                return result
             except Exception as error:
                 raise HTTPException(400, f"Agent Tool Calling 探测失败：{error}") from error
 
