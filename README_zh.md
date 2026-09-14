@@ -125,6 +125,8 @@ ClipTalk 可以直接把自然语言指令转换成具体的剪辑操作。
 
 ## 🚀 快速开始
 
+也可以将仓库交给 Codex、Claude Code 或 Gemini，并让其按照 [AI 辅助安装指南](docs/AI_INSTALL.md) 自动检查、安装和验证；Codex 会自动读取根目录 [AGENTS.md](AGENTS.md)。
+
 需要 Linux x86_64（Windows 可使用 WSL2）、Python 3.10–3.11、FFmpeg/ffprobe、curl 和中文字体。Debian/Ubuntu 可执行：
 
 ```bash

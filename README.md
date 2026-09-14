@@ -109,6 +109,8 @@ You can also refine the result through follow-up instructions such as *“make i
 
 ## 🚀 Quick Start
 
+Prefer AI-assisted setup? Give this repository to Codex, Claude Code, or Gemini and ask it to follow the [AI installation guide](docs/AI_INSTALL.md); Codex discovers the root [AGENTS.md](AGENTS.md) automatically.
+
 Requires Linux x86_64 (or WSL2), Python 3.10–3.11, FFmpeg/ffprobe, curl, and a CJK font. On Debian/Ubuntu:
 
 ```bash
