@@ -23,12 +23,12 @@ CORE_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "inspect_workspace", "description": "读取当前素材、任务状态和已有分析结果；也可在执行前核验当前任务是否具备所选 Skill 的必要成片或时间线", "sideEffect": "read", "parameters": {"type": "object", "properties": {"requiredState": {"type": "string"}, "preconditionCode": {"type": "string"}, "preconditionMessage": {"type": "string"}}, "additionalProperties": False}},
     {"name": "analyze_highlights", "description": "运行多模态高光分析并生成候选", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"instruction": {"type": "string"}, "targetSeconds": {"type": "number"}, "focus": {"type": "string"}}, "additionalProperties": False}},
     {"name": "search_content", "description": "根据语义、字幕和画面证据搜索内容片段", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}},
-    {"name": "review_content_evidence", "description": "请求用户审核并保存将用于组合的内容候选", "sideEffect": "review", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "minimumSelection": {"type": "integer"}}, "required": ["query"], "additionalProperties": False}},
+    {"name": "review_content_evidence", "description": "请求用户审核并保存将用于组合的内容候选", "sideEffect": "review", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "minimumSelection": {"type": "integer"}, "selectionPolicy": {"type": "string", "enum": ["all_reliable", "unique_or_review"]}}, "required": ["query"], "additionalProperties": False}},
     {"name": "discover_people", "description": "发现素材中的人物和出现区间", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "select_people", "description": "请求用户确认需要保留或排除的人物", "sideEffect": "identity", "parameters": {"type": "object", "properties": {"mode": {"type": "string"}, "description": {"type": "string"}}, "additionalProperties": False}},
     {"name": "discover_speakers", "description": "发现当前素材内的匿名说话人", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"expectedSpeakers": {"type": "integer"}}, "additionalProperties": False}},
     {"name": "select_speakers", "description": "请求用户确认说话人及保留方式", "sideEffect": "identity", "parameters": {"type": "object", "properties": {"mode": {"type": "string"}, "label": {"type": "string"}}, "additionalProperties": False}},
-    {"name": "propose_timeline_edit", "description": "根据已确认的证据建立一到四个可审阅、尚未应用的时间线修改", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"instruction": {"type": "string"}, "variantCount": {"type": "integer"}, "variantDirections": {"type": "array"}}, "required": ["instruction"], "additionalProperties": False}},
+    {"name": "propose_timeline_edit", "description": "根据已确认的证据建立一到四个可审阅、尚未应用的时间线修改", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"instruction": {"type": "string"}, "variantCount": {"type": "integer"}, "variantDirections": {"type": "array"}, "targetSeconds": {"type": "number"}, "toleranceSeconds": {"type": "number"}, "durationSource": {"type": "string"}, "anchorStartQuery": {"type": "string"}}, "required": ["instruction"], "additionalProperties": False}},
     {"name": "confirm_timeline_edit", "description": "请求用户审核并确认已应用的时间线修改", "sideEffect": "preview", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "prepare_subtitle_review", "description": "生成已确认时间线对应的可审阅字幕草稿；自动模式仅应用低风险校对并继续生成样片", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"style": {"type": "string"}, "requireConfirmedDraft": {"type": "boolean"}, "autoReview": {"type": "boolean"}}, "additionalProperties": False}},
     {"name": "render_review_preview", "description": "渲染带轻水印、低码率和审阅字幕的审核样片；不做正式导出", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"subtitleMode": {"type": "string"}}, "additionalProperties": False}},
@@ -535,6 +535,30 @@ class AgentPlatform:
         return max(0, round(float(match.group(1)))) if match else None
 
     @staticmethod
+    def _relative_duration_request(text: str) -> bool:
+        return bool(re.search(
+            r"(?:再短一点|再短些|更短(?:一点|些)?|稍微短(?:一点|些)?|"
+            r"再精简(?:一点|些)?|再紧凑(?:一点|些)?)",
+            str(text or ""),
+        ))
+
+    @staticmethod
+    def _anchor_start(text: str) -> dict[str, Any] | None:
+        match = re.search(
+            r"从\s*(?:讲到|讲|提到|介绍|说到|说)?\s*"
+            r"(.{1,100}?)(?:的地方|的位置|那里|那儿|处)?\s*"
+            r"(?:开始|起)(?:剪|保留|播放|做|生成|编辑)?",
+            str(text or ""),
+        )
+        if not match:
+            return None
+        query = str(match.group(1) or "").strip(" 　：:，,。；;")
+        query = re.sub(r"(?:的)?(?:部分|内容|片段|画面)$", "", query).strip()
+        if re.fullmatch(r"[\d\s:.：零一二三四五六七八九十百]+(?:秒|分钟|分)?", query):
+            return None
+        return {"query": query[:240], "selectionPolicy": "unique_or_review"} if query else None
+
+    @staticmethod
     def _editing_brief(goal: str, context: dict[str, Any]) -> dict[str, Any]:
         text = str(goal or "").strip()
         # Parse requested deliverables only from affirmative clauses. Artifact
@@ -550,13 +574,36 @@ class AgentPlatform:
         # (for example “upload this video, find X, then make several cuts”)
         # to semantic retrieval used to pollute the evidence query with
         # planning language and made every request look like the same edit.
-        retrieval_query = AgentPlatform._retrieval_query(text)
+        anchor_start = AgentPlatform._anchor_start(text)
+        retrieval_query = str((anchor_start or {}).get("query") or AgentPlatform._retrieval_query(text))
         source_range = AgentPlatform._source_range(text, context)
         excluded_clauses = re.findall(r"(?:不要|不保留|删除|去掉|排除|剔除|移除)([^，,。；;\n]+)", text)
         target_seconds, explicit_duration = AgentPlatform._duration_target(text)
         explicit_tolerance = AgentPlatform._duration_tolerance(text)
-        if target_seconds is None and isinstance(context.get("targetSeconds"), (int, float)):
+        relative_duration = target_seconds is None and AgentPlatform._relative_duration_request(text)
+        input_context = context.get("inputContext") if isinstance(context.get("inputContext"), dict) else {}
+        editing_context = context.get("editing") if isinstance(context.get("editing"), dict) else {}
+        current_duration = input_context.get("outputDurationSeconds")
+        current_duration_source = "referenced_output" if isinstance(current_duration, (int, float)) else ""
+        if not isinstance(current_duration, (int, float)):
+            current_duration = editing_context.get("currentDurationSeconds")
+            current_duration_source = str(editing_context.get("currentDurationSource") or "current_edit")
+        unresolved_relative_duration = bool(relative_duration and not (
+            isinstance(current_duration, (int, float)) and not isinstance(current_duration, bool)
+            and float(current_duration) > 0
+        ))
+        duration_source = "explicit" if explicit_duration else ""
+        if relative_duration and not unresolved_relative_duration:
+            target_seconds = max(4, round(float(current_duration) * .8))
+            explicit_duration = True
+            duration_source = "relative"
+        elif target_seconds is None and isinstance(context.get("targetSeconds"), (int, float)):
             target_seconds = int(context["targetSeconds"])
+            duration_source = "context"
+        if relative_duration:
+            # This is a timeline adjustment, not a request to search for the
+            # literal phrase “再短一点” inside the video.
+            retrieval_query = ""
         interview = bool(re.search(r"访谈|采访|问答|播客|证言", text))
         cover_intro_requested = bool(re.search(r"片头|(?:最)?开头.{0,30}封面|封面.{0,20}(?:放进|合入|加入|插入|作为开头)", affirmative_text))
         cover_intro_only_opening = bool(
@@ -583,7 +630,8 @@ class AgentPlatform:
         audio_polish_requested = bool(re.search(r"降噪|人声增强|声音增强|音频优化|音量|响度|爆音|削波|静音|背景音乐|混音|音乐压低", affirmative_text))
         broll_requested = bool(re.search(r"穿插|补充画面|补画面|覆盖画面|叠加画面|b-?roll|B-?roll|空镜|产品画面覆盖", affirmative_text, re.IGNORECASE))
         graphics_requested = bool(re.search(
-            r"标题卡|参数卡|价格|角标|标签|贴纸|水印|logo|Logo|CTA|关键词高亮|图文|文字(?!幕)层"
+            r"标题卡|参数卡|价格卡|报价卡|角标|标签|贴纸|水印|logo|Logo|CTA|关键词高亮|图文|文字(?!幕)层"
+            r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:价格|报价)"
             r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:文本|文字(?!幕)|文案|说明)",
             affirmative_text,
         ))
@@ -616,7 +664,7 @@ class AgentPlatform:
             retrieval_query or text,
         ))
         composition_requested = bool(re.search(
-            r"组合|合成|剪辑|成片|版本|合集|精华|整理(?:成|为)|做成|剪成|制作|编排|删除|去掉|排除|剔除|移除|只保留|重排|缩短|加速|返修",
+            r"组合|合成|剪辑|成片|版本|合集|精华|整理(?:成|为)|做成|剪成|剪出来|截出来|制作|编排|删除|去掉|排除|剔除|移除|只保留|重排|缩短|加速|返修",
             affirmative_text,
         ))
         cover_aspect = str(social_delivery.get("aspect") or "16:9")
@@ -695,7 +743,8 @@ class AgentPlatform:
         format_only = bool(social_delivery["requested"] and not retrieval_query)
         timeline_requested = bool(
             composition_requested or short_form or variants > 1 or target_seconds or subtitle_requested
-            or preview_requested or (social_delivery["requested"] and (retrieval_query or format_only))
+            or preview_requested or anchor_start
+            or (social_delivery["requested"] and (retrieval_query or format_only))
         )
         # A project output aspect is a delivery default, not a new editing
         # request. Apply it only when this goal already asks for a timeline;
@@ -714,6 +763,11 @@ class AgentPlatform:
             "inheritedContentConstraint": copy.deepcopy((context.get("evidence") or {}).get("contentConstraint"))
             if not retrieval_query and (timeline_requested or social_delivery.get("requested")) else None,
             "durationExplicit": explicit_duration,
+            "durationSource": duration_source or "none",
+            "relativeDurationBaseSeconds": round(float(current_duration), 3)
+            if relative_duration and not unresolved_relative_duration else None,
+            "relativeDurationBaseSource": current_duration_source if relative_duration else "",
+            "unresolvedRelativeDuration": unresolved_relative_duration,
             "durationToleranceSeconds": (
                 explicit_tolerance if explicit_tolerance is not None
                 else 15 if target_seconds == 180
@@ -732,6 +786,7 @@ class AgentPlatform:
             "shortForm": short_form,
             "specificContentTarget": bool(retrieval_query) or bool(re.search(r"围绕|关于|主题|观点|案例|演示|说过|讲到", text)),
             "retrievalQuery": retrieval_query,
+            "anchorStart": copy.deepcopy(anchor_start),
             # A cover supplements a video deliverable; it must never turn an
             # explicit short-video/edit request into a cover-only workflow.
             "delivery": "timeline" if timeline_requested else "artifact" if cover_requested else "candidates",
@@ -774,6 +829,12 @@ class AgentPlatform:
         # prefix.  Neither is evidence the video search should try to match.
         text = re.sub(r"(?:上传|从)\s*[^，,；;：:]{1,160}?\s*(?:，|,|；|;)?\s*(?:交给|让)?\s*(?:智能)?剪辑\s*Agent\s*[:：]?", "", text, flags=re.I)
         text = re.sub(r"(?:素材范围|范围)\s*[:：].*$", "", text, flags=re.I)
+        # A generic highlight request describes an editorial ranking task,
+        # not a semantic phrase that must literally occur in the media.
+        if re.search(r"最精彩的部分|精彩部分|高光(?:视频|成片|片段)?", text) and not re.search(
+            r"关于|围绕|介绍|讲解|讲到|提到|指定主题|找到|查找|搜索|检索|找出", text
+        ):
+            return ""
         enumerated = re.search(
             r"(?:分别(?:是|为)|包括|包含)\s*[:：]?\s*(.{2,160}?)(?=(?:[。！？!?；;]|每(?:个|段)|各(?:个|段)|$))",
             text,
@@ -782,7 +843,12 @@ class AgentPlatform:
             r"关于\s*(.{2,160}?)\s*的(?:回答|回应|发言|观点|内容)",
             text,
         )
-        match = enumerated or about_answer or re.search(
+        natural_extract = re.search(
+            r"(?:把|将)?\s*((?:介绍|讲解|讲到|提到|讨论|说到).{1,120}?)"
+            r"(?:的)?(?:部分|片段|内容|画面)?\s*(?:剪出来|截出来|提取出来|保留下来)(?:[。！？!?,，]|$)",
+            text,
+        )
+        match = enumerated or about_answer or natural_extract or re.search(
             r"(?:(?:只\s*)?(?:找出|找到|查找|搜索|检索|定位|提取|截取)(?:并列出)?\s*[:：]?\s*|^(?:只保留|保留)\s*[:：]?\s*)"
             r"(.{2,160}?)(?=(?:[，,；;。！？!?]|并(?:且|做|生成|给|合成|剪辑|制作|组合|删除|去掉|排除)?|然后|随后|再|做成|剪成|制作|组合|合成)|$)",
             text,
@@ -1431,6 +1497,10 @@ class AgentPlatform:
                         "不使用画面或屏幕文字作为主题证据"
                     )[:500]
                     review_query = "访谈完整回答和必要问题上下文"
+            if brief.get("anchorStart") and re.search(
+                r"从\s*(?:讲到|讲|提到|介绍|说到|说)", str(brief.get("goal") or "")
+            ) and not re.search(r"画面|屏幕|镜头|字幕|文字|出现|展示", str(brief.get("goal") or "")):
+                search_query = f"仅根据对白检索：{brief['anchorStart']['query']}；定位相关发言，不使用画面或屏幕文字作为证据"
             add(
                 "search_content",
                 "检索目标内容" if not needs_timeline else "提取剪辑证据",
@@ -1442,10 +1512,17 @@ class AgentPlatform:
                 "reason": f"从任务描述中抽取检索目标“{search_query[:80]}”",
             })
             if needs_timeline and bool(brief.get("requiresEvidenceReview")):
+                review_arguments: dict[str, Any] = {
+                    "query": review_query[:500], "minimumSelection": 1,
+                }
+                if brief.get("anchorStart"):
+                    review_arguments["selectionPolicy"] = "unique_or_review"
                 add(
                     "review_content_evidence",
-                    "自动筛选用于组合的候选片段" if mode == AUTONOMOUS_REVIEW else "确认用于组合的候选片段",
-                    {"query": review_query[:500], "minimumSelection": 1},
+                    "核定起剪位置" if brief.get("anchorStart") else
+                    "自动筛选用于组合的候选片段" if mode == AUTONOMOUS_REVIEW else
+                    "确认用于组合的候选片段",
+                    review_arguments,
                     (
                         "Agent 自动选定的候选片段及其排列范围"
                         if mode == AUTONOMOUS_REVIEW else "用户确认的候选片段及其排列范围"
@@ -1453,7 +1530,8 @@ class AgentPlatform:
                 )
                 decision.append({
                     "rule": "evidence_review",
-                    "outcome": "auto_select" if mode == AUTONOMOUS_REVIEW else "confirm",
+                    "outcome": "unique_or_review" if brief.get("anchorStart") else
+                    "auto_select" if mode == AUTONOMOUS_REVIEW else "confirm",
                     "reason": (
                         "自动模式由 Agent 依据有效证据筛选并保存候选"
                         if mode == AUTONOMOUS_REVIEW else "用户同时要求检索与组合成片，需先审核候选"
@@ -1539,6 +1617,12 @@ class AgentPlatform:
         instruction = str(brief["goal"] or strategy.get("timelineInstruction") or "")
         if brief["targetSeconds"]:
             instruction = f"{instruction}；目标 {brief['targetSeconds']} 秒，允许浮动 ±{brief['durationToleranceSeconds']} 秒"
+        if brief.get("anchorStart"):
+            anchor_query = str(brief["anchorStart"].get("query") or "")
+            instruction = (
+                f"{instruction}；以已核定的“{anchor_query}”匹配片段作为新时间线起点，"
+                "移除此前内容，保留后续可用编辑内容"
+            )
         if kind == "shortform":
             instruction = f"{instruction}；前 1–3 秒必须进入明确 Hook，保留完整观点或动作，不使用片头、空白铺垫或重复表达"
         if needs_timeline:
@@ -1553,6 +1637,16 @@ class AgentPlatform:
             timeline_arguments: dict[str, Any] = {
                 "instruction": instruction[:500], "variantCount": requested_variants,
             }
+            if brief.get("targetSeconds") is not None:
+                timeline_arguments.update({
+                    "targetSeconds": float(brief["targetSeconds"]),
+                    "toleranceSeconds": float(brief["durationToleranceSeconds"]),
+                    "durationSource": str(brief.get("durationSource") or "explicit"),
+                })
+            if brief.get("anchorStart"):
+                timeline_arguments["anchorStartQuery"] = str(
+                    brief["anchorStart"].get("query") or ""
+                )[:240]
             if brief.get("distinctSourceAcrossVariants"):
                 timeline_arguments["distinctSourceAcrossVariants"] = True
             variant_directions = [str(item)[:240] for item in strategy.get("variantDirections") or []][:requested_variants]
@@ -1765,7 +1859,7 @@ class AgentPlatform:
                 if requested_variants > 1 else "先确认片段，再安排播放顺序。"
             )
             delivery_clause = (
-                f"画幅为 {social.get('aspect')}。"
+                f"随后自动生成 {social.get('aspect')} 社媒审核预览并质检。"
                 if bool(social.get("requested")) and mode == AUTONOMOUS_REVIEW else
                 f"确认后生成 {social.get('aspect')} 预览。"
                 if bool(social.get("requested")) else ""
@@ -1871,10 +1965,17 @@ class AgentPlatform:
         if not eligible:
             raise ValueError("当前没有满足素材前置条件的 Skill；请先生成或选择一个可审核成片")
         editing = context.get("editing") if isinstance(context.get("editing"), dict) else {}
-        source_edit_requested = bool(brief.get("retrievalQuery")) and str(brief.get("delivery") or "") == "timeline"
-        revision_requested = bool(editing.get("hasActiveSession") or editing.get("hasOutputs")) and bool(re.search(
-            r"当前成片|已有成片|时间线|二次精剪|返修|重排|缩短|恢复|加字幕|添加文本|添加文字|加文字|叠加文字", str(goal or ""),
-        ))
+        source_edit_requested = str(brief.get("delivery") or "") == "timeline" and bool(
+            brief.get("retrievalQuery") or re.search(r"高光|最精彩|精彩部分", str(goal or ""))
+        )
+        revision_requested = bool(editing.get("hasActiveSession") or editing.get("hasOutputs")) and bool(
+            brief.get("durationSource") == "relative"
+            or brief.get("anchorStart")
+            or re.search(
+                r"当前成片|已有成片|时间线|二次精剪|返修|重排|缩短|恢复|加字幕|添加文本|添加文字|加文字|叠加文字",
+                str(goal or ""),
+            )
+        )
         preferred_kind = ""
         if bool(brief.get("diagnosticsRequested")):
             preferred_kind = "edit-diagnostics"
@@ -1883,6 +1984,8 @@ class AgentPlatform:
             and re.search(r"检查|核查|校验|验证|排查|是否|有没有|误用|串用", str(goal or ""))
         ):
             preferred_kind = "source-provenance"
+        elif revision_requested and (brief.get("durationSource") == "relative" or brief.get("anchorStart")):
+            preferred_kind = "revision"
         elif bool(brief.get("draftExportRequested")) and not source_edit_requested:
             preferred_kind = "local-draft"
         elif bool(brief.get("motionGraphicsRequested")) and not source_edit_requested:
@@ -2017,6 +2120,8 @@ class AgentPlatform:
         planning_brief = self._editing_brief(goal, {})
         planning_surface = "editor" if (
             str(planning_brief.get("delivery") or "") == "timeline"
+            or bool(planning_brief.get("anchorStart"))
+            or bool(planning_brief.get("durationSource") == "relative")
             or bool(re.search(
                 r"当前成片|已有成片|时间线|二次精剪|返修|重排|缩短|恢复|加字幕|添加文本|添加文字|加文字|叠加文字",
                 str(goal or ""),
@@ -2049,6 +2154,8 @@ class AgentPlatform:
             if len(ranges) == 1:
                 planning_context.update({"sourceScope": "custom", "sourceRange": ranges[0]})
             brief = self._editing_brief(goal, planning_context)
+            if brief.get("unresolvedRelativeDuration"):
+                raise ValueError("找不到当前成片的可用时长，无法理解“再短一点”。请先选择一个成片版本，或直接说明目标秒数。")
             skill = self._enabled_skill(skill_id) if skill_id else self.route_skill(goal, planning_context=planning_context)
             eligible, reason = self._skill_routing_eligibility(skill, brief=brief, context=planning_context)
             # An explicitly selected Skill is allowed to produce a structured

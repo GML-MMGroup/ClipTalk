@@ -21,6 +21,43 @@ class VisionRequestError(RuntimeError):
 ArkRequestError = VisionRequestError
 
 
+class JsonResponseError(VisionRequestError):
+    """A response that must be regenerated rather than treated as evidence."""
+
+
+JSON_RETRY_INSTRUCTION = (
+    "上一条响应不是完整有效的 JSON 对象。请重新检查原始素材并返回完整 JSON，"
+    "不要 Markdown 或解释。字符串内的双引号必须转义，字段间必须有逗号，"
+    "数组和对象必须闭合。保持原要求的字段和证据，不要凭空补充时间或候选；"
+    "精简说明文字以确保响应完整。"
+)
+
+
+def _remove_trailing_json_commas(value: str) -> str:
+    # Only remove punctuation outside strings. Never invent missing fields,
+    # quotes, timestamps or closing braces in a truncated model response.
+    result = []
+    in_string = escaped = False
+    for index, char in enumerate(value):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == ",":
+            following = index + 1
+            while following < len(value) and value[following].isspace():
+                following += 1
+            if following < len(value) and value[following] in "}]":
+                continue
+        result.append(char)
+    return "".join(result)
+
+
 @runtime_checkable
 class VisionModelClient(Protocol):
     """Small provider-neutral contract used by the highlight pipeline."""
@@ -70,11 +107,11 @@ def parse_json_object(text: str) -> dict[str, Any]:
         # Vision models occasionally put a literal newline/tab inside a JSON
         # string even when explicitly asked for JSON. Python's non-strict mode
         # accepts those control characters without weakening structural checks.
-        parsed = json.loads(value, strict=False)
+        parsed = json.loads(_remove_trailing_json_commas(value), strict=False)
     except json.JSONDecodeError as error:
-        raise ArkRequestError(f"视觉模型没有返回合法 JSON：{error}", retryable=True) from error
+        raise JsonResponseError(f"视觉模型没有返回合法 JSON：{error}", retryable=True) from error
     if not isinstance(parsed, dict):
-        raise ArkRequestError("视觉模型返回值必须是 JSON 对象")
+        raise JsonResponseError("视觉模型返回值必须是 JSON 对象", retryable=True)
     return parsed
 
 
@@ -214,6 +251,8 @@ class OpenAICompatibleVisionClient:
                         )
                     raise ArkRequestError(f"{self.provider_name}请求失败（HTTP {response.status_code}）：{detail}")
                 body = response.json()
+                if (body.get("choices") or [{}])[0].get("finish_reason") == "length":
+                    raise JsonResponseError("视觉模型响应达到长度上限，JSON 可能不完整", retryable=True)
                 message = body.get("choices", [{}])[0].get("message", {})
                 answer = message.get("content", "")
                 if isinstance(answer, list):
@@ -225,6 +264,9 @@ class OpenAICompatibleVisionClient:
                 return parsed
             except ArkRequestError as error:
                 last_error = error
+                if isinstance(error, JsonResponseError) and attempt == 0:
+                    payload["messages"].append({"role": "user", "content": JSON_RETRY_INSTRUCTION})
+                    payload["max_tokens"] = max(maximum_tokens, min(16384, maximum_tokens * 2))
                 if self._cancelled.is_set():
                     raise ArkRequestError(f"{self.provider_name}请求已取消") from error
                 if not error.retryable or attempt == 1:
@@ -364,6 +406,8 @@ class AnthropicCompatibleClient:
                         raise ArkRequestError(f"Anthropic 兼容接口暂时不可用（HTTP {response.status_code}）：{detail}", retryable=True)
                     raise ArkRequestError(f"Anthropic 兼容接口请求失败（HTTP {response.status_code}）：{detail}")
                 body = response.json()
+                if body.get("stop_reason") == "max_tokens":
+                    raise JsonResponseError("视觉模型响应达到长度上限，JSON 可能不完整", retryable=True)
                 content = body.get("content", [])
                 answer = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
                 if not answer.strip():
@@ -373,6 +417,9 @@ class AnthropicCompatibleClient:
                 return parsed
             except ArkRequestError as error:
                 last_error = error
+                if isinstance(error, JsonResponseError) and attempt == 0:
+                    payload["messages"].append({"role": "user", "content": JSON_RETRY_INSTRUCTION})
+                    payload["max_tokens"] = max(maximum_tokens, min(16384, maximum_tokens * 2))
                 if self._cancelled.is_set():
                     raise ArkRequestError("Anthropic 兼容接口请求已取消") from error
                 if not error.retryable or attempt == 1:

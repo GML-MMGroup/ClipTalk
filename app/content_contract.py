@@ -96,6 +96,37 @@ def finite(value: Any) -> float | None:
         return None
 
 
+def speech_verification_evidence(transcript: list[dict], left: float, right: float) -> dict:
+    """Keep dialogue context separate from admissible clip boundaries.
+
+    Compact full utterances instead of slicing serialized word-level JSON,
+    which can lose the question or even end in an incomplete JSON object.
+    """
+    local, context = [], []
+    for segment in transcript:
+        if not isinstance(segment, dict):
+            continue
+        start, end = finite(segment.get("start")), finite(segment.get("end"))
+        if start is None or end is None or end <= start:
+            continue
+        row = {key: segment[key] for key in ("start", "end", "text", "speaker") if key in segment}
+        if end >= left and start <= right:
+            local.append(row)
+        elif end >= left - 30 and start <= right + 30:
+            context.append(row)
+    # Bound model input without silently dropping local evidence.
+    if len(local) > 200 or sum(len(str(row.get("text") or "")) for row in local) > 16000:
+        raise ValueError("speech_verification_evidence_budget_exceeded")
+    context.sort(key=lambda row: min(abs(row["end"] - left), abs(row["start"] - right)))
+    nearby, remaining = [], 6000
+    for row in context[:60]:
+        size = len(str(row.get("text") or ""))
+        if size <= remaining:
+            nearby.append(row)
+            remaining -= size
+    return {"local": local, "contextOnly": sorted(nearby, key=lambda row: row["start"])}
+
+
 def verification_current(match: dict, contract: dict) -> bool:
     if contract.get("strategy") == "selection_union":
         contract = match.get("sourceContentContract") or {}

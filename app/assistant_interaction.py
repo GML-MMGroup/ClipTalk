@@ -20,7 +20,13 @@ def message_intent(text: str) -> str:
         return "answer"
     if re.search(r"不对|不相关|无关|错了|不符合|有问题", value):
         return "feedback"
-    if re.search(r"剪|找|检索|搜索|合成|合并|生成|改|调整|删除|去掉|不要|保留|添加|字幕|导出|竖屏|横屏|方屏|封面|缩短|重排|edit|find|merge|remove|change", value, re.I):
+    if re.search(
+        r"剪|找|检索|搜索|合成|合并|生成|改|调整|删除|去掉|不要|保留|添加|字幕|导出|竖屏|横屏|方屏|封面|缩短|重排|"
+        r"再短一点|再短些|更短(?:一点|些)?|稍微短(?:一点|些)?|再精简|再紧凑|"
+        r"从.{1,80}(?:开始|开始剪|起剪)|edit|find|merge|remove|change",
+        value,
+        re.I,
+    ):
         return "edit"
     return "clarification"
 
@@ -81,6 +87,11 @@ def freeze_context(job: dict, ui: dict, *, read_only: bool = False) -> dict:
         if reframe.get("aspect"):
             frozen["outputAspect"] = reframe["aspect"]
             frozen["outputFit"] = reframe.get("fit", "blur")
+        output_duration = output.get("duration")
+        if not isinstance(output_duration, (int, float)) and session:
+            output_duration = session.get("duration")
+        if isinstance(output_duration, (int, float)) and float(output_duration) > 0:
+            frozen["outputDurationSeconds"] = round(float(output_duration), 3)
     ranges = ui.get("timelineSelections") or ([ui["timelineSelection"]] if ui.get("timelineSelection") else [])
     if ranges:
         if not isinstance(ranges, list) or any(not isinstance(x, dict) for x in ranges):
@@ -129,8 +140,10 @@ def revised_goal(original: str, revision: str) -> str:
         base = re.sub(r"竖屏|横屏|方屏|\d+:\d+", "", base)
     if re.search(r"字幕", revision):
         base = re.sub(r"(?:不要|不添加|添加|加|保留|生成)?\s*(?:AI\s*)?字幕", "", base)
-    if re.search(r"\d+\s*(?:秒|分钟)", revision):
-        base = re.sub(r"\d+\s*(?:秒|分钟)", "", base)
+    if re.search(r"\d+\s*(?:秒|分钟)", revision) or re.search(
+        r"再短一点|再短些|更短|再精简|再紧凑", revision
+    ):
+        base = re.sub(r"\d+(?:\.\d+)?\s*(?:秒|分钟)", "", base)
     return f"{revision}。保留其余要求：{base}"[:4000]
 
 
@@ -266,6 +279,10 @@ class AssistantInteraction:
                             raise ValueError("后台操作尚未确认停止，暂不创建新方案；请等待停止完成")
                     frozen = freeze_context(job, ui)
                     new_search = bool(re.search(r"找出|找到|查找|搜索|检索|重新找|\bfind\b|\bsearch\b", text, re.I))
+                    if re.search(r"从.{1,80}(?:开始|起剪)", text):
+                        # The anchor search produces a fresh selection while
+                        # the referenced output remains the base for revision.
+                        frozen.pop("contentSelection", None)
                     if new_search:
                         # Old candidates are context, not the output selection
                         # of a newly requested search.
@@ -301,7 +318,12 @@ class AssistantInteraction:
                     else:
                         replaces = active["id"] if active else None
                         goal = revised_goal(active["goal"], text) if active else text
-                        if not active and not new_search and re.search(r"改|调整|不要|删除|去掉|缩短|重排", text) and (job.get("activeEditSessionId") or output_references(job)):
+                        if not active and not new_search and re.search(
+                            r"改|调整|不要|删除|去掉|缩短|重排|"
+                            r"再短一点|再短些|更短(?:一点|些)?|稍微短(?:一点|些)?|再精简|再紧凑|"
+                            r"从.{1,80}(?:开始|开始剪|起剪)",
+                            text,
+                        ) and (job.get("activeEditSessionId") or output_references(job)):
                             goal = f"修改当前成片：{text}"
                         new_plan = self.platform.create_plan(
                             workspace_id=workspace_id, goal=goal, skill_id=request.get("skillId"),
