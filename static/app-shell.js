@@ -142,6 +142,37 @@
     };
   }
 
+  function taskArtworkMarkup(job) {
+    const output = job?.primaryOutput && typeof job.primaryOutput === "object" ? job.primaryOutput : null;
+    const sourceUrl = String(job?.thumbnailUrl || (job?.id ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail` : ""));
+    const coverUrl = String(output?.coverUrl || "");
+    const artworkUrl = coverUrl || sourceUrl;
+    if (!artworkUrl) return "";
+    const version = output ? `V${String(Number(output.versionNumber || 1)).padStart(2, "0")}` : "素材";
+    const description = coverUrl
+      ? `${output?.displayTitle || "当前成片"}的绑定封面`
+      : output ? `${output.displayTitle || "当前成片"}尚未设置封面，显示素材画面` : "任务素材画面";
+    return `<span class="shell-task-media" data-artwork-kind="${coverUrl ? "output-cover" : "source-thumbnail"}" title="${escapeHtml(description)}"><img src="${escapeHtml(artworkUrl)}"${coverUrl && sourceUrl ? ` data-artwork-fallback="${escapeHtml(sourceUrl)}"` : ""} data-task-artwork alt="${escapeHtml(description)}" loading="lazy"><b>${escapeHtml(version)}</b></span>`;
+  }
+
+  function wireTaskArtwork(root) {
+    $$('[data-task-artwork]', root).forEach((image) => {
+      image.addEventListener("error", () => {
+        const fallback = String(image.dataset.artworkFallback || "");
+        if (fallback && image.src !== new URL(fallback, location.href).href) {
+          image.removeAttribute("data-artwork-fallback");
+          image.closest(".shell-task-media")?.setAttribute("data-artwork-kind", "source-thumbnail");
+          const badge = image.closest(".shell-task-media")?.querySelector("b");
+          if (badge) badge.textContent = "素材";
+          image.src = fallback;
+          return;
+        }
+        image.hidden = true;
+        image.closest(".shell-task-media")?.setAttribute("data-artwork-kind", "unavailable");
+      });
+    });
+  }
+
   function taskCard(job, { home = false, deletable = true } = {}) {
     const group = statusGroup(job);
     const workflow = String(job?.request?.entryWorkflow || "") === "agent"
@@ -149,13 +180,17 @@
     const current = String(window.ClipTalkCurrentJobId?.() || "") === String(job?.id || "");
     const display = taskDisplayName(job);
     const updated = formatDate(job?.updatedAt || job?.createdAt).replace("保存时间未知", "更新时间未知");
+    const output = job?.primaryOutput && typeof job.primaryOutput === "object" ? job.primaryOutput : null;
+    const versionLabel = output ? `V${String(Number(output.versionNumber || 1)).padStart(2, "0")}` : "";
+    const outputLabel = output ? ` · ${versionLabel} ${output.coverUrl ? "封面已绑定" : "使用素材画面"}` : "";
     const historyIds = (job.executionHistory || []).map((record) => String(record?.id || "")).filter(Boolean);
     const deleteLabel = historyIds.length ? `删除任务及 ${historyIds.length} 条历史记录` : "删除任务";
     return `<article class="shell-task-card${current ? " is-current" : ""}${home ? " home-shell-task" : ""}" data-shell-job="${escapeHtml(job?.id)}" data-status-group="${group}">
       ${deletable && taskCanDelete(job) ? `<details class="shell-task-menu"><summary aria-label="${escapeHtml(`${display.title}的任务操作`)}" title="任务操作">•••</summary><div><button type="button" data-shell-delete="${escapeHtml(job?.id)}" data-shell-delete-related="${escapeHtml(historyIds.join(","))}">${escapeHtml(deleteLabel)}</button></div></details>` : ""}
-      <button class="shell-task-open" type="button" data-shell-open="${escapeHtml(job?.openJobId || job?.id)}">
+      <button class="shell-task-open" type="button" data-shell-open="${escapeHtml(job?.openJobId || job?.id)}"${output?.filename ? ` data-shell-output="${escapeHtml(output.filename)}"` : ""}>
+        ${home ? taskArtworkMarkup(job) : ""}
         <span class="shell-task-heading"><strong title="${escapeHtml(display.title)}">${escapeHtml(display.title)}</strong><b class="shell-task-state">${escapeHtml(taskStateLabel(group))}</b></span>
-        <small>${escapeHtml(workflow)} · ${escapeHtml(display.filename)}${current ? " · 当前任务" : ""}</small>
+        <small>${escapeHtml(workflow)} · ${escapeHtml(display.filename)}${escapeHtml(outputLabel)}${current ? " · 当前任务" : ""}</small>
         <span class="shell-task-detail" title="${escapeHtml(statusText(job))}">${escapeHtml(statusText(job))}</span>
         <span class="shell-task-foot"><time>${escapeHtml(updated)}</time>${taskProgressMarkup(job)}</span>
       </button>
@@ -238,6 +273,7 @@
     root.innerHTML = actionJobs.length || savedJobs.length
       ? `${actionJobs.length ? `<section class="home-task-section"><header><strong>需要处理</strong><span>${actionJobs.length}</span></header><div>${actionJobs.map((job) => taskCard(job, { home: true })).join("")}</div></section>` : ""}${savedJobs.length ? `<section class="home-task-section"><header><strong>最近任务</strong><span>${savedJobs.length}</span></header><div>${savedJobs.map((job) => taskCard(job, { home: true })).join("")}</div></section>` : ""}`
       : `<div class="home-current-empty"><div><strong>当前没有处理中的任务</strong><span>创建新任务后，进行中和待确认的内容会显示在这里。</span></div></div>`;
+    wireTaskArtwork(root);
     renderNavigationBadges();
   }
 
@@ -362,8 +398,8 @@
       const version = Number(item.versionNumber || 1);
       const size = Number(item.sizeBytes || 0) / 1024 / 1024;
       return `<article class="app-library-item${index === 0 ? " featured" : ""}" data-library-key="${escapeHtml(`${item.jobId}/${item.filename}`)}">
-        <div class="app-library-media"><video src="${escapeHtml(item.videoUrl)}" preload="metadata" muted playsinline aria-label="${escapeHtml(title)}预览"></video><span>${escapeHtml(formatDuration(item.duration))}</span></div>
-        <div class="app-library-copy"><small>V${String(version).padStart(2, "0")} · ${item.kept ? "已长期保留" : "成片"}</small><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong><p>${item.sourceTaskAvailable ? "来自任务" : "原任务已清理"}：${escapeHtml(item.sourceFilename || "原视频")}</p><div class="app-library-meta"><span>${escapeHtml(formatDuration(item.duration))}</span><span>${escapeHtml(formatDate(item.createdAt || item.keptAt))}</span>${size ? `<span>${size.toFixed(1)} MB</span>` : ""}</div><div class="app-library-actions"><button class="primary" type="button" data-library-play>播放</button><a href="${escapeHtml(item.downloadUrl)}" download="${escapeHtml(item.downloadFilename || item.filename)}">下载 MP4</a>${item.sourceTaskAvailable ? `<button type="button" data-library-task="${escapeHtml(item.jobId)}" data-library-output="${escapeHtml(item.filename)}">返回任务</button>` : ""}<details><summary>更多</summary><div>${item.kept ? `<button class="danger" type="button" data-library-remove="${escapeHtml(`${item.jobId}/${item.filename}`)}">${item.sourceFileAvailable ? "取消长期保留" : "删除独立副本"}</button>` : item.canKeep ? `<button type="button" data-library-keep="${escapeHtml(`${item.jobId}/${item.filename}`)}">长期保留</button>` : "<span>暂无其他操作</span>"}</div></details></div></div>
+        <div class="app-library-media" data-cover-bound="${item.coverUrl ? "true" : "false"}"><video src="${escapeHtml(item.videoUrl)}"${item.coverUrl ? ` poster="${escapeHtml(item.coverUrl)}"` : ""} preload="metadata" muted playsinline aria-label="${escapeHtml(title)}预览"></video><span>${escapeHtml(formatDuration(item.duration))}</span></div>
+        <div class="app-library-copy"><small>V${String(version).padStart(2, "0")} · ${item.kept ? "已长期保留" : "成片"}${item.coverUrl ? " · 封面已绑定" : ""}</small><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong><p>${item.sourceTaskAvailable ? "来自任务" : "原任务已清理"}：${escapeHtml(item.sourceFilename || "原视频")}</p><div class="app-library-meta"><span>${escapeHtml(formatDuration(item.duration))}</span><span>${escapeHtml(formatDate(item.createdAt || item.keptAt))}</span>${size ? `<span>${size.toFixed(1)} MB</span>` : ""}</div><div class="app-library-actions"><button class="primary" type="button" data-library-play>播放</button><a href="${escapeHtml(item.downloadUrl)}" download="${escapeHtml(item.downloadFilename || item.filename)}">下载 MP4</a>${item.sourceTaskAvailable ? `<button type="button" data-library-task="${escapeHtml(item.jobId)}" data-library-output="${escapeHtml(item.filename)}">返回任务</button>` : ""}<details><summary>更多</summary><div>${item.kept ? `<button class="danger" type="button" data-library-remove="${escapeHtml(`${item.jobId}/${item.filename}`)}">${item.sourceFileAvailable ? "取消长期保留" : "删除独立副本"}</button>` : item.canKeep ? `<button type="button" data-library-keep="${escapeHtml(`${item.jobId}/${item.filename}`)}">长期保留</button>` : "<span>暂无其他操作</span>"}</div></details></div></div>
       </article>`;
     }).join("");
   }
@@ -516,10 +552,13 @@
     return expanded;
   }
 
-  async function openTask(jobId) {
+  async function openTask(jobId, outputFilename = "") {
     if (!jobId) return;
     try {
       await window.openHomeTask?.(jobId);
+      if (outputFilename && String(window.ClipTalkCurrentJobId?.() || "") === String(jobId)) {
+        window.selectOutput?.(outputFilename, false);
+      }
       showView("workspace", { route: false });
       setHistoryDrawer(false);
       renderSidebar();
@@ -606,7 +645,7 @@
     }
     if (target.closest("#sidebarLoadMore")) { await loadSidebarCatalog({ append: true }); return; }
     const taskOpen = target.closest("[data-shell-open]");
-    if (taskOpen) { await openTask(taskOpen.dataset.shellOpen); return; }
+    if (taskOpen) { await openTask(taskOpen.dataset.shellOpen, taskOpen.dataset.shellOutput); return; }
     const taskDelete = target.closest("[data-shell-delete]");
     if (taskDelete) {
       event.stopPropagation();

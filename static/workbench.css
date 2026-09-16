@@ -7704,36 +7704,36 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer {
   grid-row: 4 !important;
-  min-height: 142px !important;
+  min-height: 108px !important;
   height: auto !important;
-  max-height: 190px !important;
-  padding: 12px 14px 9px !important;
+  max-height: 160px !important;
+  padding: 10px 14px 12px !important;
   border-top: 1px solid rgba(210, 232, 220, .1) !important;
   background: rgba(11, 29, 28, .72) !important;
-  box-shadow: 0 -14px 32px rgba(5, 18, 17, .12) !important;
+  box-shadow: none !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer > .chat-input-shell.chat-input-shell {
   position: relative !important;
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) !important;
-  grid-template-rows: minmax(46px, auto) 32px !important;
+  grid-template-rows: minmax(34px, auto) 28px !important;
   width: 100% !important;
-  min-height: 96px !important;
+  min-height: 86px !important;
   height: auto !important;
-  max-height: 138px !important;
-  padding: 10px 10px 8px !important;
+  max-height: 134px !important;
+  padding: 8px 10px 7px !important;
   overflow: visible !important;
   border: 1px solid rgba(172, 204, 189, .28) !important;
   border-radius: 12px !important;
   background: #112927 !important;
-  box-shadow: 0 9px 24px rgba(3, 16, 15, .16) !important;
+  box-shadow: none !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer .chat-input-shell.chat-input-shell > #chatInput#chatInput {
   grid-row: 1 !important;
-  min-height: 42px !important;
-  height: var(--ct-composer-input-height, 42px) !important;
+  min-height: 34px !important;
+  height: var(--ct-composer-input-height, 34px) !important;
   max-height: 84px !important;
   padding: 2px 3px 5px !important;
   color: #edf5f1 !important;
@@ -7752,9 +7752,9 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   grid-row: 2 !important;
   width: 100% !important;
   min-width: 0 !important;
-  height: 32px !important;
-  min-height: 32px !important;
-  margin: 2px 0 0 !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  margin: 1px 0 0 !important;
   padding: 0 !important;
   align-items: center !important;
   justify-content: space-between !important;
@@ -7765,8 +7765,8 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   display: flex !important;
   width: auto !important;
   min-width: 0 !important;
-  height: 32px !important;
-  min-height: 32px !important;
+  height: 28px !important;
+  min-height: 28px !important;
   margin: 0 !important;
   padding: 0 !important;
   align-items: center !important;
@@ -7780,9 +7780,9 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer #agentSkillMenuButton#agentSkillMenuButton {
   display: inline-flex !important;
   width: auto !important;
-  min-width: 136px !important;
-  height: 30px !important;
-  min-height: 30px !important;
+  min-width: 104px !important;
+  height: 28px !important;
+  min-height: 28px !important;
   padding: 0 10px !important;
   align-items: center !important;
   justify-content: flex-start !important;
@@ -7833,14 +7833,13 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   opacity: 1 !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel #chatForm > small {
-  display: block !important;
-  height: 16px !important;
-  margin: 5px 2px 0 !important;
+html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer > small {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
   padding: 0 !important;
-  color: #839a8f !important;
-  font-size: 10px !important;
-  line-height: 16px !important;
+  overflow: hidden !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #uploadView > .intro {
@@ -8551,7 +8550,7 @@ html[data-theme="light"] body :where(.candidate-drawer, .settings-panel, .action
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer {
   border-top-color: var(--ct4-line) !important;
   background: #f7f7f4 !important;
-  box-shadow: 0 -12px 28px rgba(37, 54, 45, .07) !important;
+  box-shadow: none !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel > #ctV4AssistantQuickStart#ctV4AssistantQuickStart {
@@ -8566,7 +8565,7 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer > .chat-input-shell.chat-input-shell {
   border-color: var(--ct4-line-strong) !important;
   background: #ffffff !important;
-  box-shadow: 0 8px 20px rgba(37, 54, 45, .08) !important;
+  box-shadow: none !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer .chat-input-shell.chat-input-shell > #chatInput#chatInput {
@@ -9131,10 +9130,11 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #uploadForm#uploadForm.upload-card {
-  border-color: rgba(53, 93, 72, .16) !important;
-  background: #edf1ed !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
   background-image: none !important;
-  box-shadow: 0 18px 42px rgba(37, 54, 45, .1) !important;
+  box-shadow: none !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #dropZone#dropZone.drop-zone {
@@ -13387,8 +13387,8 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace#
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace#workspace.studio.new-task-workbench:not(.home-mode) > #assistantPanel#assistantPanel > #chatForm#chatForm.chat-composer {
   grid-row: 4 !important;
-  min-height: 132px !important;
-  max-height: 176px !important;
+  min-height: 108px !important;
+  max-height: 160px !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace#workspace.studio.new-task-workbench:not(.home-mode) > #assistantPanel#assistantPanel > #ctV4AssistantQuickStart#ctV4AssistantQuickStart.capability-drawer:not(.hidden) {
@@ -13626,19 +13626,6 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar 
   height: 18px !important;
 }
 
-html body[data-shell-view] #appSidebar#appSidebar #sidebarNewTask#sidebarNewTask span,
-html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar #sidebarNewTask#sidebarNewTask span {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  margin: -1px !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  clip: rect(0 0 0 0) !important;
-  white-space: nowrap !important;
-  border: 0 !important;
-}
-
 html body.ct-workbench-v4 > #appSidebar#appSidebar :where(#sidebarTaskCountBadge, #sidebarOutputCount):not(.hidden),
 html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar :where(#sidebarTaskCountBadge, #sidebarOutputCount):not(.hidden),
 html body[data-shell-view] > #appSidebar#appSidebar :where(#sidebarTaskCountBadge, #sidebarOutputCount):not(.hidden) {
@@ -13668,6 +13655,18 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar 
   overflow: hidden !important;
   clip: rect(0 0 0 0) !important;
   white-space: nowrap !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar .app-sidebar-utility .app-sidebar-action {
+  width: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: 10px !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] > #appSidebar#appSidebar .app-sidebar-utility {
@@ -13701,22 +13700,23 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #ctTaskJourney .ct-journey-summary {
-  min-height: 28px !important;
+  min-height: 26px !important;
   grid-template-columns: minmax(0, 1fr) 68px 14px !important;
-  padding: 2px 4px 3px !important;
-  border-color: rgba(197, 226, 165, .13) !important;
-  border-radius: 8px !important;
-  background: rgba(255, 255, 255, .02) !important;
+  padding: 0 2px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #ctTaskJourney .ct-journey-summary-copy {
-  display: grid !important;
-  gap: 0 !important;
+  display: flex !important;
+  align-items: baseline !important;
+  gap: 8px !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #ctTaskJourney .ct-journey-summary-copy small {
   order: 2;
-  margin-top: 1px;
+  margin-top: 0;
   color: #8fa29a !important;
   font-size: 9px !important;
   letter-spacing: 0 !important;
@@ -13728,9 +13728,8 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #ctTaskJourney .ct-journey-summary {
-  border-color: rgba(49, 95, 73, .12) !important;
   color: #183229 !important;
-  background: rgba(231, 239, 232, .48) !important;
+  background: transparent !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #ctTaskJourney .ct-journey-summary-copy small,
@@ -13843,13 +13842,13 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #uploadView#uploadView.upload-view.new-task-upload {
-  width: min(780px, calc(100% - 72px)) !important;
+  width: min(720px, calc(100% - 72px)) !important;
   min-height: 0 !important;
   margin: auto !important;
   padding: 0 !important;
   display: grid !important;
-  grid-template-columns: minmax(300px, 348px) 300px !important;
-  gap: 72px !important;
+  grid-template-columns: minmax(280px, 320px) 300px !important;
+  gap: 48px !important;
   align-items: center !important;
   align-content: center !important;
   justify-content: center !important;
@@ -13858,7 +13857,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #uploadView#uploadView > .intro {
   min-height: 148px !important;
-  max-width: 348px !important;
+  max-width: 320px !important;
   display: grid !important;
   align-content: center !important;
 }
@@ -14084,4 +14083,76 @@ html[data-theme="dark"] body.ct-workbench-v4[data-shell-mode="workspace"] .studi
   background: #1a2925 !important;
   background-color: #1a2925 !important;
   background-image: none !important;
+}
+
+/* Keep each task's selected formal output and cover visually inseparable. */
+html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-open {
+  position: relative !important;
+  min-height: 82px !important;
+  padding-left: 116px !important;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-media {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  width: 88px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--pw-canvas-deep, #111917);
+  box-shadow: inset 0 0 0 1px rgba(193, 207, 213, .1);
+  transform: translateY(-50%);
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-media img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-media b {
+  position: absolute;
+  inset: auto auto 5px 5px;
+  min-width: 27px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: #f4f7f3;
+  background: rgba(10, 18, 15, .78);
+  font: 650 9px/1 var(--font-mono, ui-monospace, monospace);
+  text-align: center;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-media[data-artwork-kind="source-thumbnail"] b {
+  color: var(--pw-muted, #839289);
+  background: rgba(10, 18, 15, .68);
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-media[data-artwork-kind="unavailable"]::before {
+  content: "暂无画面";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--pw-muted, #839289);
+  font-size: 10px;
+}
+
+html[data-theme="light"] body[data-shell-view="home"] #homeTaskGrid .shell-task-media {
+  background: #e9ede8;
+  box-shadow: inset 0 0 0 1px rgba(53, 93, 72, .12);
+}
+
+@media (max-width: 560px) {
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-open {
+    min-height: 76px !important;
+    padding-left: 98px !important;
+  }
+
+  html body[data-shell-view="home"] #homeTaskGrid .shell-task-media {
+    left: 12px;
+    width: 72px;
+    height: 46px;
+  }
 }

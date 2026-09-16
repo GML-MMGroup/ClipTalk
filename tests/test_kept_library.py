@@ -22,18 +22,25 @@ def test_kept_library_saves_lists_and_removes_copy(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"video-bytes")
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"cover-bytes")
     record = {
         "jobId": "job_1", "filename": "highlight.mp4",
         "sourceFilename": "访谈.mp4", "title": "关键片段",
         "versionNumber": 2, "strategyKey": "llm", "position": 1,
         "keptAt": "2026-08-14T00:00:00+00:00",
     }
-    stored = service.save_copy(source=source, record=record)
+    stored = service.save_copy(source=source, record=record, existing_cover=cover)
     assert stored["sizeBytes"] == len(b"video-bytes")
     listed = service.list_records()
     assert len(listed) == 1
     assert listed[0]["videoUrl"] == "/api/kept/job_1/highlight.mp4"
-    assert "LLM" in listed[0]["downloadFilename"]
+    assert listed[0]["coverUrl"] == "/api/kept/job_1/highlight.mp4/cover"
+    assert listed[0]["displayTitle"] == "访谈 · 关键片段"
+    assert listed[0]["downloadFilename"] == "访谈_关键片段_V2.mp4"
+    assert "LLM" not in listed[0]["downloadFilename"]
+    response = service.cover_response("job_1", "highlight.mp4")
+    assert Path(response.path).read_bytes() == b"cover-bytes"
     service.remove("job_1", "highlight.mp4")
     assert service.list_records() == []
 

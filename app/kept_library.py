@@ -43,6 +43,10 @@ class KeptLibraryService:
     def preview_path(media: Path) -> Path:
         return media.with_name(f".{media.name}.preview.mp4")
 
+    @staticmethod
+    def cover_path(media: Path) -> Path:
+        return media.with_name(f".{media.name}.cover.jpg")
+
     @classmethod
     def friendly_output_naming(
         cls, *, source_filename: str, version_number: Any = 1,
@@ -104,12 +108,16 @@ class KeptLibraryService:
         job_id = str(record["jobId"])
         filename = str(record["filename"])
         naming = self._record_naming(record)
-        return {
+        public = {
             **record,
             **naming,
             "videoUrl": f"/api/kept/{quote(job_id, safe='')}/{quote(filename, safe='')}",
             "downloadUrl": f"/api/kept/{quote(job_id, safe='')}/{quote(filename, safe='')}?download=1",
         }
+        media, _ = self.output_paths(job_id, filename)
+        if self.cover_path(media).is_file():
+            public["coverUrl"] = f"/api/kept/{quote(job_id, safe='')}/{quote(filename, safe='')}/cover"
+        return public
 
     def list_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
@@ -125,7 +133,10 @@ class KeptLibraryService:
                 continue
         return sorted(records, key=lambda item: str(item.get("keptAt", "")), reverse=True)
 
-    def save_copy(self, *, source: Path, record: dict[str, Any], existing_preview: Path | None = None) -> dict[str, Any]:
+    def save_copy(
+        self, *, source: Path, record: dict[str, Any],
+        existing_preview: Path | None = None, existing_cover: Path | None = None,
+    ) -> dict[str, Any]:
         if not source.is_file():
             raise HTTPException(404, "待保留的高光文件不存在")
         media, metadata = self.output_paths(str(record["jobId"]), str(record["filename"]))
@@ -140,6 +151,8 @@ class KeptLibraryService:
             temporary_metadata.replace(metadata)
             if existing_preview and existing_preview.is_file():
                 shutil.copy2(existing_preview, self.preview_path(media))
+            if existing_cover and existing_cover.is_file():
+                shutil.copy2(existing_cover, self.cover_path(media))
             return stored
         finally:
             temporary.unlink(missing_ok=True)
@@ -173,10 +186,18 @@ class KeptLibraryService:
             content_disposition_type="attachment" if download else "inline",
         )
 
+    def cover_response(self, job_id: str, filename: str) -> FileResponse:
+        media, metadata = self.output_paths(job_id, filename)
+        cover = self.cover_path(media)
+        if not media.is_file() or not metadata.is_file() or not cover.is_file():
+            raise HTTPException(404, "保留库封面不存在")
+        return FileResponse(cover, media_type="image/jpeg", filename=f"{Path(filename).stem}-cover.jpg")
+
     def remove(self, job_id: str, filename: str) -> None:
         media, metadata = self.output_paths(job_id, filename)
         media.unlink(missing_ok=True)
         self.preview_path(media).unlink(missing_ok=True)
+        self.cover_path(media).unlink(missing_ok=True)
         metadata.unlink(missing_ok=True)
         try:
             media.parent.rmdir()

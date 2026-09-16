@@ -1327,12 +1327,15 @@ def save_output_to_kept_library(job: dict[str, Any], item: dict[str, Any]) -> di
         "score": float(item.get("score") or 0),
         "chapterCount": int(item.get("chapterCount") or 0),
         "segmentCount": int(item.get("segmentCount") or 1),
+        "coverVersionId": str(item.get("coverVersionId") or version.get("coverVersionId") or ""),
+        "coverContentHash": str(item.get("coverContentHash") or version.get("coverContentHash") or ""),
         "keptAt": now_iso(),
     }
     return kept_library_service().save_copy(
         source=source,
         record=record,
         existing_preview=output_preview_path(job, str(item["filename"])),
+        existing_cover=output_cover_path(job, item, version),
     )
 
 
@@ -5648,6 +5651,66 @@ def source_project_id_for_job(job: dict[str, Any]) -> str:
     return f"asset_{str(job.get('id') or 'unknown')}"
 
 
+_NON_FORMAL_OUTPUT_KINDS = {
+    "agent_review_preview", "review_preview", "social_reframe_preview",
+    "cover_intro_review_preview", "audio_polish_preview",
+}
+
+
+def primary_formal_output_summary(job: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the task's active formal output and its immutable cover binding."""
+    versions = [
+        item for item in job.get("outputVersions") or []
+        if isinstance(item, dict)
+    ]
+    if not versions and isinstance(job.get("outputs"), list):
+        versions = [{
+            "id": "v001", "number": 1,
+            "createdAt": job.get("updatedAt") or job.get("createdAt"),
+            "outputs": job.get("outputs") or [],
+        }]
+    current_id = str(job.get("currentOutputVersionId") or "")
+    ordered = sorted(
+        versions,
+        key=lambda item: (int(item.get("number") or 0), str(item.get("createdAt") or "")),
+    )
+    current = next((item for item in ordered if str(item.get("id") or "") == current_id), None)
+    candidates = [*([current] if current else []), *reversed([item for item in ordered if item is not current])]
+    for version in candidates:
+        if not version or version.get("previewOnly"):
+            continue
+        outputs = [
+            item for item in version.get("outputs") or []
+            if isinstance(item, dict)
+            and item.get("filename")
+            and not item.get("previewOnly")
+            and str(item.get("outputKind") or "") not in _NON_FORMAL_OUTPUT_KINDS
+        ]
+        if not outputs:
+            continue
+        output = outputs[-1]
+        filename = str(output["filename"])
+        position = outputs.index(output) + 1
+        naming = build_output_naming(
+            job, version, output, position=position, output_count=len(outputs),
+        )
+        result = {
+            "versionId": str(version.get("id") or ""),
+            "versionNumber": int(version.get("number") or 1),
+            "filename": filename,
+            "displayTitle": naming["displayTitle"],
+            "duration": float(output.get("duration") or 0),
+            "coverVersionId": str(output.get("coverVersionId") or version.get("coverVersionId") or ""),
+            "coverContentHash": str(output.get("coverContentHash") or version.get("coverContentHash") or ""),
+        }
+        if result["coverVersionId"]:
+            encoded_job = quote(str(job["id"]), safe="")
+            encoded_filename = quote(filename, safe="")
+            result["coverUrl"] = f"/api/jobs/{encoded_job}/outputs/{encoded_filename}/cover"
+        return result
+    return None
+
+
 @lru_cache(maxsize=512)
 def _output_media_dimensions(path: str, mtime_ns: int, size: int) -> dict[str, int]:
     """Probe a legacy artifact once per file revision, never assume source dimensions."""
@@ -5754,6 +5817,7 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
     visible["personMergeRevision"] = int(job.get("personMergeRevision") or 0)
     visible["personMergeCanUndo"] = bool(job.get("personMergeHistory"))
     visible["sourceProjectId"] = source_project_id_for_job(job)
+    visible["primaryOutput"] = primary_formal_output_summary(job)
     visible["contentUiRevision"] = _content_ui_revision(job)
     visible["contentSearchSession"] = content_search_session_snapshot(job)
     if str(job.get("taskMode") or "highlight") != "content_extract":
@@ -6152,6 +6216,7 @@ def public_job_summary(job: dict[str, Any]) -> dict[str, Any]:
         "eventGroupCount": len(event_groups),
         "candidateCount": len(content_candidates) if job.get("taskMode") == "content_extract" else len(candidates),
         "outputCount": job_output_count(job),
+        "primaryOutput": primary_formal_output_summary(job),
         "agent": copy.deepcopy(job.get("agent") or None),
         "agentDraft": bool(job.get("agentDraft")),
         "instructionSubmitted": bool(job.get("instructionSubmitted", True)),
@@ -21552,6 +21617,10 @@ def kept_media(job_id: str, filename: str, download: int = 0) -> FileResponse:
     return kept_library_service().media_response(job_id, filename, download=bool(download))
 
 
+def kept_cover(job_id: str, filename: str) -> FileResponse:
+    return kept_library_service().cover_response(job_id, filename)
+
+
 def delete_kept_output(job_id: str, filename: str, require_source: bool = False) -> dict[str, bool]:
     path, metadata = kept_output_paths(job_id, filename)
     if not path.is_file() and not metadata.is_file():
@@ -33020,10 +33089,6 @@ def _activate_cover_variant(
                 "status": "user_confirmed",
                 "confirmedAt": now_iso(),
             }
-        temporary = thumbnail_cache_path(current).with_name(".approved-cover.tmp.jpg")
-        temporary.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(selected_path, temporary)
-        temporary.replace(thumbnail_cache_path(current))
         current["currentCoverVersionId"] = str(version["id"])
         settings_state = _cover_timeline_settings(current, variant_id)
         current["coverIntroDraft"] = {
@@ -37404,6 +37469,7 @@ app.include_router(build_client_observability_router(
 app.include_router(build_kept_router(
     list_kept_outputs=list_kept_outputs,
     kept_media=kept_media,
+    kept_cover=kept_cover,
     delete_kept_output=delete_kept_output,
     list_library_outputs=list_library_outputs,
 ))

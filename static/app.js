@@ -110,10 +110,15 @@ function resizeChatComposerInput() {
   const input = $("#chatInput");
   const form = $("#chatForm");
   if (!input || !form) return;
-  const minHeight = 42;
+  const compactDraft = Boolean($("#workspace")?.classList.contains("new-task-workbench") && !currentJob);
+  input.rows = compactDraft ? 1 : 2;
+  const minHeight = compactDraft ? 34 : 42;
   const maxHeight = 84;
+  if (compactDraft) form.style.setProperty("--ct-composer-input-height", `${minHeight}px`);
   input.style.setProperty("height", "auto", "important");
-  const naturalHeight = Math.max(minHeight, input.scrollHeight);
+  const naturalHeight = compactDraft && !input.value.trim()
+    ? minHeight
+    : Math.max(minHeight, input.scrollHeight);
   const inputHeight = Math.min(maxHeight, naturalHeight);
   input.style.setProperty("height", `${inputHeight}px`, "important");
   input.style.setProperty("overflow-y", naturalHeight > maxHeight ? "auto" : "hidden", "important");
@@ -574,6 +579,12 @@ function syncTaskCreationLayout() {
   }
   syncAssistantPanelResizerAvailability();
   uploadView?.classList.toggle("new-task-upload", creating);
+  resizeChatComposerInput();
+  if (creating && chatInput && !chatInput.value.trim()) {
+    chatInput.rows = 1;
+    chatInput.style.setProperty("height", "34px", "important");
+    $("#chatForm")?.style.setProperty("--ct-composer-input-height", "34px");
+  }
   return creating;
 }
 
@@ -17236,6 +17247,7 @@ function openNewTaskFromHome() {
     $("#homeView")?.classList.add("hidden");
     $("#uploadView")?.classList.remove("hidden");
   }
+  requestAnimationFrame(() => resizeChatComposerInput());
 }
 
 async function openHomeTask(jobId) {
@@ -17609,7 +17621,7 @@ function resetWorkspace(showHome = true, clearSavedJob = showHome) {
     chatInput.disabled = Boolean(showHome);
     chatInput.placeholder = showHome
       ? "请输入指令或补充需求……"
-      : "描述想保留的内容，例如：保留产品特写，剪成一分钟竖屏短片……";
+      : agentDraftPlaceholder();
   }
   const sendButton = $("#sendButton");
   if (sendButton) sendButton.disabled = true;

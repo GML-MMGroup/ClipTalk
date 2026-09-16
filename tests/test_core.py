@@ -983,6 +983,38 @@ class PublicJobPayloadTests(unittest.TestCase):
         self.assertEqual(status["execution"]["status"], "running")
         self.assertEqual(status["execution"]["progress"]["completed"], 1)
 
+    def test_summary_exposes_the_formal_output_with_its_bound_cover(self) -> None:
+        job = {
+            "id": "job_bound_cover", "filename": "source.mp4", "status": "completed",
+            "workDirectory": "/tmp/job_bound_cover", "sourcePath": "/tmp/job_bound_cover-source.mp4",
+            "createdAt": "2026-08-10T00:00:00Z", "updatedAt": "2026-08-10T00:02:00Z",
+            "videoInfo": {"duration": 60, "width": 1920, "height": 1080},
+            "currentOutputVersionId": "v002",
+            "outputVersions": [
+                {
+                    "id": "v001", "number": 1, "outputs": [{
+                        "filename": "final.mp4", "duration": 18,
+                        "coverVersionId": "cover_v003", "coverContentHash": "sha256:cover",
+                    }],
+                },
+                {
+                    "id": "v002", "number": 2, "previewOnly": True,
+                    "outputs": [{"filename": "review.mp4", "previewOnly": True}],
+                },
+            ],
+        }
+
+        summary = public_job_summary(job)
+
+        self.assertEqual(summary["primaryOutput"]["versionId"], "v001")
+        self.assertEqual(summary["primaryOutput"]["filename"], "final.mp4")
+        self.assertEqual(summary["primaryOutput"]["coverVersionId"], "cover_v003")
+        self.assertEqual(
+            summary["primaryOutput"]["coverUrl"],
+            "/api/jobs/job_bound_cover/outputs/final.mp4/cover",
+        )
+        self.assertNotIn("outputVersions", summary)
+
     def test_execution_counts_independent_rejections_separately_from_repairs(self) -> None:
         snapshot = execution_snapshot({
             "id": "quality_counts", "status": "awaiting_confirmation", "stage": "auto_composition",
@@ -1424,7 +1456,7 @@ class EditingIntentTests(unittest.TestCase):
         discovery_pages = math.ceil(frames / 16)
         base_calls = 1 + discovery_pages + refined + 1
         self.assertEqual(frames, 48)
-        self.assertEqual(refined, 4)
+        self.assertEqual(refined, 6)
         # Only the two strongest candidates may request a second boundary pass.
         self.assertLessEqual(base_calls + 2, 15)
 
@@ -1522,7 +1554,6 @@ class SenseVoiceParsingTests(unittest.TestCase):
         options = _sensevoice_model_options(
             model_name="iic/SenseVoiceSmall", device="cpu", vad_model="fsmn-vad",
             punc_model="", spk_model="cam++", diarization=True,
-            algorithm_version="editing-algorithm-v2",
         )
         self.assertEqual(options["vad_kwargs"]["max_single_segment_time"], 3000)
 
@@ -2097,6 +2128,24 @@ class ConversationalEditProposalTests(unittest.TestCase):
 
 
 class KeptLibraryTests(unittest.TestCase):
+    def test_review_sample_cannot_be_saved_to_kept_library(self) -> None:
+        job_id = "job_preview_keep_rejected"
+        filename = "review-sample.mp4"
+        main_module.jobs[job_id] = {
+            "id": job_id, "status": "completed", "stage": "completed", "progress": 1,
+            "detail": "done", "filename": "source.mp4", "sourcePath": "/tmp/source.mp4",
+            "workDirectory": "/tmp/work", "outputDirectory": "/tmp/outputs",
+            "outputs": [{"filename": filename, "title": "审核样片", "duration": 12, "previewOnly": True}],
+            "messages": [], "request": {}, "createdAt": "2026-01-01T00:00:00+00:00",
+            "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+        try:
+            with self.assertRaisesRegex(main_module.HTTPException, "先确认并生成成片") as raised:
+                main_module.keep_job_output(job_id, filename, main_module.KeepOutputRequest(kept=True))
+            self.assertEqual(raised.exception.status_code, 409)
+        finally:
+            main_module.jobs.pop(job_id, None)
+
     def test_kept_output_survives_job_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             original_settings = main_module.settings
@@ -2168,6 +2217,9 @@ class KeptLibraryTests(unittest.TestCase):
             content_directory = main_module.content_index_directory(first)
             content_directory.mkdir(parents=True)
             (content_directory / "index.json").write_text("{}", encoding="utf-8")
+            source_evidence = main_module.source_evidence_directory(root, identity)
+            source_evidence.mkdir(parents=True)
+            (source_evidence / "evidence.json").write_text("{}", encoding="utf-8")
             try:
                 main_module.jobs.pop(first["id"])
                 main_module.cleanup_unreferenced_media_cache(first)
@@ -2176,6 +2228,7 @@ class KeptLibraryTests(unittest.TestCase):
                 self.assertTrue(waveform.is_file())
                 self.assertTrue(analysis.is_file())
                 self.assertTrue(content_directory.is_dir())
+                self.assertTrue(source_evidence.is_dir())
 
                 main_module.jobs.pop(second["id"])
                 main_module.cleanup_unreferenced_media_cache(second)
@@ -2184,6 +2237,7 @@ class KeptLibraryTests(unittest.TestCase):
                 self.assertFalse(waveform.exists())
                 self.assertFalse(analysis.exists())
                 self.assertFalse(content_directory.exists())
+                self.assertFalse(source_evidence.exists())
             finally:
                 main_module.jobs.pop(first["id"], None)
                 main_module.jobs.pop(second["id"], None)
@@ -2214,6 +2268,37 @@ class KeptLibraryTests(unittest.TestCase):
                 self.assertTrue(old_directory.is_dir())
                 self.assertTrue(search_directory.is_dir())
                 self.assertFalse(orphan_directory.exists())
+            finally:
+                main_module.jobs.pop(job["id"], None)
+                main_module.settings = original_settings
+
+    def test_startup_cache_cleanup_removes_only_unreferenced_analysis_and_source_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_settings = main_module.settings
+            root = Path(directory)
+            main_module.settings = replace(original_settings, data_root=root)
+            main_module.settings.ensure_directories()
+            referenced_key = "a" * 64
+            orphan_key = "b" * 64
+            job = {
+                "id": "job_cache_reference", "sourceHash": "current-source",
+                "analysisCacheKey": referenced_key, "request": {},
+            }
+            main_module.jobs[job["id"]] = job
+            referenced_analysis = main_module.analysis_cache_path(referenced_key)
+            orphan_analysis = main_module.analysis_cache_path(orphan_key)
+            referenced_analysis.write_text("{}", encoding="utf-8")
+            orphan_analysis.write_text("{}", encoding="utf-8")
+            referenced_evidence = main_module.source_evidence_directory(root, "current-source")
+            orphan_evidence = main_module.source_evidence_directory(root, "old-source")
+            referenced_evidence.mkdir(parents=True)
+            orphan_evidence.mkdir(parents=True)
+            try:
+                main_module.cleanup_orphaned_media_cache()
+                self.assertTrue(referenced_analysis.is_file())
+                self.assertFalse(orphan_analysis.exists())
+                self.assertTrue(referenced_evidence.is_dir())
+                self.assertFalse(orphan_evidence.exists())
             finally:
                 main_module.jobs.pop(job["id"], None)
                 main_module.settings = original_settings
@@ -2726,7 +2811,10 @@ class OutputVersionTests(unittest.TestCase):
                 with patch.object(main_module, "submit_render_task") as submit:
                     main_module.finalize_preview_output_version(
                         job_id, "v001",
-                        main_module.FinalizeOutputVersionRequest(acknowledgeQualityRisk=True),
+                        main_module.FinalizeOutputVersionRequest(
+                            acknowledgeQualityRisk=True, specVersion=1, outputFilename=filename,
+                            outputRevision=main_module.output_revision(job["outputVersions"][0], output),
+                        ),
                     )
                 submit.assert_called_once()
             finally:

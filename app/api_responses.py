@@ -28,6 +28,17 @@ class OutputVersionResponse(ExtensibleResponse):
     outputs: list[OutputItemResponse] = Field(default_factory=list)
 
 
+class PrimaryOutputSummaryResponse(ExtensibleResponse):
+    versionId: str = ""
+    versionNumber: int = 1
+    filename: str
+    displayTitle: str = ""
+    duration: float = 0
+    coverVersionId: str = ""
+    coverContentHash: str = ""
+    coverUrl: str | None = None
+
+
 class WorkflowStepResponse(ExtensibleResponse):
     id: str
     label: str
@@ -85,6 +96,7 @@ class JobDocumentResponse(ExtensibleResponse):
     request: JobRequestResponse = Field(default_factory=JobRequestResponse)
     outputs: list[OutputItemResponse] = Field(default_factory=list)
     outputVersions: list[OutputVersionResponse] = Field(default_factory=list)
+    primaryOutput: PrimaryOutputSummaryResponse | None = None
     presentation: WorkflowPresentationResponse | None = None
 
 
@@ -104,6 +116,7 @@ class JobSummaryResponse(ExtensibleResponse):
     eventGroupCount: int = 0
     candidateCount: int = 0
     outputCount: int = 0
+    primaryOutput: PrimaryOutputSummaryResponse | None = None
     presentation: WorkflowPresentationResponse | None = None
 
 

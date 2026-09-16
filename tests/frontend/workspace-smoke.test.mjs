@@ -522,19 +522,36 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
       const intro = uploadView.querySelector(":scope > .intro");
       const uploadCard = document.querySelector("#uploadForm.upload-card");
       const dropTitle = document.querySelector("#dropZone strong");
-      const dropMeta = document.querySelector("#dropZone small");
-      return {
+	      const dropMeta = document.querySelector("#dropZone small");
+	      const composer = document.querySelector("#chatForm");
+	      const inputShell = document.querySelector("#chatForm .chat-input-shell");
+	      const keyboardHint = document.querySelector("#chatForm > small");
+	      const journeySummary = document.querySelector("#ctTaskJourney .ct-journey-summary");
+	      const utilityAction = document.querySelector("#appSidebar .app-sidebar-utility .app-sidebar-action");
+	      const uploadStyle = getComputedStyle(uploadCard);
+	      return {
         reviewBackground: getComputedStyle(review).backgroundImage,
         uploadViewBackground: getComputedStyle(uploadView).backgroundImage,
         headingColor: getComputedStyle(heading).color,
         accentColor: getComputedStyle(headingAccent).color,
         descriptionColor: getComputedStyle(description).color,
         introProtection: getComputedStyle(intro, "::before").backgroundImage,
-        uploadCardBackground: getComputedStyle(uploadCard).backgroundImage,
-        dropBackground: getComputedStyle(dropTitle.closest("#dropZone")).backgroundColor,
-        dropTitleColor: getComputedStyle(dropTitle).color,
-        dropMetaColor: getComputedStyle(dropMeta).color,
-      };
+	        uploadCardBackground: uploadStyle.backgroundImage,
+	        uploadCardBackgroundColor: uploadStyle.backgroundColor,
+	        uploadCardShadow: uploadStyle.boxShadow,
+	        dropBackground: getComputedStyle(dropTitle.closest("#dropZone")).backgroundColor,
+	        dropTitleColor: getComputedStyle(dropTitle).color,
+	        dropMetaColor: getComputedStyle(dropMeta).color,
+	        composerHeight: composer.getBoundingClientRect().height,
+	        inputShellHeight: inputShell.getBoundingClientRect().height,
+	        keyboardHintDisplay: getComputedStyle(keyboardHint).display,
+	        placeholder: document.querySelector("#chatInput").placeholder,
+	        journeyBackground: getComputedStyle(journeySummary).backgroundColor,
+	        journeyBorderWidth: getComputedStyle(journeySummary).borderTopWidth,
+	        utilityActionWidth: utilityAction.getBoundingClientRect().width,
+	        utilityActionHeight: utilityAction.getBoundingClientRect().height,
+	        newTaskLabelCount: document.querySelectorAll("#sidebarNewTask span").length,
+	      };
 	    });
 	    assert.ok(creationPalette.reviewBackground);
 	    assert.match(creationPalette.uploadViewBackground, /gradient|none/);
@@ -542,9 +559,21 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
 	    assert.match(creationPalette.accentColor, /rgb/);
 	    assert.match(creationPalette.descriptionColor, /rgb/);
 	    assert.match(creationPalette.uploadCardBackground, /gradient|none/);
+	    assert.equal(creationPalette.uploadCardBackgroundColor, "rgba(0, 0, 0, 0)");
+	    assert.equal(creationPalette.uploadCardShadow, "none");
 	    assert.match(creationPalette.dropBackground, /rgb/);
 	    assert.match(creationPalette.dropTitleColor, /rgb/);
 	    assert.match(creationPalette.dropMetaColor, /rgb/);
+	    assert.ok(creationPalette.composerHeight <= 116, `new-task composer is too tall: ${creationPalette.composerHeight}px`);
+	    assert.ok(creationPalette.inputShellHeight >= 84 && creationPalette.inputShellHeight <= 90,
+	      `new-task input shell should stay near 86px, got ${creationPalette.inputShellHeight}px`);
+	    assert.equal(creationPalette.keyboardHintDisplay, "none");
+	    assert.equal(creationPalette.placeholder, "描述你想怎么剪……");
+	    assert.equal(creationPalette.journeyBackground, "rgba(0, 0, 0, 0)");
+	    assert.equal(creationPalette.journeyBorderWidth, "0px");
+	    assert.equal(creationPalette.utilityActionWidth, 42);
+	    assert.equal(creationPalette.utilityActionHeight, 42);
+	    assert.equal(creationPalette.newTaskLabelCount, 0);
 	    const creationComposer = await page.evaluate(() => {
 	      const shell = document.querySelector("#chatForm .chat-input-shell");
 	      const toolbar = document.querySelector("#chatForm .composer-toolbar");
@@ -1095,6 +1124,11 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   try {
+    await page.route("**/api/jobs/task-content/outputs/final.mp4/cover", (route) => route.fulfill({
+      status: 200,
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="#315f49"/></svg>',
+    }));
     await page.route("**/api/jobs", async (route) => {
       if (
         route.request().method() !== "GET"
@@ -1116,6 +1150,12 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
           stage: "review",
           execution: { schemaVersion: 1, status: "awaiting_confirmation", active: false, capabilities: { canDelete: true } },
           presentation: { schemaVersion: 2, key: "review", group: "action_required", label: "等待确认镜头" },
+          thumbnailUrl: "/api/jobs/task-content/thumbnail",
+          primaryOutput: {
+            versionId: "v002", versionNumber: 2, filename: "final.mp4",
+            displayTitle: "访谈精剪版", coverVersionId: "cover_v004",
+            coverUrl: "/api/jobs/task-content/outputs/final.mp4/cover",
+          },
           updatedAt: "2026-08-25T01:00:00Z",
         },
         { ...base, id: "task-person", workflowKind: "person_edit", updatedAt: "2026-08-25T02:00:00Z" },
@@ -1163,7 +1203,7 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
     assert.equal(await page.locator('.app-sidebar-brand [data-shell-view="home"]').getAttribute("aria-current"), "page");
     assert.deepEqual(await page.locator(".app-sidebar-primary > .app-sidebar-action").evaluateAll((nodes) => nodes
       .filter((node) => getComputedStyle(node).display !== "none")
-      .map((node) => node.querySelector("span")?.textContent || "")), ["新建", "任务", "成片"]);
+      .map((node) => node.querySelector("span")?.textContent || node.getAttribute("aria-label") || "")), ["新建任务", "任务", "成片"]);
     assert.equal(await page.locator(".app-sidebar-footer, #sidebarCollapse, #sidebarTaskRefresh").count(), 0);
     await page.locator("#sidebarHistoryToggle").click();
     await page.locator("#sidebarHistoryList .shell-task-card").first().waitFor({ state: "visible" });
@@ -1208,6 +1248,11 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
     assert.equal(await page.locator("#homeTaskCount").textContent(), "3");
     assert.equal(await page.locator("#homeOutputCount").textContent(), "0");
     assert.equal(await page.locator("#homeTaskGrid .shell-task-card").count(), 3);
+    const boundTask = page.locator('#homeTaskGrid [data-shell-job="task-content"]');
+    assert.equal(await boundTask.locator(".shell-task-media").getAttribute("data-artwork-kind"), "output-cover");
+    assert.equal(await boundTask.locator(".shell-task-media b").textContent(), "V02");
+    assert.equal(await boundTask.locator("[data-shell-open]").getAttribute("data-shell-output"), "final.mp4");
+    assert.match(await boundTask.locator(".shell-task-open > small").textContent(), /V02 封面已绑定/);
     assert.deepEqual(await page.locator("#homeTaskGrid [data-shell-delete]").evaluateAll((nodes) => nodes.map((node) => node.dataset.shellDelete)), ["task-content", "task-person"]);
     assert.equal(await page.evaluate(() => typeof window.deleteHistoryJob), "function");
     await page.evaluate(() => {
@@ -1303,7 +1348,9 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
     assert.equal(await page.locator("#sidebarCurrentTask").isEnabled(), true);
     assert.equal(await page.locator("#sidebarCurrentTask").isVisible(), true);
     assert.equal(await page.locator("#sidebarCurrentTask").getAttribute("title"), "返回当前任务");
-    assert.deepEqual(await page.locator(".app-sidebar-primary > .app-sidebar-action > span").allTextContents(), ["当前任务", "新建", "任务", "成片"]);
+    assert.deepEqual(await page.locator(".app-sidebar-primary > .app-sidebar-action").evaluateAll((nodes) => nodes
+      .filter((node) => getComputedStyle(node).display !== "none")
+      .map((node) => node.querySelector("span")?.textContent || node.getAttribute("aria-label") || "")), ["当前任务", "新建任务", "任务", "成片"]);
     await page.keyboard.press("Escape");
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "false");
@@ -2941,6 +2988,45 @@ test("output library badge uses actual available library records rather than tas
     const badge = page.locator("#sidebarOutputCount");
     assert.equal(await badge.textContent(), "0");
     assert.equal(await badge.evaluate((node) => node.classList.contains("hidden")), true);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
+test("output library uses the cover bound to each formal output as its poster", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/api/library/outputs", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ outputs: [{
+        jobId: "bound-output", filename: "final.mp4", versionNumber: 3,
+        displayTitle: "发布会精剪版", sourceFilename: "发布会.mp4", duration: 24,
+        videoUrl: "/api/jobs/bound-output/outputs/final.mp4/browser-preview",
+        downloadUrl: "/api/jobs/bound-output/outputs/final.mp4?download=1",
+        coverUrl: "/api/jobs/bound-output/outputs/final.mp4/cover",
+        coverVersionId: "cover_v002", sourceTaskAvailable: true, sourceFileAvailable: true,
+      }] }),
+    }));
+
+    await page.evaluate(async () => {
+      await window.ClipTalkAppShell.showView("library", { route: false });
+      await window.ClipTalkAppShell.loadLibrary({ force: true });
+    });
+
+    const item = page.locator("#libraryOutputList .app-library-item");
+    await item.waitFor({ state: "visible" });
+    assert.equal(await item.locator(".app-library-media").getAttribute("data-cover-bound"), "true");
+    assert.equal(
+      await item.locator("video").getAttribute("poster"),
+      "/api/jobs/bound-output/outputs/final.mp4/cover",
+    );
+    assert.match(await item.locator(".app-library-copy > small").textContent(), /V03.*封面已绑定/);
   } finally {
     await browser.close();
     await stub.close();
