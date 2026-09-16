@@ -43,6 +43,7 @@
     wait_and_retry: "稍后重试",
     check_input: "检查输入后重试",
     check_settings_or_retry: "检查模型设置或稍后重试",
+    complete_subtitle_review: "完成字幕校对",
     retry: "请重试",
   });
 

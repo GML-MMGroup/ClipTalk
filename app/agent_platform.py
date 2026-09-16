@@ -33,7 +33,7 @@ CORE_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "prepare_subtitle_review", "description": "生成已确认时间线对应的可审阅字幕草稿；自动模式仅应用低风险校对并继续生成样片", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"style": {"type": "string"}, "requireConfirmedDraft": {"type": "boolean"}, "autoReview": {"type": "boolean"}}, "additionalProperties": False}},
     {"name": "render_review_preview", "description": "渲染带轻水印、低码率和审阅字幕的审核样片；不做正式导出", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"subtitleMode": {"type": "string"}}, "additionalProperties": False}},
     {"name": "render_social_preview", "description": "从已有成片生成指定社媒画幅的审核预览；无论目标比例为何，默认完整保留原始画面并使用同画面虚化背景补足画布，只有用户明确要求时才裁切或留黑边，不覆盖原成片", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "aspect": {"type": "string"}, "fit": {"type": "string"}, "focusX": {"type": "number"}, "focusY": {"type": "number"}}, "required": ["aspect", "fit"], "additionalProperties": False}},
-    {"name": "propose_cover_candidates", "description": "从已有成片或源视频抽取、去重并评分可追溯的封面候选帧，不修改当前封面", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"sourceScope": {"type": "string"}, "candidateBudget": {"type": "integer"}, "aspectRatios": {"type": "array"}, "titleText": {"type": "string"}, "focus": {"type": "string"}}, "required": ["sourceScope", "candidateBudget", "aspectRatios"], "additionalProperties": False}},
+    {"name": "propose_cover_candidates", "description": "从已有成片或源视频抽取、去重并评分可追溯的封面候选帧，不修改当前封面", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"sourceScope": {"type": "string"}, "candidateBudget": {"type": "integer"}, "aspectRatios": {"type": "array"}, "titleText": {"type": "string"}, "focus": {"type": "string"}, "subject": {"type": "string"}, "sourceTime": {"type": "number"}}, "required": ["sourceScope", "candidateBudget", "aspectRatios"], "additionalProperties": False}},
     {"name": "render_cover_variants", "description": "从已评分候选帧生成不覆盖现有封面的本地审核预览，保留来源、评分和内容哈希", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"aspectRatios": {"type": "array"}, "directions": {"type": "array"}, "titleText": {"type": "string"}}, "required": ["aspectRatios", "directions"], "additionalProperties": False}},
     {"name": "review_cover_variants", "description": "审核封面候选；自动模式按当前主题和画幅自动选优，分步模式请求用户选择", "sideEffect": "review", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "confirm_cover", "description": "保存当前任务封面版本；自动成片模式随后生成正式成片，分步模式仅保存用户选择", "sideEffect": "preview", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -43,6 +43,7 @@ CORE_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "compose_cover_intro", "description": "把当前任务已确认封面合成为当前成片的短片头，不复用其他任务封面", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"duration": {"type": "number"}}, "additionalProperties": False}},
     {"name": "analyze_reframe_safe_areas", "description": "分析当前输出画幅转换的安全策略，保护人物、字幕、屏幕文字和产品主体", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"aspect": {"type": "string"}, "fit": {"type": "string"}}, "required": ["aspect"], "additionalProperties": False}},
     {"name": "layout_subtitles", "description": "更新当前精剪时间线已确认字幕稿的布局，支持顶部/底部、安全区、字号和双语等要求；不会自行生成字幕文字", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"position": {"type": "string"}, "style": {"type": "string"}, "fontSizeRatio": {"type": "number"}}, "additionalProperties": False}},
+    {"name": "export_subtitles", "description": "从当前成片或审核样片导出字幕文件，支持 SRT/VTT，不生成或修改视频", "sideEffect": "export", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "format": {"type": "string", "enum": ["srt", "vtt"]}}, "additionalProperties": False}},
     {"name": "polish_audio_mix", "description": "基于当前任务输出生成音频优化版本，支持响度规范化、保守降噪和人声优先", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "noiseReduction": {"type": "boolean"}, "voiceFirst": {"type": "boolean"}}, "additionalProperties": False}},
     {"name": "propose_broll_overlay", "description": "把已确认的辅助画面作为静音插入镜头加入当前时间线，保留主音频", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "maxOverlays": {"type": "integer"}}, "required": ["query"], "additionalProperties": False}},
     {"name": "render_graphics_package", "description": "在当前精剪时间线添加可编辑图文层，如标题、标签、参数卡、价格、Logo、水印或 CTA", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "placement": {"type": "string"}, "style": {"type": "string"}}, "additionalProperties": False}},
@@ -212,7 +213,7 @@ SKILL_PROFILES: dict[str, dict[str, Any]] = {
     "cliptalk-multi-topic-assembler": {"kind": "multi-topic", "tools": {"inspect_workspace", "search_content", "select_multi_topic_evidence", "propose_timeline_edit", "confirm_timeline_edit", "prepare_subtitle_review", "render_review_preview", "render_social_preview", "run_delivery_qc"}},
     "cliptalk-cover-intro-composer": {"kind": "cover-intro", "tools": {"inspect_workspace", "propose_cover_candidates", "render_cover_variants", "review_cover_variants", "confirm_cover", "compose_cover_intro", "run_delivery_qc"}},
     "cliptalk-dynamic-reframe-director": {"kind": "dynamic-reframe", "tools": {"inspect_workspace", "analyze_reframe_safe_areas", "render_social_preview", "run_delivery_qc"}},
-    "cliptalk-caption-layout-director": {"kind": "caption-layout", "tools": {"inspect_workspace", "layout_subtitles", "prepare_subtitle_review", "render_review_preview"}},
+    "cliptalk-caption-layout-director": {"kind": "caption-layout", "tools": {"inspect_workspace", "layout_subtitles", "prepare_subtitle_review", "render_review_preview", "export_subtitles"}},
     "cliptalk-audio-polish-mixer": {"kind": "audio-polish", "tools": {"inspect_workspace", "polish_audio_mix", "run_delivery_qc"}},
     "cliptalk-broll-overlay-editor": {"kind": "broll-overlay", "tools": {"inspect_workspace", "search_content", "review_content_evidence", "propose_broll_overlay", "confirm_timeline_edit", "render_review_preview"}},
     "cliptalk-graphics-packager": {"kind": "graphics-package", "tools": {"inspect_workspace", "render_graphics_package", "render_review_preview"}},
@@ -442,32 +443,106 @@ class AgentPlatform:
             return float(tens * 10 + ones)
         return None
 
-    @classmethod
-    def _source_range(cls, text: str, context: dict[str, Any]) -> dict[str, Any] | None:
-        match = re.search(r"(最后|结尾|末尾|开头|前)\s*([0-9.零〇一二两三四五六七八九十半]+)\s*(分钟|分|秒钟|秒)", text)
-        if not match:
-            existing = context.get("sourceRange")
-            return copy.deepcopy(existing) if isinstance(existing, dict) else None
+    @staticmethod
+    def _split_clauses(text: str) -> list[str]:
+        return [
+            clause.strip()
+            for clause in re.split(r"[，,。；;\n]+", str(text or ""))
+            if clause.strip()
+        ]
+
+    @staticmethod
+    def _strip_negative_clauses(text: str) -> str:
+        clauses: list[str] = []
+        for clause in AgentPlatform._split_clauses(text):
+            if re.search(r"^(?:但|但是|并且|同时|也)?\s*(?:不要|不能|不应|无需|不需要|别|禁止)", clause):
+                continue
+            clauses.append(clause)
+        return "，".join(clauses)
+
+    @staticmethod
+    def _time_token_pattern() -> str:
+        return (
+            r"(?:"
+            r"(?:\d{1,2}:)?\d{1,2}:\d{1,2}"
+            r"|(?:第\s*)?\d+(?:\.\d+)?\s*(?:秒钟|秒|s(?![a-z]))"
+            r")"
+        )
+
+    @staticmethod
+    def _parse_duration_amount(value: str, unit: str) -> float | None:
         try:
-            amount = float(match[2])
+            amount = float(value)
         except ValueError:
-            amount = cls._chinese_number(match[2])
+            amount = AgentPlatform._chinese_number(value)
         if amount is None or amount <= 0:
             return None
-        seconds = amount * (60 if match[3] in {"分钟", "分"} else 1)
-        duration = float(context.get("duration") or context.get("sourceDuration") or 0)
-        tail = match[1] in {"最后", "结尾", "末尾"}
-        return {
-            "kind": "custom", "start": max(0, duration - seconds) if tail else 0,
-            "end": duration if tail else min(seconds, duration) if duration else seconds,
-            "description": match[0], "requiresDuration": tail and duration <= 0,
-        }
+        return amount * (60 if unit in {"分钟", "分"} else 1)
+
+    @classmethod
+    def _source_time_range(cls, text: str, context: dict[str, Any]) -> dict[str, Any] | None:
+        token = cls._time_token_pattern()
+        explicit = re.search(
+            rf"从\s*({token})\s*(?:开始|起)?\s*(?:剪|保留|截取|提取)?\s*(?:到|至|~|～|-|—)\s*({token})",
+            str(text or ""),
+            re.IGNORECASE,
+        )
+        if explicit:
+            start = cls._parse_timecode_seconds(explicit.group(1))
+            end = cls._parse_timecode_seconds(explicit.group(2))
+            if start is not None and end is not None and end > start:
+                return {
+                    "kind": "custom", "start": round(start, 3), "end": round(end, 3),
+                    "description": explicit.group(0), "requiresDuration": False,
+                    "source": "explicit_range",
+                }
+
+        removal = re.search(
+            r"(?:剪掉|删掉|删除|去掉|移除|裁掉)\s*(前|开头)\s*([0-9.零〇一二两三四五六七八九十半]+)\s*(分钟|分|秒钟|秒)",
+            str(text or ""),
+        )
+        if removal:
+            seconds = cls._parse_duration_amount(removal.group(2), removal.group(3))
+            if seconds is not None:
+                return {
+                    "kind": "remove", "start": 0.0, "end": round(seconds, 3),
+                    "description": removal.group(0), "requiresDuration": False,
+                    "source": "remove_prefix",
+                }
+
+        include = re.search(
+            r"(?<!剪掉)(?<!删掉)(?<!删除)(?<!去掉)(?<!移除)(?<!裁掉)"
+            r"(最后|结尾|末尾|开头|前)\s*([0-9.零〇一二两三四五六七八九十半]+)\s*(分钟|分|秒钟|秒)",
+            str(text or ""),
+        )
+        if include:
+            seconds = cls._parse_duration_amount(include.group(2), include.group(3))
+            if seconds is not None:
+                duration = float(context.get("duration") or context.get("sourceDuration") or 0)
+                tail = include.group(1) in {"最后", "结尾", "末尾"}
+                return {
+                    "kind": "custom", "start": max(0, duration - seconds) if tail else 0,
+                    "end": duration if tail else min(seconds, duration) if duration else seconds,
+                    "description": include.group(0), "requiresDuration": tail and duration <= 0,
+                    "source": "relative_source_range",
+                }
+        return None
+
+    @classmethod
+    def _source_range(cls, text: str, context: dict[str, Any]) -> dict[str, Any] | None:
+        parsed = cls._source_time_range(text, context)
+        if parsed and str(parsed.get("kind") or "") != "remove":
+            return parsed
+        existing = context.get("sourceRange")
+        return copy.deepcopy(existing) if isinstance(existing, dict) else None
 
     @classmethod
     def _duration_target(cls, text: str) -> tuple[int | None, bool]:
+        source_text = str(text or "")
+        normalized = cls._strip_timeline_or_cover_time_refs(source_text)
         normalized = re.sub(
             r"(?:最后|结尾|末尾|开头|前)\s*[0-9.零〇一二两三四五六七八九十半]+\s*(?:分钟|分|秒钟|秒)",
-            "", str(text or ""),
+            "", normalized,
         )
         # A duration mentioned as something to avoid is not a requested
         # target. For example, “不要因为默认 30 秒目标丢片段” used to be
@@ -526,13 +601,71 @@ class AgentPlatform:
 
     @staticmethod
     def _duration_tolerance(text: str) -> int | None:
+        text = AgentPlatform._strip_timeline_or_cover_time_refs(str(text or ""))
         match = re.search(
             r"\d+(?:\.\d+)?\s*(?:±|\+\s*/\s*-|\+\s*-)\s*"
             r"(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))",
-            str(text or ""),
+            text,
             re.IGNORECASE,
         )
         return max(0, round(float(match.group(1)))) if match else None
+
+    @staticmethod
+    def _strip_timeline_or_cover_time_refs(text: str) -> str:
+        """Remove timestamp references that locate material, not output length."""
+        value = str(text or "")
+        if not value:
+            return ""
+        time_token = r"(?:第\s*)?\d+(?:\.\d+)?\s*(?:秒钟|秒|s(?![a-z]))"
+        # Durations attached to text/graphic overlays describe the element
+        # lifetime, not the whole output duration.
+        value = re.sub(
+            rf"(?:文字|文本|文案|标题|贴纸|水印|logo|Logo|字幕|图文|角标|标签)"
+            rf"[^，,。；;\n]{{0,40}}?(?:显示|持续|停留|保留)?\s*{time_token}",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            rf"(?:显示|持续|停留|保留)\s*{time_token}"
+            rf"[^，,。；;\n]{{0,40}}?(?:文字|文本|文案|标题|贴纸|水印|logo|Logo|字幕|图文|角标|标签)",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if re.search(r"文字(?!幕)|文本|文案|标题|贴纸|水印|logo|Logo|图文|角标|标签|添加[^，,。；;\n]{0,24}[“\"'‘]", value):
+            value = re.sub(rf"(?:显示|持续|停留|保留)\s*{time_token}", "", value, flags=re.IGNORECASE)
+        # “54s 出现的人/第54秒画面/54秒处” is a source timestamp, especially
+        # when used to pick a cover frame. It must not become targetSeconds.
+        value = re.sub(
+            rf"{time_token}\s*(?:左右|附近|前后)?\s*(?:出现|处|位置|时间点|画面|帧|这一帧|那一帧|的人|的那个人)",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        clause_parts = re.split(r"([，,。；;\n])", value)
+        cleaned: list[str] = []
+        for index in range(0, len(clause_parts), 2):
+            clause = clause_parts[index]
+            delimiter = clause_parts[index + 1] if index + 1 < len(clause_parts) else ""
+            if (
+                re.search(time_token, clause, flags=re.IGNORECASE)
+                and re.search(r"封面|缩略图|海报|截图|截帧|取帧|选取|选择|使用|用|出现|人物|这个人|那个人|画面|帧", clause)
+                and not re.search(r"目标|总(?:时长|长度)|成片(?:时长|长度)?|视频(?:时长|长度)?|剪成|做成|合成.{0,6}\d", clause)
+            ):
+                clause = re.sub(time_token, "", clause, flags=re.IGNORECASE)
+            cleaned.append(clause + delimiter)
+        return "".join(cleaned)
+
+    @staticmethod
+    def _parse_timecode_seconds(value: str) -> float | None:
+        text = str(value or "").strip()
+        colon = re.fullmatch(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?", text)
+        if colon:
+            parts = [int(item) for item in colon.groups(default="0")]
+            return float(parts[0] * 60 + parts[1]) if colon.group(3) is None else float(parts[0] * 3600 + parts[1] * 60 + parts[2])
+        match = re.fullmatch(r"(?:第\s*)?(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))", text, flags=re.IGNORECASE)
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _relative_duration_request(text: str) -> bool:
@@ -544,6 +677,26 @@ class AgentPlatform:
 
     @staticmethod
     def _anchor_start(text: str) -> dict[str, Any] | None:
+        semantic_range = AgentPlatform._semantic_anchor_range(text)
+        if semantic_range:
+            return copy.deepcopy(semantic_range.get("start"))
+        time_match = re.search(
+            r"从\s*((?:\d{1,2}:)?\d{1,2}:\d{1,2}|(?:第\s*)?\d+(?:\.\d+)?\s*(?:秒钟|秒|s(?![a-z])))"
+            r"\s*(?:左右|附近|前后)?\s*(?:出现|开始|处|位置|时间点)?\s*"
+            r"(.{0,80}?)(?:的地方|的位置|那里|那儿|处)?\s*(?:开始|起)(?:剪|保留|播放|做|生成|编辑)?",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        )
+        if time_match:
+            seconds = AgentPlatform._parse_timecode_seconds(time_match.group(1))
+            query = str(time_match.group(2) or "").strip(" 　：:，,。；;")
+            query = re.sub(r"^(?:出现|看到|有|是)\s*", "", query).strip()
+            query = re.sub(r"(?:的)?(?:部分|内容|片段|画面|镜头)$", "", query).strip()
+            if query:
+                payload: dict[str, Any] = {"query": query[:240], "selectionPolicy": "unique_or_review"}
+                if seconds is not None:
+                    payload["sourceTimeSeconds"] = round(seconds, 3)
+                return payload
         match = re.search(
             r"从\s*(?:讲到|讲|提到|介绍|说到|说)?\s*"
             r"(.{1,100}?)(?:的地方|的位置|那里|那儿|处)?\s*"
@@ -559,23 +712,55 @@ class AgentPlatform:
         return {"query": query[:240], "selectionPolicy": "unique_or_review"} if query else None
 
     @staticmethod
+    def _semantic_anchor_range(text: str) -> dict[str, dict[str, Any]] | None:
+        match = re.search(
+            r"(?:从|把|将)?\s*(?:讲到|讲|提到|介绍|说到|说)?\s*(.{1,60}?)(?:的地方|的位置|那里|那儿|处)?\s*"
+            r"(?:开始|起)\s*(?:到|至|直到)\s*"
+            r"(?:讲到|讲|提到|介绍|说到|说)?\s*(.{1,60}?)(?:的地方|的位置|那里|那儿|处)?\s*"
+            r"(?:结束|为止|之前|前)?(?:剪出来|截出来|保留|剪|$)",
+            str(text or ""),
+        )
+        if not match:
+            return None
+        start = re.sub(r"(?:的)?(?:部分|内容|片段|画面|镜头)$", "", str(match.group(1) or "")).strip(" 　：:，,。；;")
+        end = re.sub(r"(?:的)?(?:部分|内容|片段|画面|镜头)$", "", str(match.group(2) or "")).strip(" 　：:，,。；;")
+        if not start or not end:
+            return None
+        return {
+            "start": {"query": start[:240], "selectionPolicy": "unique_or_review"},
+            "end": {"query": end[:240], "selectionPolicy": "unique_or_review"},
+        }
+
+    @staticmethod
+    def _generic_cover_subject(text: str) -> bool:
+        value = re.sub(r"\s+", "", str(text or ""))
+        if not value:
+            return True
+        return bool(re.fullmatch(
+            r"(?:最)?(?:具有|有)?(?:冲击性|视觉冲击|张力|感染力|吸引力|代表性|高级感|电影感|质感|氛围感|美感|"
+            r"精彩|好看|漂亮|清晰|醒目|震撼|燃|酷|帅|关键|重要|合适|适合|好|最佳|最好|最棒|亮眼|出彩)"
+            r"(?:的)?",
+            value,
+        ))
+
+    @staticmethod
     def _editing_brief(goal: str, context: dict[str, Any]) -> dict[str, Any]:
         text = str(goal or "").strip()
         # Parse requested deliverables only from affirmative clauses. Artifact
         # names inside “不要创建成片/不能沿用旧封面” are constraints, not work
         # the Agent is authorized to perform.
-        affirmative_text = re.sub(
-            r"(?:不要|不能|不应|无需|不需要)[^，,。；;\n]*",
-            "",
-            text,
-        )
+        affirmative_text = AgentPlatform._strip_negative_clauses(text)
         # Keep the retrieval instruction separate from the conversational
         # wrapper and the requested deliverable.  Sending the whole sentence
         # (for example “upload this video, find X, then make several cuts”)
         # to semantic retrieval used to pollute the evidence query with
         # planning language and made every request look like the same edit.
+        semantic_anchor_range = AgentPlatform._semantic_anchor_range(text)
         anchor_start = AgentPlatform._anchor_start(text)
+        anchor_end = copy.deepcopy((semantic_anchor_range or {}).get("end"))
         retrieval_query = str((anchor_start or {}).get("query") or AgentPlatform._retrieval_query(text))
+        source_time_range = AgentPlatform._source_time_range(text, context)
+        removed_source_ranges = [source_time_range] if isinstance(source_time_range, dict) and str(source_time_range.get("kind") or "") == "remove" else []
         source_range = AgentPlatform._source_range(text, context)
         excluded_clauses = re.findall(r"(?:不要|不保留|删除|去掉|排除|剔除|移除)([^，,。；;\n]+)", text)
         target_seconds, explicit_duration = AgentPlatform._duration_target(text)
@@ -600,7 +785,7 @@ class AgentPlatform:
         elif target_seconds is None and isinstance(context.get("targetSeconds"), (int, float)):
             target_seconds = int(context["targetSeconds"])
             duration_source = "context"
-        if relative_duration:
+        if relative_duration and not re.search(r"找出|找到|查找|搜索|检索|定位|提取|截取|介绍|讲解|讲到|提到|讨论|说到", text):
             # This is a timeline adjustment, not a request to search for the
             # literal phrase “再短一点” inside the video.
             retrieval_query = ""
@@ -617,6 +802,11 @@ class AgentPlatform:
         # “短视频/Hook” describes an editorial form, not a duration. Only an
         # explicit user duration may become a hard fitting constraint.
         variants = AgentPlatform._requested_variant_count(text)
+        subtitle_asset_requested = bool(re.search(
+            r"(?:只|仅)?\s*(?:导出|下载|生成|保存)\s*(?:字幕文件|字幕\s*SRT|SRT|VTT)|(?:字幕文件|SRT|VTT)\s*(?:导出|下载|保存)",
+            affirmative_text,
+            re.IGNORECASE,
+        ))
         subtitle_requested = bool(re.search(
             r"(?:加上?|添加|生成|制作|配上?|烧录|导出|需要|要有|带)(?:对应的?|顶部|底部|双语|中英|中文|英文|汉语)?字幕"
             r"|字幕(?:稿|文件|样式|校对|审核)|SRT|双语字幕",
@@ -634,6 +824,9 @@ class AgentPlatform:
             r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:价格|报价)"
             r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:文本|文字(?!幕)|文案|说明)",
             affirmative_text,
+        ) or re.search(
+            r"(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}?[“\"'‘][^。；;”\"'’\n]{1,120}[”\"'’]\s*(?:文本|文字(?!幕)|文案|说明)",
+            affirmative_text,
         ))
         graphics_text_match = re.search(
             r"(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}?(?:文本|文字(?!幕)|文案|说明)"
@@ -646,7 +839,33 @@ class AgentPlatform:
                 r"\s*(?:是|为|用|写|内容为|：|:)\s*([^，,。；;\n]{1,120})",
                 text,
             )
+        if not graphics_text_match:
+            graphics_text_match = re.search(
+                r"(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}?"
+                r"[“\"'‘]([^。；;”\"'’\n]{1,120})[”\"'’]\s*(?:文本|文字(?!幕)|文案|说明)",
+                text,
+            )
         graphics_text = str(graphics_text_match.group(1) if graphics_text_match else "").strip(" \t\r\n“”\"'‘’")
+        overlay_duration_match = re.search(
+            r"(?:文字|文本|文案|标题|贴纸|水印|logo|Logo|字幕|图文|角标|标签)"
+            r"[^，,。；;\n]{0,40}?(?:显示|持续|停留|保留)\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))"
+            r"|(?:显示|持续|停留|保留)\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))"
+            r"[^，,。；;\n]{0,40}?(?:文字|文本|文案|标题|贴纸|水印|logo|Logo|字幕|图文|角标|标签)",
+            text,
+            re.IGNORECASE,
+        )
+        overlay_duration_seconds = (
+            float(next(value for value in overlay_duration_match.groups() if value))
+            if overlay_duration_match else None
+        )
+        if overlay_duration_seconds is None and graphics_requested:
+            overlay_duration_loose = re.search(
+                r"(?:显示|持续|停留|保留)\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))",
+                text,
+                re.IGNORECASE,
+            )
+            if overlay_duration_loose:
+                overlay_duration_seconds = float(overlay_duration_loose.group(1))
         motion_graphics_requested = bool(re.search(
             r"Remotion|HyperFrames?|HTML\s*(?:视频|动效)|动效|动态图文|动态字幕|动态封面|动态片头|标题动画|片头动画|可视化视频",
             text,
@@ -658,22 +877,78 @@ class AgentPlatform:
         )
         draft_export_requested = bool(re.search(r"剪映|CapCut|草稿|工程文件|项目文件|导出草稿|导出工程|外部编辑器", affirmative_text, re.IGNORECASE))
         delivery_export_requested = bool(re.search(r"正式导出|高清导出|导出高清|最终导出|可下载|下载|交付包|发布(?!会)|出片|成品文件", affirmative_text))
+        if subtitle_asset_requested and re.search(r"不要|不生成|无需|不需要", text) and re.search(r"视频|成片|样片", text):
+            delivery_export_requested = False
         diagnostics_requested = bool(re.search(r"为什么|为何|哪里.{0,8}问题|诊断|排查|卡住|失败|未找到|不合理|怎么回事", text))
         multi_topic_requested = bool(re.search(
             r"分别|各(?:类|段|个|自)|每(?:类|段|个)|\d+\s*段|[一二两三四五六七八九十]\s*段|、.*、",
             retrieval_query or text,
         ))
         composition_requested = bool(re.search(
-            r"组合|合成|剪辑|成片|版本|合集|精华|整理(?:成|为)|做成|剪成|剪出来|截出来|制作|编排|删除|去掉|排除|剔除|移除|只保留|重排|缩短|加速|返修",
+            r"组合|合成|剪辑|成片|版本|合集|精华|整理(?:成|为)|做成|剪成|剪出来|截出来|制作|编排|剪掉|删掉|裁掉|删除|去掉|排除|剔除|移除|只保留|重排|缩短|加速|返修",
             affirmative_text,
         ))
-        cover_aspect = str(social_delivery.get("aspect") or "16:9")
         cover_title_match = re.search(
             r"(?:封面|缩略图|海报帧)[^。；;\n]{0,20}?(?:标题|文案|文本描述|文字描述|文字)"
-            r"\s*(?:是|为|用|写|添加|加上|改成|：|:)?\s*[“\"'‘]?([^，,。；;”\"'’]{1,80})",
+            r"\s*(?:是|为|用|写|添加|加上|改成|：|:)?\s*[“\"'‘]?([^。；;”\"'’\n]{1,120})",
             text,
         )
+        if not cover_title_match:
+            cover_title_match = re.search(
+                r"(?:封面|缩略图|海报帧)[^。；;\n]{0,30}?"
+                r"(?:(?:上\s*)?写(?:好)?上?|加上|添加|放上|配上)"
+                r"\s*(?:是|为|用|写|内容为|：|:)?\s*[“\"'‘]?([^。；;”\"'’\n]{1,120})",
+                text,
+            )
         cover_title = str(cover_title_match.group(1) if cover_title_match else "").strip(" \t\r\n“”\"'‘’")
+        cover_title = re.sub(r"^(?:上|好上|写上|写好上)?\s*[：:]\s*", "", cover_title).strip()
+        cover_title = re.split(
+            r"[，,]\s*(?=(?:并|然后|再|同时|之后|接着)(?:生成|导出|制作|合成|添加|调整|检查|发布))",
+            cover_title,
+            maxsplit=1,
+        )[0].strip()
+        external_cover_match = re.search(
+            r"(?:找到|寻找|查找|搜索|网上找|使用|采用|上传|提供)\s*"
+            r"(?:一张|一幅|一张合适的|合适的)?\s*"
+            r"(.{1,60}?)(?:的)?(?:照片|图片|肖像|头像)\s*"
+            r"(?:来)?(?:作为|用作|做成|当作)\s*(?:视频)?封面",
+            text,
+        )
+        source_cover_match = re.search(
+            r"(?:用|使用|采用|选用|选取|选择|截取)\s*"
+            r"(?:第?\s*\d+(?:\.\d+)?\s*(?:秒钟|秒|s)\s*(?:左右|附近|前后)?\s*(?:出现|看到|有)?(?:的)?\s*)?"
+            r"(.{1,60}?)(?:的)?(?:照片|图片|肖像|头像|画面|镜头|帧)?\s*"
+            r"(?:来)?(?:作为|用作|做成|当作)\s*(?:视频)?封面",
+            text,
+            re.IGNORECASE,
+        )
+        source_cover_time_match = re.search(
+            r"(?:用|使用|采用|选用|选取|选择|截取)\s*(?:第)?\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s)"
+            r"[^。；;\n]{0,80}?(?:作为|用作|做成|当作)\s*(?:视频)?封面",
+            text,
+            re.IGNORECASE,
+        )
+        cover_source_kind = "external_image" if external_cover_match else "source_frame"
+        cover_subject = str(
+            external_cover_match.group(1)
+            if external_cover_match else source_cover_match.group(1) if source_cover_match else ""
+        ).strip(
+            " \t\r\n，,。；;：:“”\"'‘’"
+        )
+        cover_subject = re.sub(
+            r"^(?:出现|看到|看见|有|画面中|视频中)(?:的)?", "", cover_subject,
+        ).strip(" \t\r\n，,。；;：:“”\"'‘’")
+        cover_subject = "" if AgentPlatform._generic_cover_subject(cover_subject) else cover_subject
+        cover_aspect_match = re.search(
+            r"(?:封面|缩略图|海报帧)[^。；;\n]{0,40}?(9:16|16:9|4:5|1:1)"
+            r"|(9:16|16:9|4:5|1:1)[^。；;\n]{0,20}?(?:封面|缩略图|海报帧)",
+            text,
+            re.IGNORECASE,
+        )
+        cover_aspect = str(
+            (cover_aspect_match.group(1) or cover_aspect_match.group(2))
+            if cover_aspect_match else social_delivery.get("aspect") or "16:9"
+        )
         # A cover aspect and a video delivery aspect are independent. Keep an
         # explicit vertical/video request when both appear in the same goal;
         # only suppress social delivery for a cover-only request.
@@ -682,7 +957,7 @@ class AgentPlatform:
             r"|(?:9:16|4:5|1:1|16:9)\s*(?:的)?(?:视频|成片|输出|版本)"
             r"|(?:视频|成片|输出|版本)\s*(?:为|做成|改成|转换为|设置为)\s*(?:9:16|4:5|1:1|16:9)",
             text, re.IGNORECASE,
-        ))
+        ) or re.search(r"(?:视频|成片|输出|版本|样片).{0,8}(?:竖屏|横屏|方形|方屏)", text, re.IGNORECASE))
         if cover_requested and not video_format_requested:
             social_delivery = {
                 "requested": False, "aspect": "", "fit": "blur", "focusX": .5, "focusY": .5,
@@ -696,10 +971,15 @@ class AgentPlatform:
             else "compare" if re.search(r"比较|对比|分别|各自|每个人|每位", text)
             else "include"
         )
+        named_speaker_match = re.search(
+            r"(?:只保留|保留|选择|找出|找到|提取|截取)\s*([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9·]{1,15})\s*(?:说话|发言|回答|讲述|讲话|旁白)",
+            text,
+            re.IGNORECASE,
+        )
         speaker_targeted = bool(re.search(
-            r"主持人|嘉宾|说话人|发言人|声音|音色|旁白|(?:女性|男性|女生|男生|女人|男人|某人).{0,8}(?:说话|发言|回答|讲述)|Speaker\s*\d+",
+            r"主持人|嘉宾|说话人|发言人|声音|音色|声纹|旁白|(?:女性|男性|女生|男生|女人|男人|某人).{0,8}(?:说话|发言|回答|讲述|讲话)|Speaker\s*\d+",
             text, re.IGNORECASE,
-        ))
+        ) or named_speaker_match)
         # An interaction such as “主持人与歌手交谈” is a semantic content
         # target, not an instruction to include or exclude a voice cluster.
         if retrieval_query and re.search(r"交谈|对话|交流|谈话|聊天", retrieval_query):
@@ -715,14 +995,14 @@ class AgentPlatform:
                 selection_mode = "include"
         speaker_target_label = (
             f"说话人 {str(speaker_label_match.group(1)).upper()}"
-            if speaker_label_match else ""
+            if speaker_label_match else str(named_speaker_match.group(1)).strip() if named_speaker_match else ""
         )
         # ``人物`` in interview prose usually means respondents, not visual
         # identity tracking.  Requiring an appearance/selection cue keeps
         # requests such as “不同人物关于成长的回答” on the interview
         # workflow instead of launching a multi-thousand-frame body scan.
         person_targeted = not speaker_targeted and bool(re.search(
-            r"出镜|人脸|面孔|某人|这个人|该人物|目标人物|"
+            r"出镜|人脸|面孔|某人|这个人|那个人|该人物|目标人物|"
             r"人物\s*[A-ZＡ-Ｚ0-9一二三四五六七八九十]+|"
             r"(?:选择|确认|指定|识别).{0,8}(?:画面)?人物|"
             r"(?:人物|有哪些人|都有谁).{0,12}(?:选|选择|确认)|"
@@ -734,18 +1014,37 @@ class AgentPlatform:
             r"(穿[^，,。；;]{1,40}?(?:衣|服|上衣)[^，,。；;]{0,12}?(?:人|人物))",
             text,
         )
+        person_time_match = re.search(
+            r"(?:第)?\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))\s*(?:左右|附近|前后)?\s*(?:出现|看到|看见|有)?(?:的)?\s*(这个人|那个人|该人物|这个人物|目标人物)",
+            text,
+            re.IGNORECASE,
+        )
         person_description = str(
-            person_description_match.group(1) if person_description_match else ""
+            person_description_match.group(1)
+            if person_description_match else
+            f"{person_time_match.group(1)} 秒出现的{person_time_match.group(2)}"
+            if person_time_match else ""
         ).strip()
+        if person_time_match and re.search(r"这个人|那个人|该人物|目标人物", retrieval_query):
+            retrieval_query = ""
         # “找到 X” is a complete request in its own right.  It should end in
         # evidence review rather than silently creating a timeline, subtitles,
         # and a sample that the user did not ask for.
+        search_only_requested = bool(re.search(
+            r"(?:只|仅)?\s*(?:列出|展示|查看|检索|查找|找出).{0,40}(?:候选|源视频时间|时间段|时间码)"
+            r"|不要.{0,20}(?:成片|视频|样片|封面)",
+            text,
+        ) and not re.search(r"(?:合成|生成|制作|剪成|做成).{0,20}(?:视频|成片|样片)", affirmative_text))
         format_only = bool(social_delivery["requested"] and not retrieval_query)
         timeline_requested = bool(
             composition_requested or short_form or variants > 1 or target_seconds or subtitle_requested
             or preview_requested or anchor_start
             or (social_delivery["requested"] and (retrieval_query or format_only))
         )
+        if search_only_requested and not composition_requested and not subtitle_asset_requested:
+            timeline_requested = False
+        if subtitle_asset_requested:
+            timeline_requested = False
         # A project output aspect is a delivery default, not a new editing
         # request. Apply it only when this goal already asks for a timeline;
         # a search-only request must still stop at candidate review. Explicit
@@ -757,9 +1056,67 @@ class AgentPlatform:
                 "fit": "crop" if (context.get("delivery") or {}).get("outputFit") == "crop" else "blur",
                 "focusX": .5, "focusY": .5,
             }
+        time_refs: list[dict[str, Any]] = []
+        if isinstance(source_range, dict):
+            time_refs.append({
+                "kind": "source_range",
+                "start": source_range.get("start"),
+                "end": source_range.get("end"),
+                "description": source_range.get("description") or "",
+            })
+        for item in removed_source_ranges:
+            time_refs.append({
+                "kind": "remove_range",
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "description": item.get("description") or "",
+            })
+        if anchor_start and anchor_start.get("sourceTimeSeconds") is not None:
+            time_refs.append({
+                "kind": "source_anchor_start",
+                "time": anchor_start.get("sourceTimeSeconds"),
+                "query": anchor_start.get("query") or "",
+            })
+        elif anchor_start:
+            time_refs.append({
+                "kind": "semantic_anchor_start",
+                "query": anchor_start.get("query") or "",
+            })
+        if anchor_end:
+            time_refs.append({
+                "kind": "semantic_anchor_end",
+                "query": anchor_end.get("query") or "",
+            })
+        if source_cover_time_match:
+            time_refs.append({
+                "kind": "cover_frame",
+                "time": float(source_cover_time_match.group(1)),
+                "query": cover_subject[:120],
+            })
+        if person_time_match:
+            time_refs.append({
+                "kind": "person_reference",
+                "time": float(person_time_match.group(1)),
+                "query": person_description[:120],
+            })
+        if overlay_duration_seconds is not None:
+            time_refs.append({"kind": "overlay_duration", "duration": overlay_duration_seconds})
+        operation_intent = (
+            "export_subtitles" if subtitle_asset_requested else
+            "search_only" if not timeline_requested and retrieval_query else
+            "revise_timeline" if (graphics_requested or broll_requested or (subtitle_requested and not subtitle_asset_requested)) and not retrieval_query else
+            "reframe_existing" if format_only and social_delivery.get("requested") and not (source_range or removed_source_ranges) else
+            "compose_timeline" if timeline_requested else
+            "cover_asset" if cover_requested else
+            "inspect"
+        )
         return {
             "schemaVersion": 2,
             "goal": text[:1000], "targetSeconds": target_seconds,
+            "operationIntent": operation_intent,
+            "timeRefs": time_refs,
+            "removedSourceRanges": removed_source_ranges,
+            "sourceEndAnchor": copy.deepcopy(anchor_end),
             "inheritedContentConstraint": copy.deepcopy((context.get("evidence") or {}).get("contentConstraint"))
             if not retrieval_query and (timeline_requested or social_delivery.get("requested")) else None,
             "durationExplicit": explicit_duration,
@@ -778,8 +1135,10 @@ class AgentPlatform:
             "removeRepetition": bool(re.search(r"重复|冗余|精简|删", text)),
             "speakerTargeted": speaker_targeted,
             "speakerTargetLabel": speaker_target_label,
+            "speakerDescription": speaker_target_label,
             "personTargeted": person_targeted,
             "personDescription": person_description,
+            "personSourceTime": float(person_time_match.group(1)) if person_time_match else None,
             "subjectKind": "speaker" if speaker_targeted else "person" if person_targeted else "content",
             "selectionMode": selection_mode,
             "keepQuestionContext": (interview or bool(re.search(r"提问|上下文|转场", affirmative_text))) and not any("提问" in clause or "问题" in clause for clause in excluded_clauses),
@@ -789,12 +1148,13 @@ class AgentPlatform:
             "anchorStart": copy.deepcopy(anchor_start),
             # A cover supplements a video deliverable; it must never turn an
             # explicit short-video/edit request into a cover-only workflow.
-            "delivery": "timeline" if timeline_requested else "artifact" if cover_requested else "candidates",
+            "delivery": "timeline" if timeline_requested else "artifact" if (cover_requested or subtitle_asset_requested) else "candidates",
             "variantCount": variants,
             "requiresEvidenceReview": bool(
                 timeline_requested and (retrieval_query or interview or speaker_targeted)
             ),
             "subtitleRequested": subtitle_requested,
+            "subtitleAssetRequested": subtitle_asset_requested,
             "reviewPreviewRequested": preview_requested,
             "deliveryQcRequested": qc_requested,
             "coverIntroRequested": cover_intro_requested,
@@ -802,6 +1162,8 @@ class AgentPlatform:
             "brollRequested": broll_requested,
             "graphicsRequested": graphics_requested,
             "graphicsText": graphics_text,
+            "overlayText": graphics_text,
+            "overlayDurationSeconds": overlay_duration_seconds,
             "motionGraphicsRequested": motion_graphics_requested,
             "motionIntroRequested": bool(motion_intro_requested),
             "draftExportRequested": draft_export_requested,
@@ -813,10 +1175,153 @@ class AgentPlatform:
             "coverRequested": cover_requested,
             "coverAspect": cover_aspect,
             "coverTitle": cover_title,
+            "coverSourceKind": cover_source_kind,
+            "coverSubject": cover_subject[:120],
+            "coverIdentityPolicy": "verify" if cover_subject else "ignore",
+            "coverSourceTime": float(source_cover_time_match.group(1)) if source_cover_time_match else None,
+            "coverSourceStatus": "requires_external_asset" if external_cover_match else "available",
             "sourceScope": "custom" if source_range else str(context.get("sourceScope") or "all"),
             "sourceRange": source_range,
             "excludedContent": [clause for clause in excluded_clauses if not re.search(r"字幕|封面|复用|重复使用|默认|创建|生成|渲染|导出|时长|秒|分钟", clause)],
             "distinctSourceAcrossVariants": bool(re.search(r"(?:不要|不允许|禁止|不能|不得|不)\s*(?:重复使用|复用|重复).{0,8}(?:片段|镜头|素材)", text)),
+        }
+
+    @staticmethod
+    def _format_seconds_label(seconds: Any) -> str:
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return ""
+        if value < 0:
+            return ""
+        minutes = int(value // 60)
+        remainder = value - minutes * 60
+        if minutes:
+            return f"{minutes}:{int(round(remainder)):02d}"
+        return f"{value:g} 秒"
+
+    @classmethod
+    def _plan_understanding(cls, brief: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Public, user-facing interpretation of an Agent goal.
+
+        This deliberately mirrors the execution brief but avoids internal flags.
+        The UI shows it before approval so users can catch ambiguity such as a
+        timestamp being mistaken for output duration.
+        """
+        context = context if isinstance(context, dict) else {}
+        items: list[dict[str, str]] = []
+
+        def add(label: str, value: Any, *, kind: str = "") -> None:
+            text = str(value or "").strip()
+            if text:
+                items.append({"label": label, "value": text[:240], **({"kind": kind} if kind else {})})
+
+        retrieval = str(brief.get("retrievalQuery") or "").strip()
+        if retrieval:
+            add("检索目标", retrieval, kind="retrieval")
+        elif str(brief.get("delivery") or "") == "timeline":
+            add("检索目标", "按全片高光或当前成片要求自动筛选", kind="retrieval")
+        else:
+            add("检索目标", "仅查看当前任务状态或已有结果", kind="retrieval")
+
+        social = brief.get("socialDelivery") if isinstance(brief.get("socialDelivery"), dict) else {}
+        output_bits: list[str] = []
+        delivery = str(brief.get("delivery") or "")
+        if bool(brief.get("subtitleAssetRequested")):
+            output_bits.append("导出字幕文件")
+        elif delivery == "timeline":
+            output_bits.append("生成可审核剪辑版本")
+        elif delivery == "artifact":
+            output_bits.append("生成素材资产")
+        else:
+            output_bits.append("仅保留候选供确认")
+        if social.get("requested"):
+            output_bits.append(f"{social.get('aspect') or '目标'} 画幅")
+            output_bits.append({"blur": "完整保留画面并虚化补边", "crop": "裁切铺满", "pad": "保留黑边"}.get(str(social.get("fit") or ""), ""))
+        add("输出方式", " · ".join(bit for bit in output_bits if bit), kind="output")
+
+        if isinstance(brief.get("targetSeconds"), (int, float)):
+            tolerance = brief.get("durationToleranceSeconds")
+            add(
+                "成片时长",
+                f"目标 {float(brief['targetSeconds']):g} 秒"
+                + (f" · 允许 ±{float(tolerance):g} 秒" if isinstance(tolerance, (int, float)) else ""),
+                kind="duration",
+            )
+        elif delivery == "timeline":
+            add("成片时长", "不限制，使用符合条件的可靠片段", kind="duration")
+
+        anchor = brief.get("anchorStart") if isinstance(brief.get("anchorStart"), dict) else {}
+        if anchor:
+            anchor_text = str(anchor.get("query") or "指定位置")
+            time_label = cls._format_seconds_label(anchor.get("sourceTimeSeconds"))
+            add("起剪位置", f"{time_label} 附近 · {anchor_text}" if time_label else anchor_text, kind="anchor")
+
+        if bool(brief.get("subtitleRequested")):
+            if bool(brief.get("subtitleAssetRequested")):
+                add("字幕", "导出字幕文件，不生成视频", kind="subtitle")
+            else:
+                add("字幕", "生成/应用字幕" + (" · 顶部排版" if re.search(r"顶部", str(brief.get("goal") or "")) else ""), kind="subtitle")
+        else:
+            add("字幕", "不新增字幕", kind="subtitle")
+
+        if bool(brief.get("graphicsRequested")):
+            text = str(brief.get("graphicsText") or "").strip()
+            duration = brief.get("overlayDurationSeconds")
+            add(
+                "文字层",
+                (text or "按要求添加图文/文字层")
+                + (f" · 显示 {float(duration):g} 秒" if isinstance(duration, (int, float)) else ""),
+                kind="graphics",
+            )
+
+        if bool(brief.get("coverRequested")):
+            cover_bits = [f"{brief.get('coverAspect') or '16:9'} 封面"]
+            if str(brief.get("coverTitle") or "").strip():
+                cover_bits.append(f"文字：{brief.get('coverTitle')}")
+            source_time_label = cls._format_seconds_label(brief.get("coverSourceTime"))
+            source_bits: list[str] = []
+            if source_time_label:
+                source_bits.append(f"{source_time_label}画面")
+            if str(brief.get("coverSubject") or "").strip():
+                source_bits.append(f"人物：{brief.get('coverSubject')}")
+            if source_bits:
+                cover_bits.append(" · ".join(source_bits))
+            elif re.search(r"\d|第|秒|s|:", str(brief.get("goal") or ""), re.IGNORECASE):
+                cover_bits.append("按指令中的时间点/画面线索取帧")
+            add("封面", " · ".join(cover_bits), kind="cover")
+        else:
+            add("封面", "不新增封面", kind="cover")
+
+        source_range = brief.get("sourceRange") if isinstance(brief.get("sourceRange"), dict) else {}
+        if source_range:
+            start = cls._format_seconds_label(source_range.get("start")) or "0 秒"
+            end = cls._format_seconds_label(source_range.get("end"))
+            add("素材范围", f"{start} → {end}" if end else str(source_range.get("description") or "指定范围"), kind="scope")
+        elif brief.get("removedSourceRanges"):
+            ranges = []
+            for item in brief.get("removedSourceRanges") or []:
+                if not isinstance(item, dict):
+                    continue
+                start = cls._format_seconds_label(item.get("start")) or "0 秒"
+                end = cls._format_seconds_label(item.get("end"))
+                ranges.append(f"移除 {start} → {end}" if end else str(item.get("description") or "移除指定范围"))
+            add("素材范围", "；".join(ranges), kind="scope")
+        elif str((context.get("sourceScope") or brief.get("sourceScope") or "all")) == "custom":
+            add("素材范围", "指定源视频范围", kind="scope")
+        else:
+            add("素材范围", "全片", kind="scope")
+
+        end_anchor = brief.get("sourceEndAnchor") if isinstance(brief.get("sourceEndAnchor"), dict) else {}
+        if end_anchor:
+            add("结束位置", str(end_anchor.get("query") or "指定结束点"), kind="anchor")
+
+        summary = "；".join(f"{item['label']}：{item['value']}" for item in items[:4])
+        return {
+            "schemaVersion": 1,
+            "title": "Agent 理解",
+            "summary": summary[:500],
+            "items": items,
         }
 
     @staticmethod
@@ -835,6 +1340,13 @@ class AgentPlatform:
             r"关于|围绕|介绍|讲解|讲到|提到|指定主题|找到|查找|搜索|检索|找出", text
         ):
             return ""
+        keep_positive = re.search(
+            r"(?:去掉|删除|排除|剔除|移除)\s*没有\s*(.{1,80}?)(?:的)?(?:部分|片段|画面|镜头|内容)"
+            r".{0,24}?(?:保留|只保留|留下)\s*有\s*\1",
+            text,
+        )
+        if keep_positive:
+            return str(keep_positive.group(1) or "").strip(" ：:，,。；;")[:240]
         enumerated = re.search(
             r"(?:分别(?:是|为)|包括|包含)\s*[:：]?\s*(.{2,160}?)(?=(?:[。！？!?；;]|每(?:个|段)|各(?:个|段)|$))",
             text,
@@ -849,14 +1361,22 @@ class AgentPlatform:
             text,
         )
         match = enumerated or about_answer or natural_extract or re.search(
-            r"(?:(?:只\s*)?(?:找出|找到|查找|搜索|检索|定位|提取|截取)(?:并列出)?\s*[:：]?\s*|^(?:只保留|保留)\s*[:：]?\s*)"
+            r"(?:(?:只\s*)?(?:找出|找到|查找|搜索|检索|定位|提取|截取|列出|展示|查看)(?:并列出)?\s*[:：]?\s*|^(?:只保留|保留|只列出|列出)\s*[:：]?\s*)"
             r"(.{2,160}?)(?=(?:[，,；;。！？!?]|并(?:且|做|生成|给|合成|剪辑|制作|组合|删除|去掉|排除)?|然后|随后|再|做成|剪成|制作|组合|合成)|$)",
             text,
         )
         value = match.group(1) if match else ""
+        value = re.sub(
+            r"^(?:第\s*)?\d+(?:\.\d+)?\s*(?:秒钟|秒|s(?![a-z]))\s*(?:左右|附近|前后)?\s*(?:出现|看到|看见|有)?",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
         value = re.sub(r"^(?:所有|全部|视频中|素材中|其中的?)\s*", "", value).strip()
+        value = re.sub(r"^(?:有|出现|看到|看见)\s*", "", value).strip()
         value = re.sub(r"^关于", "", value).strip()
-        value = re.sub(r"(?:的)?候选片段(?:和|及)?源视频时间$", "", value).strip()
+        value = re.sub(r"(?:的)?(?:相关)?候选(?:片段|画面|镜头)?(?:和|及)?源视频时间$", "", value).strip()
+        value = re.sub(r"(?:的)?(?:相关)?候选(?:片段|画面|镜头)?$", "", value).strip()
         value = re.sub(r"(?:的)?(?:相关)?(?:视频)?(?:片段|画面|镜头|内容|场景|部分)$", "", value).strip(" ：:，,。；;")
         if enumerated and value:
             return f"分别查找{value}，各类片段作为并列候选"[:240]
@@ -871,8 +1391,8 @@ class AgentPlatform:
                 2 <= len(phrase) <= 80
                 and not re.search(
                     r"上传|交给|Agent|生成|合成|剪辑|剪一个|导出|输出|封面|字幕|竖屏|横屏|方形|方屏|"
-                    r"审核|审阅|预览|样片|短视频|短片|Hook|hook|成片|交付|检查|计划|规划|重启|"
-                    r"修复|优化|为什么|为何|怎么|如何|打不开|卡住|失败|测试|9:16|4:5|1:1|16:9",
+                    r"做一个|做一条|小红书|抖音|视频号|审核|审阅|预览|样片|短视频|短片|Hook|hook|成片|交付|检查|计划|规划|重启|"
+                    r"剪掉|删掉|删除|去掉|移除|裁掉|保留后|修复|优化|为什么|为何|怎么|如何|打不开|卡住|失败|测试|9:16|4:5|1:1|16:9",
                     phrase,
                     re.IGNORECASE,
                 )
@@ -941,7 +1461,7 @@ class AgentPlatform:
         """Return a delivery-format request without confusing it with the edit goal."""
         text = str(goal or "").lower()
         if "9:16" in text or re.search(
-            r"(?:合成|生成|输出|做(?:成|一个|一条)?|剪成|制作|转换为|改成).{0,18}竖屏|竖屏(?:的)?(?:视频|成片|输出|版本)",
+            r"(?:合成|生成|输出|做(?:成|一个|一条)?|剪成|制作|转换为|改成).{0,18}竖屏|竖屏(?:的)?(?:视频|成片|输出|版本)|(?:视频|成片|输出|版本|样片).{0,8}竖屏",
             text,
         ):
             aspect = "9:16"
@@ -950,7 +1470,7 @@ class AgentPlatform:
         elif "4:5" in text:
             aspect = "4:5"
         elif "16:9" in text or re.search(
-            r"(?:合成|生成|输出|做成|剪成|制作|转换为|改成).{0,18}横屏|横屏(?:的)?(?:视频|成片|输出|版本)",
+            r"(?:合成|生成|输出|做成|剪成|制作|转换为|改成).{0,18}横屏|横屏(?:的)?(?:视频|成片|输出|版本)|(?:视频|成片|输出|版本|样片).{0,8}横屏",
             text,
         ):
             aspect = "16:9"
@@ -958,7 +1478,9 @@ class AgentPlatform:
             aspect = "9:16"
         else:
             aspect = ""
-        if re.search(r"中心裁切|居中裁切|裁满|裁切铺满|放大裁切|\bcrop\b", text):
+        if re.search(r"(?:不要|不能|不应|无需|不需要|别|禁止).{0,8}(?:裁切|裁剪|crop)|保留完整画面|完整保留", text):
+            fit = "blur"
+        elif re.search(r"中心裁切|居中裁切|裁满|裁切铺满|放大裁切|\bcrop\b", text):
             fit = "crop"
         elif re.search(r"留黑|黑边|黑色留边|\bpad\b", text):
             fit = "pad"
@@ -970,6 +1492,21 @@ class AgentPlatform:
         focus_x = .25 if re.search(r"主体靠左|焦点靠左|人物靠左", text) else .75 if re.search(r"主体靠右|焦点靠右|人物靠右", text) else .5
         focus_y = .25 if re.search(r"主体靠上|焦点靠上", text) else .75 if re.search(r"主体靠下|焦点靠下", text) else .5
         return {"requested": bool(aspect), "aspect": aspect, "fit": fit, "focusX": focus_x, "focusY": focus_y}
+
+    @classmethod
+    def _local_motion_requires_current_output(cls, brief: dict[str, Any]) -> bool:
+        """Only require an output when the user explicitly asks to modify one.
+
+        A title card or motion intro can be rendered as a standalone preview
+        from a source task.  Merely using the word “片头” must not turn that
+        creation request into an existing-output edit.
+        """
+        goal = str(brief.get("goal") or "")
+        return bool(re.search(
+            r"(?:合入|并入|接入|追加到|添加到|加到).{0,12}(?:当前|已有|现有)?成片|"
+            r"(?:当前|已有|现有)成片.{0,16}(?:合入|并入|追加|添加|加上|片头)",
+            goal,
+        ))
 
     @classmethod
     def _skill_routing_eligibility(
@@ -987,7 +1524,9 @@ class AgentPlatform:
         delivery = cls._social_delivery(str(brief.get("goal") or ""))
         editing = context.get("editing") if isinstance(context.get("editing"), dict) else {}
         has_outputs = bool(editing.get("hasOutputs"))
-        source_edit_requested = bool(brief.get("retrievalQuery")) and str(brief.get("delivery") or "") == "timeline"
+        source_edit_requested = str(brief.get("delivery") or "") == "timeline" and bool(
+            brief.get("retrievalQuery") or brief.get("sourceRange") or brief.get("removedSourceRanges")
+        )
         if kind in {"social-reframe", "dynamic-reframe"} and source_edit_requested:
             return False, "请求仍需从源片检索并组合内容，不能直接改画幅"
         if kind in {"social-reframe", "dynamic-reframe"} and not has_outputs:
@@ -998,7 +1537,7 @@ class AgentPlatform:
             return False, "正式交付需要当前任务已有审核通过的成片；不能导出源视频或其他任务输出"
         if kind == "cover-intro" and not has_outputs:
             return False, "封面片头需要当前任务已有成片；不能先生成无归属封面或复用其他任务封面"
-        if kind == "local-motion" and bool(brief.get("motionIntroRequested")) and not has_outputs:
+        if kind == "local-motion" and cls._local_motion_requires_current_output(brief) and not has_outputs:
             return False, "动态图文片头合成需要当前任务已有成片；不能先生成无法合入的独立动效"
         if kind == "delivery-qc" and source_edit_requested:
             return False, "请求仍需先生成内容剪辑，不能只运行交付质检"
@@ -1008,9 +1547,21 @@ class AgentPlatform:
             return True, ""
         has_timeline = bool(editing.get("hasActiveSession"))
         if (
-            kind in {"caption-layout", "graphics-package", "broll-overlay"}
-            or str(skill.get("id") or "") == "cliptalk-subtitle-editor"
-        ) and not has_timeline:
+            (kind == "caption-layout" or str(skill.get("id") or "") == "cliptalk-subtitle-editor")
+            and bool(brief.get("subtitleAssetRequested"))
+            and not has_outputs
+        ):
+            return False, "字幕文件导出需要当前任务已有带字幕的成片或审核样片"
+        if (
+            (kind == "caption-layout" or str(skill.get("id") or "") == "cliptalk-subtitle-editor")
+            and not bool(brief.get("subtitleAssetRequested"))
+            and not has_timeline
+        ):
+            return False, "该编辑需要当前任务已有已确认时间线；不能重新分析源视频或复用其他任务的编辑结果"
+        if (
+            kind in {"graphics-package", "broll-overlay"}
+            and not has_timeline
+        ):
             return False, "该编辑需要当前任务已有已确认时间线；不能重新分析源视频或复用其他任务的编辑结果"
         return True, ""
 
@@ -1022,10 +1573,12 @@ class AgentPlatform:
         if eligible:
             return None
         kind = str(cls._profile_for_skill(skill).get("kind") or "")
-        if kind in {"caption-layout", "graphics-package", "broll-overlay"} or str(skill.get("id") or "") == "cliptalk-subtitle-editor":
+        if (kind == "caption-layout" or str(skill.get("id") or "") == "cliptalk-subtitle-editor") and bool(brief.get("subtitleAssetRequested")):
+            required_state, code = "current_output", "missing_current_output"
+        elif kind in {"caption-layout", "graphics-package", "broll-overlay"} or str(skill.get("id") or "") == "cliptalk-subtitle-editor":
             required_state, code = "active_timeline", "missing_current_timeline"
         elif kind in {"social-reframe", "dynamic-reframe", "audio-polish", "platform-delivery", "cover-intro", "delivery-qc"} or (
-            kind == "local-motion" and bool(brief.get("motionIntroRequested"))
+            kind == "local-motion" and cls._local_motion_requires_current_output(brief)
         ):
             required_state, code = "current_output", "missing_current_output"
         else:
@@ -1085,6 +1638,18 @@ class AgentPlatform:
             skills.append(skill)
             kinds.add(kind)
 
+        def append_reframe_kind(*, required: bool = True) -> None:
+            if "social-reframe" in kinds or "dynamic-reframe" in kinds:
+                return
+            for candidate_kind in ("social-reframe", "dynamic-reframe"):
+                skill = self._enabled_skill_for_kind(candidate_kind)
+                if skill is not None:
+                    skills.append(skill)
+                    kinds.add(candidate_kind)
+                    return
+            if required:
+                raise ValueError("当前缺少已启用的 social-reframe 或 dynamic-reframe Skill，无法完整覆盖用户要求")
+
         primary_kind = next(iter(kinds))
         # Audit and diagnostic Skills mention many artifact names while
         # describing what they inspect. Those nouns are not requests to create
@@ -1097,7 +1662,7 @@ class AgentPlatform:
             bool(brief.get("socialDelivery", {}).get("requested"))
             and primary_kind not in {"social-reframe", "dynamic-reframe", "local-motion"}
         ):
-            append_kind("social-reframe")
+            append_reframe_kind()
         if bool(brief.get("coverIntroRequested")) and "cover-intro" not in kinds:
             append_kind("cover-intro", required=False)
         explicit_caption_position = bool(re.search(
@@ -1116,7 +1681,12 @@ class AgentPlatform:
             append_kind("broll-overlay", required=False)
         if bool(brief.get("graphicsRequested")) and "graphics-package" not in kinds:
             append_kind("graphics-package", required=False)
-        if bool(brief.get("deliveryQcRequested")) and "delivery-qc" not in kinds and "social-reframe" not in kinds:
+        if (
+            bool(brief.get("deliveryQcRequested"))
+            and "delivery-qc" not in kinds
+            and "social-reframe" not in kinds
+            and "dynamic-reframe" not in kinds
+        ):
             append_kind("delivery-qc")
         if bool(brief.get("coverRequested")) and "cover" not in kinds and primary_kind != "cover-intro":
             append_kind("cover")
@@ -1218,6 +1788,23 @@ class AgentPlatform:
                 )
             return arguments
 
+        def cover_candidate_source_scope() -> str:
+            editing_context = context.get("editing") if isinstance(context.get("editing"), dict) else {}
+            has_adopted_source = bool(
+                editing_context.get("hasOutputs")
+                or editing_context.get("hasActiveSession")
+                or context.get("currentOutputVersionId")
+            )
+            if not has_adopted_source:
+                return "source_video"
+            if brief.get("coverSourceTime") is not None and re.search(
+                r"源视频|原视频|本次视频|素材|第\s*\d|(?:\d+(?:\.\d+)?)\s*(?:秒钟|秒|s)",
+                str(brief.get("goal") or ""),
+                re.IGNORECASE,
+            ):
+                return "source_video"
+            return "accepted_cut"
+
         kind = str(profile["kind"])
         precondition = self._skill_precondition_descriptor(
             skill, brief=brief, context=context,
@@ -1234,6 +1821,30 @@ class AgentPlatform:
             result["decisionRecord"] = [{
                 "rule": "skill_precondition",
                 "outcome": "stop_with_clear_limitation",
+                "reason": reason,
+            }]
+            return result
+        if bool(brief.get("coverRequested")) and str(brief.get("coverSourceKind") or "") == "external_image":
+            subject = str(brief.get("coverSubject") or "指定人物").strip()
+            reason = (
+                f"封面要求使用“{subject}”的外部图片，但当前版本只能从本次视频中抽帧制作封面，"
+                "尚不支持联网找图或导入独立封面图片"
+            )
+            add(
+                "inspect_workspace", "等待外部封面素材",
+                {
+                    "requiredState": "external_cover_asset",
+                    "preconditionCode": "missing_external_cover_asset",
+                    "preconditionMessage": reason,
+                },
+                "获得明确来源的封面图片后才可继续，不会用源视频画面替代",
+            )
+            result["summary"] = f"{reason}。请修改要求为使用本次视频画面；当前不会开始检索、剪辑或生成错误封面。"
+            result["planningWarning"] = reason
+            result["steps"] = steps
+            result["decisionRecord"] = [{
+                "rule": "external_cover_capability",
+                "outcome": "stop_without_silent_fallback",
                 "reason": reason,
             }]
             return result
@@ -1322,9 +1933,13 @@ class AgentPlatform:
             aspect = str(brief.get("coverAspect") or "16:9")
             title_text = str(brief.get("coverTitle") or "")[:80]
             candidate_arguments: dict[str, Any] = {
-                "sourceScope": "accepted_cut", "candidateBudget": 16,
+                "sourceScope": cover_candidate_source_scope(), "candidateBudget": 16,
                 "aspectRatios": [aspect], "focus": str(brief.get("goal") or "")[:240],
             }
+            if brief.get("coverSubject"):
+                candidate_arguments["subject"] = str(brief["coverSubject"])[:120]
+            if brief.get("coverSourceTime") is not None:
+                candidate_arguments["sourceTime"] = float(brief["coverSourceTime"])
             if title_text:
                 candidate_arguments["titleText"] = title_text
             cover_candidate_step = add("propose_cover_candidates", "提取并评分封面候选", candidate_arguments, "当前任务内可追溯封面候选")
@@ -1341,6 +1956,24 @@ class AgentPlatform:
             add("run_delivery_qc", "检查封面片头成片质量", qc_arguments(), "封面片头成片质检报告", [intro_step])
             decision.append({"rule": "cover_intro", "outcome": "compose", "reason": "目标要求封面出现在视频开头"})
         elif kind == "caption-layout":
+            if bool(brief.get("subtitleAssetRequested")):
+                add(
+                    "export_subtitles",
+                    "导出字幕文件",
+                    {
+                        "format": "vtt" if re.search(r"\bVTT\b|WebVTT", str(brief.get("goal") or ""), re.IGNORECASE) else "srt",
+                    },
+                    "当前成片或审核样片对应的字幕文件；不生成视频",
+                )
+                decision.append({
+                    "rule": "subtitle_asset_export",
+                    "outcome": "export_subtitles",
+                    "reason": "目标明确要求字幕文件而不是视频成片",
+                })
+                result["summary"] = "从当前成片或审核样片导出字幕文件；不生成、不修改视频。"
+                result["steps"] = steps
+                result["decisionRecord"] = decision
+                return result
             position = "top" if re.search(r"顶部|上方|顶端", str(brief.get("goal") or "")) else "bottom"
             subtitle_step = add(
                 "prepare_subtitle_review",
@@ -1449,6 +2082,16 @@ class AgentPlatform:
                     highlight_arguments, "按内容质量排序的高光证据",
                 )
                 decision.append({"rule": "highlight_evidence", "outcome": "analyze", "reason": "未发现可复用高光候选"})
+        elif (kind in {"content", "speaker", "revision"}
+              and any(p.get("kind") == "speech.voice_identity" for p in
+                      (((context.get("evidence") or {}).get("contentConstraint") or {}).get("contract") or {}).get("predicates", []))
+              and re.search(r"(?:当前|这些).{0,30}片段.{0,12}(?:合成|生成)", str(brief["goal"]))
+              and not re.search(r"重新检索|换一个|另一个|另外|排除", str(brief["goal"]))):
+            add("review_content_evidence", "试听并确认当前声纹匹配片段",
+                {"query": str((context.get("evidence") or {}).get("lastQuery") or ""), "minimumSelection": 1},
+                "当前声纹匹配候选的审核选择，不重新选择匿名说话人")
+            decision.append({"rule": "existing_voice_candidates", "outcome": "review_existing",
+                             "reason": "合成当前声纹检索结果，保留原身份约束"})
         elif kind in {"content", "interview", "speaker"} or (kind == "revision" and "content" in profile_kinds):
             requires_speaker_scope = kind == "speaker" or bool(brief["speakerTargeted"])
             if requires_speaker_scope and bool(speaker.get("needsDiscovery")):
@@ -1501,6 +2144,12 @@ class AgentPlatform:
                 r"从\s*(?:讲到|讲|提到|介绍|说到|说)", str(brief.get("goal") or "")
             ) and not re.search(r"画面|屏幕|镜头|字幕|文字|出现|展示", str(brief.get("goal") or "")):
                 search_query = f"仅根据对白检索：{brief['anchorStart']['query']}；定位相关发言，不使用画面或屏幕文字作为证据"
+            if brief.get("sourceEndAnchor") and brief.get("anchorStart"):
+                search_query = (
+                    f"{brief['anchorStart'].get('query') or ''} 到 "
+                    f"{brief['sourceEndAnchor'].get('query') or ''}"
+                ).strip(" 到")
+                review_query = search_query
             add(
                 "search_content",
                 "检索目标内容" if not needs_timeline else "提取剪辑证据",
@@ -1578,11 +2227,15 @@ class AgentPlatform:
             aspect = str(brief.get("coverAspect") or "16:9")
             title_text = str(brief.get("coverTitle") or "")[:80]
             candidate_arguments: dict[str, Any] = {
-                "sourceScope": "accepted_cut",
+                "sourceScope": cover_candidate_source_scope(),
                 "candidateBudget": 16,
                 "aspectRatios": [aspect],
                 "focus": str(brief.get("goal") or "")[:240],
             }
+            if brief.get("coverSubject"):
+                candidate_arguments["subject"] = str(brief["coverSubject"])[:120]
+            if brief.get("coverSourceTime") is not None:
+                candidate_arguments["sourceTime"] = float(brief["coverSourceTime"])
             if title_text:
                 candidate_arguments["titleText"] = title_text
             cover_candidate_step = add(
@@ -1623,6 +2276,22 @@ class AgentPlatform:
                 f"{instruction}；以已核定的“{anchor_query}”匹配片段作为新时间线起点，"
                 "移除此前内容，保留后续可用编辑内容"
             )
+        if brief.get("sourceEndAnchor"):
+            end_query = str((brief.get("sourceEndAnchor") or {}).get("query") or "")
+            if end_query:
+                instruction = f"{instruction}；在“{end_query}”对应位置结束，移除之后内容"
+        if brief.get("sourceRange"):
+            scope = brief["sourceRange"]
+            instruction = f"{instruction}；仅使用源视频 {float(scope['start']):g} 到 {float(scope['end']):g} 秒范围"
+        for removal in brief.get("removedSourceRanges") or []:
+            if isinstance(removal, dict):
+                instruction = f"{instruction}；移除源视频 {float(removal.get('start') or 0):g} 到 {float(removal.get('end') or 0):g} 秒内容"
+        if brief.get("graphicsRequested"):
+            overlay_text = str(brief.get("overlayText") or brief.get("graphicsText") or "").strip()
+            duration = brief.get("overlayDurationSeconds")
+            duration_text = f"，显示 {float(duration):g} 秒" if isinstance(duration, (int, float)) else ""
+            if overlay_text:
+                instruction = f"{instruction}；添加文字层“{overlay_text}”{duration_text}"
         if kind == "shortform":
             instruction = f"{instruction}；前 1–3 秒必须进入明确 Hook，保留完整观点或动作，不使用片头、空白铺垫或重复表达"
         if needs_timeline:
@@ -1714,11 +2383,15 @@ class AgentPlatform:
             aspect = str(brief.get("coverAspect") or "16:9")
             title_text = str(brief.get("coverTitle") or "")[:80]
             candidate_arguments: dict[str, Any] = {
-                "sourceScope": "accepted_cut",
+                "sourceScope": cover_candidate_source_scope(),
                 "candidateBudget": 16,
                 "aspectRatios": [aspect],
                 "focus": str(brief.get("goal") or "")[:240],
             }
+            if brief.get("coverSubject"):
+                candidate_arguments["subject"] = str(brief["coverSubject"])[:120]
+            if brief.get("coverSourceTime") is not None:
+                candidate_arguments["sourceTime"] = float(brief["coverSourceTime"])
             if title_text:
                 candidate_arguments["titleText"] = title_text
             cover_candidate_step = add(
@@ -1966,11 +2639,14 @@ class AgentPlatform:
             raise ValueError("当前没有满足素材前置条件的 Skill；请先生成或选择一个可审核成片")
         editing = context.get("editing") if isinstance(context.get("editing"), dict) else {}
         source_edit_requested = str(brief.get("delivery") or "") == "timeline" and bool(
-            brief.get("retrievalQuery") or re.search(r"高光|最精彩|精彩部分", str(goal or ""))
+            brief.get("retrievalQuery") or brief.get("sourceRange") or brief.get("removedSourceRanges")
+            or re.search(r"高光|最精彩|精彩部分", str(goal or ""))
         )
         revision_requested = bool(editing.get("hasActiveSession") or editing.get("hasOutputs")) and bool(
             brief.get("durationSource") == "relative"
             or brief.get("anchorStart")
+            or brief.get("sourceRange")
+            or brief.get("removedSourceRanges")
             or re.search(
                 r"当前成片|已有成片|时间线|二次精剪|返修|重排|缩短|恢复|加字幕|添加文本|添加文字|加文字|叠加文字",
                 str(goal or ""),
@@ -1984,16 +2660,36 @@ class AgentPlatform:
             and re.search(r"检查|核查|校验|验证|排查|是否|有没有|误用|串用", str(goal or ""))
         ):
             preferred_kind = "source-provenance"
-        elif revision_requested and (brief.get("durationSource") == "relative" or brief.get("anchorStart")):
+        elif bool(brief.get("coverRequested")) and str(brief.get("delivery") or "") == "artifact" and not source_edit_requested:
+            preferred_kind = "cover"
+        elif revision_requested and (
+            brief.get("durationSource") == "relative"
+            or brief.get("anchorStart")
+            or brief.get("sourceRange")
+            or brief.get("removedSourceRanges")
+        ):
             preferred_kind = "revision"
+        elif bool(brief.get("subtitleAssetRequested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
+            preferred_kind = "caption-layout"
         elif bool(brief.get("draftExportRequested")) and not source_edit_requested:
             preferred_kind = "local-draft"
         elif bool(brief.get("motionGraphicsRequested")) and not source_edit_requested:
             preferred_kind = "local-motion"
-        elif bool(brief.get("deliveryExportRequested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
-            preferred_kind = "platform-delivery"
         elif bool(brief.get("audioPolishRequested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
             preferred_kind = "audio-polish"
+        elif revision_requested and not source_edit_requested and (
+            bool(brief.get("subtitleRequested"))
+            or bool(brief.get("graphicsRequested"))
+            or bool(brief.get("brollRequested"))
+        ):
+            if bool(brief.get("subtitleRequested")):
+                preferred_kind = "caption-layout"
+            elif bool(brief.get("graphicsRequested")):
+                preferred_kind = "graphics-package"
+            else:
+                preferred_kind = "broll-overlay"
+        elif bool(brief.get("deliveryExportRequested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
+            preferred_kind = "platform-delivery"
         elif bool(brief.get("socialDelivery", {}).get("requested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
             preferred_kind = "dynamic-reframe"
         elif bool(brief.get("deliveryQcRequested")) and bool(editing.get("hasOutputs")) and not source_edit_requested:
@@ -2121,6 +2817,8 @@ class AgentPlatform:
         planning_surface = "editor" if (
             str(planning_brief.get("delivery") or "") == "timeline"
             or bool(planning_brief.get("anchorStart"))
+            or bool(planning_brief.get("sourceRange"))
+            or bool(planning_brief.get("removedSourceRanges"))
             or bool(planning_brief.get("durationSource") == "relative")
             or bool(re.search(
                 r"当前成片|已有成片|时间线|二次精剪|返修|重排|缩短|恢复|加字幕|添加文本|添加文字|加文字|叠加文字",
@@ -2353,6 +3051,7 @@ class AgentPlatform:
             raw_plan, skill=skill, skills=skills, goal=goal, context=context,
             execution_mode=execution_mode,
         )
+        compiled["understanding"] = self._plan_understanding(brief, context)
         plan = self._normalize_plan(
             compiled, workspace=workspace, skill=skill, skills=skills, goal=goal,
         )
@@ -2489,6 +3188,7 @@ class AgentPlatform:
             "planHash": digest, "steps": steps,
             "approval": None, "agent": raw.get("agent") or {},
             "brief": raw.get("brief") if isinstance(raw.get("brief"), dict) else {},
+            "understanding": raw.get("understanding") if isinstance(raw.get("understanding"), dict) else {},
             "planningContext": raw.get("planningContext") if isinstance(raw.get("planningContext"), dict) else {},
             "decisionRecord": raw.get("decisionRecord") if isinstance(raw.get("decisionRecord"), list) else [],
             "profile": str(raw.get("profile") or profile["kind"]),
@@ -2639,6 +3339,12 @@ class AgentPlatform:
                 raise ValueError("计划当前不能确认")
             if plan.get("planHash") != expected_hash:
                 raise ValueError("计划已经变化，请重新审核")
+            brief = plan.get("brief") if isinstance(plan.get("brief"), dict) else {}
+            if str(brief.get("coverSourceStatus") or "") == "requires_external_asset":
+                subject = str(brief.get("coverSubject") or "指定人物").strip()
+                raise ValueError(
+                    f"当前无法获取“{subject}”的外部封面图片；请修改要求，改用本次视频画面制作封面"
+                )
             workspace = self.store.get("workspaces", str(plan["workspaceId"]))
             if workspace and workspace.get("planningRequestId"):
                 raise ValueError("正在准备修改方案，请等待完成后确认")
@@ -3024,11 +3730,31 @@ class AgentPlatform:
             if error:
                 step["error"] = error[:2000]
             if no_result:
+                artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+                terminal_message = str(
+                    artifact.get("message") or result.get("message")
+                    or "上游步骤未形成可继续执行的可靠结果。"
+                )[:1000]
+                terminal_reason = str(artifact.get("reasonCode") or "no_result")
+                step["outcome"] = "no_result"
+                step["outcomeMessage"] = terminal_message
+                terminal_tool = str(step.get("tool") or "")
+                skip_reason = (
+                    "上游步骤未形成可应用的时间线，后续字幕、封面、画幅预览或质检未执行。"
+                    if terminal_tool == "propose_timeline_edit" else
+                    "上游内容检索或候选筛选未形成可靠结果，后续编排与渲染步骤未执行。"
+                    if terminal_tool in {"search_content", "review_content_evidence", "select_multi_topic_evidence"} else
+                    "上游步骤未形成可继续执行的结果，后续步骤未执行。"
+                )
                 for downstream in plan["steps"]:
                     if downstream.get("status") == "pending":
                         downstream.update({
                             "status": "skipped", "completedAt": now_iso(),
-                            "skipReason": "上游检索没有得到可用于自动编排的可靠结果",
+                            "skipReason": skip_reason,
+                            "blockedByStepId": step_id,
+                            "blockedByTool": str(step.get("tool") or ""),
+                            "blockedByReason": terminal_reason,
+                            "blockedByMessage": terminal_message,
                         })
             self.store.save("plans", plan)
             self.store.append_event(plan["workspaceId"], f"step.{status}", {
@@ -3315,6 +4041,7 @@ class AgentPlatform:
         retry_failed_chain = False
         retry_qc_chain = False
         retry_subtitle_chain = False
+        retry_cover_chain = False
         with self._execution_lock:
             plan = self.store.get("plans", plan_id)
             if not plan:
@@ -3401,6 +4128,40 @@ class AgentPlatform:
                 ), None)
                 if replay_index is None:
                     raise ValueError("当前无结果计划没有可安全重跑的步骤")
+                if (
+                    replay_tool == "propose_timeline_edit"
+                    and reason_code in {"insufficient_coverage", "duration_constraint_unmet"}
+                    and isinstance(plan.get("brief"), dict)
+                    and plan["brief"].get("durationExplicit")
+                ):
+                    refreshed_brief = self._editing_brief(
+                        str(plan.get("goal") or ""),
+                        plan.get("planningContext") if isinstance(plan.get("planningContext"), dict) else {},
+                    )
+                    if not refreshed_brief.get("durationExplicit") and refreshed_brief.get("targetSeconds") is None:
+                        plan["brief"].update({
+                            "targetSeconds": None,
+                            "durationExplicit": False,
+                            "durationSource": "none",
+                        })
+                        for candidate_step in plan["steps"]:
+                            arguments = candidate_step.get("arguments")
+                            if not isinstance(arguments, dict):
+                                continue
+                            if str(candidate_step.get("tool") or "") == "propose_timeline_edit":
+                                arguments.pop("targetSeconds", None)
+                                arguments.pop("toleranceSeconds", None)
+                                arguments.pop("durationSource", None)
+                                instruction = str(arguments.get("instruction") or "")
+                                instruction = re.sub(
+                                    r"[；;]\s*目标\s*\d+(?:\.\d+)?\s*秒，允许浮动\s*±\s*\d+(?:\.\d+)?\s*秒",
+                                    "",
+                                    instruction,
+                                )
+                                arguments["instruction"] = instruction[:500]
+                            elif str(candidate_step.get("tool") or "") == "run_delivery_qc":
+                                arguments.pop("targetSeconds", None)
+                                arguments.pop("toleranceSeconds", None)
                 for step in plan["steps"][replay_index:]:
                     step["status"] = "pending"
                     for key in ("completedAt", "error", "result", "operationId"):
@@ -3459,12 +4220,67 @@ class AgentPlatform:
             else:
                 step = next((item for item in plan["steps"] if item["status"] == "action_required"), None)
             action_tool = str((step or {}).get("tool") or "")
+            if action_tool == "review_cover_variants":
+                replay_index = next((
+                    index for index, item in enumerate(plan["steps"])
+                    if str(item.get("tool") or "") == "propose_cover_candidates"
+                ), None)
+                if replay_index is None:
+                    raise ValueError("当前封面计划缺少可重新生成的候选步骤")
+                refreshed_brief = self._editing_brief(
+                    str(plan.get("goal") or ""),
+                    plan.get("planningContext") if isinstance(plan.get("planningContext"), dict) else {},
+                )
+                brief = plan.get("brief") if isinstance(plan.get("brief"), dict) else {}
+                for key in (
+                    "coverRequested", "coverAspect", "coverTitle", "coverSourceKind",
+                    "coverSubject", "coverIdentityPolicy", "coverSourceTime", "coverSourceStatus",
+                ):
+                    brief[key] = copy.deepcopy(refreshed_brief.get(key))
+                plan["brief"] = brief
+                candidate_step = plan["steps"][replay_index]
+                arguments = candidate_step.get("arguments") if isinstance(candidate_step.get("arguments"), dict) else {}
+                arguments.update({
+                    "aspectRatios": [str(brief.get("coverAspect") or "16:9")],
+                    "focus": str(plan.get("goal") or "")[:240],
+                })
+                subject = str(brief.get("coverSubject") or "").strip()
+                if subject:
+                    arguments["subject"] = subject[:120]
+                else:
+                    arguments.pop("subject", None)
+                if brief.get("coverSourceTime") is not None:
+                    arguments["sourceTime"] = float(brief["coverSourceTime"])
+                else:
+                    arguments.pop("sourceTime", None)
+                candidate_step["arguments"] = arguments
+                for replay_step in plan["steps"][replay_index:]:
+                    replay_step["status"] = "pending"
+                    for key in ("completedAt", "error", "result", "operationId"):
+                        replay_step.pop(key, None)
+                plan["status"] = "running"
+                plan.pop("completedAt", None)
+                plan = self.store.save("plans", plan)
+                workspace = self.store.get("workspaces", str(plan["workspaceId"]))
+                if not workspace:
+                    raise ValueError("Agent Workspace 不存在")
+                workspace["status"] = "running"
+                workspace = self.store.save("workspaces", workspace)
+                self.store.append_event(plan["workspaceId"], "action.retried", {
+                    "planId": plan_id,
+                    "stepId": str((step or {}).get("id") or ""),
+                    "replayFromTool": "propose_cover_candidates",
+                    "reason": "cover_candidates_do_not_match_requirement",
+                })
+                self._notify_workspace_state(workspace, plan)
+                retry_cover_chain = True
+                step = None
             stale_autonomous_subtitle = bool(
                 action_tool == "prepare_subtitle_review"
                 and str(plan.get("executionMode") or "") == AUTONOMOUS_REVIEW
             )
             stale_subtitle_layout = action_tool == "layout_subtitles"
-            if not (retry_failed_chain or retry_qc_chain) and (
+            if not (retry_failed_chain or retry_qc_chain or retry_cover_chain) and (
                 not step or (
                     action_tool != "propose_timeline_edit"
                     and not stale_autonomous_subtitle
@@ -3472,7 +4288,7 @@ class AgentPlatform:
                 )
             ):
                 raise ValueError("当前审核步骤不能自动重试")
-            if retry_failed_chain or retry_qc_chain:
+            if retry_failed_chain or retry_qc_chain or retry_cover_chain:
                 pass
             elif stale_subtitle_layout:
                 # Older plans could mark subtitle preparation completed even
@@ -3548,7 +4364,7 @@ class AgentPlatform:
                     "planId": plan_id, "stepId": step["id"],
                 })
                 self._notify_workspace_state(workspace, plan)
-        if retry_failed_chain or retry_qc_chain or retry_subtitle_chain:
+        if retry_failed_chain or retry_qc_chain or retry_subtitle_chain or retry_cover_chain:
             self._advance_plan(plan_id)
         else:
             self._execute_step(plan_id, str(step["id"]))
@@ -3561,6 +4377,9 @@ class AgentPlatform:
             plan = self.store.get("plans", plan_id)
             if not plan:
                 raise KeyError(plan_id)
+            receipt = content_hash(json.dumps({"approved": approved, "value": value}, sort_keys=True, ensure_ascii=False))
+            if approved and receipt in (plan.get("actionResolutionReceipts") or []):
+                return plan
             if plan.get("status") != "action_required":
                 raise ValueError("计划当前没有待确认操作")
             step = next((item for item in plan["steps"] if item["status"] == "action_required"), None)
@@ -3594,6 +4413,7 @@ class AgentPlatform:
                     "result": {"userConfirmed": True, "value": resolved_value},
                 })
             plan["status"] = "running"
+            plan["actionResolutionReceipts"] = [*(plan.get("actionResolutionReceipts") or []), receipt][-64:]
             plan = self.store.save("plans", plan)
             self.store.append_event(plan["workspaceId"], "action.resolved", {
                 "planId": plan_id, "stepId": step["id"], "approved": True,

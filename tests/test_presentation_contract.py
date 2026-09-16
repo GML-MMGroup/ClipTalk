@@ -56,6 +56,21 @@ def test_api_error_payload_is_actionable_and_backward_compatible() -> None:
     }
 
 
+def test_subtitle_review_errors_point_to_subtitle_review_not_refresh() -> None:
+    payload = main_module.api_error_payload(
+        _request("req-subtitle-1"),
+        status_code=409,
+        detail={
+            "code": "subtitle_review_required",
+            "message": "字幕草稿尚未完成校对，请先打开字幕校对面板确认文字与断句。",
+        },
+    )
+
+    assert payload["error"]["code"] == "subtitle_review_required"
+    assert payload["error"]["recoveryAction"] == "complete_subtitle_review"
+    assert payload["error"]["requestId"] == "req-subtitle-1"
+
+
 def test_validation_error_keeps_the_legacy_detail_list() -> None:
     errors = [{"loc": ["body", "instruction"], "msg": "Field required"}]
     payload = main_module.api_error_payload(
@@ -107,7 +122,7 @@ def test_person_presentation_requests_target_before_search() -> None:
 
     assert presentation["workflowKind"] == "person_edit"
     assert presentation["primaryAction"]["kind"] == "select_person"
-    assert presentation["terminology"]["result"] == "人物剪辑"
+    assert presentation["terminology"]["result"] == "人物聚焦成片"
 
 
 def test_speaker_presentation_requests_ready_speaker_selection() -> None:
@@ -120,3 +135,54 @@ def test_speaker_presentation_requests_ready_speaker_selection() -> None:
     assert presentation["workflowKind"] == "speaker_edit"
     assert presentation["primaryAction"]["kind"] == "select_speaker"
     assert presentation["terminology"]["candidate"] == "发言片段"
+
+
+def test_completed_job_without_export_has_a_completed_ui_state() -> None:
+    presentation = main_module.workflow_presentation_snapshot({
+        "id": "completed-analysis-only",
+        "taskMode": "highlight",
+        "workflowKind": "highlight",
+        "request": {"workflowKind": "highlight"},
+        "status": "completed",
+        "stage": "complete",
+        "outputs": [],
+        "outputVersions": [],
+    })
+
+    assert presentation["key"] == "exported"
+    assert presentation["label"] == "已完成"
+    assert presentation["headline"] == "任务已完成"
+    assert presentation["primaryActionKey"] == "view_results"
+
+
+def test_recoverable_person_generation_failure_keeps_specific_status_copy() -> None:
+    presentation = main_module.workflow_presentation_snapshot(_content_job(
+        "person_edit",
+        status="failed",
+        stage="failed",
+        detail="人物出镜视频生成没有完成",
+        error="确认片段完整性校验失败",
+        currentAction="合成已停止",
+    ))
+
+    assert presentation["key"] == "failed"
+    assert presentation["label"] == "人物聚焦生成失败"
+    assert presentation["headline"] == "视频生成没有完成"
+
+
+def test_quality_rejected_output_has_one_canonical_review_state() -> None:
+    job = _content_job("content_search", status="awaiting_confirmation", stage="content_search_ready")
+    job["autoComposition"] = {
+        "status": "completed",
+        "phase": "review_llm",
+        "qualityPassedCount": 0,
+        "rejectedVersionCount": 2,
+        "rejectedVersions": [{"id": "rejected-1"}, {"id": "rejected-2"}],
+    }
+
+    presentation = main_module.workflow_presentation_snapshot(job)
+
+    assert presentation["key"] == "no_result"
+    assert presentation["group"] == "action_required"
+    assert "未通过质量门" in presentation["label"]
+    assert "2 个样片" in presentation["label"]

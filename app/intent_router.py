@@ -37,14 +37,15 @@ _WORKFLOW_TO_TASK_MODE = {
 
 WORKFLOW_KINDS = frozenset(_WORKFLOW_TO_TASK_MODE)
 WORKFLOW_OPTIONS = (
-    {"id": "highlight", "label": "自动生成高光"},
-    {"id": "content_search", "label": "查找并截取内容"},
-    {"id": "person_edit", "label": "按画面人物剪辑"},
-    {"id": "speaker_edit", "label": "按说话人剪辑"},
+    {"id": "highlight", "label": "智能高光"},
+    {"id": "content_search", "label": "内容检索"},
+    {"id": "person_edit", "label": "人物聚焦"},
+    {"id": "speaker_edit", "label": "发言剪辑"},
 )
 MODEL_ROUTING_CONFIDENCE = .78
 
 _SPEAKER_WORKFLOW_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:发言剪辑|说话人剪辑)", re.IGNORECASE),
     re.compile(r"(?:按|根据)(?:说话人|声音|音色|speaker).{0,10}(?:剪辑|提取|筛选|分段|出片)", re.IGNORECASE),
     re.compile(r"(?:识别|区分|选择|选|试听|确认).{0,8}(?:说话人|发言人|声音|音色|speaker)", re.IGNORECASE),
     re.compile(r"(?:speaker\s*[A-Z0-9一二三四五六七八九十]+|声音\s*[A-ZＡ-Ｚ一二三四五六七八九十]+).{0,12}(?:全部|所有|发言|说话|片段)", re.IGNORECASE),
@@ -54,6 +55,7 @@ _SPEAKER_WORKFLOW_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _PERSON_WORKFLOW_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"人物聚焦"),
     re.compile(r"(?:按|根据)(?:画面)?人物.{0,10}(?:剪辑|提取|筛选|分段|出片)"),
     re.compile(r"(?:选择|确认|指定|识别).{0,8}(?:画面)?人物.{0,10}(?:剪辑|出镜|片段)"),
     re.compile(r"(?:人物\s*[A-ZＡ-Ｚ0-9一二三四五六七八九十]+|所选人物|目标人物).{0,12}(?:全部|所有|每次|出镜|出现|画面)"),
@@ -100,7 +102,7 @@ def route_editing_instruction(instruction: str, requested_mode: str = "auto") ->
     """
     mode = str(requested_mode or "auto").strip().lower().replace("-", "_")
     if mode == "content_extract":
-        return IntentRoutingDecision(mode, 1.0, False, "用户明确选择了内容探索", "explicit", "content_search")
+        return IntentRoutingDecision(mode, 1.0, False, "用户明确选择了内容检索", "explicit", "content_search")
     if mode in _WORKFLOW_TO_TASK_MODE:
         return IntentRoutingDecision(
             _WORKFLOW_TO_TASK_MODE[mode], 1.0, False, "用户明确选择了剪辑方式", "explicit", mode,

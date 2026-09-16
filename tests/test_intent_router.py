@@ -31,8 +31,12 @@ def test_explicit_legacy_mode_remains_authoritative() -> None:
 def test_routes_first_class_person_and_speaker_workflows() -> None:
     person = route_editing_instruction("按人物剪辑，先选择人物 A，再提取他的所有出镜")
     speaker = route_editing_instruction("按说话人剪辑，试听后保留 Speaker 2 的全部发言")
+    renamed_person = route_editing_instruction("人物聚焦，提取目标人物的所有出镜")
+    renamed_speaker = route_editing_instruction("发言剪辑，保留 Speaker 2 的全部发言")
     assert person.workflow_kind == "person_edit"
     assert speaker.workflow_kind == "speaker_edit"
+    assert renamed_person.workflow_kind == "person_edit"
+    assert renamed_speaker.workflow_kind == "speaker_edit"
     assert person.task_mode == speaker.task_mode == "content_extract"
 
 

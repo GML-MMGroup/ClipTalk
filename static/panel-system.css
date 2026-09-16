@@ -1,0 +1,122 @@
+/* Final panel contract. Keep panel visibility, stacking and compact layouts
+   authoritative here so legacy component skins cannot override interaction state. */
+:root {
+  --ct-z-navigation: 100;
+  --ct-z-popover: 200;
+  --ct-z-drawer-scrim: 400;
+  --ct-z-drawer: 410;
+  --ct-z-modal-scrim: 500;
+  --ct-z-modal: 510;
+  --ct-z-system-dialog: 600;
+  --ct-z-notice: 700;
+  --ct-panel-drawer-width: clamp(320px, 30vw, 430px);
+}
+
+/* Hidden is a state, never a presentation preference. These roots previously
+   lost to more-specific display:grid/flex declarations. */
+html body #homeView.hidden,
+html body #taskSetupView.hidden,
+html body #reviewView.hidden,
+html body #timelinePanel.hidden,
+html body #timelinePrecisionDrawer.hidden,
+html body #ctV4AssistantQuickStart.hidden,
+html body #agentPlanDrawer.hidden,
+html body #agentPlanDrawerScrim.hidden,
+html body #secondaryEditor.hidden,
+html body #secondaryEditorPanelScrim.hidden,
+html body #drawerBackdrop.hidden,
+html body #settingsBackdrop.hidden,
+html body #libraryView.hidden,
+html body #settingsPanel.hidden,
+html body #candidateDrawer.hidden,
+html body #voiceProfilePanel.hidden,
+html body #personProfilePanel.hidden,
+html body #subtitleReview.hidden,
+html body #coverImagePreview.hidden,
+html body #actionConfirm.hidden,
+html body #inputPrompt.hidden {
+  display: none !important;
+}
+html body.ct-workbench-v4 #reviewView#reviewView.hidden.hidden {
+  display: none !important;
+}
+
+/* One semantic layer scale for all page-level surfaces. */
+html body > #appSidebar,
+html body > #ctV4Topbar { z-index: var(--ct-z-navigation) !important; }
+html body > #mobileNavigationToggle { z-index: calc(var(--ct-z-navigation) + 1) !important; }
+html body > #appSidebarScrim,
+html body > #drawerBackdrop,
+html body > #agentPlanDrawerScrim { z-index: var(--ct-z-drawer-scrim) !important; }
+html body > #sidebarHistoryDrawer,
+html body > #candidateDrawer,
+html body > #agentPlanDrawer { z-index: var(--ct-z-drawer) !important; }
+html body > #secondaryEditor { z-index: var(--ct-z-modal) !important; }
+html body > #subtitleReview { z-index: var(--ct-z-modal) !important; }
+html body > #coverImagePreview { z-index: calc(var(--ct-z-modal) + 1) !important; }
+html body > :is(#actionConfirm, #inputPrompt, #accessTokenDialog, #agentRegistryDialog) { z-index: var(--ct-z-system-dialog) !important; }
+html body > #toastRegion,
+html body > .toast-region { z-index: var(--ct-z-notice) !important; }
+
+/* Closed off-canvas panels must neither paint nor accept pointer input. */
+html body > #candidateDrawer {
+  width: min(var(--ct-panel-drawer-width), calc(100vw - 24px));
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(calc(100% + 32px));
+  transition: transform .22s cubic-bezier(.2, .75, .25, 1), opacity .16s ease, visibility 0s linear .22s;
+}
+html body > #candidateDrawer.open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateX(0);
+  transition-delay: 0s;
+}
+
+/* The timeline settings panel docks beside the tracks instead of covering them. */
+@media (min-width: 1280px) {
+  html body.timeline-precision-drawer-open #timelinePanel {
+    padding-right: 348px !important;
+  }
+  html body.timeline-precision-drawer-open #timelinePanel > #timelinePrecisionDrawer {
+    top: 7px;
+    right: 7px;
+    bottom: 7px;
+    width: 334px;
+  }
+}
+@media (max-width: 1279px) {
+  html body #timelinePrecisionDrawer:not(.hidden) {
+    position: fixed;
+    z-index: var(--ct-z-drawer);
+    top: 72px;
+    right: 12px;
+    bottom: 12px;
+    width: min(390px, calc(100vw - 24px));
+  }
+}
+
+.secondary-editor-panel-scrim {
+  position: absolute;
+  z-index: 19;
+  inset: 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: rgba(5, 12, 14, .54) !important;
+  backdrop-filter: blur(2px);
+}
+@media (min-width: 781px) {
+  .secondary-editor-panel-scrim { display: none !important; }
+}
+
+/* A save action belongs to the form's scroll surface and must not cover the
+   final controls. */
+html body[data-shell-view="settings"] #settingsPanel form:has(.settings-save-bar:not(.hidden)) {
+  padding-bottom: 112px !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html body > #candidateDrawer { transition: none; }
+}

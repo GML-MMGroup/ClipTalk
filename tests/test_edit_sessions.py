@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -10,13 +11,66 @@ from app.edit_sessions import (
     apply_edit_proposal,
     build_edit_proposal,
     build_edit_session_render_plan,
+    create_or_resume_candidate_edit_session,
     create_or_resume_content_edit_session,
     create_or_resume_edit_session,
     edit_session_preflight,
+    normalize_edit_session_reframe,
     public_edit_session,
+    repair_agent_short_clips,
     redo_edit_session,
     undo_edit_session,
 )
+
+
+def test_conversational_revision_shortens_without_overwriting_the_base() -> None:
+    from app.main import _conversational_timeline_proposal
+    job = _job()
+    base, _ = create_or_resume_edit_session(job, version_id="version-1")
+    job["activeEditSessionId"] = base["id"]
+    original = copy.deepcopy(base)
+    target = base["duration"] * .8
+    result = _conversational_timeline_proposal(
+        job, {"instruction": "再短一点", "targetSeconds": target, "durationSource": "relative"}, {}, "p1",
+    )
+    branch = next(s for s in job["editSessions"] if s["id"] == result["sessionId"])
+    apply_edit_proposal(job, branch, result["proposalId"])
+    assert branch["duration"] == pytest.approx(target, abs=.01)
+    assert base == original
+
+
+def test_conversational_anchor_keeps_following_clips_in_edit_order() -> None:
+    from app.main import _conversational_timeline_proposal
+    job = _job()
+    base, _ = create_or_resume_edit_session(job, version_id="version-1")
+    job["activeEditSessionId"] = base["id"]
+    original = copy.deepcopy(base)
+    anchor = float(base["clips"][1]["sourceStart"]) + 1
+    job["contentSearch"] = {"id": "s1", "reviewDraft": {"selectedMatchIds": ["m1"]},
+                            "candidates": [{"id": "m1", "start": anchor, "end": anchor + 1}]}
+    result = _conversational_timeline_proposal(
+        job, {"instruction": "从讲价格的地方开始", "anchorStartQuery": "价格"}, {}, "p1",
+    )
+    branch = next(s for s in job["editSessions"] if s["id"] == result["sessionId"])
+    apply_edit_proposal(job, branch, result["proposalId"])
+    assert branch["clips"][0]["sourceStart"] == anchor
+    assert [c["id"] for c in branch["clips"]] == [c["id"] for c in base["clips"][1:]]
+    assert base == original
+
+
+def test_edit_session_inherits_and_normalizes_output_reframe() -> None:
+    job = _job()
+    job["outputVersions"][0]["outputs"][0]["reframe"] = {
+        "aspect": "9:16", "fit": "crop", "focusX": 2, "focusY": -.5,
+    }
+
+    session, created = create_or_resume_edit_session(job, version_id="version-1")
+
+    assert created is True
+    assert session["reframe"] == {
+        "aspect": "9:16", "fit": "crop", "focusX": 1.0, "focusY": 0.0,
+    }
+    assert normalize_edit_session_reframe({"aspect": "原始比例"}) is None
 
 
 def _job() -> dict:
@@ -155,7 +209,7 @@ def test_content_search_results_can_start_editing_before_first_render() -> None:
     )
 
     assert created is True
-    assert session["title"] == "内容探索精剪"
+    assert session["title"] == "内容检索精剪"
     assert session["baseVersionId"] == ""
     assert [clip["title"] for clip in session["clips"]] == ["第一段", "第二段"]
     assert [clip["sourceRef"] for clip in session["clips"]] == [
@@ -183,6 +237,35 @@ def test_content_search_results_can_start_editing_before_first_render() -> None:
     assert [(item["start"], item["end"]) for item in segments] == [
         (5.0, 9.0), (30.5, 32.5), (20.0, 25.0),
     ]
+    assert cutaways == []
+
+
+def test_highlight_candidates_can_start_a_review_timeline_before_render() -> None:
+    job = {
+        "id": "highlight-job",
+        "workflowKind": "highlight",
+        "videoInfo": {"duration": 90.0},
+        "candidates": [
+            {"index": 7, "title": "结尾反应", "start": 40.0, "end": 46.0, "score": 90},
+            {"id": "candidate-hook", "title": "开场 Hook", "start": 5.0, "end": 10.0, "score": 96},
+        ],
+        "outputVersions": [],
+    }
+
+    session, created = create_or_resume_candidate_edit_session(
+        job, candidate_ids=["7", "candidate-hook"], order_mode="source",
+    )
+
+    assert created is True
+    assert session["title"] == "高光候选精剪"
+    assert session["baseVersionId"] == ""
+    assert session["sourceCandidateIds"] == ["candidate-hook", "7"]
+    assert [clip["sourceRef"] for clip in session["clips"]] == [
+        {"kind": "highlight_candidate", "id": "candidate-hook"},
+        {"kind": "highlight_candidate", "id": "7"},
+    ]
+    segments, cutaways = build_edit_session_render_plan(job, session)
+    assert [(item["start"], item["end"]) for item in segments] == [(5.0, 10.0), (40.0, 46.0)]
     assert cutaways == []
 
 
@@ -251,6 +334,49 @@ def test_semantic_preflight_warns_for_speech_cut_duplicate_and_audio_jump() -> N
     assert "duplicate_source" in codes
     assert "audio_jump" in codes
     assert report["ready"] is True
+
+
+def test_semantic_preflight_accepts_compact_segment_count_and_loads_canonical_rows(tmp_path) -> None:
+    job = _job()
+    job["speechAnalysis"] = {"status": "ready", "segments": 1}
+    job["workDirectory"] = str(tmp_path)
+    (tmp_path / "transcript.json").write_text(json.dumps({
+        "segments": [{"start": 10, "end": 13, "text": "一句完整的话"}],
+    }), encoding="utf-8")
+    session, _created = create_or_resume_edit_session(
+        job, version_id="version-1", output_filename="version-1.mp4",
+    )
+    session["clips"][0]["sourceStart"] = 11
+    report = edit_session_preflight(session, job)
+    assert "speech_truncation" in {item["code"] for item in report["issues"]}
+
+
+def test_semantic_preflight_treats_missing_compact_transcript_as_empty() -> None:
+    job = _job()
+    job["speechAnalysis"] = {"status": "ready", "segments": 154}
+    session, _created = create_or_resume_candidate_edit_session(job)
+    assert session["preflight"]["ready"] is True
+
+
+def test_agent_short_clip_repair_removes_residual_fragments() -> None:
+    session = {"clips": [
+        {"id": "keep", "sourceStart": 1.0, "sourceEnd": 2.0},
+        {"id": "tiny", "sourceStart": 3.0, "sourceEnd": 3.1},
+    ]}
+    removed = repair_agent_short_clips(session)
+    assert removed == ["tiny"]
+    assert [item["id"] for item in session["clips"]] == ["keep"]
+    assert session["preflight"]["ready"] is True
+
+
+def test_agent_short_clip_repair_returns_no_result_when_all_fragments_are_tiny() -> None:
+    session = {"clips": [
+        {"id": "tiny-a", "sourceStart": 1.0, "sourceEnd": 1.1},
+        {"id": "tiny-b", "sourceStart": 2.0, "sourceEnd": 2.1},
+    ]}
+    removed = repair_agent_short_clips(session)
+    assert removed == ["tiny-a", "tiny-b"]
+    assert session["clips"] == []
 
 def test_edit_proposal_combines_speed_transition_and_timeline_order() -> None:
     job = _job()

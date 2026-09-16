@@ -21,7 +21,7 @@ def message_intent(text: str) -> str:
     if re.search(r"不对|不相关|无关|错了|不符合|有问题", value):
         return "feedback"
     if re.search(
-        r"剪|找|检索|搜索|合成|合并|生成|改|调整|删除|去掉|不要|保留|添加|字幕|导出|竖屏|横屏|方屏|封面|缩短|重排|"
+        r"剪|找|检索|搜索|合成|合并|生成|制作|优化|检查|校对|适配|重构|诊断|改|调整|删除|去掉|不要|保留|添加|字幕|导出|竖屏|横屏|方屏|封面|片头|动态图文|包装|缩短|重排|"
         r"再短一点|再短些|更短(?:一点|些)?|稍微短(?:一点|些)?|再精简|再紧凑|"
         r"从.{1,80}(?:开始|开始剪|起剪)|edit|find|merge|remove|change",
         value,
@@ -246,6 +246,12 @@ class AssistantInteraction:
             plan = self.platform.store.get("plans", str(workspace.get("activePlanId") or ""))
             try:
                 intent = message_intent(text)
+                # A valid explicitly selected Skill is itself an action choice.
+                # Do not downgrade its concrete instruction to generic chat
+                # merely because the fallback keyword classifier is narrower
+                # than the installed Skill's vocabulary.
+                if request.get("skillId") and intent == "clarification":
+                    intent = "edit"
                 if intent == "answer":
                     ui = request.get("uiContext") or {}
                     # Questions validate ownership too, but a changing progress

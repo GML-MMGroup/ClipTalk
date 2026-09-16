@@ -519,7 +519,7 @@ def create_or_resume_content_edit_session(
         "sourceMatchIds": source_match_ids,
         "contentBinding": binding,
         "workflowKind": workflow_kind,
-        "title": "内容探索精剪",
+        "title": "内容检索精剪",
         "status": "draft",
         "revision": 0,
         "clips": clips,
@@ -1105,8 +1105,8 @@ def build_edit_session_render_plan(
             "sourceDuration": round(end - start, 3),
             "effectiveDuration": _duration(start, end, float(clip.get("playbackRate") or 1)),
             "userConfirmed": True,
-            "reason": str(source.get("reason") or ("用户从内容探索结果直接精剪" if session.get("sourceSearchId") else "用户基于已有成片进行二次编辑"))[:600],
-            "evidence": list(source.get("evidence") or (["用户确认内容探索片段后进入精剪。"] if session.get("sourceSearchId") else ["用户从成片版本继续编辑。"])) ,
+            "reason": str(source.get("reason") or ("用户从内容检索结果直接精剪" if session.get("sourceSearchId") else "用户基于已有成片进行二次编辑"))[:600],
+            "evidence": list(source.get("evidence") or (["用户确认内容检索片段后进入精剪。"] if session.get("sourceSearchId") else ["用户从成片版本继续编辑。"])) ,
         })
         segments.append(source)
     disabled = {str(value) for value in session.get("disabledCutawayIds") or []}

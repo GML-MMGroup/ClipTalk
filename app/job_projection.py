@@ -140,7 +140,7 @@ def ui_presentation_snapshot(
             return result(
                 "preview_review", group="action_required", label="审核样片有质量提醒",
                 headline="执行完成 · 建议人工复核",
-                detail="样片已保留；完整播放并确认风险后可生成正式视频。",
+                detail="样片已保留；完整播放并确认风险后可生成成片。",
                 railTitle="样片复核", running=False, tone="attention",
                 primaryActionKey="export_formal",
             )
@@ -153,7 +153,7 @@ def ui_presentation_snapshot(
         )
 
     if not active_export and (delivered_plan or delivered_lineage):
-        return result("exported", group="completed", label="正式视频已生成", headline="正式视频已生成",
+        return result("exported", group="completed", label="成片已生成", headline="成片已生成",
                       detail="成片已就绪，可以预览或下载。", railTitle="成片已就绪",
                       running=False, tone="success", primaryActionKey="download")
     handoff_job_id = str(job.get("agentHandoffJobId") or (job.get("latestHandoff") or {}).get("toJobId") or "")
@@ -185,8 +185,8 @@ def ui_presentation_snapshot(
         failure_label = "处理失败"
         if generation_failure:
             failure_label = (
-                "人物剪辑生成失败" if workflow_kind == "person_edit"
-                else "说话人剪辑生成失败" if workflow_kind == "speaker_edit"
+                "人物聚焦生成失败" if workflow_kind == "person_edit"
+                else "发言剪辑生成失败" if workflow_kind == "speaker_edit"
                 else "内容视频生成失败"
             )
         return result(
@@ -239,7 +239,7 @@ def ui_presentation_snapshot(
             suffix = f" · {previews} 个" if previews else ""
             return result(
                 "preview_review", group="action_required", label=f"审核样片已生成{suffix}", headline="审核样片已生成",
-                detail="先预览时间线；确认后生成高清新版本，当前样片会保留。",
+                detail="预览剪辑效果，满意后生成成片。",
                 railTitle="审核样片", running=False, tone="success", primaryActionKey="review_preview",
             )
         if agent_status in {"approved", "running"}:
@@ -261,9 +261,9 @@ def ui_presentation_snapshot(
         "render", "auto_composition", "quality_review", "secondary_edit_rendering", "export",
     }:
         return result(
-            "export_running", group="active", label="正在生成正式视频", headline="正在生成正式新版本",
+            "export_running", group="active", label="正在生成成片", headline="正在生成成片",
             detail="已有版本保持不变，完成后会新增一个版本。" if output_count else "完成后可直接预览和下载。",
-            railTitle="生成正式视频", running=True, tone="active", primaryActionKey="view_activity",
+            railTitle="生成成片", running=True, tone="active", primaryActionKey="view_activity",
         )
     if execution.get("outcome") == "no_acceptable_output":
         rejected_count = max(0, int((execution.get("result") or {}).get("qualityRejectedCount") or 0))
@@ -290,15 +290,15 @@ def ui_presentation_snapshot(
     if previews and not output_count:
         return result(
             "preview_review", group="action_required", label=f"审核样片已生成 · {previews} 个", headline="审核样片已生成",
-            detail="先预览时间线；确认后生成高清新版本，当前样片会保留。",
+            detail="预览剪辑效果，满意后生成成片。",
             railTitle="审核样片", running=False, tone="success", primaryActionKey="review_preview",
         )
     if formal_outputs or execution.get("outcome") == "output_ready" or status == "completed" or raw_status == "completed":
         has_output = bool(formal_outputs or execution.get("outcome") == "output_ready")
         return result(
             "exported", group="completed",
-            label=f"{formal_outputs or 1} 条正式视频已完成" if has_output else "已完成",
-            headline="正式视频已完成" if has_output else "任务已完成",
+            label=f"{formal_outputs or 1} 条成片已完成" if has_output else "已完成",
+            headline="成片已完成" if has_output else "任务已完成",
             detail="可以预览、下载或基于当前版本继续精剪。" if has_output else "结果已保存，可以随时继续查看。",
             railTitle="成片版本" if has_output else "任务结果",
             running=False, tone="success", primaryActionKey="view_outputs" if has_output else "view_results",

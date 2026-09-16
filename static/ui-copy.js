@@ -1,7 +1,7 @@
 (function createClipTalkCopy(global) {
   const WORKFLOWS = Object.freeze({
     highlight: Object.freeze({
-      label: "高光剪辑",
+      label: "智能高光",
       output: "高光成片",
       outputPlural: "高光版本",
       candidate: "事件镜头",
@@ -16,24 +16,24 @@
       ]),
     }),
     content_search: Object.freeze({
-      label: "内容探索",
+      label: "内容检索",
       output: "内容视频",
       outputPlural: "内容视频版本",
       candidate: "匹配片段",
       candidatePlural: "匹配片段",
       timeline: "匹配片段来源时间线",
-      phases: Object.freeze({ brief: "需求确认", analysis: "内容探索", events: "片段确认", compose: "生成结果" }),
+      phases: Object.freeze({ brief: "需求确认", analysis: "内容检索", events: "片段确认", compose: "生成结果" }),
       navigation: Object.freeze([
         ["准备", "描述要查找的内容"],
-        ["内容探索", "识别并检索目标内容"],
+        ["内容检索", "识别并检索目标内容"],
         ["片段确认", "预览并选择匹配片段"],
         ["生成结果", "合成、预览并下载"],
       ]),
     }),
     person_edit: Object.freeze({
-      label: "按人物剪辑",
-      output: "人物剪辑",
-      outputPlural: "人物剪辑版本",
+      label: "人物聚焦",
+      output: "人物聚焦成片",
+      outputPlural: "人物聚焦版本",
       candidate: "出镜片段",
       candidatePlural: "出镜片段",
       timeline: "人物出镜时间线",
@@ -46,7 +46,7 @@
       ]),
     }),
     speaker_edit: Object.freeze({
-      label: "按说话人剪辑",
+      label: "发言剪辑",
       output: "发言视频",
       outputPlural: "发言视频版本",
       candidate: "发言片段",

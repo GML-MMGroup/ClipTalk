@@ -324,7 +324,7 @@
       <div class="ct-v4-project">
         <span class="ct-v4-project-icon">${icons.folder}</span>
         <i aria-hidden="true"></i>
-        <button type="button" id="ctV4ProjectButton" aria-label="切换剪辑任务" title="打开任务列表"><b>项目：</b><strong id="ctV4ProjectName">未命名剪辑任务</strong><span aria-hidden="true">⌄</span></button>
+        <button type="button" id="ctV4ProjectButton" aria-label="切换或管理剪辑任务" title="打开任务列表和任务操作"><b class="sr-only">项目</b><strong id="ctV4ProjectName">未命名剪辑任务</strong><span aria-hidden="true">⌄</span></button>
       </div>
       <div class="ct-v4-global-state">
         <span id="ctV4SaveState" class="ct-v4-save-state">${icons.check}<b>工程已保存</b></span>
@@ -760,8 +760,8 @@
       quickStart = document.createElement("section");
       quickStart.id = "ctV4AssistantQuickStart";
       quickStart.className = "ct-v4-assistant-quick-start";
-      quickStart.setAttribute("aria-label", "快捷开始");
-      quickStart.innerHTML = '<header><strong>快捷开始</strong></header>';
+      quickStart.setAttribute("aria-label", "选择处理方式");
+      quickStart.innerHTML = '<header><strong>选择处理方式</strong></header>';
       assistant.insertBefore(quickStart, form);
     }
     if (picker.parentElement !== quickStart) quickStart.append(picker);
@@ -823,7 +823,7 @@
     const source = editorVisible ? $("#secondaryEditorSaveState")?.dataset.state : "saved";
     let label = editorVisible ? "精剪已保存" : "项目已载入";
     let tone = "saved";
-    if (creating) { label = "未创建"; tone = "draft"; }
+    if (creating) { label = "草稿"; tone = "draft"; }
     else if (source === "error") { label = "保存失败"; tone = "error"; }
     else if (source === "saving") { label = "正在保存"; tone = "saving"; }
     else if (source === "draft") { label = "有未保存修改"; tone = "dirty"; }
@@ -907,12 +907,12 @@
     identity.textContent = `${version?.number ? `V${version.number} · ` : ""}${item.displayTitle || item.title || item.filename} · ${compactDuration(item.duration)} · ${item.width || "未知"}×${item.height || "未知"}`;
     const status = document.createElement("p");
     status.setAttribute("role", "status");
-    status.textContent = item.kept ? "已存入成片库，可从“成片”页面再次下载。" : "正式文件已生成，尚未存入成片库。下载保存到本地，入库保留独立副本。";
+    status.textContent = item.kept ? "已长期保留，可从“成片”页面再次下载。" : "正式文件已生成，尚未长期保留。下载保存到本地，入库保留独立副本。";
     dialog.append(heading, identity, status);
-    for (const [action, label] of [["export", "下载 MP4"], ["keep", "存入成片库"], ["edit", "继续编辑此版本"]]) {
+    for (const [action, label] of [["export", "下载 MP4"], ["keep", "长期保留"], ["edit", "继续编辑此版本"]]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = action === "keep" && item.kept ? "已存入成片库" : label;
+      button.textContent = action === "keep" && item.kept ? "已长期保留" : label;
       button.disabled = (action === "keep" && Boolean(item.kept)) || (action === "edit" && !item.segments?.length);
       const capability = { keep: "canKeep", edit: "canEdit", export: "canDownload" }[action];
       button.disabled ||= item.capabilities?.[capability] === false;
@@ -948,10 +948,18 @@
     const job = window.ClipTalkCurrentJobSnapshot?.();
     const presentation = job?.presentation || {};
     const key = presentation.key || "home";
-    const stages = ["准备素材", "确认方案", "筛选与编排", "审核样片", "生成与交付"];
+    const draftCapability = window.ClipTalkDraftCapabilitySnapshot?.() || {};
+    const coverDraft = Boolean(draftCapability.active && draftCapability.optionId === "cover");
+    const stages = coverDraft
+      ? ["设置封面", "选择方案", "保存封面"]
+      : ["素材与要求", "确认方案", "筛选与编排", "审核样片", "生成与交付"];
     const entries = window.ClipTalkOrderedJobOutputs?.(job) || [];
     const hasOutput = entries.length > 0;
-    const active = Number.isInteger(presentation.journeyStage) ? Math.max(0, Math.min(4, presentation.journeyStage)) : job ? -1 : 0;
+    const active = Number.isInteger(presentation.journeyStage) ? Math.max(0, Math.min(stages.length - 1, presentation.journeyStage)) : job ? -1 : 0;
+    const activeIndex = Math.max(0, active);
+    const visibleStages = [...stages];
+    if (!job) visibleStages[0] = "准备素材";
+    else if (activeIndex === 0 && !coverDraft) visibleStages[0] = "补充剪辑要求";
     let nav = $("#ctTaskJourney");
     if (!nav) {
       nav = document.createElement("nav");
@@ -959,40 +967,75 @@
       nav.setAttribute("aria-label", "剪辑流程");
       ($("#assistantPanel > .panel-header") || $("#assistantPanel"))?.append(nav);
     }
-    const signature = `${job?.id || ""}:${key}:${active}:${hasOutput}:${presentation.journeyDetail || ""}`;
+    const signature = `${job?.id || ""}:${job?.status || ""}:${key}:${activeIndex}:${hasOutput}:${draftCapability.optionId || ""}:${presentation.journeyDetail || ""}`;
     if (nav.dataset.signature === signature) return;
+    const expanded = nav.dataset.expanded === "true";
     nav.dataset.signature = signature;
     nav.replaceChildren();
     nav.classList.toggle("is-new-task", !job);
-    if (!job) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "第 1/5 步 · 准备素材";
-      button.setAttribute("aria-current", "step");
-      button.onclick = () => $("#chatForm")?.scrollIntoView({ block: "center", behavior: "smooth" });
-      const status = document.createElement("p");
-      status.textContent = "添加视频并描述需求，顺序不限";
-      nav.append(button, status);
-      return;
-    }
-    stages.forEach((label, index) => {
+
+    const summary = document.createElement("button");
+    summary.type = "button";
+    summary.className = "ct-journey-summary";
+    summary.setAttribute("aria-controls", "ctTaskJourneyDetails");
+    summary.setAttribute("aria-label", `查看处理流程，当前第 ${activeIndex + 1}/${stages.length} 步：${visibleStages[activeIndex]}`);
+    const summaryCopy = document.createElement("span");
+    summaryCopy.className = "ct-journey-summary-copy";
+    const summaryStep = document.createElement("small");
+    summaryStep.textContent = `${activeIndex + 1} / ${stages.length}`;
+    const summaryTitle = document.createElement("strong");
+    summaryTitle.textContent = visibleStages[activeIndex];
+    summaryCopy.append(summaryStep, summaryTitle);
+    const progress = document.createElement("progress");
+    progress.max = stages.length;
+    progress.value = activeIndex + 1;
+    progress.setAttribute("aria-hidden", "true");
+    const chevron = document.createElement("span");
+    chevron.className = "ct-journey-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "⌄";
+    summary.append(summaryCopy, progress, chevron);
+
+    const details = document.createElement("div");
+    details.id = "ctTaskJourneyDetails";
+    details.className = "ct-journey-details";
+    const list = document.createElement("ol");
+    visibleStages.forEach((label, index) => {
+      const item = document.createElement("li");
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = `${index + 1} ${label}`;
-      button.disabled = index > active;
-      if (index === active) button.setAttribute("aria-current", "step");
+      button.disabled = index > activeIndex;
+      button.dataset.state = index < activeIndex ? "complete" : index === activeIndex ? "current" : "upcoming";
+      if (index === activeIndex) button.setAttribute("aria-current", "step");
       button.onclick = () => {
-        if (index >= 3) openReviewRail("materials");
+        if (!job || index === 0) $("#chatForm")?.scrollIntoView({ block: "center", behavior: "smooth" });
+        else if (index >= 3) openReviewRail("materials");
         else {
-          const target = index === 0 ? $("#chatForm") : $("#agentPlanDock");
-          target?.scrollIntoView({ block: "center", behavior: "smooth" });
+          $("#agentPlanDock")?.scrollIntoView({ block: "center", behavior: "smooth" });
         }
+        nav.dataset.expanded = "false";
+        summary.setAttribute("aria-expanded", "false");
+        details.hidden = true;
       };
-      nav.append(button);
+      item.append(button);
+      list.append(item);
     });
     const status = document.createElement("p");
-    status.textContent = presentation.journeyDetail || (job ? "正在同步任务流程" : stages[0]);
-    nav.append(status);
+    status.textContent = !job
+      ? "添加视频并描述需求，顺序不限"
+      : activeIndex === 0
+        ? "视频已添加，等待剪辑要求"
+        : presentation.journeyDetail || "正在同步任务流程";
+    details.append(list, status);
+    const setExpanded = (next) => {
+      nav.dataset.expanded = String(next);
+      summary.setAttribute("aria-expanded", String(next));
+      details.hidden = !next;
+    };
+    summary.onclick = () => setExpanded(nav.dataset.expanded !== "true");
+    nav.append(summary, details);
+    setExpanded(expanded);
   }
 
   function copyCandidateImages() {
@@ -1018,6 +1061,9 @@
 
   function syncMaterialsSummary() {
     const job = window.ClipTalkCurrentJobSnapshot?.();
+    const draftCapability = window.ClipTalkDraftCapabilitySnapshot?.() || {};
+    const coverDraft = Boolean(draftCapability.active && draftCapability.optionId === "cover");
+    body.classList.toggle("ct-cover-draft-mode", coverDraft);
     const sourceTitle = cleanDisplayText(job?.filename, projectTitle());
     setText($("#ctV4SourceName"), sourceTitle);
     const duration = $("#assetDuration")?.textContent?.trim();
@@ -1066,6 +1112,7 @@
     const selectedVersion = selectedEntry?.version || null;
     const summary = $("#ctV4MaterialsSummary");
     if (summary) summary.dataset.outputFilename = selectedOutput?.filename || "";
+    summary?.classList.toggle("cover-draft", coverDraft);
     const domVersionCount = $("#clipStrip")?.children.length || Math.max(0, ($("#clipVersionPicker")?.children.length || 1) - 1);
     const versionCount = orderedOutputs.length || domVersionCount;
     const previewOnly = Boolean(
@@ -1163,23 +1210,24 @@
       formalVersionCount ? `${formalVersionCount} 个正式版本` : "",
       previewCount ? `${previewCount} 个审核样片` : "",
     ].filter(Boolean).join(" · ");
-    setText($("#ctV4VersionState"), versionCount ? versionState || `${versionCount} 个版本` : "尚未生成");
+    setText($("#ctV4VersionState"), versionCount ? versionState || `${versionCount} 个版本` : coverDraft ? "等待生成" : "尚未生成");
     const reviewingSelection = ["content_review", "running", "plan_planning"].includes(job?.presentation?.key);
     const versionHeading = $(".ct-v4-version-card > header > strong");
-    setText(versionHeading, reviewingSelection && versionCount ? "已有成片 · 非本次结果" : "当前版本");
+    setText(versionHeading, coverDraft && !versionCount ? "封面结果" : reviewingSelection && versionCount ? "历史成片（本次未修改）" : "当前版本");
+    setText($(".ct-v4-version-card > header > span"), coverDraft && !versionCount ? "2" : "3");
     const versionName = cleanDisplayText(selectedOutput?.displayTitle)
       || cleanDisplayText(selectedOutput?.title)
       || (previewOnly ? "审核样片已生成" : "当前成片版本");
-    setText($("#ctV4VersionName"), versionCount ? `${selectedVersion?.number ? `V${selectedVersion.number} · ` : ""}${versionName}` : "等待生成版本");
+    setText($("#ctV4VersionName"), versionCount ? `${selectedVersion?.number ? `V${selectedVersion.number} · ` : ""}${versionName}` : coverDraft ? "等待封面方案" : "等待生成版本");
     const outputMeta = [
       compactDuration(selectedOutput?.duration),
       selectedOutput?.clipCount ? `${selectedOutput.clipCount} 个镜头` : "",
       selectedOutput?.width && selectedOutput?.height ? `${selectedOutput.width}×${selectedOutput.height}` : "",
-      previewOnly ? "审核样片 · 可生成高清版本" : "",
+      previewOnly ? "审核样片 · 可生成成片" : "",
     ].filter(Boolean).join(" · ");
     setText($("#ctV4VersionMeta"), versionCount
       ? outputMeta || $("#clipSummary")?.textContent?.trim() || "点击播放或进入版本列表查看"
-      : "确认候选后会保留可审看版本");
+      : coverDraft ? "生成后可选择并保存为当前封面" : "确认候选后会保留可审看版本");
     const deliveryChecks = $("#ctV4DeliveryChecks");
     if (deliveryChecks) {
       const playing = window.ClipTalkCurrentOutputSnapshot?.();
@@ -1252,7 +1300,7 @@
     const selectedImage = selectedOutput?.coverUrl || selectedOutput?.thumbnailUrl || "";
     const imageUnavailable = !selectedImage || versionImage?.dataset.failedSrc === selectedImage;
     versionPreview?.classList.toggle("is-placeholder", !versionCount || imageUnavailable);
-    setText(versionPreview?.querySelector("em"), versionCount ? "缩略图暂不可用" : "尚无成片");
+    setText(versionPreview?.querySelector("em"), versionCount ? "缩略图暂不可用" : coverDraft ? "尚无封面" : "尚无成片");
     if (versionImage) {
       if (versionCount && selectedImage && !imageUnavailable) {
         if (versionImage.getAttribute("src") !== selectedImage) {
@@ -1280,7 +1328,7 @@
       librarySaveAction.classList.toggle("hidden", previewOnly);
       librarySaveAction.disabled = previewOnly || Boolean(selectedOutput.kept) || librarySaveAction.dataset.saving === "true" || selectedOutput.capabilities?.canKeep === false;
       librarySaveAction.title = selectedOutput.capabilities?.disabledReason?.keep || "保存独立成片副本";
-      setText(librarySaveAction, selectedOutput.kept ? "已存入成片库" : "存入成片库");
+      setText(librarySaveAction, selectedOutput.kept ? "已长期保留" : "长期保留");
       librarySaveAction.onclick = () => window.ClipTalkVersionAction?.(selectedOutput.filename, "keep");
     }
     setText(previewAction?.querySelector("span"), previewOnly ? "播放样片" : "播放成片");

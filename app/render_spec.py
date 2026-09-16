@@ -12,6 +12,15 @@ from .subtitle_review import output_fingerprints
 SPEC_VERSION = 1
 
 
+def subtitle_review_required_detail(message: str, *, code: str = "subtitle_review_required") -> dict[str, str]:
+    return {
+        "code": code,
+        "message": message,
+        "recoveryAction": "complete_subtitle_review",
+        "action": "subtitle_review",
+    }
+
+
 def content_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -25,9 +34,18 @@ def freeze_spec(*, segments: list[dict], cutaways=None, chapters=None, technique
     draft = copy.deepcopy(subtitle_draft) if subtitle_mode == "burn" else None
     if subtitle_mode == "burn":
         if not draft or draft.get("status") not in {"confirmed", "auto_reviewed"}:
-            raise HTTPException(409, "字幕草稿尚未完成校对")
+            raise HTTPException(
+                409,
+                subtitle_review_required_detail("字幕草稿尚未完成校对，请先打开字幕校对面板确认文字与断句。"),
+            )
         if draft.get("sourceSubtitleAcknowledged") is False:
-            raise HTTPException(409, "请先确认原视频字幕状态")
+            raise HTTPException(
+                409,
+                subtitle_review_required_detail(
+                    "请先在字幕校对面板确认原视频字幕状态，避免重复叠加字幕。",
+                    code="source_subtitle_ack_required",
+                ),
+            )
         if output_fingerprints([{"segments": segments}]) != list(draft.get("outputFingerprints") or []):
             raise HTTPException(409, "时间线范围、顺序或速度已变化，请重新校对字幕")
     value = {"schemaVersion": SPEC_VERSION, "segments": segments, "cutaways": cutaways or [],

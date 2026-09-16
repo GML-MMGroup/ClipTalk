@@ -812,7 +812,7 @@ html body #viewerShell #playerNotice {
   background-image: none !important;
   box-shadow: none !important;
 }
-body[data-shell-mode="workspace"] #viewerBadge { border-radius: 4px !important; color: var(--pw-body) !important; background: rgba(9, 14, 17, .82) !important; font-size: 12px !important; }
+body[data-shell-mode="workspace"] #viewerBadge { border-radius: 4px !important; color: var(--ct-on-media) !important; background: rgba(9, 14, 17, .82) !important; font-size: 12px !important; }
 body[data-shell-mode="workspace"] #viewerShell .player-controls {
   min-height: 46px !important;
   border-top: 1px solid var(--pw-line) !important;
@@ -1319,6 +1319,22 @@ html body[data-shell-view="library"] #libraryView.app-library-page {
   scrollbar-color: var(--pw-line-strong) transparent !important;
 }
 
+/* Page views live inside a body that intentionally does not scroll. Keep the
+   output library viewport-bound, just like Settings, so long libraries own a
+   real scroll container instead of growing below the unreachable body. */
+html body[data-shell-view="library"] #libraryView.app-library-page {
+  position: fixed !important;
+  inset: 0 0 0 var(--app-shell-offset) !important;
+  width: auto !important;
+  height: 100dvh !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 html body[data-shell-view="settings"] #settingsPanel > header,
 html body[data-shell-view="library"] #libraryView > header,
 html body[data-shell-view="library"] #libraryView .app-library-toolbar,
@@ -1470,13 +1486,13 @@ html body[data-shell-view="settings"] #settingsPanel .llm-reuse-notice {
 html body[data-shell-view="settings"] #settingsPanel .vision-advanced-settings summary { color: var(--pw-body) !important; }
 html body[data-shell-view="settings"] #settingsPanel .vision-advanced-settings summary small { color: var(--pw-muted) !important; }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar {
-  margin-inline: -32px !important;
-  padding: 13px 32px !important;
-  border-top: 1px solid var(--pw-line) !important;
-  border-radius: 0 0 9px 9px !important;
+  margin-inline: 0 !important;
+  padding: 13px 16px 13px 20px !important;
+  border: 1px solid var(--pw-line-strong) !important;
+  border-radius: 9px !important;
   color: var(--pw-muted) !important;
   background: rgba(11, 16, 19, .96) !important;
-  box-shadow: none !important;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .28) !important;
   backdrop-filter: blur(12px) !important;
 }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar :is(b, small) { color: var(--pw-muted) !important; font-size: 12px !important; }
@@ -1490,6 +1506,47 @@ html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button {
 }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button.primary { border-color: var(--pw-accent) !important; color: var(--pw-accent-ink) !important; background: var(--pw-accent) !important; }
 html body[data-shell-view="settings"] #settingsPanel .settings-save-bar button:disabled { border-color: var(--pw-line) !important; color: var(--pw-faint) !important; background: var(--pw-surface-1) !important; }
+html body[data-shell-view="settings"] #settingsPanel .agent-effective-model {
+  margin-block: 20px;
+  padding: 18px 20px;
+  border: 1px solid var(--ct-border);
+  border-radius: 8px;
+  color: var(--ct-text);
+  background: var(--ct-raised);
+}
+html body[data-shell-view="settings"] #settingsPanel .agent-effective-model p {
+  margin: 8px 0;
+  color: var(--ct-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+html body[data-shell-view="settings"] #settingsPanel #testEffectiveAgent {
+  padding: 9px 14px;
+  border: 1px solid var(--ct-control-border);
+  border-radius: 6px;
+  color: var(--ct-text);
+  background: var(--ct-panel);
+  cursor: pointer;
+}
+html body[data-shell-view="settings"] #settingsPanel #testEffectiveAgent:disabled { color: var(--ct-text-muted); cursor: not-allowed; }
+html body[data-shell-view="settings"] #settingsPanel #testEffectiveAgent:hover:not(:disabled) { background: var(--ct-hover); }
+html body[data-shell-view="settings"] #settingsPanel .agent-independent-settings > summary {
+  padding: 14px 0;
+  color: var(--ct-text);
+  cursor: pointer;
+  font-weight: 600;
+}
+html body[data-shell-view="settings"] #settingsPanel .agent-independent-settings > summary span {
+  margin-left: 12px;
+  color: var(--ct-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+html body[data-shell-view="settings"] #settingsPanel :is(#testEffectiveAgent, .agent-independent-settings > summary):focus-visible {
+  outline: 2px solid var(--ct-focus);
+  outline-offset: 3px;
+}
 html body[data-shell-view="settings"] #settingsPanel .local-capabilities {
   width: min(100%, 1120px);
   padding: 20px;
@@ -1586,6 +1643,19 @@ html body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-focus { 
 
 @media (max-width: 820px) {
   html body[data-shell-view="library"] #libraryView .app-library-item { grid-template-columns: minmax(0, 1fr) !important; }
+  html body[data-shell-view="library"] #libraryView .app-library-media {
+    width: 100% !important;
+    min-height: 0 !important;
+  }
+}
+
+@media (max-width: 760px) {
+  html body[data-shell-view="library"] #libraryView.app-library-page {
+    inset: 0 !important;
+  }
+  html body[data-shell-view="settings"] #settingsPanel.app-settings-page {
+    left: 0 !important;
+  }
 }
 
 /* Global dark-cinema pass: hierarchy comes from tone, spacing and depth;
@@ -3579,7 +3649,6 @@ html body #chatMessages .chat-message.agent-draft-modes {
 html body #chatMessages .brief-template-picker {
   display: block !important;
   width: 100% !important;
-  max-width: 410px !important;
   box-sizing: border-box !important;
   margin: 10px 0 0 !important;
   padding: 12px !important;
@@ -3588,7 +3657,7 @@ html body #chatMessages .brief-template-picker {
   background: #131f24 !important;
   box-shadow: inset 0 1px 0 rgba(226, 238, 233, .035) !important;
 }
-html body #chatMessages .brief-template-picker > summary { display:flex !important; align-items:flex-end !important; justify-content:space-between !important; padding:0 0 12px !important; border:0 !important; color:#e6ece8 !important; list-style:none !important; cursor:pointer !important; }
+html body #chatMessages .brief-template-picker > summary { display:flex !important; justify-content:space-between !important; padding:0 0 12px !important; border:0 !important; color:#e6ece8 !important; list-style:none !important; cursor:pointer !important; }
 html body #chatMessages .brief-template-picker > summary::-webkit-details-marker { display:none !important; }
 html body #chatMessages .brief-template-picker > summary > span { display:grid !important; gap:3px !important; }
 html body #chatMessages .brief-template-picker > summary strong { color:#edf4f1 !important; font-size:15px !important; font-weight:620 !important; }
@@ -3621,17 +3690,11 @@ html body #chatMessages .brief-template-picker > header b {
 }
 html body #chatMessages .brief-template-picker .workflow-entry-grid {
   display: grid !important;
-  grid-template-columns: 1fr !important;
-  gap: 7px !important;
   padding: 0 !important;
 }
 html body #chatMessages .brief-template-picker .workflow-entry-card {
-  min-height: 62px !important;
-  padding: 9px 10px !important;
   display: grid !important;
-  grid-template-columns: 32px minmax(0, 1fr) auto !important;
   align-items: center !important;
-  gap: 10px !important;
   border: 1px solid rgba(143, 166, 162, .13) !important;
   border-radius: 7px !important;
   background: #19272d !important;
@@ -3649,8 +3712,6 @@ html body #chatMessages .brief-template-picker .workflow-entry-card:hover {
 html body #chatMessages .brief-template-picker .workflow-entry-card > i {
   display:grid !important;
   place-items:center !important;
-  width:32px !important;
-  height:32px !important;
   border:1px solid rgba(204, 223, 217, .07) !important;
   border-radius:6px !important;
   color:#dceae3 !important;
@@ -3699,4 +3760,207 @@ html body #chatMessages .brief-template-picker .workflow-entry-card > b {
   background:rgba(137, 177, 164, .09) !important;
   font-size:9px !important;
   font-weight:600 !important;
+}
+
+/* New-task capability discovery: keep automatic routing and the existing
+   quick modes in one first-level chooser, then reveal concrete abilities in
+   place. The compact grid is intentionally informational, not a dashboard. */
+html body #chatMessages .brief-template-picker {
+  max-width: none !important;
+}
+html body #chatMessages .brief-template-picker > summary {
+  align-items: center !important;
+}
+html body #chatMessages .brief-template-picker > summary > b {
+  flex: 0 0 auto !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 7px !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card {
+  min-height: 58px !important;
+  grid-template-columns: 29px minmax(0, 1fr) auto !important;
+  gap: 8px !important;
+  padding: 8px !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card.capability-auto {
+  grid-column: 1 / -1 !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card > i {
+  width: 29px !important;
+  height: 29px !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card > span > small {
+  max-width: 22ch !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card.selected,
+html body #chatMessages .brief-template-picker .workflow-entry-card[aria-pressed="true"] {
+  border-color: rgba(197, 226, 165, .46) !important;
+  background: #243832 !important;
+  box-shadow: inset 2px 0 #c5e2a5 !important;
+}
+html body #chatMessages .brief-template-picker .workflow-entry-card:focus-visible,
+html body #chatMessages .brief-capability-options > button:focus-visible {
+  outline: 2px solid rgba(197, 226, 165, .82) !important;
+  outline-offset: 2px !important;
+}
+.brief-capability-detail {
+  margin-top: 10px !important;
+  padding-top: 10px !important;
+  border-top: 1px solid rgba(143, 166, 162, .16) !important;
+}
+.brief-capability-detail > header {
+  display: grid !important;
+  gap: 4px !important;
+  margin-bottom: 9px !important;
+}
+.brief-capability-detail > header > div {
+  display: flex !important;
+  align-items: baseline !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+}
+.brief-capability-detail > header small {
+  color: #d7ab78 !important;
+  font-size: 9px !important;
+  font-weight: 650 !important;
+  letter-spacing: .08em !important;
+}
+.brief-capability-detail > header strong {
+  color: #edf4f1 !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+}
+.brief-capability-detail > header p {
+  margin: 0 !important;
+  color: #90a29d !important;
+  font-size: 10px !important;
+  line-height: 1.45 !important;
+}
+.brief-capability-options {
+  display: grid !important;
+  grid-template-columns: 1fr !important;
+  gap: 6px !important;
+}
+.brief-capability-options > button {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 10px !important;
+  min-height: 50px !important;
+  padding: 8px 9px !important;
+  border: 1px solid rgba(143, 166, 162, .14) !important;
+  border-radius: 7px !important;
+  color: #e8f0ed !important;
+  background: #19272d !important;
+  text-align: left !important;
+  transition: background .18s ease, border-color .18s ease, transform .18s ease !important;
+}
+.brief-capability-options > button:not(:disabled):hover {
+  border-color: rgba(197, 226, 165, .34) !important;
+  background: #203238 !important;
+  transform: translateY(-1px) !important;
+}
+.brief-capability-options > button[aria-pressed="true"] {
+  border-color: rgba(197, 226, 165, .48) !important;
+  background: #243832 !important;
+  box-shadow: inset 2px 0 #c5e2a5 !important;
+}
+.brief-capability-options > button > span {
+  display: grid !important;
+  gap: 3px !important;
+  min-width: 0 !important;
+}
+.brief-capability-options > button strong {
+  color: inherit !important;
+  font-size: 11px !important;
+  font-weight: 620 !important;
+}
+.brief-capability-options > button small {
+  overflow: hidden !important;
+  color: #91a39e !important;
+  font-size: 9.5px !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.brief-capability-options > button > b {
+  color: #a9c9bd !important;
+  font-size: 9px !important;
+  font-weight: 600 !important;
+  white-space: nowrap !important;
+}
+.brief-capability-options > button:disabled {
+  cursor: not-allowed !important;
+  opacity: .66 !important;
+  filter: saturate(.65) !important;
+}
+.brief-capability-options > button:disabled > b {
+  color: #d6aa7d !important;
+}
+.brief-capability-selection {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: baseline !important;
+  gap: 3px 9px !important;
+  margin: 10px 0 12px !important;
+  padding: 9px 10px !important;
+  border-left: 2px solid var(--pw-accent, #c5e2a5) !important;
+  border-radius: 0 7px 7px 0 !important;
+  background: rgba(197, 226, 165, .07) !important;
+}
+.brief-capability-selection > small {
+  color: var(--pw-muted, #90a29d) !important;
+  font-size: 10px !important;
+}
+.brief-capability-selection > strong {
+  color: var(--pw-text, #edf4f1) !important;
+  font-size: 12px !important;
+  font-weight: 650 !important;
+}
+.brief-capability-selection > span {
+  grid-column: 1 / -1 !important;
+  color: var(--pw-muted, #90a29d) !important;
+  font-size: 10px !important;
+  line-height: 1.45 !important;
+}
+
+html[data-theme="light"] body #chatMessages .brief-template-picker .workflow-entry-card.selected,
+html[data-theme="light"] body #chatMessages .brief-template-picker .workflow-entry-card[aria-pressed="true"] {
+  border-color: rgba(53, 93, 72, .38) !important;
+  color: #20362b !important;
+  background: #e8eee9 !important;
+  box-shadow: inset 2px 0 #537b65 !important;
+}
+html[data-theme="light"] body .brief-capability-detail {
+  border-top-color: rgba(38, 63, 50, .14) !important;
+}
+html[data-theme="light"] body .brief-capability-detail > header strong,
+html[data-theme="light"] body .brief-capability-options > button {
+  color: #20362b !important;
+}
+html[data-theme="light"] body .brief-capability-detail > header small {
+  color: #8a5d31 !important;
+}
+html[data-theme="light"] body .brief-capability-detail > header p,
+html[data-theme="light"] body .brief-capability-options > button small {
+  color: #607168 !important;
+}
+html[data-theme="light"] body .brief-capability-options > button {
+  border-color: rgba(38, 63, 50, .14) !important;
+  background: #f7f8f5 !important;
+}
+html[data-theme="light"] body .brief-capability-options > button:not(:disabled):hover,
+html[data-theme="light"] body .brief-capability-options > button[aria-pressed="true"] {
+  border-color: rgba(53, 93, 72, .34) !important;
+  background: #e8eee9 !important;
+}
+html[data-theme="light"] body .brief-capability-options > button[aria-pressed="true"] {
+  box-shadow: inset 2px 0 #537b65 !important;
+}
+html[data-theme="light"] body .brief-capability-options > button > b {
+  color: #416552 !important;
+}
+html[data-theme="light"] body .brief-capability-options > button:disabled > b {
+  color: #966741 !important;
 }

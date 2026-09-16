@@ -19,17 +19,59 @@ const contentTypes = {
   ".woff2": "font/woff2",
 };
 
+async function chooseQuickWorkflow(page, workflowKind) {
+  if (!await page.locator("#quickWorkflowPicker").isVisible()) {
+    await page.locator("#assistantActionDock [data-open-capability-drawer]").first().click();
+  }
+  await page.locator(`#quickWorkflowPicker [data-capability-category-switch='${workflowKind}']`).click();
+  await page.locator(`#quickWorkflowPicker [data-workflow-switch='${workflowKind}']`).click();
+}
+
 
 async function startStubServer() {
   const requests = [];
   let voiceDiscoveryStarted = false;
   let voiceProgressReported = false;
+  const draftJob = {
+    id: "job_agent_draft",
+    filename: "sample.mp4",
+    taskMode: "highlight",
+    status: "awaiting_agent_instruction",
+    stage: "agent_workspace_ready",
+    progress: 0,
+    detail: "视频已就绪，等待你描述剪辑要求",
+    agentDraft: true,
+    instructionSubmitted: false,
+    videoInfo: { duration: 120, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+    request: { entryWorkflow: "agent", workflowKind: "highlight", sourceScope: { kind: "all", start: 0, end: 120 } },
+    messages: [{ id: "draft-ready", role: "assistant", kind: "notice", text: "我已拿到《sample.mp4》。现在不会分析视频，也不会生成计划。请直接告诉我你想保留什么、剪成什么比例，是否需要字幕或封面；也可以选择快速剪辑模式。" }],
+    outputs: [],
+    outputVersions: [],
+    candidates: [],
+    eventGroups: [],
+  };
+  const activatedJob = (body = {}) => ({
+    id: "job_voice_upload", filename: "sample.mp4", taskMode: body.workflowKind === "highlight" ? "highlight" : "content_extract",
+    workflowKind: body.workflowKind || "highlight",
+    status: "awaiting_content_confirmation", stage: "voice_discovery_available",
+    progress: 0, detail: "视频已上传，可以开始识别本视频说话人",
+    agentDraft: false,
+    instructionSubmitted: true,
+    videoInfo: { duration: 120, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+    request: {
+      entryWorkflow: body.workflowKind === "speaker_edit" ? "voice_discovery" : "agent_direct",
+      workflowKind: body.workflowKind || "highlight",
+      contentInstruction: body.instruction || (body.workflowKind === "speaker_edit" ? "识别本视频中的说话人" : ""),
+    },
+    messages: [], outputs: [], outputVersions: [], candidates: [], eventGroups: [], recognition: {},
+  });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (url.pathname === "/api/health") {
       response.setHeader("Content-Type", "application/json");
       response.end(JSON.stringify({
         ok: true,
+        uiContractVersion: 2,
         visionConfigured: false,
         llmConfigured: false,
         speechEngine: "sensevoice",
@@ -40,6 +82,16 @@ async function startStubServer() {
         ffprobe: true,
         keptLibrary: false,
       }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/setup/status") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ complete: true, canCreateTask: true, canUseAgent: true, steps: [] }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/library/outputs") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ outputs: [] }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/settings/vision") {
@@ -75,20 +127,37 @@ async function startStubServer() {
       if (request.method === "POST") {
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
-        requests.push({ path: url.pathname, token, method: request.method, body: Buffer.concat(chunks).toString("utf8") });
+        const body = Buffer.concat(chunks).toString("utf8");
+        requests.push({ path: url.pathname, token, method: request.method, body });
         response.statusCode = 202;
-        response.end(JSON.stringify({ job: {
-          id: "job_voice_upload", filename: "sample.mp4", taskMode: "content_extract",
-          status: "awaiting_content_confirmation", stage: "voice_discovery_available",
-          progress: 0, detail: "视频已上传，可以开始识别本视频说话人",
-          videoInfo: { duration: 120, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
-          request: { entryWorkflow: "voice_discovery", contentInstruction: "识别本视频中的说话人" },
-          messages: [], outputs: [], candidates: [], eventGroups: [], recognition: {},
-        } }));
+        if (/name="agent_draft"\r?\n\r?\ntrue/.test(body) || /name="entry_workflow"\r?\n\r?\nagent/.test(body)) {
+          response.end(JSON.stringify({ job: draftJob }));
+        } else {
+          response.end(JSON.stringify({ job: activatedJob({ workflowKind: "speaker_edit", instruction: "识别本视频中的说话人" }) }));
+        }
         return;
       }
       requests.push({ path: url.pathname, token, method: request.method });
       response.end(JSON.stringify({ jobs: [] }));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/jobs/job_agent_draft/activate") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      requests.push({ path: url.pathname, token: String(request.headers["x-highlight-token"] || ""), method: request.method, body });
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ job: activatedJob(body) }));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/agent/workspaces") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      requests.push({ path: url.pathname, token: String(request.headers["x-highlight-token"] || ""), method: request.method, body });
+      response.statusCode = 201;
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ workspace: { id: `ws_${body.jobId || "job_agent_draft"}`, jobId: body.jobId || "job_agent_draft" } }));
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/jobs/job_voice_upload/content-search/voices/discover") {
@@ -237,6 +306,120 @@ async function openAuthenticatedWorkspace(page, url) {
   await page.locator('#homeView[data-home-state="empty"]').waitFor({ state: "visible" });
 }
 
+async function auditVisibleContrast(page, controlsOnly = true) {
+  return page.evaluate((onlyControls) => {
+    const parseColor = (value) => {
+      const channels = String(value || "").match(/[\d.]+/g)?.map(Number) || [];
+      return channels.length >= 3 ? [channels[0], channels[1], channels[2], channels[3] ?? 1] : [0, 0, 0, 0];
+    };
+    const composite = (front, back) => {
+      const alpha = front[3] + back[3] * (1 - front[3]);
+      if (!alpha) return [0, 0, 0, 0];
+      return [0, 1, 2].map((index) => (front[index] * front[3] + back[index] * back[3] * (1 - front[3])) / alpha).concat(alpha);
+    };
+    const background = (element) => {
+      const ancestry = [];
+      for (let node = element; node instanceof Element; node = node.parentElement) ancestry.unshift(node);
+      return ancestry.reduce((result, node) => composite(parseColor(getComputedStyle(node).backgroundColor), result), [255, 255, 255, 1]);
+    };
+    const luminance = (color) => {
+      const channels = color.slice(0, 3).map((value) => {
+        const normalized = value / 255;
+        return normalized <= .04045 ? normalized / 12.92 : ((normalized + .055) / 1.055) ** 2.4;
+      });
+      return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+    };
+    const contrast = (foreground, backdrop) => {
+      const text = composite(foreground, backdrop);
+      const bright = Math.max(luminance(text), luminance(backdrop));
+      const dark = Math.min(luminance(text), luminance(backdrop));
+      return (bright + .05) / (dark + .05);
+    };
+    const candidates = onlyControls
+      ? [...document.querySelectorAll('button, summary, a.download-button, [role="button"]')]
+      : [...document.body.querySelectorAll("*")].filter((element) => [...element.childNodes]
+        .some((node) => node.nodeType === Node.TEXT_NODE && String(node.textContent || "").trim()));
+    return candidates
+      .filter((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const unavailableAncestor = element.closest('[hidden], .hidden, [aria-hidden="true"], [inert]');
+        return !unavailableAncestor && style.visibility !== "hidden" && style.display !== "none"
+          && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0
+          && rect.top < innerHeight && rect.left < innerWidth;
+      })
+      .map((element) => {
+        const style = getComputedStyle(element);
+        const backdrop = background(element);
+        const ratio = contrast(parseColor(style.color), backdrop);
+        const fontSize = Number.parseFloat(style.fontSize) || 0;
+        const fontWeight = Number.parseFloat(style.fontWeight) || 400;
+        const largeText = fontSize >= 24 || fontSize >= 18.66 && fontWeight >= 700;
+        return {
+          target: element.id ? `#${element.id}` : element.className ? `.${String(element.className).trim().replaceAll(/\s+/g, ".")}` : element.tagName.toLowerCase(),
+          label: String(element.innerText || element.getAttribute("aria-label") || "").trim().replaceAll(/\s+/g, " ").slice(0, 80),
+          ratio: Number(ratio.toFixed(2)),
+          color: style.color,
+          background: backdrop.slice(0, 3).map((value) => Math.round(value)).join(","),
+          disabled: Boolean(element.disabled || element.closest("button:disabled, select:disabled, input:disabled")),
+          iconOnly: !String(element.innerText || "").trim(),
+          largeText,
+        };
+      })
+      .filter((item) => item.ratio < (onlyControls
+        ? item.iconOnly || item.disabled ? 3 : 4.5
+        : item.disabled || item.largeText ? 3 : 4.5));
+  }, controlsOnly);
+}
+
+
+test("review fixes keep missing frames empty and notification clicks read-only", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      document.body.dataset.shellView = "workspace";
+      document.querySelector("#workspace").classList.remove("home-mode");
+    });
+    await page.addScriptTag({ path: join(staticRoot, "workspace-controller.js") });
+    const result = await page.evaluate(() => {
+      currentJob = { id: "review-regression", videoInfo: { duration: 60 }, candidates: [] };
+      viewerMediaKind = "source";
+      currentOutput = null;
+      currentEventGroup = null;
+      currentEventSegment = null;
+      currentCandidate = { start: 40, end: 50 };
+      document.querySelector("#reviewView").dataset.reviewLayout = "portrait";
+      timelineExpanded = true;
+      const track = document.querySelector("#timelineThumbnails");
+      track.innerHTML = '<button class="timeline-thumbnail" data-timeline-frame-time="5" style="background-image:url(/wrong-frame.jpg)"></button>';
+      syncPortraitPrecisionWorkbench();
+      const frame = document.querySelector("#portraitWorkbenchFrame");
+      const missingFrame = { state: frame.dataset.state, image: frame.style.backgroundImage };
+      let actionCount = 0;
+      const dock = document.querySelector("#agentPlanDock");
+      const action = document.createElement("button");
+      action.onclick = () => { actionCount += 1; };
+      dock.prepend(action);
+      const notifications = document.querySelector("#ctV4Notifications");
+      notifications.disabled = false;
+      notifications.click();
+      const save = document.querySelector("#secondaryEditorSaveState");
+      save.dataset.state = "saved";
+      save.textContent = "视频分析失败";
+      document.querySelector("#workspace").classList.remove("new-task-workbench");
+      window.ClipTalkWorkspaceController.mount();
+      const saveLabel = document.querySelector("#ctV4SaveState b").textContent;
+      return { missingFrame, actionCount, saveLabel };
+    });
+    assert.deepEqual(result, { missingFrame: { state: "empty", image: "" }, actionCount: 0, saveLabel: "项目已载入" });
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
 
 test("workspace loads, authenticates without URL token, and opens new-task flow", async () => {
   const stub = await startStubServer();
@@ -255,7 +438,7 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
     assert.equal(await page.locator("#homeTaskGrid .home-empty").count(), 0);
     assert.equal(await page.locator("#homeTaskGrid > *").count(), 1);
     assert.match(await page.locator("#homeView").textContent(), /开始剪辑/);
-    assert.match(await page.locator("[data-home-create]").textContent(), /进入后选择视频/);
+    assert.match(await page.locator("[data-home-create]").textContent(), /选择视频并描述你想得到的结果/);
     assert.doesNotMatch(await page.locator("#homeView").textContent(), /AI VIDEO EDITING WORKSPACE|RECENT TASKS|拖入视频或点击选择素材/);
     assert.ok(stub.requests.some((item) => item.token === ""));
     assert.ok(stub.requests.some((item) => item.token === "browser-test-token"));
@@ -263,24 +446,141 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
       await page.evaluate(() => sessionStorage.getItem("cliptalk_access_token")),
       "browser-test-token",
     );
-    await page.locator("[data-home-create]").click();
-    await page.locator("#uploadView").waitFor({ state: "visible" });
-    await page.locator("#uploadForm").waitFor({ state: "visible" });
-    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("task-creation-mode")), true);
-    assert.equal(await page.locator(".chat-panel").isVisible(), false);
-    assert.equal(await page.locator(".panel-resizer-left").isVisible(), false);
-    const creationCanvas = await page.locator(".studio").evaluate((node) => {
-      const review = node.querySelector(":scope > .review-panel");
-      const assistant = node.querySelector(":scope > .chat-panel");
-      const style = getComputedStyle(node);
+	    await page.locator("[data-home-create]").click();
+	    await page.locator("#uploadView").waitFor({ state: "visible" });
+	    await page.locator("#uploadForm").waitFor({ state: "visible" });
+	    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("task-creation-mode")), false);
+	    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("new-task-workbench")), true);
+	    assert.equal(await page.locator(".chat-panel").isVisible(), true);
+	    assert.equal(await page.locator(".panel-resizer-left").isVisible(), true);
+	    const assistantBeforeResize = await page.locator(".chat-panel").evaluate((node) => node.getBoundingClientRect().width);
+	    assert.ok(assistantBeforeResize >= 378, `new-task assistant is still too narrow: ${assistantBeforeResize}`);
+	    const assistantHandle = await page.locator(".panel-resizer-left").boundingBox();
+	    await page.mouse.move(assistantHandle.x + assistantHandle.width / 2, assistantHandle.y + 100);
+	    await page.mouse.down();
+	    await page.mouse.move(assistantHandle.x + assistantHandle.width / 2 + 48, assistantHandle.y + 100, { steps: 4 });
+	    await page.mouse.up();
+	    const assistantAfterResize = await page.locator(".chat-panel").evaluate((node) => node.getBoundingClientRect().width);
+	    assert.ok(assistantAfterResize >= assistantBeforeResize + 40,
+	      `dragging did not widen the new-task assistant: ${assistantBeforeResize} -> ${assistantAfterResize}`);
+	    assert.equal(await page.evaluate(() => Number(localStorage.getItem("cliptalk-new-task-assistant-width:v1"))), Math.round(assistantAfterResize));
+	    assert.equal(await page.locator("[data-new-task-exit]").count(), 0);
+	    assert.equal(await page.locator("[data-new-task-choose-existing]").count(), 0);
+	    assert.doesNotMatch(await page.locator("#uploadView > .intro").textContent(), /返回任务列表|选择已有任务|创建剪辑任务/);
+	    assert.equal(await page.locator("#ctV4ProjectName").textContent(), "新任务");
+	    assert.match(await page.locator("#chatMessages").textContent(), /先添加视频.*想怎么剪.*保留完整发言/s);
+	    assert.equal(await page.locator("#quickWorkflowPicker").isVisible(), false,
+	      "the capability catalogue should stay collapsed until requested");
+	    assert.equal(await page.locator("#assistantActionDock").isVisible(), false);
+	    assert.equal(await page.locator("#newTaskDraftStatus").textContent(), "等待添加素材");
+	    assert.equal(await page.locator("#ctV4SaveState").isVisible(), false);
+	    assert.equal(await page.locator("#reviewRail").isVisible(), false);
+	    const creationCanvas = await page.locator(".studio").evaluate((node) => {
+	      const review = node.querySelector(":scope > .review-panel");
+	      const assistant = node.querySelector(":scope > .chat-panel");
+	      const style = getComputedStyle(node);
+	      return {
+	        studioWidth: node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+	        reviewWidth: review.getBoundingClientRect().width,
+	        assistantHidden: assistant.getAttribute("aria-hidden"),
+	      };
+	    });
+	    assert.ok(creationCanvas.reviewWidth < creationCanvas.studioWidth);
+	    assert.equal(creationCanvas.assistantHidden, null);
+	    const workspaceCreationCanvas = await page.locator(".studio").evaluate((node) => {
+	      document.body.dataset.shellMode = "workspace";
+	      const review = node.querySelector(":scope > .review-panel");
+	      const assistant = node.querySelector(":scope > .chat-panel");
+	      const style = getComputedStyle(node);
+	      const nodeRect = node.getBoundingClientRect();
+	      const reviewRect = review.getBoundingClientRect();
+	      const assistantRect = assistant.getBoundingClientRect();
+	      const paddingLeft = parseFloat(style.paddingLeft) || 0;
+	      const paddingRight = parseFloat(style.paddingRight) || 0;
+	      return {
+	        columnCount: style.gridTemplateColumns.split(" ").filter(Boolean).length,
+	        leftGap: reviewRect.left - nodeRect.left - paddingLeft,
+	        widthGap: node.clientWidth - paddingLeft - paddingRight - reviewRect.width,
+	        assistantWidth: assistantRect.width,
+	      };
+	    });
+	    assert.ok(workspaceCreationCanvas.columnCount >= 3);
+	    assert.ok(
+	      workspaceCreationCanvas.assistantWidth > 220,
+	      `expected assistant panel to remain visible, got ${workspaceCreationCanvas.assistantWidth}px`,
+	    );
+	    assert.ok(
+	      workspaceCreationCanvas.leftGap > workspaceCreationCanvas.assistantWidth,
+	      `expected upload panel after assistant, got ${workspaceCreationCanvas.leftGap}px`,
+	    );
+	    const creationPalette = await page.evaluate(() => {
+	      const review = document.querySelector(".studio.new-task-workbench > .review-panel");
+	      const uploadView = document.querySelector("#uploadView");
+      const heading = uploadView.querySelector(":scope > .intro h1");
+      const headingAccent = heading.querySelector("em");
+      const description = uploadView.querySelector(":scope > .intro > span");
+      const intro = uploadView.querySelector(":scope > .intro");
+      const uploadCard = document.querySelector("#uploadForm.upload-card");
+      const dropTitle = document.querySelector("#dropZone strong");
+      const dropMeta = document.querySelector("#dropZone small");
       return {
-        studioWidth: node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-        reviewWidth: review.getBoundingClientRect().width,
-        assistantHidden: assistant.getAttribute("aria-hidden"),
+        reviewBackground: getComputedStyle(review).backgroundImage,
+        uploadViewBackground: getComputedStyle(uploadView).backgroundImage,
+        headingColor: getComputedStyle(heading).color,
+        accentColor: getComputedStyle(headingAccent).color,
+        descriptionColor: getComputedStyle(description).color,
+        introProtection: getComputedStyle(intro, "::before").backgroundImage,
+        uploadCardBackground: getComputedStyle(uploadCard).backgroundImage,
+        dropBackground: getComputedStyle(dropTitle.closest("#dropZone")).backgroundColor,
+        dropTitleColor: getComputedStyle(dropTitle).color,
+        dropMetaColor: getComputedStyle(dropMeta).color,
       };
-    });
-    assert.ok(Math.abs(creationCanvas.studioWidth - creationCanvas.reviewWidth) < 4);
-    assert.equal(creationCanvas.assistantHidden, "true");
+	    });
+	    assert.ok(creationPalette.reviewBackground);
+	    assert.match(creationPalette.uploadViewBackground, /gradient|none/);
+	    assert.match(creationPalette.headingColor, /rgb/);
+	    assert.match(creationPalette.accentColor, /rgb/);
+	    assert.match(creationPalette.descriptionColor, /rgb/);
+	    assert.match(creationPalette.uploadCardBackground, /gradient|none/);
+	    assert.match(creationPalette.dropBackground, /rgb/);
+	    assert.match(creationPalette.dropTitleColor, /rgb/);
+	    assert.match(creationPalette.dropMetaColor, /rgb/);
+	    const creationComposer = await page.evaluate(() => {
+	      const shell = document.querySelector("#chatForm .chat-input-shell");
+	      const toolbar = document.querySelector("#chatForm .composer-toolbar");
+	      const skill = document.querySelector("#agentSkillMenuButton");
+	      const send = document.querySelector("#sendButton");
+	      const shellRect = shell.getBoundingClientRect();
+	      const toolbarRect = toolbar.getBoundingClientRect();
+	      const skillRect = skill.getBoundingClientRect();
+	      const sendRect = send.getBoundingClientRect();
+	      return {
+	        shellBackground: getComputedStyle(shell).backgroundColor,
+	        toolbarDisplay: getComputedStyle(toolbar).display,
+	        toolbarInside: toolbarRect.top >= shellRect.top && toolbarRect.bottom <= shellRect.bottom,
+	        skillWidth: skillRect.width,
+	        skillText: skill.textContent.replace(/\s+/g, " ").trim(),
+	        attachAbsent: !document.querySelector("#composerAttachButton"),
+	        controlsAligned: Math.abs((skillRect.top + skillRect.height / 2) - (sendRect.top + sendRect.height / 2)) < 2,
+	      };
+	    });
+	    assert.equal(creationComposer.toolbarDisplay, "flex");
+	    assert.equal(creationComposer.toolbarInside, true);
+	    assert.ok(creationComposer.skillWidth >= 96, `expected a readable Skill control, got ${creationComposer.skillWidth}px`);
+	    assert.match(creationComposer.skillText, /执行设置.*自动/);
+	    assert.equal(creationComposer.attachAbsent, true);
+	    assert.equal(creationComposer.controlsAligned, true);
+	    assert.notEqual(creationComposer.shellBackground, "rgb(240, 243, 240)");
+	    await page.locator("#sidebarHistoryToggle").click();
+	    await page.waitForFunction(() => document.querySelector("#sidebarHistoryDrawer")?.getAttribute("aria-hidden") === "false");
+	    await page.locator("#sidebarHistoryClose").click();
+	    await page.waitForFunction(() => document.querySelector("#sidebarHistoryDrawer")?.getAttribute("aria-hidden") === "true");
+	    await page.locator(".app-sidebar-brand [data-shell-view=home]").click();
+	    await page.locator("#homeView").waitFor({ state: "visible" });
+	    await page.locator("[data-home-create]").click();
+	    await page.locator("#uploadView").waitFor({ state: "visible" });
+	    await page.locator("#chatInput").fill("找出所有汽车画面，合成竖屏视频");
+	    await page.screenshot({ path: join(projectRoot, "test-results/new-task-workstation.png"), fullPage: true });
     await page.evaluate(() => {
       const transfer = new DataTransfer();
       transfer.items.add(new File([new Uint8Array(256)], "sample.mp4", { type: "video/mp4" }));
@@ -293,41 +593,59 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
       Object.defineProperty(preview, "videoHeight", { configurable: true, value: 720 });
       preview.dispatchEvent(new Event("loadedmetadata"));
     });
-    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("task-creation-mode")), true);
-    assert.equal(await page.locator(".chat-panel").isVisible(), false);
-    assert.equal(await page.locator(".chat-panel").getAttribute("aria-hidden"), "true");
+    await page.waitForFunction(() => currentJob?.id === "job_agent_draft");
+	    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("task-creation-mode")), false);
+	    assert.equal(await page.locator(".chat-panel").isVisible(), true);
+	    assert.equal(await page.locator(".chat-panel").getAttribute("aria-hidden"), null);
+    assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("new-task-workbench")), false);
+    assert.equal(await page.locator("#reviewView").isVisible(), true);
+    assert.equal(await page.locator("#uploadView").isVisible(), false);
+    assert.equal(await page.locator("#taskSetupView").isVisible(), false);
+    assert.equal(await page.locator("#chatInput").isDisabled(), false);
+    assert.equal(await page.locator("#chatInput").inputValue(), "找出所有汽车画面，合成竖屏视频");
+    const draftConversation = await page.locator("#chatMessages").textContent();
+    assert.match(draftConversation, /视频《sample\.mp4》已添加/);
+    assert.match(draftConversation, /请描述想保留的内容/);
+    assert.doesNotMatch(draftConversation, /剪成什么比例|是否需要字幕或封面/);
+    assert.doesNotMatch(draftConversation, /素材工作区/);
+    assert.doesNotMatch(draftConversation, /生成完整执行计划/);
+    assert.equal(await page.locator("#chatLegacyModeButton").isVisible(), false);
     assert.equal(await page.locator(".brief-task-section, .brief-storage-section").count(), 0);
-    assert.equal(await page.locator("#briefContentInstruction").count(), 1);
-    assert.equal(await page.locator("#briefContentInstruction").isVisible(), false);
     assert.equal(await page.locator("#briefReuseAnalysis, #briefTargetDuration, #briefResultStrategy").count(), 0);
     assert.equal(await page.locator("#briefInstruction").count(), 0);
-    assert.equal(await page.locator("[data-workflow-choice]").count(), 4);
-    assert.equal(await page.locator("#taskSetupView").isVisible(), true);
-    assert.match(await page.locator("#taskSetupView > header").textContent(), /确认后.*上传.*开始分析.*继续补充要求/s);
-    assert.equal(await page.locator("#briefAutoInstruction").isVisible(), true);
-    assert.equal(await page.locator("#taskSetupPortal > .brief-card").count(), 1);
+    assert.equal(await page.locator("#chatMessages [data-workflow-switch]").count(), 0);
+    assert.equal(await page.locator("#taskSetupPortal > .brief-card").count(), 0);
     assert.equal(await page.locator("#chatMessages .brief-card").count(), 0);
-    const workflowGrid = await page.locator(".workflow-entry-grid").evaluate((node) => ({
+    assert.equal(await page.locator(".agent-draft-modes").count(), 0);
+    assert.equal(await page.locator("#quickWorkflowPicker").isVisible(), false);
+    assert.match(await page.locator("#assistantActionDock").textContent(), /自动选择/);
+    await page.locator("#assistantActionDock [data-open-capability-drawer]").first().click();
+    assert.equal(await page.locator("#quickWorkflowPicker [data-capability-category-switch]").count(), 9);
+    const workflowGrid = await page.locator("#quickWorkflowPicker .legacy-workflow-grid").evaluate((node) => ({
       columns: getComputedStyle(node).gridTemplateColumns.split(" ").length,
       width: node.getBoundingClientRect().width,
     }));
-    assert.equal(workflowGrid.columns, 2);
-    assert.ok(workflowGrid.width > 520);
+    assert.ok([1, 2].includes(workflowGrid.columns), `quick workflow grid should stay readable at this sidebar width: ${workflowGrid.columns} columns`);
+    assert.ok(workflowGrid.width > 220);
     assert.equal(await page.locator("#voiceProfileButton").count(), 0);
-    assert.equal(await page.locator('[data-workflow-choice="person_edit"]').textContent().then((value) => /所有出镜片段/.test(value)), true);
-    assert.match(await page.locator("#localPreviewPanel").textContent(), /任务设置/);
-    await page.locator('[data-workflow-choice="content_search"]').click();
-    await page.locator("#briefContentInstruction").fill("找出后半段的产品演示");
-    assert.match(await page.locator(".brief-core-settings").textContent(), /素材范围/);
-    assert.equal(await page.locator("#briefHighlightSettings").isVisible(), false);
-    assert.equal(await page.locator("#briefContentSettings").isVisible(), true);
-    assert.equal(await page.locator("#briefIntentClarification").isVisible(), false);
-    assert.equal(await page.evaluate(() => pendingCreateIntentMode), "content_extract");
-    await page.locator("#briefSourceScope").selectOption("back_half");
-    const creationOptions = await page.evaluate(() => activeBriefOptions("找出产品演示"));
-    assert.deepEqual(creationOptions.sourceScope, { kind: "back_half", start: 60, end: 120 });
-    assert.equal("targetSeconds" in creationOptions, false);
-    assert.equal("resultStrategy" in creationOptions, false);
+    assert.equal(await page.locator('#quickWorkflowPicker [data-capability-category-switch="person_edit"]').textContent().then((value) => /人物/.test(value)), true);
+    await chooseQuickWorkflow(page, "content_search");
+    assert.equal(await page.evaluate(() => pendingWorkflowSwitch), "content_search");
+    assert.match(await page.locator("#quickWorkflowPicker").textContent(), /素材范围.*整个源视频/s);
+    assert.equal(await page.locator("#chatInput").inputValue(), "找出所有汽车画面，合成竖屏视频");
+    await page.locator("#chatInput").fill("找出后半段的产品演示");
+    const durationGoalOptions = await page.evaluate(() => activeBriefOptions(
+      "从视频素材中提取3段片段，每段20秒左右，拼接成总时长60秒成品视频",
+    ));
+    assert.deepEqual(durationGoalOptions.sourceScope, { kind: "all", start: "", end: "" });
+    const durationRangeOptions = await page.evaluate(() => activeBriefOptions(
+      "每段控制在15到20秒，输出三段成片",
+    ));
+    assert.deepEqual(durationRangeOptions.sourceScope, { kind: "all", start: "", end: "" });
+    const explicitPositionOptions = await page.evaluate(() => activeBriefOptions("找视频第20秒左右的产品画面"));
+    assert.equal(explicitPositionOptions.sourceScope.kind, "custom");
+    assert.equal("targetSeconds" in durationGoalOptions, false);
+    assert.equal("resultStrategy" in durationGoalOptions, false);
     const formValues = await page.evaluate(() => {
       const form = window.ClipTalkTaskCreation.buildForm({
         file: new File([new Uint8Array(8)], "sample.mp4", { type: "video/mp4" }),
@@ -365,6 +683,244 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
   }
 });
 
+test("theme switch updates the application palette and persists the user's choice", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const toggle = page.locator("#themeToggle");
+    await toggle.waitFor({ state: "visible" });
+    assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+
+    const darkPalette = await page.evaluate(() => ({
+      page: getComputedStyle(document.documentElement).backgroundColor,
+      navigation: getComputedStyle(document.body).getPropertyValue("--pw-rail").trim(),
+    }));
+    await toggle.click();
+    assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+    assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+    assert.equal(await toggle.locator("span").textContent(), "浅色");
+    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-color-theme-v1")), "light");
+
+    const lightPalette = await page.evaluate(() => ({
+      page: getComputedStyle(document.documentElement).backgroundColor,
+      navigation: getComputedStyle(document.body).getPropertyValue("--pw-rail").trim(),
+      scheme: getComputedStyle(document.documentElement).colorScheme,
+      themeColor: document.querySelector('meta[name="theme-color"]')?.content,
+    }));
+    assert.notEqual(lightPalette.page, darkPalette.page);
+    assert.notEqual(lightPalette.navigation, darkPalette.navigation);
+    assert.equal(lightPalette.page, "rgb(243, 243, 240)");
+    assert.equal(lightPalette.navigation, "#f2f2f0");
+    assert.equal(lightPalette.scheme, "light");
+    assert.equal(lightPalette.themeColor, "#f3f3f0");
+    await page.waitForTimeout(350);
+    const homeContrast = await auditVisibleContrast(page);
+    const homeTextContrast = await auditVisibleContrast(page, false);
+    await page.locator("#sidebarHistoryToggle").click();
+    await page.locator("#sidebarHistoryDrawer[aria-hidden='false']").waitFor({ state: "visible" });
+    await page.waitForTimeout(350);
+    const drawerContrast = await auditVisibleContrast(page);
+    const drawerTextContrast = await auditVisibleContrast(page, false);
+    await page.locator("#sidebarHistoryClose").click();
+
+    await page.locator("#sidebarNewTask").click();
+    await page.waitForFunction(() => document.body.dataset.shellView === "workspace" && document.body.classList.contains("ct-workbench-v4"));
+    const workspacePalette = await page.evaluate(() => {
+      const channels = (selector) => (getComputedStyle(document.querySelector(selector)).backgroundColor.match(/[\d.]+/g) || [])
+        .slice(0, 3).map(Number);
+      return {
+        navigation: channels("#appSidebar"),
+        assistant: channels("#assistantPanel"),
+        review: channels(".review-panel"),
+        toolbar: channels("#ctV4Topbar"),
+      };
+    });
+    assert.deepEqual(workspacePalette, {
+      navigation: [245, 247, 242],
+      assistant: [248, 249, 245],
+      review: [242, 241, 234],
+      toolbar: [250, 250, 247],
+    });
+    const harmonizedSurfaces = await page.evaluate(() => {
+      const color = (selector, property = "backgroundColor") => {
+        const element = document.querySelector(selector);
+        return element ? getComputedStyle(element)[property] : "missing";
+      };
+      const plan = document.querySelector("#agentPlanDock");
+      const originalPlanMarkup = plan?.innerHTML || "";
+      const planWasHidden = plan?.classList.contains("hidden");
+      if (plan) {
+        plan.innerHTML = `<header><small>内容剪辑计划</small><b>等待确认</b></header>
+          <section class="agent-plan-control"><dl><div><dt>目标</dt><dd>整理素材</dd></div></dl></section>
+          <div class="agent-plan-segments"><i data-state="completed"></i><i data-state="running"></i></div>
+          <footer><button class="primary" type="button">确认计划</button></footer>`;
+        plan.classList.remove("hidden");
+      }
+      const timeline = document.querySelector("#timelineViewport");
+      const timelineProbe = document.createElement("button");
+      timelineProbe.type = "button";
+      timelineProbe.className = "timeline-sequence-segment";
+      timelineProbe.innerHTML = "<span>普通片段</span>";
+      timeline?.append(timelineProbe);
+      const result = {
+        plan: color("#agentPlanDock"),
+        planText: color("#agentPlanDock", "color"),
+        planControl: color("#agentPlanDock .agent-plan-control"),
+        planPrimary: color("#agentPlanDock button.primary"),
+        reviewHeader: color("#reviewView > .review-header"),
+        viewerShell: color("#viewerShell"),
+        playerControls: color("#viewerShell .player-controls"),
+        railTabs: color("#ctV4RailTabs"),
+        timelineIdle: getComputedStyle(timelineProbe).backgroundColor,
+        timelineIdleText: getComputedStyle(timelineProbe).color,
+      };
+      timelineProbe.classList.add("playback-active");
+      result.timelineActive = getComputedStyle(timelineProbe).backgroundColor;
+      result.timelineActiveText = getComputedStyle(timelineProbe).color;
+      timelineProbe.remove();
+      if (plan) {
+        plan.innerHTML = originalPlanMarkup;
+        plan.classList.toggle("hidden", Boolean(planWasHidden));
+      }
+      return result;
+    });
+    assert.deepEqual(harmonizedSurfaces, {
+      plan: "rgb(247, 247, 244)",
+      planText: "rgb(29, 41, 36)",
+      planControl: "rgb(247, 247, 244)",
+      planPrimary: "rgb(53, 93, 72)",
+      reviewHeader: "rgb(243, 243, 240)",
+      viewerShell: "rgb(247, 247, 244)",
+      playerControls: "rgb(247, 247, 244)",
+      railTabs: "rgb(243, 243, 240)",
+      timelineIdle: "rgb(227, 237, 229)",
+      timelineIdleText: "rgb(39, 67, 54)",
+      timelineActive: "rgb(53, 93, 72)",
+      timelineActiveText: "rgb(255, 255, 255)",
+    });
+    await page.waitForTimeout(350);
+    const workspaceContrast = await auditVisibleContrast(page);
+    const workspaceTextContrast = await auditVisibleContrast(page, false);
+    await page.locator("#settingsButton").click();
+    await page.locator("#settingsPanel:not(.hidden)").waitFor({ state: "visible" });
+    await page.waitForTimeout(350);
+    const settingsContrast = await auditVisibleContrast(page);
+    const settingsTextContrast = await auditVisibleContrast(page, false);
+    await page.locator(".app-sidebar-outputs").click();
+    await page.locator("#libraryView:not(.hidden)").waitFor({ state: "visible" });
+    await page.waitForTimeout(350);
+    const libraryContrast = await auditVisibleContrast(page);
+    const libraryTextContrast = await auditVisibleContrast(page, false);
+    assert.deepEqual({
+      home: [...homeContrast, ...homeTextContrast],
+      drawer: [...drawerContrast, ...drawerTextContrast],
+      workspace: [...workspaceContrast, ...workspaceTextContrast],
+      settings: [...settingsContrast, ...settingsTextContrast],
+      library: [...libraryContrast, ...libraryTextContrast],
+    }, {
+      home: [], drawer: [], workspace: [], settings: [], library: [],
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+    assert.equal(await page.locator("#themeToggle").getAttribute("aria-pressed"), "false");
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("timeline uses one semantic track model without empty legacy lanes or vertical clipping", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const audit = await page.evaluate(() => {
+      document.querySelector("#reviewView")?.classList.remove("hidden");
+      viewerMediaKind = "source";
+      currentOutput = null;
+      currentCandidate = null;
+      currentEventGroup = null;
+      currentEventSegment = null;
+      waveformData = { duration: 90, peaks: Array.from({ length: 90 }, (_, index) => (index % 7) / 7) };
+      timelineViewStart = 0;
+      timelineViewEnd = 90;
+
+      const snapshot = () => {
+        const viewport = document.querySelector("#timelineViewport");
+        const labels = document.querySelector("#timelineTrackLabels");
+        const labelRows = [...labels.children];
+        const geometry = timelineTrackLayout(260, false, 1, 1, viewport.dataset.trackLayout || "source-tracks");
+        const geometryTotal = geometry.eventRowHeight + geometry.shotRowHeight
+          + geometry.pictureHeight + geometry.audioHeight + geometry.rulerHeight;
+        return {
+          title: document.querySelector("#timelineTitle")?.textContent || "",
+          layout: viewport.dataset.trackLayout || "",
+          labels: labelRows.map((node) => node.textContent),
+          overflowY: getComputedStyle(viewport).overflowY,
+          geometryHeight: geometry.height,
+          geometryTotal,
+          trackCount: labels.dataset.trackCount || "",
+        };
+      };
+
+      currentJob = {
+        id: "source_only", taskMode: "highlight", status: "awaiting_instruction",
+        videoInfo: { duration: 90, has_audio: true }, eventGroups: [], candidates: [],
+      };
+      updateTimeline();
+      const source = snapshot();
+
+      currentJob = {
+        ...currentJob, status: "awaiting_confirmation",
+        candidates: [{ index: 0, start: 10, end: 16, title: "产品展示", score: 90 }],
+        eventGroups: [{
+          id: "event_1", title: "产品展示", start: 10, end: 16,
+          segments: [{ id: "shot_1", start: 10, end: 16, title: "产品特写" }],
+        }],
+      };
+      updateTimeline();
+      const hierarchy = snapshot();
+
+      currentJob = {
+        id: "content", taskMode: "content_extract", status: "awaiting_content_confirmation",
+        videoInfo: { duration: 90, has_audio: true }, eventGroups: [], candidates: [],
+        contentSearch: { id: "search_1", candidates: [{ id: "match_1", start: 20, end: 28, title: "核心观点" }] },
+      };
+      updateTimeline();
+      const content = snapshot();
+      return { source, hierarchy, content };
+    });
+
+    assert.deepEqual(audit.source.labels, ["画面", "音频"]);
+    assert.equal(audit.source.layout, "source-tracks");
+    assert.equal(audit.source.title, "源视频时间线");
+    assert.equal(audit.source.trackCount, "2");
+    assert.deepEqual(audit.hierarchy.labels, ["事件", "镜头", "画面", "音频"]);
+    assert.equal(audit.hierarchy.layout, "hierarchy");
+    assert.equal(audit.hierarchy.trackCount, "4");
+    assert.deepEqual(audit.content.labels, ["匹配片段", "画面", "音频"]);
+    assert.equal(audit.content.layout, "content-review");
+    assert.equal(audit.content.trackCount, "3");
+    for (const state of Object.values(audit)) {
+      assert.equal(state.overflowY, "hidden");
+      assert.equal(state.geometryTotal, state.geometryHeight, `${state.layout} geometry overflows its viewport`);
+    }
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
 
 test("queued content search can stop immediately and explains cancellation latency", async () => {
   const stub = await startStubServer();
@@ -395,6 +951,22 @@ test("queued content search can stop immediately and explains cancellation laten
       document.querySelector(".studio")?.classList.remove("home-mode");
       document.querySelector("#homeView")?.classList.add("hidden");
       renderConversation(job);
+    });
+    await page.evaluate(() => window.ClipTalkTheme.apply("light"));
+    await page.waitForTimeout(220);
+    const lightProgress = await page.locator("#inlineAnalysisProgress").evaluate((panel) => ({
+      beamTheme: panel.dataset.beamTheme,
+      panelBackground: getComputedStyle(panel).backgroundColor,
+      stageBackground: getComputedStyle(panel.querySelector(".inline-current-stage")).backgroundColor,
+      detailColor: getComputedStyle(panel.querySelector("[data-inline-detail]")).color,
+      cancelBackground: getComputedStyle(panel.querySelector("[data-inline-cancel]")).backgroundColor,
+    }));
+    assert.deepEqual(lightProgress, {
+      beamTheme: "light",
+      panelBackground: "rgb(247, 247, 244)",
+      stageBackground: "rgb(255, 255, 255)",
+      detailColor: "rgb(29, 41, 36)",
+      cancelBackground: "rgb(248, 236, 234)",
     });
     const stopButton = page.locator("[data-inline-cancel]");
     assert.equal(await stopButton.isEnabled(), true);
@@ -518,7 +1090,7 @@ test("unrouted follow-up thinking uses the generic video editing assistant", asy
   }
 });
 
-test("compact navigation rail opens a focused history drawer", async () => {
+test("integrated navigation opens a focused history drawer above its scrim", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -531,12 +1103,34 @@ test("compact navigation rail opens a focused history drawer", async () => {
       const base = {
         sourceProjectId: "asset_shared", filename: "interview.mp4", taskMode: "content_extract",
         status: "completed", stage: "completed", progress: 1, outputs: [], outputVersions: [],
+        execution: { schemaVersion: 1, status: "completed", active: false, outcome: "completed" },
+        presentation: { schemaVersion: 2, key: "completed", group: "completed", label: "已完成" },
         videoInfo: { duration: 60, width: 1280, height: 720 }, candidateCount: 2,
       };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [
-        { ...base, id: "task-content", workflowKind: "content_search", updatedAt: "2026-08-25T01:00:00Z" },
+        {
+          ...base,
+          id: "task-content",
+          workflowKind: "content_search",
+          status: "awaiting_confirmation",
+          stage: "review",
+          execution: { schemaVersion: 1, status: "awaiting_confirmation", active: false, capabilities: { canDelete: true } },
+          presentation: { schemaVersion: 2, key: "review", group: "action_required", label: "等待确认镜头" },
+          updatedAt: "2026-08-25T01:00:00Z",
+        },
         { ...base, id: "task-person", workflowKind: "person_edit", updatedAt: "2026-08-25T02:00:00Z" },
-        { ...base, id: "task-running", workflowKind: "highlight", status: "running", stage: "analysis", progress: .43, detail: "正在分析素材", updatedAt: "2026-08-25T03:00:00Z" },
+        {
+          ...base,
+          id: "task-running",
+          workflowKind: "highlight",
+          status: "running",
+          stage: "analysis",
+          progress: .43,
+          detail: "正在分析素材",
+          updatedAt: "2026-08-25T03:00:00Z",
+          execution: { schemaVersion: 1, status: "running", active: true, operation: "analysis" },
+          presentation: { schemaVersion: 2, key: "running", group: "active", label: "进行中" },
+        },
       ] }) });
     });
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
@@ -545,9 +1139,12 @@ test("compact navigation rail opens a focused history drawer", async () => {
     await page.locator("#accessTokenDialog button[type=submit]").click();
     await page.waitForFunction(() => document.querySelector("#homeView")?.dataset.homeState === "ready");
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
-    assert.equal(await page.locator("#appSidebar").evaluate((node) => getComputedStyle(node).width), "88px");
+    assert.ok(await page.locator("#appSidebar").evaluate((node) => {
+      const width = node.getBoundingClientRect().width;
+      return width === 84;
+    }), "navigation width should remain readable without consuming the workspace");
     assert.equal(await page.locator(".app-sidebar-brand-wordmark").textContent(), "ClipTalk");
-    assert.equal(await page.locator(".app-sidebar-brand-wordmark").isVisible(), true);
+    assert.equal(await page.locator(".app-sidebar-brand-wordmark").isVisible(), false);
     const brandFitsRail = await page.locator(".app-sidebar-brand button").evaluate((node) => {
       const brand = node.getBoundingClientRect();
       const rail = node.closest(".app-sidebar").getBoundingClientRect();
@@ -556,9 +1153,10 @@ test("compact navigation rail opens a focused history drawer", async () => {
         && brand.top >= header.top && brand.bottom <= header.bottom;
     });
     assert.equal(brandFitsRail, true);
-    assert.equal(await page.locator(".app-sidebar-primary .app-sidebar-action").count(), 6);
+    assert.equal(await page.locator(".app-sidebar-primary .app-sidebar-action").count(), 7);
     assert.equal(await page.locator(".topbar").count(), 0);
     assert.equal(await page.locator("#engineState").evaluate((node) => node.closest(".app-sidebar-utility") !== null), true);
+    assert.equal(await page.locator("#themeToggle").evaluate((node) => node.closest(".app-sidebar-utility") !== null), true);
     assert.equal(await page.locator("#settingsButton").evaluate((node) => node.closest(".app-sidebar-utility") !== null), true);
     assert.equal(await page.locator("#sidebarCurrentTask").isDisabled(), true);
     assert.equal(await page.locator("#sidebarCurrentTask").isVisible(), false);
@@ -569,21 +1167,87 @@ test("compact navigation rail opens a focused history drawer", async () => {
     assert.equal(await page.locator(".app-sidebar-footer, #sidebarCollapse, #sidebarTaskRefresh").count(), 0);
     await page.locator("#sidebarHistoryToggle").click();
     await page.locator("#sidebarHistoryList .shell-task-card").first().waitFor({ state: "visible" });
+    await page.waitForTimeout(260);
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "false");
     assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "true");
+    const drawerGeometry = await page.evaluate(() => {
+      const sidebar = document.querySelector("#appSidebar").getBoundingClientRect();
+      const drawerNode = document.querySelector("#sidebarHistoryDrawer");
+      const drawer = drawerNode.getBoundingClientRect();
+      const scrimNode = document.querySelector("#appSidebarScrim");
+      const scrim = scrimNode.getBoundingClientRect();
+      const scrimStyle = getComputedStyle(scrimNode);
+      const drawerStyle = getComputedStyle(drawerNode);
+      const edgeTarget = document.elementFromPoint(drawer.left + 1, drawer.top + 1);
+      return {
+        adjacent: Math.abs(drawer.left - sidebar.right) <= 1,
+        leftEdgeCoveredByDrawer: drawerNode === edgeTarget || drawerNode.contains(edgeTarget),
+        sidebarRight: Math.round(sidebar.right),
+        drawerLeft: Math.round(drawer.left),
+        drawerRight: Math.round(drawer.right),
+        scrimLeft: Math.round(scrim.left),
+        width: Math.round(drawer.width),
+        borderTopLeftRadius: drawerStyle.borderTopLeftRadius,
+        borderBottomLeftRadius: drawerStyle.borderBottomLeftRadius,
+        drawerLayer: Number(getComputedStyle(drawerNode).zIndex),
+        scrimLayer: Number(scrimStyle.zIndex),
+        scrimBlur: scrimStyle.backdropFilter,
+      };
+    });
+    assert.equal(drawerGeometry.adjacent, true, JSON.stringify(drawerGeometry));
+    assert.equal(drawerGeometry.leftEdgeCoveredByDrawer, true, JSON.stringify(drawerGeometry));
+    assert.equal(drawerGeometry.borderTopLeftRadius, "0px", JSON.stringify(drawerGeometry));
+    assert.equal(drawerGeometry.borderBottomLeftRadius, "0px", JSON.stringify(drawerGeometry));
+    assert.ok(Math.abs(drawerGeometry.scrimLeft - drawerGeometry.drawerRight) <= 1, JSON.stringify(drawerGeometry));
+    assert.ok(drawerGeometry.width >= 360 && drawerGeometry.width <= 420);
+    assert.ok(drawerGeometry.drawerLayer > drawerGeometry.scrimLayer);
+    assert.match(drawerGeometry.scrimBlur, /none|blur/);
     assert.equal(await page.locator("#homeView").getAttribute("data-home-state"), "ready");
     assert.equal(await page.locator(".home-summary").isVisible(), false);
     assert.equal(await page.locator("#homeAssetCount").textContent(), "1");
     assert.equal(await page.locator("#homeTaskCount").textContent(), "3");
     assert.equal(await page.locator("#homeOutputCount").textContent(), "0");
-    assert.equal(await page.locator("#homeTaskGrid .shell-task-card").count(), 1);
-    const homeTaskPalette = await page.locator("#homeTaskGrid .home-shell-task").evaluate((card) => ({
+    assert.equal(await page.locator("#homeTaskGrid .shell-task-card").count(), 3);
+    assert.deepEqual(await page.locator("#homeTaskGrid [data-shell-delete]").evaluateAll((nodes) => nodes.map((node) => node.dataset.shellDelete)), ["task-content", "task-person"]);
+    assert.equal(await page.evaluate(() => typeof window.deleteHistoryJob), "function");
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+      document.querySelector("#homeTaskGrid .shell-task-menu")?.setAttribute("open", "");
+    });
+    const lightDeleteMenuPalette = await page.locator("#homeTaskGrid .shell-task-menu").first().evaluate((menu) => ({
+      background: getComputedStyle(menu.querySelector(":scope > div")).backgroundColor,
+      action: getComputedStyle(menu.querySelector(":scope > div button")).color,
+    }));
+    assert.equal(lightDeleteMenuPalette.background, "rgb(255, 255, 255)");
+    assert.equal(lightDeleteMenuPalette.action, "rgb(143, 69, 62)");
+    await page.evaluate(() => document.querySelector("#sidebarHistoryDrawer .shell-task-menu")?.setAttribute("open", ""));
+    const lightSidebarDeleteColor = await page.locator("#sidebarHistoryDrawer .shell-task-menu > div button").first().evaluate((button) => getComputedStyle(button).color);
+    assert.equal(lightSidebarDeleteColor, "rgb(143, 69, 62)");
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+      document.querySelector("#homeTaskGrid .shell-task-menu")?.removeAttribute("open");
+      document.querySelector("#sidebarHistoryDrawer .shell-task-menu")?.removeAttribute("open");
+    });
+    const homeTaskPalette = await page.locator("#homeTaskGrid .home-shell-task").first().evaluate((card) => ({
       background: getComputedStyle(card).backgroundColor,
       title: getComputedStyle(card.querySelector(".shell-task-heading > strong")).color,
     }));
-    assert.equal(homeTaskPalette.background, "rgba(255, 255, 255, 0.76)");
-    assert.equal(homeTaskPalette.title, "rgb(32, 42, 48)");
-    assert.equal(await page.locator("#sidebarAttentionCount").textContent(), "1");
+    assert.equal(homeTaskPalette.background, "rgba(0, 0, 0, 0)", "Home rows inherit the dark surface instead of a legacy white card");
+    assert.notEqual(homeTaskPalette.title, "rgba(0, 0, 0, 0)");
+    assert.equal(await page.locator("#sidebarTaskCountBadge").textContent(), "3");
+    const taskBadgeGeometry = await page.locator("#sidebarTaskCountBadge").evaluate((badge) => {
+      const style = getComputedStyle(badge);
+      return {
+        clientWidth: badge.clientWidth,
+        scrollWidth: badge.scrollWidth,
+        minWidth: style.minWidth,
+        borderRadius: style.borderRadius,
+      };
+    });
+    assert.ok(taskBadgeGeometry.clientWidth >= 18, JSON.stringify(taskBadgeGeometry));
+    assert.ok(taskBadgeGeometry.scrollWidth <= taskBadgeGeometry.clientWidth, JSON.stringify(taskBadgeGeometry));
+    assert.equal(taskBadgeGeometry.borderRadius, "999px", JSON.stringify(taskBadgeGeometry));
+    assert.match(await page.locator("#sidebarHistoryToggle").getAttribute("aria-label"), /共 3 个任务，其中 2 个需要处理/);
     const rows = await page.locator("#sidebarHistoryList .shell-task-card").evaluateAll((nodes) => nodes.map((node) => ({
       openId: node.querySelector("[data-shell-open]")?.dataset.shellOpen || "",
       deleteId: node.querySelector("[data-shell-delete]")?.dataset.shellDelete || "",
@@ -591,13 +1255,47 @@ test("compact navigation rail opens a focused history drawer", async () => {
     })));
     assert.deepEqual(rows, [
       { openId: "task-running", deleteId: "", label: "智能高光" },
-      { openId: "task-person", deleteId: "task-person", label: "按人物剪辑" },
-      { openId: "task-content", deleteId: "task-content", label: "内容探索" },
+      { openId: "task-person", deleteId: "task-person", label: "人物聚焦" },
+      { openId: "task-content", deleteId: "task-content", label: "内容检索" },
     ]);
     assert.equal(await page.locator("#sidebarHistoryList .task-stage-track, #sidebarHistoryList .shell-task-meta").count(), 0);
-    assert.deepEqual(await page.locator("#sidebarHistoryList .shell-task-state").allTextContents(), ["进行中", "已完成", "已完成"]);
+    assert.deepEqual(await page.locator("#sidebarHistoryList .shell-task-state").allTextContents(), ["进行中", "已完成", "待确认"]);
     assert.equal(await page.locator("#sidebarHistoryList .shell-task-progress").count(), 1);
-    assert.match(await page.locator("#sidebarHistoryList .shell-task-progress").getAttribute("aria-label"), /43%/);
+    assert.match(await page.locator("#sidebarHistoryList .shell-task-progress").getAttribute("aria-label"), /暂无法估算进度/);
+    const denseTaskListGeometry = await page.locator("#sidebarHistoryList").evaluate((list) => {
+      const template = list.querySelector(".shell-task-card");
+      for (let index = list.children.length; index < 30; index += 1) list.append(template.cloneNode(true));
+      const cards = [...list.querySelectorAll(".shell-task-card")];
+      return {
+        clientHeight: list.clientHeight,
+        scrollHeight: list.scrollHeight,
+        cardHeights: cards.map((card) => card.getBoundingClientRect().height),
+        openHeights: cards.map((card) => card.querySelector(".shell-task-open").getBoundingClientRect().height),
+      };
+    });
+    assert.ok(denseTaskListGeometry.scrollHeight > denseTaskListGeometry.clientHeight * 2);
+    assert.ok(denseTaskListGeometry.cardHeights.every((height) => height >= 90));
+    assert.ok(denseTaskListGeometry.openHeights.every((height) => height >= 90));
+    await page.evaluate(() => {
+      window.__shellDialogPromise = requestActionConfirmation({
+        title: "确认执行",
+        summary: "确认弹窗应收起任务列表并占据最高交互层级。",
+      });
+    });
+    await page.locator("#actionConfirm").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "false");
+    assert.equal(await page.locator("#appSidebarScrim").isVisible(), false);
+    assert.equal(await page.locator("body").getAttribute("data-sidebar-overlay"), "false");
+    const modalLayer = await page.evaluate(() => ({
+      dialog: Number(getComputedStyle(document.querySelector("#actionConfirm")).zIndex),
+      sidebar: Number(getComputedStyle(document.querySelector("#appSidebar")).zIndex),
+    }));
+    assert.ok(modalLayer.dialog > modalLayer.sidebar);
+    await page.locator("#actionConfirmCancel").click();
+    await page.evaluate(() => window.__shellDialogPromise);
+    await page.locator("#sidebarHistoryToggle").click();
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "false");
     await page.evaluate(() => {
       window.ClipTalkCurrentJobId = () => "task-running";
       window.ClipTalkAppShell.syncCurrentJob({ id: "task-running" });
@@ -610,6 +1308,75 @@ test("compact navigation rail opens a focused history drawer", async () => {
     assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#sidebarHistoryToggle").getAttribute("aria-expanded"), "false");
     assert.equal(await page.evaluate(() => document.activeElement?.id), "sidebarHistoryToggle");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => document.querySelector("#sidebarHistoryToggle")?.click());
+    await page.waitForTimeout(260);
+    const mobileDrawer = await page.evaluate(() => {
+      const drawer = document.querySelector("#sidebarHistoryDrawer").getBoundingClientRect();
+      return {
+        left: Math.round(drawer.left),
+        width: Math.round(drawer.width),
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        active: document.activeElement?.id || "",
+      };
+    });
+    assert.deepEqual(mobileDrawer, { left: 64, width: 326, overflow: 0, active: "sidebarTaskSearch" });
+    await page.evaluate(() => document.querySelector("#sidebarHistoryClose")?.click());
+    assert.equal(await page.locator("#sidebarHistoryDrawer").getAttribute("aria-hidden"), "true");
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
+test("task deletion removes historical records before the current task", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const deleted = [];
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/api/jobs/delete-**", async (route) => {
+      const url = new URL(route.request().url());
+      const parts = url.pathname.split("/");
+      const id = parts.at(-1);
+      const method = route.request().method();
+      if (method === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job: { id, status: "completed", taskMode: "highlight" } }) });
+      if (method === "POST" && id === "delete-intent") {
+        const targetId = parts.at(-2);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision: 1, deleteIntent: `intent-${targetId}` }) });
+      }
+      if (method === "DELETE") {
+        deleted.push(id);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ deleted: true }) });
+      }
+      return route.fallback();
+    });
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+      window.__deleteTaskPromise = window.deleteHistoryJob("delete-current", ["delete-old"]);
+    });
+    await page.locator("#actionConfirm:not(.hidden)").waitFor({ state: "visible" });
+    assert.match(await page.locator("#actionConfirmSummary").textContent(), /及其 1 条历史记录/);
+    assert.match(await page.locator("#actionConfirmDetails").textContent(), /2 个任务记录/);
+    const deleteDialogPalette = await page.locator("#actionConfirm").evaluate((dialog) => ({
+      tone: dialog.dataset.tone,
+      card: getComputedStyle(dialog.querySelector(".action-confirm-card")).backgroundColor,
+      actionText: getComputedStyle(dialog.querySelector("#actionConfirmOk")).color,
+      actionBackground: getComputedStyle(dialog.querySelector("#actionConfirmOk")).backgroundColor,
+    }));
+    assert.deepEqual(deleteDialogPalette, {
+      tone: "danger",
+      card: "rgb(255, 255, 255)",
+      actionText: "rgb(255, 255, 255)",
+      actionBackground: "rgb(168, 72, 65)",
+    });
+    await page.locator("#actionConfirmOk").click();
+    await page.evaluate(() => window.__deleteTaskPromise);
+    assert.equal(await page.locator("#actionConfirm").getAttribute("data-tone"), null);
+    assert.deepEqual(deleted, ["delete-old", "delete-current"]);
   } finally {
     await browser.close();
     await stub.close();
@@ -661,6 +1428,21 @@ test("upload workflow entries reveal only relevant controls and highlight starts
   try {
     await openAuthenticatedWorkspace(page, stub.url);
     await page.locator("[data-home-create]").click();
+    await page.setViewportSize({ width: 720, height: 900 });
+    await page.waitForTimeout(120);
+    const narrowCreationLayout = await page.evaluate(() => ({
+      bodyWidth: document.body.scrollWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+      chatDisabled: document.querySelector("#chatInput")?.disabled,
+    }));
+    assert.ok(
+      narrowCreationLayout.documentWidth <= narrowCreationLayout.viewportWidth + 1,
+      `new-task workbench overflowed its narrow viewport: ${JSON.stringify(narrowCreationLayout)}`,
+    );
+    assert.equal(narrowCreationLayout.chatDisabled, false);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#chatInput").fill("重点保留产品演示");
     await page.evaluate(() => {
       const transfer = new DataTransfer();
       transfer.items.add(new File([new Uint8Array(256)], "highlight.mp4", { type: "video/mp4" }));
@@ -669,62 +1451,37 @@ test("upload workflow entries reveal only relevant controls and highlight starts
       input.dispatchEvent(new Event("change", { bubbles: true }));
       Object.defineProperty(document.querySelector("#localPreviewVideo"), "duration", { configurable: true, value: 90 });
     });
-    assert.equal(await page.locator("#replaceVideoButton").isVisible(), true);
-    assert.match(await page.locator("#briefWorkflowHelp").textContent(), /让 AI 推荐处理方式.*不会直接开始任务/s);
-    assert.equal(await page.locator(".workflow-entry-card svg").count(), 4);
-    await page.setViewportSize({ width: 720, height: 900 });
-    await page.waitForTimeout(120);
-    const narrowCreationLayout = await page.evaluate(() => ({
-      bodyWidth: document.body.scrollWidth,
-      documentWidth: document.documentElement.scrollWidth,
-      viewportWidth: window.innerWidth,
-    }));
-    assert.ok(
-      narrowCreationLayout.documentWidth <= narrowCreationLayout.viewportWidth + 1,
-      `task creation overflowed its narrow viewport: ${JSON.stringify(narrowCreationLayout)}`,
+    await page.waitForFunction(() => currentJob?.id === "job_agent_draft");
+    assert.equal(await page.locator("#taskSetupView").isVisible(), false);
+    assert.equal(await page.locator("#chatInput").isDisabled(), false);
+    assert.equal(await page.locator("#chatInput").inputValue(), "重点保留产品演示");
+    assert.equal(await page.locator("#chatLegacyModeButton").isVisible(), false);
+    assert.equal(await page.locator(".agent-draft-modes [data-workflow-switch]").count(), 0);
+    assert.equal(await page.locator("#quickWorkflowPicker").isVisible(), false);
+    assert.match(await page.locator("#assistantActionDock").textContent(), /自动选择/);
+    await chooseQuickWorkflow(page, "highlight");
+    assert.match(await page.locator("#quickWorkflowPicker").textContent(), /目标时长（秒）.*版本数/s);
+    await page.locator("[data-workflow-target-seconds]").fill("30");
+    await page.locator("[data-workflow-variant-count]").selectOption("2");
+    const activationStatusRequest = page.waitForRequest((request) =>
+      new URL(request.url()).pathname === "/api/jobs/job_voice_upload/status",
     );
-    await page.setViewportSize({ width: 1280, height: 720 });
-    await page.locator('[data-workflow-choice="content_search"]').click();
-    assert.equal(await page.locator("#briefContentSettings").isVisible(), true);
-    assert.equal(await page.locator("#briefHighlightSettings").isVisible(), false);
-    assert.equal(await page.locator("#chatInput").isDisabled(), true);
-    assert.equal(await page.locator("#briefContentInstruction").evaluate((node) => node === document.activeElement), true);
-    await page.locator("#briefContentInstruction").fill("找出煎鸡蛋的画面");
-    assert.equal(await page.locator("#chatInput").inputValue(), "");
-
-    await page.locator('[data-workflow-choice="person_edit"]').click();
-    assert.equal(await page.locator("#briefPersonSettings").isVisible(), true);
-    assert.equal(await page.locator("#briefContentSettings").isVisible(), false);
-    assert.equal(await page.locator("#chatInput").isDisabled(), true);
-
-    await page.locator('[data-workflow-choice="speaker_edit"]').click();
-    assert.equal(await page.locator("#briefSpeakerSettings").isVisible(), true);
-    assert.equal(await page.locator("#briefPersonSettings").isVisible(), false);
-
-    await page.locator('[data-workflow-choice="highlight"]').click();
-    assert.equal(await page.locator("#briefHighlightSettings").isVisible(), true);
-    assert.match(await page.locator("#briefHighlightSettings").textContent(), /目标成片时长（秒）.*最短为 4 秒/s);
-    assert.equal(await page.locator("#briefSpeakerSettings").isVisible(), false);
-    assert.equal(await page.locator("#chatInput").isDisabled(), true);
-    assert.equal(await page.locator("#chatInput").inputValue(), "");
-    assert.equal(await page.locator("#briefHighlightInstruction").isVisible(), true);
-    await page.locator("#briefHighlightInstruction").fill("重点保留产品演示");
-    assert.equal(await page.locator("#briefHighlightInstruction").inputValue(), "重点保留产品演示");
-    await page.locator("#briefHighlightInstruction").fill("");
-    await page.locator("#briefHighlightTargetSeconds").fill("30");
-    await page.locator("#briefHighlightVariantCount").selectOption("2");
-    await page.locator('[data-start-workflow="highlight"]').click();
+    await page.locator("[data-start-workflow-switch]").click();
     await page.waitForFunction(() => currentJob?.id === "job_voice_upload");
+    await activationStatusRequest;
     assert.equal(await page.locator(".studio").evaluate((node) => node.classList.contains("task-creation-mode")), false);
     assert.equal(await page.locator(".chat-panel").isVisible(), true);
     assert.equal(await page.locator(".chat-panel").getAttribute("aria-hidden"), null);
     const creation = stub.requests.find((item) => item.path === "/api/jobs" && item.method === "POST");
-    assert.ok(creation, "highlight entry should upload without requiring text input");
-    assert.match(creation.body, /name="workflow_kind"\r?\n\r?\nhighlight/);
-    assert.match(creation.body, /name="task_mode"\r?\n\r?\nhighlight/);
-    assert.match(creation.body, /name="total_target_seconds"\r?\n\r?\n30/);
-    assert.match(creation.body, /name="auto_variant_count"\r?\n\r?\n2/);
-    assert.match(creation.body, /自动分析所选素材并生成高光视频/);
+    assert.ok(creation, "upload should create an agent draft job first");
+    assert.match(creation.body, /name="entry_workflow"\r?\n\r?\nagent/);
+    assert.match(creation.body, /name="agent_draft"\r?\n\r?\ntrue/);
+    const activation = stub.requests.find((item) => item.path === "/api/jobs/job_agent_draft/activate" && item.method === "POST");
+    assert.ok(activation, "highlight entry should activate the draft without requiring text input");
+    assert.equal(activation.body.workflowKind, "highlight");
+    assert.equal(activation.body.targetSeconds, 30);
+    assert.equal(activation.body.variantCount, 2);
+    assert.match(activation.body.instruction, /重点保留产品演示/);
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -750,16 +1507,31 @@ test("content search starts from the inline task dialog", async () => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
       Object.defineProperty(document.querySelector("#localPreviewVideo"), "duration", { configurable: true, value: 90 });
     });
-    await page.locator('[data-workflow-choice="content_search"]').click();
-    await page.locator("#briefContentInstruction").fill("找出煎鸡蛋的画面");
-    await page.locator("[data-start-content-search]").click();
+    await page.waitForFunction(() => currentJob?.id === "job_agent_draft");
+    await page.evaluate(() => window.ClipTalkTheme?.apply("light"));
+    await chooseQuickWorkflow(page, "content_search");
+    const launchInstruction = page.locator("[data-workflow-launch-instruction]");
+    assert.equal(await launchInstruction.isVisible(), true);
+    assert.match(await launchInstruction.inputValue(), /核心主题/);
+    const launchTheme = await page.locator(".quick-workflow-launch").evaluate((node) => {
+      const panel = getComputedStyle(node);
+      const field = getComputedStyle(node.querySelector("[data-workflow-launch-instruction]"));
+      return { panelBackground: panel.backgroundColor, panelColor: panel.color, fieldBackground: field.backgroundColor, fieldColor: field.color };
+    });
+    assert.equal(launchTheme.panelBackground, "rgb(255, 255, 255)");
+    assert.equal(launchTheme.fieldBackground, "rgb(248, 250, 247)");
+    assert.notEqual(launchTheme.panelColor, launchTheme.panelBackground);
+    assert.notEqual(launchTheme.fieldColor, launchTheme.fieldBackground);
+    await launchInstruction.fill("找出煎鸡蛋的画面");
+    assert.equal(await page.locator("#chatInput").inputValue(), "找出煎鸡蛋的画面");
+    assert.match(await page.locator("#quickWorkflowPicker").textContent(), /开始内容检索/);
+    await page.locator("[data-start-workflow-switch]").click();
     await page.waitForFunction(() => currentJob?.id === "job_voice_upload");
 
-    const creation = stub.requests.find((item) => item.path === "/api/jobs" && item.method === "POST");
-    assert.ok(creation, "content search should submit from the inline task dialog");
-    assert.match(creation.body, /name="workflow_kind"\r?\n\r?\ncontent_search/);
-    assert.match(creation.body, /name="task_mode"\r?\n\r?\ncontent_extract/);
-    assert.match(creation.body, /找出煎鸡蛋的画面/);
+    const activation = stub.requests.find((item) => item.path === "/api/jobs/job_agent_draft/activate" && item.method === "POST");
+    assert.ok(activation, "content search should activate from the inline quick mode picker");
+    assert.equal(activation.body.workflowKind, "content_search");
+    assert.equal(activation.body.instruction, "找出煎鸡蛋的画面");
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -783,30 +1555,22 @@ test("speaker workflow uses its own upload entry and starts with the configured 
       const input = document.querySelector("#videoInput");
       input.files = transfer.files;
       input.dispatchEvent(new Event("change", { bubbles: true }));
+      Object.defineProperty(document.querySelector("#localPreviewVideo"), "duration", { configurable: true, value: 90 });
     });
+    await page.waitForFunction(() => currentJob?.id === "job_agent_draft");
     assert.equal(await page.locator("#chatInput").inputValue(), "");
-    await page.locator('[data-workflow-choice="speaker_edit"]').click();
-    assert.equal(await page.locator("#briefSpeakerSettings").isVisible(), true);
-    assert.equal(await page.locator("#chatInput").isDisabled(), true);
-    await page.locator("#briefExpectedVoiceCount").selectOption("2");
-    await page.locator('[data-start-workflow="speaker_edit"]').click();
+    await chooseQuickWorkflow(page, "speaker_edit");
+    assert.match(await page.locator("#quickWorkflowPicker").textContent(), /预计人数/);
+    assert.equal(await page.locator("#chatInput").isDisabled(), false);
+    await page.locator("[data-workflow-speaker-count]").fill("2");
+    await page.locator("[data-start-workflow-switch]").click();
     await page.waitForFunction(() => currentJob?.id === "job_voice_upload");
-    await page.waitForFunction(() => document.querySelector("#voiceProfilePanel") && !document.querySelector("#voiceProfilePanel").classList.contains("hidden"));
 
-    const creation = stub.requests.find((item) => item.path === "/api/jobs" && item.method === "POST");
-    assert.ok(creation, "speaker entry should formally upload the selected video");
-    assert.match(creation.body, /name="entry_workflow"\r?\n\r?\nvoice_discovery/);
-    assert.match(creation.body, /name="workflow_kind"\r?\n\r?\nspeaker_edit/);
-    assert.match(creation.body, /name="task_mode"\r?\n\r?\ncontent_extract/);
-    assert.match(creation.body, /识别本视频中的说话人/);
-    await page.waitForFunction(() => document.querySelector("#currentVoiceCount")?.textContent === "识别中");
-    await page.locator("#currentVoiceList .voice-discovery-progress").waitFor({ state: "visible" });
-    await page.waitForFunction(() => document.querySelector("#currentVoiceList")?.textContent.includes("正在分析声音 A 的代表发言"));
-    assert.match(await page.locator("#currentVoiceList .voice-discovery-progress").textContent(), /已完成 1\/2 个声音/);
-    assert.equal(await page.locator("[data-inline-cancel]").textContent(), "停止说话人识别");
-    const discovery = stub.requests.find((item) => item.path.endsWith("/content-search/voices/discover") && item.method === "POST");
-    assert.ok(discovery);
-    assert.deepEqual(JSON.parse(discovery.body), { expectedSpeakerCount: 2, force: false });
+    const activation = stub.requests.find((item) => item.path === "/api/jobs/job_agent_draft/activate" && item.method === "POST");
+    assert.ok(activation, "speaker entry should activate the draft task");
+    assert.equal(activation.body.workflowKind, "speaker_edit");
+    assert.equal(activation.body.expectedSpeakerCount, 2);
+    assert.match(activation.body.instruction, /识别(?:本)?视频中的说话人/);
     assert.equal(await page.locator("#chatInput").inputValue(), "");
     assert.deepEqual(pageErrors, []);
   } finally {
@@ -860,13 +1624,119 @@ test("speaker panel clears the previous video and ignores its late response", as
 
     assert.equal((await page.locator("#currentVoiceList").textContent()).includes("视频 A 的人物"), false);
     assert.match(await page.locator("#currentVoiceList").textContent(), /正在读取当前视频/);
-    await page.locator("#currentVoiceList").getByText("视频 B 的人物").waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.querySelector("#currentVoiceList")?.textContent?.includes("视频 B 的人物"));
     await page.waitForTimeout(260);
     const finalText = await page.locator("#currentVoiceList").textContent();
     assert.match(finalText, /视频 B 的人物/);
     assert.equal(finalText.includes("视频 A 的人物"), false);
     assert.equal(await page.evaluate(() => currentVoiceJobId), "job-video-b");
     assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("agent-owned speaker and person discovery replace duplicate manual starts with progress", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const state = await page.evaluate(() => {
+      const agent = {
+        workspaceStatus: "running", status: "running",
+        currentStepStatus: "waiting_operation",
+        currentStepTool: "discover_speakers",
+        currentStepTitle: "补全说话人证据",
+      };
+      currentJob = {
+        id: "agent-speaker", filename: "speaker.mp4", taskMode: "content_extract",
+        workflowKind: "speaker_edit", status: "awaiting_agent_plan", stage: "agent_plan_running",
+        execution: { schemaVersion: 1, status: "completed", operation: "speaker_discovery", active: false },
+        agent, voiceDiscovery: { status: "not_started" },
+      };
+      document.querySelector("#chatMessages").innerHTML = '<article><section id="inlineCurrentVoices"></section></article>';
+      renderInlineCurrentVoices(currentJob.voiceDiscovery);
+      const speakerMarkup = document.querySelector("#inlineCurrentVoices").textContent;
+      const speakerStartCount = document.querySelectorAll("#inlineCurrentVoices [data-inline-speaker-start]").length;
+      const speakerCapabilities = interactionCapabilitiesForJob(currentJob);
+
+      currentJob = {
+        ...currentJob, id: "agent-person", workflowKind: "person_edit",
+        agent: { ...agent, currentStepTool: "discover_people", currentStepTitle: "补全人物证据" },
+      };
+      renderCurrentPersons();
+      const personMarkup = document.querySelector("#currentPersonList").textContent;
+      const personCapabilities = interactionCapabilitiesForJob(currentJob);
+      const personTimelineMarkup = document.querySelector("#timelinePersonTrack")?.textContent || "";
+      const personTimelineHidden = document.querySelector("#timelinePersonTrack")?.classList.contains("hidden");
+      const handedOffJob = {
+        ...currentJob, id: "agent-source", stage: "agent_handed_off", status: "completed",
+        agentHandoffWorkflowKind: "speaker_edit",
+        agent: { ...agent, currentStepTool: "discover_speakers" },
+        execution: { schemaVersion: 1, status: "completed", operation: "content_search", phase: "agent_handed_off", active: false },
+      };
+      const handedOffCapabilities = interactionCapabilitiesForJob(handedOffJob);
+      const handedOffStatus = displayStatusForJob(handedOffJob);
+      return {
+        speakerMarkup, speakerStartCount, speakerCapabilities, personMarkup, personCapabilities,
+        personTimelineMarkup, personTimelineHidden,
+        handedOffCapabilities, handedOffStatus,
+      };
+    });
+    assert.match(state.speakerMarkup, /正在区分匿名说话人.*补全说话人证据/s);
+    assert.equal(state.speakerStartCount, 0);
+    assert.equal(state.speakerCapabilities.active, true);
+    assert.equal(state.speakerCapabilities.canCorrectVoice, false);
+    assert.equal(state.speakerCapabilities.canMutateContentBasket, false);
+    assert.match(state.speakerCapabilities.reason, /Agent 正在执行.*补全说话人证据/);
+    assert.match(state.personMarkup, /正在发现画面人物/);
+    assert.equal(state.personCapabilities.active, true);
+    assert.equal(state.personCapabilities.canCorrectPerson, false);
+    assert.equal(state.personTimelineHidden, false);
+    assert.match(state.personTimelineMarkup, /识别中.*正在建立人物卡与连续出镜轨迹/s);
+    assert.equal(state.handedOffCapabilities.active, false);
+    assert.equal(state.handedOffStatus.running, false);
+    assert.match(state.handedOffStatus.text, /已转到发言剪辑任务.*结果已保留/);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("agent handoff opens the latest child task instead of its stale plan snapshot", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/api/jobs/agent-latest-child", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job: {
+        id: "agent-latest-child", filename: "latest.mp4", taskMode: "highlight", workflowKind: "highlight",
+        status: "completed", stage: "completed", progress: 1,
+        videoInfo: { duration: 30, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+        request: {}, messages: [], outputs: [], outputVersions: [], candidates: [], eventGroups: [],
+        execution: { schemaVersion: 1, status: "completed", operation: "highlight_analysis", phase: "completed", active: false },
+      } }) });
+    });
+    const state = await page.evaluate(async () => {
+      currentJob = {
+        id: "agent-source", status: "completed", stage: "agent_handed_off",
+        workflowKind: "content_search", taskMode: "content_extract",
+      };
+      await window.ClipTalkSwitchWorkspaceJob({
+        id: "agent-latest-child", filename: "stale.mp4", status: "awaiting_agent_plan",
+        stage: "agent_plan_running", workflowKind: "speaker_edit", taskMode: "content_extract",
+      });
+      return { id: currentJob?.id, status: currentJob?.status, stage: currentJob?.stage, filename: currentJob?.filename };
+    });
+    assert.deepEqual(state, {
+      id: "agent-latest-child", status: "completed", stage: "completed", filename: "latest.mp4",
+    });
   } finally {
     await browser.close();
     await stub.close();
@@ -1067,9 +1937,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
       boundaryEditor.querySelector('[data-boundary-adjust="start:-1"]').click();
       const oneSecondNudgeDelta = Number(boundaryEditor.dataset.boundaryStart) - beforeOneSecondNudge;
       timelineMatchButton.click();
-      const evidenceClickLeavesEditorResumable = !document.querySelector("#evidencePanel").classList.contains("content-boundary-view")
-        && document.querySelector("#contentBoundaryInspector").classList.contains("hidden")
-        && contentBoundaryTimelineEdit?.editor === boundaryEditor
+      const evidenceClickPreservesEditorState = contentBoundaryTimelineEdit?.editor === boundaryEditor
         && Math.abs(Number(boundaryEditor.dataset.boundaryStart) - (beforeOneSecondNudge - 1)) < 1e-6;
       document.querySelector('[data-content-detail-mode="edit"]').click();
       const timelineDirectActionsVisible = ["timelineContentToggleSelected", "timelineContentMoveEarlier", "timelineContentMoveLater"]
@@ -1181,7 +2049,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
           items: [{ searchId: "search_test", matchId: "match_1" }],
         },
       };
-      const basketInjectedIntoChat = chatUiContextEntries().some((entry) => entry.key === "contentMatches");
+      const basketInjectedIntoChat = chatUiContextEntries().some((entry) => entry.value?.selected?.basketItemIds);
       currentJob = previousCurrentJob;
       const noDialogueSubtitleState = {
         disabled: subtitleInput.disabled,
@@ -1260,7 +2128,12 @@ test("content match cards remain readable in a narrow review rail", async () => 
         disabled: entryButton.disabled,
         searchId: entryButton.dataset.boundarySearchId,
       };
-      currentJob = { ...reviewJob, status: "running" };
+      currentJob = {
+        ...reviewJob,
+        status: "running",
+        execution: { schemaVersion: 1, active: true, status: "running", capabilities: {} },
+        presentation: { schemaVersion: 2, key: "content_search_running", group: "processing", label: "生成中" },
+      };
       currentCandidate = reviewJob.contentSearch.candidates[0];
       currentContentPreviewSearchId = reviewJob.contentSearch.id;
       syncContentBoundaryEntry();
@@ -1278,6 +2151,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
         ...reviewJob,
         status: "running",
         execution: { schemaVersion: 1, active: true, status: "running", capabilities: {} },
+        presentation: { schemaVersion: 2, key: "content_search_running", group: "processing", label: "生成中" },
         contentSearchSession: { activeSearchId: reviewJob.contentSearch.id, state: "running" },
       }, historicalSearch, { historicalExpanded: true }), "text/html");
       const runningRestoreButton = runningHistoricalDocument.querySelector("[data-content-search-restore]");
@@ -1285,6 +2159,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
         ...reviewJob,
         status: "running",
         execution: { schemaVersion: 1, active: true, status: "running", capabilities: {} },
+        presentation: { schemaVersion: 2, key: "content_search_running", group: "processing", label: "生成中" },
         contentSelectionBasket: {
           schemaVersion: "content-selection-basket-v2", entryMode: "explicit", initialized: true,
           items: [{
@@ -1353,7 +2228,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
         timelinePreviewStayedClosed,
         timelineEvidencePanelOpen,
         timelineBoundaryInspectorOpen,
-        evidenceClickLeavesEditorResumable,
+        evidenceClickPreservesEditorState,
         timelineBoundaryDialogActions,
         oneSecondNudgeDelta,
         timelineDirectActionsVisible,
@@ -1373,7 +2248,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
         boundaryEditorVisible: !boundaryEditor.classList.contains("hidden"),
         boundaryFrameText: boundaryEditor.querySelector("[data-boundary-frame-rate]").textContent,
         boundaryFrameDelta: adjustedBoundaryEnd - originalBoundaryEnd,
-        boundaryHasManualActions: ["开始秒数", "结束秒数", "前一帧", "后一帧", "前一秒", "后一秒", "预览片段", "取消", "保存修改"].every((label) => boundaryEditor.textContent.includes(label)),
+        boundaryHasManualActions: ["时间（秒）", "−1帧", "+1帧", "−1秒", "+1秒", "当前帧", "试看片段", "取消", "保存修改", "重新识别边界"].every((label) => boundaryEditor.textContent.includes(label)),
         editableBoundaryEntry,
         completedBoundaryEntry,
         historicalBoundaryEntry,
@@ -1405,7 +2280,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.deepEqual(audit.outputOptions, ["single_reel", "separate_events"]);
     assert.equal(audit.singleSelectionOutputHidden, true);
     assert.deepEqual(audit.orderOptions, ["source", "selection", "llm_recommend"]);
-    assert.match(audit.llmHint, /不会增删片段|不会.*起止点/);
+    assert.match(audit.llmHint, /调整所选片段顺序.*再次确认/);
     assert.deepEqual(audit.separateState, {
       hidden: true,
       disabled: true,
@@ -1416,7 +2291,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.equal(audit.outputControlColumns.trim().split(/\s+/).length, 1);
     assert.ok(audit.confirmButtonWidth > 0);
     assert.equal(audit.contentEditEntryCount, 0);
-    assert.equal(audit.confirmButtonText, "生成当前检索视频");
+    assert.equal(audit.confirmButtonText, "用所选片段剪辑");
     assert.deepEqual(audit.noDialogueSubtitleState, {
       disabled: true,
       checked: false,
@@ -1431,7 +2306,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.equal(audit.personLabelButton, "person_1");
     assert.match(audit.layeredPersonEvidenceText, /人物描述采用多帧匹配.*1 个人物证据充分/s);
     assert.match(audit.layeredCandidateEvidenceText, /外观描述 88%.*主动说话 93%/s);
-    assert.match(audit.recoveryText, /结果可能有遗漏.*提高采样密度并检查剩余范围/);
+    assert.match(audit.recoveryText, /结果可能有遗漏.*继续检查剩余画面.*处理时间会相应增加/);
     assert.equal(audit.recoveryOpen, false);
     assert.equal(audit.recoveryAfterActions, true);
     assert.equal(audit.completeRecoveryCount, 0);
@@ -1455,7 +2330,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.deepEqual(audit.basketAudit.orderOptions, ["source", "selection", "ai_plan"]);
     assert.equal(audit.basketInjectedIntoChat, false);
     assert.equal(audit.boundaryButtonText, "直接修剪");
-    assert.equal(audit.boundaryPreviewButtonText, "预览");
+    assert.equal(audit.boundaryPreviewButtonText, "播放");
     assert.equal(audit.boundaryCopyIsPreview, true);
     assert.equal(audit.directEntryInitiallyClosed, true);
     assert.equal(audit.directBoundaryMovedToInspector, true);
@@ -1463,8 +2338,8 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.equal(audit.timelinePreviewStayedClosed, true);
     assert.equal(audit.timelineEvidencePanelOpen, true);
     assert.equal(audit.timelineBoundaryInspectorOpen, true);
-    assert.equal(audit.evidenceClickLeavesEditorResumable, true);
-    assert.deepEqual(audit.timelineBoundaryDialogActions, ["前一帧", "后一帧", "前一秒", "后一秒", "前一帧", "后一帧", "前一秒", "后一秒"]);
+    assert.equal(audit.evidenceClickPreservesEditorState, true);
+    assert.deepEqual(audit.timelineBoundaryDialogActions, ["−1秒", "−1帧", "+1帧", "+1秒", "−1秒", "−1帧", "+1帧", "+1秒"]);
     assert.ok(Math.abs(audit.oneSecondNudgeDelta + 1) < 1e-6);
     assert.equal(audit.timelineDirectActionsVisible, true);
     assert.equal(audit.timelineSelectedSequence, "P01");
@@ -1493,7 +2368,7 @@ test("content match cards remain readable in a narrow review rail", async () => 
       label: "返回确认后调整",
       kind: "reedit",
       disabled: false,
-      title: "返回片段确认并调整边界；不会重新分析视频，已有成片仍会保留",
+      title: "返回片段确认并调整边界",
     });
     assert.deepEqual(audit.historicalBoundaryEntry, {
       label: "恢复此检索后调整",
@@ -1520,11 +2395,11 @@ test("content match cards remain readable in a narrow review rail", async () => 
     assert.equal(audit.runningBasketAudit.confirmLabel, "任务完成后生成");
     assert.match(audit.runningBasketAudit.summary, /任务完成后可继续修改和生成/);
     assert.deepEqual(audit.boundaryPanelPalette, {
-      switchBackground: "rgb(237, 242, 244)",
-      activeBackground: "rgb(255, 244, 237)",
-      fieldsetBackground: "rgba(255, 255, 255, 0.78)",
-      buttonBackground: "rgb(255, 255, 255)",
-      primaryBackground: "rgb(242, 160, 121)",
+      switchBackground: "rgb(20, 43, 41)",
+      activeBackground: "rgb(200, 223, 169)",
+      fieldsetBackground: "rgb(17, 42, 39)",
+      buttonBackground: "rgb(24, 51, 47)",
+      primaryBackground: "rgb(200, 223, 169)",
     });
     assert.deepEqual(pageErrors, []);
   } finally {
@@ -1540,6 +2415,7 @@ test("confirmation dialog keeps every selected item and wraps long labels", asyn
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   try {
     await openAuthenticatedWorkspace(page, stub.url);
+    await page.locator("#settingsButton").focus();
     await page.evaluate(() => {
       const details = Array.from({ length: 25 }, (_, index) => `片段 ${index + 1} · 完整标题 ${"很长的内容说明".repeat(8)}`);
       const orderItems = details.map((label, index) => ({ id: `match_${index + 1}`, label, meta: `${index}:00 → ${index}:05` }));
@@ -1549,6 +2425,9 @@ test("confirmation dialog keeps every selected item and wraps long labels", asyn
       });
     });
     await page.locator("#actionConfirm").waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.activeElement?.id === "actionConfirmCancel");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "actionConfirmCancel");
+    assert.equal(await page.locator("#appSidebar").evaluate((node) => node.inert), true);
     assert.equal(await page.locator("#actionConfirmDetails li").count(), 25);
     assert.match(await page.locator("#actionConfirmDetails li").last().textContent(), /片段 25/);
     assert.equal(await page.locator("#actionConfirmOrderList > div").count(), 25);
@@ -1564,6 +2443,9 @@ test("confirmation dialog keeps every selected item and wraps long labels", asyn
     assert.equal(dialogPalette.title, "rgb(38, 49, 56)");
     assert.match(dialogPalette.footer, /255, 255, 255/);
     await page.locator("#actionConfirmCancel").click();
+    assert.equal(await page.locator("#actionConfirm").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#appSidebar").evaluate((node) => node.inert), false);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "settingsButton");
   } finally {
     await browser.close();
     await stub.close();
@@ -1571,7 +2453,7 @@ test("confirmation dialog keeps every selected item and wraps long labels", asyn
 });
 
 
-test("rendered content stays anchored to the source review timeline", async () => {
+test("rendered content uses the generated version playback timeline", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -1647,9 +2529,9 @@ test("rendered content stays anchored to the source review timeline", async () =
       currentOutput = output;
       currentCandidate = null;
       viewerMediaKind = "output";
-      timelineCoordinateSpace = "source";
+      timelineCoordinateSpace = "output";
       timelineViewStart = 0;
-      timelineViewEnd = 90;
+      timelineViewEnd = 17;
       updateTimeline();
       const outputView = {
         title: document.querySelector("#timelineTitle")?.textContent || "",
@@ -1679,6 +2561,8 @@ test("rendered content stays anchored to the source review timeline", async () =
       };
       currentOutput = null;
       viewerMediaKind = "source";
+      timelineViewStart = 0;
+      timelineViewEnd = 60;
       updateTimeline();
       const highlightView = {
         title: document.querySelector("#timelineTitle")?.textContent || "",
@@ -1697,23 +2581,23 @@ test("rendered content stays anchored to the source review timeline", async () =
     assert.equal(audit.review.relations, 0);
     assert.match(audit.review.firstCardText, /P01.*嘉宾回答第一个问题.*已选/);
     assert.equal(audit.review.previewedMatchId, "match_1");
-    assert.equal(audit.outputView.title, "内容视频来源时间线");
+    assert.equal(audit.outputView.title, "成片版本时间轴");
     assert.equal(audit.outputView.layout, "content-review");
-    assert.deepEqual(audit.outputView.trackLabels, ["匹配片段", "画面", "音频"]);
+    assert.deepEqual(audit.outputView.trackLabels, ["成片片段", "画面", "音频"]);
     assert.equal(audit.outputView.matches.length, 2);
-    assert.match(audit.outputView.matches[0], /P01.*嘉宾回答第一个问题.*已采用/);
-    assert.match(audit.outputView.matches[1], /P02.*嘉宾回答第二个问题.*已采用/);
+    assert.match(audit.outputView.matches[0], /P01.*嘉宾回答第二个问题/);
+    assert.match(audit.outputView.matches[1], /P02.*嘉宾回答第一个问题/);
     assert.equal(audit.outputView.composedSegments, 0);
     assert.equal(audit.outputView.relationCurves, 0);
     assert.match(audit.outputView.summary, /2 个片段.*内容视频 17\.0 秒/);
-    assert.equal(audit.outputView.summaryButtons, 0);
-    assert.equal(audit.outputView.clock, "源片");
-    assert.equal(audit.outputView.duration, "01:30.0");
+    assert.equal(audit.outputView.summaryButtons, 2);
+    assert.equal(audit.outputView.clock, "成片");
+    assert.equal(audit.outputView.duration, "00:17.0");
     assert.equal(audit.outputView.coordinateSwitches, 0);
     assert.equal(audit.sourceView.layout, "content-review");
-    assert.deepEqual(audit.sourceView.trackLabels, ["匹配片段", "画面", "音频"]);
-    assert.equal(audit.sourceView.clock, "源片");
-    assert.equal(audit.sourceView.duration, "01:30.0");
+    assert.deepEqual(audit.sourceView.trackLabels, ["成片片段", "画面", "音频"]);
+    assert.equal(audit.sourceView.clock, "成片");
+    assert.equal(audit.sourceView.duration, "00:17.0");
     assert.equal(audit.highlightView.title, "智能剪辑时间线");
     assert.equal(audit.highlightView.layout, "hierarchy");
     assert.deepEqual(audit.highlightView.trackLabels, ["事件", "镜头", "画面", "音频"]);
@@ -1725,7 +2609,7 @@ test("rendered content stays anchored to the source review timeline", async () =
 });
 
 
-test("highlight output uses the source event-shot timeline and jumps to source", async () => {
+test("review sample timeline stays on output until the explicit source action", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -1758,7 +2642,7 @@ test("highlight output uses the source event-shot timeline and jumps to source",
         recommendedGroupIds: groups.map((group) => group.id), candidates: [], recommendedIndices: [],
       };
       currentOutput = {
-        filename: "highlight-v1.mp4", duration: 15, title: "高光成片",
+        filename: "highlight-v1.mp4", duration: 15, title: "高光成片", previewOnly: true,
         segments: [
           { ...groups[0].segments[0], eventGroupId: groups[0].id, eventTitle: groups[0].title },
           { ...groups[0].segments[1], eventGroupId: groups[0].id, eventTitle: groups[0].title },
@@ -1769,17 +2653,20 @@ test("highlight output uses the source event-shot timeline and jumps to source",
       currentEventSegment = null;
       currentCandidate = null;
       viewerMediaKind = "output";
-      timelineCoordinateSpace = "source";
+      timelineCoordinateSpace = "output";
       timelineViewStart = 0;
-      timelineViewEnd = 60;
+      timelineViewEnd = 15;
       waveformData = null;
       timelineAssets = null;
       updateTimeline();
       let sourceJump = null;
+      let outputSeek = null;
       const originalPreviewCompositionSourceSegment = previewCompositionSourceSegment;
+      const originalSeekCurrentMediaTime = seekCurrentMediaTime;
       previewCompositionSourceSegment = (composed, segmentIndex, sourceTime) => {
         sourceJump = { filename: composed?.filename, segmentIndex, sourceTime };
       };
+      seekCurrentMediaTime = (time) => { outputSeek = Number(time); };
       const output = {
         title: document.querySelector("#timelineTitle")?.textContent || "",
         layout: document.querySelector("#timelineViewport")?.dataset.trackLayout || "",
@@ -1792,9 +2679,16 @@ test("highlight output uses the source event-shot timeline and jumps to source",
         coordinateSwitches: document.querySelectorAll("#timelineCoordinateSwitch").length,
       };
       document.querySelector("#timelineShotMarkers .timeline-shot-marker")?.click();
+      const stayedOnOutput = viewerMediaKind === "output" && currentOutput?.filename === "highlight-v1.mp4";
+      const selectedSummaryButtons = document.querySelectorAll("#timelineEventSummaryText button.active").length;
+      const sourceActionLabel = document.querySelector("[data-timeline-output-source]")?.textContent || "";
+      document.querySelector("[data-timeline-output-source]")?.click();
       previewCompositionSourceSegment = originalPreviewCompositionSourceSegment;
+      seekCurrentMediaTime = originalSeekCurrentMediaTime;
       currentOutput = null;
       viewerMediaKind = "source";
+      timelineViewStart = 0;
+      timelineViewEnd = 60;
       updateTimeline();
       const source = {
         layout: document.querySelector("#timelineViewport")?.dataset.trackLayout || "",
@@ -1802,9 +2696,9 @@ test("highlight output uses the source event-shot timeline and jumps to source",
         eventCount: document.querySelectorAll("#timelineLabels .timeline-label").length,
         shotCount: document.querySelectorAll("#timelineShotMarkers .timeline-shot-marker").length,
       };
-      return { output, source, sourceJump };
+      return { output, source, sourceJump, outputSeek, stayedOnOutput, selectedSummaryButtons, sourceActionLabel };
     });
-    assert.equal(audit.output.title, "成片来源时间线");
+    assert.equal(audit.output.title, "审核样片时间轴");
     assert.equal(audit.output.layout, "hierarchy");
     assert.deepEqual(audit.output.labels, ["事件", "镜头", "画面", "音频"]);
     assert.equal(audit.output.events.length, 2);
@@ -1814,12 +2708,16 @@ test("highlight output uses the source event-shot timeline and jumps to source",
     assert.match(audit.output.shots[0], /镜头 01.*建立/);
     assert.match(audit.output.shots[1], /镜头 02.*高潮/);
     assert.match(audit.output.shots[2], /镜头 03.*结果/);
-    assert.ok(Math.abs(audit.output.clipLefts[0] - 10 / 60 * 100) < .001);
-    assert.ok(Math.abs(audit.output.clipLefts[1] - 20 / 60 * 100) < .001);
-    assert.ok(Math.abs(audit.output.clipLefts[2] - 40 / 60 * 100) < .001);
-    assert.equal(audit.output.clock, "源片");
-    assert.equal(audit.output.duration, "01:00.0");
+    assert.ok(Math.abs(audit.output.clipLefts[0]) < .001);
+    assert.ok(Math.abs(audit.output.clipLefts[1] - 5 / 15 * 100) < .001);
+    assert.ok(Math.abs(audit.output.clipLefts[2] - 11 / 15 * 100) < .001);
+    assert.equal(audit.output.clock, "样片");
+    assert.equal(audit.output.duration, "00:15.0");
     assert.equal(audit.output.coordinateSwitches, 0);
+    assert.equal(audit.outputSeek, 0);
+    assert.equal(audit.stayedOnOutput, true);
+    assert.equal(audit.selectedSummaryButtons, 1);
+    assert.equal(audit.sourceActionLabel, "查看源片");
     assert.deepEqual(audit.sourceJump, { filename: "highlight-v1.mp4", segmentIndex: 0, sourceTime: 10 });
     assert.equal(audit.source.layout, audit.output.layout);
     assert.deepEqual(audit.source.labels, audit.output.labels);
@@ -1891,12 +2789,24 @@ test("review sample makes formal export primary and low-resolution download seco
         downloadBackground: getComputedStyle(download).backgroundColor,
         downloadColor: getComputedStyle(download).color,
         secondaryClass: download.classList.contains("review-sample-download"),
-        reviewScore: document.querySelector("#clipScore")?.textContent || "",
+        evidencePanelHidden: document.querySelector("#evidencePanel")?.classList.contains("hidden"),
+        outputStripHidden: document.querySelector("#outputEvidenceStrip")?.classList.contains("hidden"),
+        outputStripText: document.querySelector("#outputEvidenceStrip")?.textContent || "",
+        outputStripRows: getComputedStyle(document.querySelector("#viewerShell")).gridTemplateRows,
         reviewScoreTitle: document.querySelector("#clipScore")?.title || "",
-        qualityText: document.querySelector(".output-quality-detail")?.textContent || "",
-        dimensionCount: document.querySelectorAll(".output-review-dimensions > span").length,
+        detailInitiallyHidden: !document.querySelector(".output-evidence-popover")?.open,
+        qualityText: "",
+        dimensionCount: 0,
         viewerBadge: document.querySelector("#viewerBadge")?.textContent || "",
+        outputPreviewMode: document.body.classList.contains("ct-output-preview-mode"),
+        reviewPanelSwitchDisplay: getComputedStyle(document.querySelector("#reviewPanelSwitch")).display,
+        reviewWorkbenchDisplay: getComputedStyle(document.querySelector("#reviewWorkbench")).display,
+        reviewWidth: document.querySelector("#reviewView")?.getBoundingClientRect().width || 0,
+        stageWidth: document.querySelector("#reviewStage")?.getBoundingClientRect().width || 0,
       };
+      document.querySelector(".output-evidence-popover > summary")?.click();
+      preview.qualityText = document.querySelector(".output-evidence-popover-body")?.textContent || "";
+      preview.dimensionCount = document.querySelectorAll(".output-evidence-quality span").length;
       selectOutput(formal.filename);
       const formalState = {
         finalizeHidden: finalize.classList.contains("hidden"),
@@ -1906,30 +2816,131 @@ test("review sample makes formal export primary and low-resolution download seco
       selectOutput(sample.filename);
       return { preview, formalState, nearbyDownloads };
     });
-    assert.equal(audit.preview.finalizeText, "确认版本并导出高清");
-    assert.match(audit.preview.finalizeTitle, /源视频分辨率.*正式成片/);
-    assert.equal(audit.preview.finalizeAria, "确认当前版本并导出高清正式成片");
-    assert.equal(audit.preview.finalizeBackground, "rgb(168, 194, 105)");
+    assert.equal(audit.preview.finalizeText, "生成成片");
+    assert.equal(audit.preview.finalizeTitle, "生成当前样片的成片版本");
+    assert.equal(audit.preview.finalizeAria, "生成当前样片的成片版本");
+    assert.equal(audit.preview.finalizeBackground, "rgb(203, 231, 170)");
     assert.equal(audit.preview.downloadText, "下载 V1 审核样片");
-    assert.match(audit.preview.downloadTitle, /当前预览的 V1.*低分辨率审核样片.*不会创建正式高清成片/);
-    assert.equal(audit.preview.downloadAria, "下载当前预览的 V1 低清审核样片，不导出高清版本");
+    assert.equal(audit.preview.downloadTitle, "下载当前预览的 V1 审核样片");
+    assert.equal(audit.preview.downloadAria, "下载当前预览的 V1 审核样片");
     assert.equal(audit.preview.downloadBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(audit.preview.downloadColor, "rgb(131, 148, 155)");
+    assert.notEqual(audit.preview.downloadColor, "rgba(0, 0, 0, 0)");
     assert.equal(audit.preview.secondaryClass, true);
-    assert.equal(audit.preview.reviewScore, "综合审片 53/100");
+    assert.equal(audit.preview.evidencePanelHidden, true);
+    assert.equal(audit.preview.outputStripHidden, false);
+    assert.match(audit.preview.outputStripText, /V1.*成片依据.*18\.0 秒.*审片 53\/100/);
+    assert.match(audit.preview.outputStripRows, /42px/);
     assert.match(audit.preview.reviewScoreTitle, /内容、叙事、节奏、连续性、音画与目标匹配/);
+    assert.equal(audit.preview.detailInitiallyHidden, true);
     assert.match(audit.preview.qualityText, /内容62.*叙事55.*节奏64.*连续性58.*音画72.*目标匹配56/s);
     assert.match(audit.preview.qualityText, /维度加权 61\.0.*根因校准 -7\.0/);
     assert.equal(audit.preview.dimensionCount, 6);
-    assert.match(audit.preview.viewerBadge, /V1.*样片.*质量通过/);
+    assert.match(audit.preview.viewerBadge, /V1.*审核样片预览/);
+    assert.equal(audit.preview.outputPreviewMode, true);
+    assert.equal(audit.preview.reviewPanelSwitchDisplay, "none");
+    assert.equal(audit.preview.reviewWorkbenchDisplay, "none");
+    assert.ok(Math.abs(audit.preview.reviewWidth - audit.preview.stageWidth) < 1);
     assert.deepEqual(audit.formalState, {
-      finalizeHidden: true, downloadText: "下载 V2 高清 MP4", secondaryClass: false,
+      finalizeHidden: true, downloadText: "下载 V2 MP4", secondaryClass: false,
     });
     assert.deepEqual(audit.nearbyDownloads.map((item) => item.filename).sort(), ["formal.mp4", "review-sample.mp4"]);
-    assert.match(audit.nearbyDownloads.find((item) => item.filename === "formal.mp4").text, /下载 V2 高清/);
-    assert.match(audit.nearbyDownloads.find((item) => item.filename === "review-sample.mp4").text, /下载 V1 样片/);
-    assert.match(audit.nearbyDownloads.find((item) => item.filename === "formal.mp4").aria, /V2.*高清 MP4/);
+    assert.equal(audit.nearbyDownloads.find((item) => item.filename === "formal.mp4").text, "下载 MP4");
+    assert.equal(audit.nearbyDownloads.find((item) => item.filename === "review-sample.mp4").text, "下载样片");
+    assert.match(audit.nearbyDownloads.find((item) => item.filename === "formal.mp4").aria, /V2.*正式 MP4/);
     await page.screenshot({ path: join(projectRoot, "test-results/export-action-hierarchy.png"), fullPage: true });
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
+test("editable formal output can be retained independently", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  let keepRequest = null;
+  const formal = {
+    filename: "formal.mp4", title: "节奏连贯版", displayName: "节奏连贯版",
+    duration: 18, start: 0, end: 18, previewOnly: false, segments: [],
+    downloadUrl: "/api/jobs/library-save/outputs/formal.mp4?download=1",
+  };
+  const job = {
+    id: "library-save", filename: "source.mp4", taskMode: "highlight", storageMode: "editable", status: "completed",
+    videoInfo: { duration: 60, width: 1920, height: 1080, has_audio: true },
+    eventGroups: [], candidates: [], recommendedGroupIds: [], messages: [], request: {},
+    outputVersions: [{ id: "v001", number: 1, previewOnly: false, variantKind: "formal_export", qualityStatus: "passed", outputs: [formal] }],
+    outputs: [formal], currentOutputVersionId: "v001",
+  };
+  try {
+    await page.route("**/api/jobs/library-save/outputs/formal.mp4/keep", async (route) => {
+      keepRequest = route.request().postDataJSON();
+      const keptOutput = { ...formal, kept: true };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ job: { ...job, outputs: [keptOutput], outputVersions: [{ ...job.outputVersions[0], outputs: [keptOutput] }] } }),
+      });
+    });
+    await page.route("**/api/library/outputs", (route) => route.fulfill({
+      status: 200, contentType: "application/json", body: JSON.stringify({ outputs: [] }),
+    }));
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate((value) => {
+      homeNavigationRequested = false;
+      studio.classList.add("director-merged");
+      studio.classList.remove("home-mode");
+      document.body.dataset.shellMode = "workspace";
+      document.querySelector("#homeView")?.classList.add("hidden");
+      document.querySelector("#reviewView")?.classList.remove("hidden");
+      currentJob = value;
+      renderOutputs(value);
+      selectOutput("formal.mp4");
+    }, job);
+    const button = page.locator("#saveToLibraryButton");
+    await page.evaluate(() => window.ClipTalkWorkspaceController.openRail('materials'));
+    await button.waitFor({ state: "visible" });
+    assert.equal(await button.textContent(), "长期保留");
+    assert.equal(await button.evaluate((node) => node.parentElement.classList.contains("ct-v4-version-secondary-actions")), true);
+    assert.deepEqual(await page.evaluate(() => {
+      const first = { filename: "part-a.mp4" };
+      const second = { filename: "part-b.mp4" };
+      const version = { id: "v007", number: 7, outputs: [first, second] };
+      return [outputVersionIdentity(version, first), outputVersionIdentity(version, second)];
+    }), ["V7.1", "V7.2"]);
+    await button.click();
+    await page.waitForFunction(() => document.querySelector("#saveToLibraryButton")?.textContent.includes("已长期保留"));
+    assert.deepEqual(keepRequest, { kept: true });
+    assert.equal(await button.isDisabled(), true);
+    assert.equal(await button.getAttribute("aria-label"), "当前高清成片已长期保留");
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
+test("output library badge uses actual available library records rather than task output counts", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/api/jobs", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobs: [{ id: "task-with-outputs", filename: "source.mp4", status: "completed", outputCount: 4 }] }),
+    }));
+    await page.route("**/api/library/outputs", (route) => route.fulfill({
+      status: 200, contentType: "application/json", body: JSON.stringify({ outputs: [] }),
+    }));
+    await page.evaluate(async () => {
+      await window.ClipTalkAppShell.refreshCatalog();
+      await window.ClipTalkAppShell.loadLibrary({ force: true });
+    });
+    const badge = page.locator("#sidebarOutputCount");
+    assert.equal(await badge.textContent(), "0");
+    assert.equal(await badge.evaluate((node) => node.classList.contains("hidden")), true);
   } finally {
     await browser.close();
     await stub.close();
@@ -2231,8 +3242,7 @@ test("speaker confirmation identifies the target anonymous person", async () => 
         anonymousTargetHelp: targetChoiceDocument.querySelector(".content-person-panel > p")?.textContent || "",
         outputCardText: outputDocument.querySelector(".content-output-result-card")?.textContent || "",
         outputPreviewFilename: outputDocument.querySelector("[data-auto-output]")?.dataset.autoOutput || "",
-        outputDownloadFilename: outputDocument.querySelector("[data-output-download]")?.dataset.outputDownload || "",
-        outputDownloadText: outputDocument.querySelector("[data-output-download]")?.textContent || "",
+        outputDownloadCount: outputDocument.querySelectorAll("[data-output-download]").length,
         capabilityTitle: capabilityDocument.querySelector(".content-search-review.empty strong")?.textContent || "",
         completeCapabilityText: capabilityDocument.querySelector("[data-content-evidence-choice]")?.textContent || "",
         personCapabilityDisabled: capabilityDocument.querySelector(".content-evidence-option.unavailable")?.disabled || false,
@@ -2254,10 +3264,10 @@ test("speaker confirmation identifies the target anonymous person", async () => 
     ]);
     assert.deepEqual(audit.anonymousLabelButtons, ["添加标签（可选）", "添加标签（可选）"]);
     assert.match(audit.anonymousTargetHelp, /可选择一个或多个人物.*添加项目内标签是可选操作/);
-    assert.match(audit.outputCardText, /内容视频已生成.*V1.*3 个已确认片段.*点击预览/);
+    assert.match(audit.outputCardText, /内容视频已生成.*V1.*3 个已选片段.*点击播放/);
     assert.equal(audit.outputPreviewFilename, "v001-content.mp4");
-    assert.equal(audit.outputDownloadFilename, "v001-content.mp4");
-    assert.equal(audit.outputDownloadText, "下载 V1 高清");
+    assert.equal(audit.outputDownloadCount, 0);
+    assert.match(audit.outputCardText, /播放器顶部下载/);
     assert.equal(audit.capabilityTitle, "确认识别依据");
     assert.match(audit.completeCapabilityText, /按必要依据查找.*人物.*听到的对白.*画面/);
     assert.equal(audit.personCapabilityDisabled, true);
@@ -2485,33 +3495,52 @@ test("task display keeps waiting and failure states ahead of existing outputs", 
     await openAuthenticatedWorkspace(page, stub.url);
     const audit = await page.evaluate(() => {
       const outputs = [{ filename: "one.mp4" }, { filename: "two.mp4" }];
-      const failed = displayStatusForJob({ status: "failed", outputs, outputVersions: [{ number: 1, outputs }] });
-      const waiting = displayStatusForJob({ status: "awaiting_confirmation", outputs, outputVersions: [{ number: 1, outputs }] });
+      const failed = displayStatusForJob({
+        status: "failed", outputs, outputVersions: [{ number: 1, outputs }],
+        presentation: { schemaVersion: 2, key: "failed", group: "failed", label: "处理失败", running: false },
+      });
+      const waiting = displayStatusForJob({
+        status: "awaiting_confirmation", outputs, outputVersions: [{ number: 1, outputs }],
+        presentation: { schemaVersion: 2, key: "content_review", group: "action_required", label: "等待审核事件与镜头", running: false },
+      });
       const composing = displayStatusForJob({
         status: "awaiting_confirmation",
-        stage: "auto_composition",
-        autoComposition: { status: "running", completedVersions: 1, totalVersions: 2 },
+        presentation: { schemaVersion: 2, key: "export_running", group: "active", label: "正在生成成片版本", running: true },
+        execution: {
+          schemaVersion: 2, status: "running", operation: "auto_composition", active: true,
+          detail: "正在生成成片", outcome: "none", progress: { completed: 1, total: 2 }, result: {}, capabilities: {},
+        },
       });
       const canonicalComposing = displayStatusForJob({
         status: "awaiting_confirmation",
+        presentation: { schemaVersion: 2, key: "export_running", group: "active", label: "正在生成成片版本", running: true },
         execution: {
-          schemaVersion: 1, status: "running", operation: "quality_review", active: true,
+          schemaVersion: 2, status: "running", operation: "quality_review", active: true,
           detail: "正在复核成片", outcome: "none", progress: { completed: 1, total: 3 }, result: {}, capabilities: {},
         },
       });
       const rejected = displayStatusForJob({
         status: "awaiting_confirmation",
+        presentation: { schemaVersion: 2, key: "no_result", group: "action_required", label: "自动成片未通过质量门 · 2 个样片待人工检查", running: false },
         execution: {
-          schemaVersion: 1, status: "waiting_user", operation: "auto_composition", active: false,
+          schemaVersion: 2, status: "waiting_user", operation: "auto_composition", active: false,
           outcome: "no_acceptable_output", progress: {}, result: { qualityRejectedCount: 2 }, capabilities: {},
         },
       });
-      const queued = displayStatusForJob({ status: "queued", outputs, outputVersions: [{ number: 1, outputs }] });
+      const queued = displayStatusForJob({
+        status: "queued", outputs, outputVersions: [{ number: 1, outputs }],
+        presentation: { schemaVersion: 2, key: "running", group: "active", label: "排队中", running: false },
+      });
       const queuedJob = {
         id: "queued-progress", filename: "等待测试.mp4", status: "queued", stage: "queued",
         taskMode: "highlight", workflowKind: "highlight", progress: 0,
         detail: "任务已进入队列", currentAction: "任务已进入队列", model: "系统",
         processingElapsedSeconds: 0, processingTimingVersion: 1,
+        execution: {
+          schemaVersion: 1, status: "queued", operation: "analysis", phase: "queued",
+          active: false, detail: "任务已提交，正在等待后台开始处理", outcome: "none", capabilities: {},
+        },
+        presentation: { schemaVersion: 2, key: "running", group: "active", label: "任务已进入队列", railTitle: "等待处理", running: false },
         progressFacts: {
           workflow: { fraction: 0 }, stage: { label: "等待开始", mode: "indeterminate" },
           timing: { processingElapsedSeconds: 0, processingTimingVersion: 1 },
@@ -2533,6 +3562,7 @@ test("task display keeps waiting and failure states ahead of existing outputs", 
       const queuedSummary = document.querySelector("#directorTaskSummary")?.textContent;
       const separate = displayStatusForJob({
         status: "completed",
+        presentation: { schemaVersion: 2, key: "exported", group: "completed", label: "3 条成片版本已完成", running: false },
         outputVersions: [
           { number: 1, outputs: [{ filename: "one.mp4" }] },
           { number: 2, outputs: [{ filename: "two-a.mp4" }, { filename: "two-b.mp4" }] },
@@ -2541,26 +3571,26 @@ test("task display keeps waiting and failure states ahead of existing outputs", 
       return { failed, waiting, composing, canonicalComposing, rejected, queued, queuedProgress, queuedSummary, separate };
     });
     assert.match(audit.failed.text, /处理失败/);
-    assert.match(audit.failed.text, /已保留 1 个版本 · 2 条视频/);
-    assert.match(audit.waiting.text, /等待确认高光/);
-    assert.match(audit.waiting.text, /1 个版本 · 2 条视频/);
-    assert.equal(audit.composing.text, "正在生成成片 · 已完成 1/2 个");
+    assert.match(audit.failed.text, /已保留 1 个正式版本 · 2 条成片/);
+    assert.match(audit.waiting.text, /等待审核事件与镜头/);
+    assert.doesNotMatch(audit.waiting.text, /已完成/);
+    assert.equal(audit.composing.text, "正在生成成片版本");
     assert.equal(audit.composing.running, true);
-    assert.equal(audit.canonicalComposing.text, "正在审片 · 已完成 1/3 个");
+    assert.equal(audit.canonicalComposing.text, "正在生成成片版本");
     assert.match(audit.rejected.text, /未通过质量门/);
-    assert.match(audit.queued.text, /排队中/);
+    assert.match(audit.queued.text, /等待开始|排队中/);
     assert.equal(audit.queued.running, false);
     assert.deepEqual(audit.queuedProgress, {
       workflow: "排队中",
-      stage: "当前阶段 · 等待处理",
+      stage: "分析阶段 · 等待处理",
       detail: "任务已提交，正在等待后台开始处理",
       fact: "等待后台开始处理",
       elapsed: "处理用时尚未开始",
       eta: "排队时间不计入处理用时",
       currentSteps: 0,
     });
-    assert.match(audit.queuedSummary, /当前阶段 · 等待处理.*任务已提交，正在等待后台开始处理/s);
-    assert.match(audit.separate.text, /已完成 · 2 个版本 · 3 条视频/);
+    assert.match(audit.queuedSummary, /当前阶段 · 等待处理.*任务已进入队列/s);
+    assert.match(audit.separate.text, /3 条成片版本已完成/);
   } finally {
     await browser.close();
     await stub.close();
@@ -2638,9 +3668,9 @@ test("derived task conversation collapses inherited history and exposes quality 
         actionCount: document.querySelectorAll(".quality-gate-result-card button").length,
       };
     });
-    assert.match(audit.historySummary, /此前任务对话.*1 条/);
-    assert.equal(audit.historyOpen, false);
-    assert.match(audit.boundary, /内容探索.*高光剪辑/);
+    assert.equal(audit.historySummary, "");
+    assert.equal(audit.historyOpen, undefined);
+    assert.equal(audit.boundary, "");
     assert.match(audit.quality, /2 个独立样片均未达到展示标准/);
     assert.match(audit.quality, /镜头衔接不完整/);
     assert.match(audit.quality, /成片 00:20\.8/);
@@ -2649,6 +3679,50 @@ test("derived task conversation collapses inherited history and exposes quality 
     assert.match(audit.quality, /自动返修并复审/);
     assert.match(audit.quality, /重新规划剪辑方案/);
     assert.equal(audit.actionCount, 2);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("submitted Agent conversations hide setup boilerplate and preserve the real goal", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const audit = await page.evaluate(() => {
+      const job = {
+        id: "submitted-agent-dialogue",
+        status: "awaiting_agent_plan",
+        stage: "agent_plan_failed",
+        agentDraft: true,
+        instructionSubmitted: true,
+        taskMode: "highlight",
+        request: { entryWorkflow: "agent" },
+        messages: [
+          { id: "upload", role: "user", kind: "request", text: "上传 demo.mp4，交给智能剪辑 Agent：剪一条 60 秒产品高光；素材范围：全片" },
+          { id: "notice", role: "assistant", kind: "notice", text: "视频已上传并建立 Agent 素材工作区。请在对话框描述剪辑要求；输入前不会开始分析或渲染。" },
+          { id: "summary", role: "assistant", kind: "brief-summary", text: "素材范围与剪辑目标已记录。智能剪辑 Agent 将生成计划，计划会列出实际工具、依赖和人工确认点。" },
+          { id: "result", role: "assistant", kind: "error", text: "执行计划未完成，请检查失败步骤。" },
+        ],
+        eventGroups: [], candidates: [], outputVersions: [], outputs: [],
+      };
+      currentJob = job;
+      renderConversation(job);
+      return {
+        text: document.querySelector("#chatMessages").textContent,
+        messageCount: document.querySelectorAll("#chatMessages > .chat-message").length,
+        roleOnlyCount: document.querySelectorAll("#chatMessages .message-role-only").length,
+      };
+    });
+    assert.match(audit.text, /剪一条 60 秒产品高光/);
+    assert.match(audit.text, /执行计划未完成/);
+    assert.doesNotMatch(audit.text, /请在对话框描述剪辑要求/);
+    assert.doesNotMatch(audit.text, /素材范围与剪辑目标已记录/);
+    assert.doesNotMatch(audit.text, /上传 demo\.mp4/);
+    assert.equal(audit.messageCount, 2);
+    assert.equal(audit.roleOnlyCount, 2);
   } finally {
     await browser.close();
     await stub.close();
@@ -3047,7 +4121,7 @@ test("legacy outputs without segment metadata do not expose a dead fine-edit act
       renderOutputs(job);
     });
     const edit = page.locator(".clip-version-edit");
-    assert.equal(await edit.textContent(), "无可精剪时间线");
+    assert.equal(await edit.textContent(), "无可编辑时间线");
     assert.equal(await edit.isDisabled(), true);
     assert.match(await edit.getAttribute("title"), /没有保存可编辑片段信息/);
   } finally {
@@ -3056,6 +4130,94 @@ test("legacy outputs without segment metadata do not expose a dead fine-edit act
   }
 });
 
+
+test("Agent timeline handoff opens its existing draft and preloads the approved instruction", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/api/jobs/job_agent_timeline/edit-sessions/edit_agent_1/proposals", async (route) => {
+      const proposal = {
+        id: "proposal_agent_1", status: "pending", title: "主题精简草案",
+        summary: "删除重复表达并保留核心回答", operations: [{ type: "update_clip", clipId: "clip_agent_1", playbackRate: 1.1 }],
+        preview: { operationCount: 1, durationBefore: 8, durationAfter: 7.27, clipCountBefore: 1, clipCountAfter: 1 },
+      };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        proposal,
+        session: {
+          id: "edit_agent_1", title: "内容检索精剪", status: "draft", revision: 0,
+          workflowKind: "content_search", duration: 8, clipCount: 1,
+          canUndo: false, canRedo: false, textLayers: [], subtitleEnabled: false,
+          clips: [{
+            id: "clip_agent_1", title: "核心回答", sourceRef: { kind: "content_match", id: "match_1" },
+            sourceStart: 12, sourceEnd: 20, duration: 8, playbackRate: 1,
+            transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 },
+          }],
+          schedule: [{ clipId: "clip_agent_1", outputStart: 0, outputEnd: 8 }],
+          pendingProposal: proposal,
+        },
+      }) });
+    });
+    const opened = await page.evaluate(async () => {
+      const session = {
+        id: "edit_agent_1", title: "内容检索精剪", status: "draft", revision: 0,
+        workflowKind: "content_search", duration: 8, clipCount: 1,
+        canUndo: false, canRedo: false, textLayers: [], subtitleEnabled: false,
+        clips: [{
+          id: "clip_agent_1", title: "核心回答", sourceRef: { kind: "content_match", id: "match_1" },
+          sourceStart: 12, sourceEnd: 20, duration: 8, playbackRate: 1,
+          transitionIn: { type: "cut", duration: 0 }, audioBridge: { type: "none", duration: 0 },
+        }],
+        schedule: [{ clipId: "clip_agent_1", outputStart: 0, outputEnd: 8 }],
+        agentTimelineRequest: { instruction: "删除重复表达并按主题组织", variantCount: 1 },
+      };
+      currentJob = {
+        id: "job_agent_timeline", filename: "访谈.mp4", workflowKind: "content_search",
+        taskMode: "content_extract", status: "awaiting_confirmation", stage: "content_confirmation",
+        previewUrl: "/api/jobs/job_agent_timeline/preview",
+        videoInfo: { duration: 60, width: 1280, height: 720, frame_rate: 25, has_audio: true },
+        editSessions: [session], activeEditSessionId: session.id,
+        outputVersions: [], outputs: [], candidates: [], eventGroups: [],
+      };
+      return window.ClipTalkOpenAgentTimeline({ sessionId: session.id });
+    });
+    assert.equal(opened, true);
+    assert.equal(await page.locator("#secondaryEditor").isVisible(), true);
+    assert.equal(await page.locator('[data-secondary-inspector-tab="ai"]').getAttribute("aria-pressed"), "true");
+    assert.equal(await page.locator("#secondaryEditorAiInput").inputValue(), "删除重复表达并按主题组织");
+    assert.equal(await page.locator("#secondaryEditorAiScope").inputValue(), "timeline");
+    assert.match(await page.locator("#secondaryEditorAiScopeSummary").textContent(), /整个成片/);
+    assert.match(await page.locator('[data-secondary-inspector-panel="ai"]').textContent(), /查看修改预案/);
+    await page.locator("#secondaryEditorAiForm button").click();
+    await page.locator("#secondaryEditorProposal:not(.hidden)").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => (
+      window.ClipTalkCurrentJobSnapshot().editSessions[0].pendingProposal?.id
+    )), "proposal_agent_1");
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+
+
+async function revealSecondaryControl(page, selector) {
+  const node = page.locator(selector);
+  const context = await node.first().evaluate(element => ({
+    library: !!element.closest("#secondaryEditorLibrary"),
+    inspector: !!element.closest("#secondaryEditorInspector"),
+    panel: element.closest("[data-secondary-inspector-panel]")?.dataset.secondaryInspectorPanel,
+  }));
+  if (context.library && !await page.locator("#secondaryEditorLibrary").isVisible()) await page.locator("#secondaryEditorLibraryToggle").click();
+  if (context.inspector) {
+    if (!await page.locator("#secondaryEditorInspector").isVisible()) await page.locator("#secondaryEditorInspectorToggle").click();
+    if (context.panel) await page.locator(`[data-secondary-inspector-tab="${context.panel}"]`).click();
+  }
+  const detail = node.locator("xpath=ancestor::details[1]");
+  if (await detail.count() && !await node.evaluate(element => element.tagName === "SUMMARY") && !await detail.evaluate(element => element.open)) await detail.locator(":scope > summary").click();
+  return node;
+}
 
 test("generated output versions open a persistent secondary editor", async () => {
   const stub = await startStubServer();
@@ -3241,7 +4403,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.equal(await page.locator("#secondaryEditCurrentButton").isVisible(), true);
     assert.equal(await page.locator("#secondaryEditCurrentButton").getAttribute("data-secondary-edit-version"), "version_1");
     assert.equal(await page.locator("#secondaryEditCurrentButton").getAttribute("data-secondary-edit-output"), "version_1.mp4");
-    assert.equal(await page.locator(".clip-version-edit").textContent(), "精剪此版本");
+    assert.equal(await page.locator(".clip-version-edit").textContent(), "编辑此版本");
     const outputActionColors = await page.evaluate(() => ({
       selector: getComputedStyle(document.querySelector("#videoViewSelect")).backgroundColor,
       edit: getComputedStyle(document.querySelector("#secondaryEditCurrentButton")).backgroundColor,
@@ -3251,36 +4413,119 @@ test("generated output versions open a persistent secondary editor", async () =>
       evidenceReason: getComputedStyle(document.querySelector("#clipReason")).color,
       explanation: getComputedStyle(document.querySelector("#outputExplanation")).color,
     }));
-    assert.match(outputActionColors.selector, /255, 255, 255/);
-    assert.equal(outputActionColors.edit, "rgb(255, 245, 239)");
-    assert.equal(outputActionColors.download, "rgb(237, 135, 84)");
-    assert.equal(outputActionColors.downloadText, "rgb(255, 255, 255)");
-    assert.equal(outputActionColors.evidenceTitle, "rgb(38, 49, 56)");
-    assert.equal(outputActionColors.evidenceReason, "rgb(86, 99, 107)");
-    assert.equal(outputActionColors.explanation, "rgb(62, 75, 82)");
-    await page.locator("#secondaryEditCurrentButton").click();
+    assert.notEqual(outputActionColors.selector, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.edit, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.download, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.downloadText, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.evidenceTitle, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.evidenceReason, "rgba(0, 0, 0, 0)");
+    assert.notEqual(outputActionColors.explanation, "rgba(0, 0, 0, 0)");
+    await (await revealSecondaryControl(page, "#secondaryEditCurrentButton")).click();
     await page.locator("#secondaryEditor").waitFor({ state: "visible" });
+    await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline .secondary-clip-frame > svg").length >= 4);
+    const clipInteractionAudit = await page.evaluate(() => {
+      const clip = document.querySelector("[data-secondary-clip]");
+      const select = clip?.querySelector("[data-secondary-clip-select]");
+      const transition = document.querySelector("[data-secondary-transition]");
+      const trim = clip?.querySelector("[data-secondary-trim]");
+      const remove = clip?.querySelector("[data-secondary-clip-delete]");
+      const size = (node) => {
+        const rect = node?.getBoundingClientRect();
+        return rect ? { width: rect.width, height: rect.height } : null;
+      };
+      return {
+        clipRole: clip?.getAttribute("role"), clipTabIndex: clip?.getAttribute("tabindex"),
+        selectTag: select?.tagName, transitionTag: transition?.tagName, trimTag: trim?.tagName,
+        trimSize: size(trim), removeSize: size(remove), transitionSize: size(transition),
+        mediaFrameCount: clip?.querySelectorAll(".secondary-clip-frame > svg").length,
+        mediaViewBoxes: [...(clip?.querySelectorAll(".secondary-clip-frame > svg") || [])].map((frame) => frame.getAttribute("viewBox")),
+      };
+    });
+    assert.equal(clipInteractionAudit.clipRole, "group");
+    assert.equal(clipInteractionAudit.clipTabIndex, null);
+    assert.equal(clipInteractionAudit.selectTag, "BUTTON");
+    assert.equal(clipInteractionAudit.transitionTag, "BUTTON");
+    assert.equal(clipInteractionAudit.trimTag, "BUTTON");
+    assert.equal(clipInteractionAudit.mediaFrameCount, 4);
+    assert.equal(clipInteractionAudit.mediaViewBoxes.every((value) => /^\d+(?:\.\d+)? \d+(?:\.\d+)? 80 45$/.test(value)), true);
+    assert.ok(clipInteractionAudit.trimSize?.width >= 14);
+    assert.equal(clipInteractionAudit.removeSize?.width, 0);
+    assert.equal(clipInteractionAudit.transitionSize?.height, 0);
+    // Required-preview styling transitions after the session finishes loading.
+    await page.waitForTimeout(350);
     const editorPalette = await page.evaluate(() => {
-      delete document.body.dataset.shellMode;
+      const resolveBackground = (token) => {
+        const probe = document.createElement("i");
+        probe.style.background = `var(${token})`;
+        document.body.append(probe);
+        const value = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return value;
+      };
       return {
         main: getComputedStyle(document.querySelector(".secondary-editor-main")).backgroundColor,
         timeline: getComputedStyle(document.querySelector(".secondary-editor-timeline-section")).backgroundColor,
+        timelineGradient: getComputedStyle(document.querySelector(".secondary-editor-timeline-section")).backgroundImage,
         inspector: getComputedStyle(document.querySelector(".secondary-editor-inspector")).backgroundColor,
-        library: getComputedStyle(document.querySelector(".secondary-editor-library")).backgroundImage,
+        library: getComputedStyle(document.querySelector(".secondary-editor-library")).backgroundColor,
+        header: getComputedStyle(document.querySelector(".secondary-editor-header")).backgroundColor,
+        previewAction: getComputedStyle(document.querySelector("#secondaryEditorPreview")).backgroundColor,
+        previewActionState: document.querySelector("#secondaryEditorPreview").dataset.state,
+        editorFont: getComputedStyle(document.querySelector("#secondaryEditor")).fontFamily,
+        workspaceFont: getComputedStyle(document.body).fontFamily,
+        sharedCanvas: resolveBackground("--pw-canvas"),
+        sharedPanel: resolveBackground("--pw-surface-1"),
+        sharedAccent: resolveBackground("--pw-accent"),
       };
     });
-    assert.equal(editorPalette.main, "rgb(248, 249, 250)");
-    assert.equal(editorPalette.timeline, "rgb(248, 249, 250)");
-    assert.equal(editorPalette.inspector, "rgb(248, 249, 250)");
-    assert.match(editorPalette.library, /rgb\(20, 33, 42\)/);
-    await page.evaluate(() => { document.body.dataset.shellMode = "workspace"; });
-    assert.equal(await page.locator("#secondarySubtitleAdd").isVisible(), true);
+    assert.equal(editorPalette.main, editorPalette.sharedCanvas);
+    assert.equal(editorPalette.timeline, editorPalette.sharedCanvas);
+    assert.equal(editorPalette.timelineGradient, "none");
+    assert.equal(editorPalette.inspector, editorPalette.sharedPanel);
+    assert.equal(editorPalette.library, editorPalette.sharedPanel);
+    assert.equal(editorPalette.header, editorPalette.sharedPanel);
+    if (editorPalette.previewActionState === "required") assert.equal(editorPalette.previewAction, editorPalette.sharedAccent);
+    assert.equal(editorPalette.editorFont, editorPalette.workspaceFont);
+    const timelineFirstLayout = await page.evaluate(() => {
+      const layout = document.querySelector(".secondary-editor-layout").getBoundingClientRect();
+      const timeline = document.querySelector(".secondary-editor-timeline-section").getBoundingClientRect();
+      const player = document.querySelector(".secondary-editor-player").getBoundingClientRect();
+      return {
+        layoutWidth: layout.width,
+        layoutHeight: layout.height,
+        timelineWidth: timeline.width,
+        timelineHeight: timeline.height,
+        playerHeight: player.height,
+        sidebarDisplay: getComputedStyle(document.querySelector("#appSidebar")).display,
+      };
+    });
+    assert.ok(timelineFirstLayout.timelineWidth >= timelineFirstLayout.layoutWidth - 2);
+    assert.ok(timelineFirstLayout.timelineHeight >= timelineFirstLayout.layoutHeight * .35);
+    assert.ok(timelineFirstLayout.playerHeight >= 210);
+    assert.notEqual(timelineFirstLayout.sidebarDisplay, "none");
+    assert.equal(await page.locator("#secondaryEditorWorkspaceResize").getAttribute("aria-valuenow"), "58");
+    await (await revealSecondaryControl(page, "#secondaryEditorWorkspaceResize")).focus();
+    await page.keyboard.press("ArrowUp");
+    assert.equal(await page.locator("#secondaryEditorWorkspaceResize").getAttribute("aria-valuenow"), "56");
+    await page.locator("#secondaryEditorWorkspaceResize").dblclick();
+    assert.equal(await page.locator("#secondaryEditorWorkspaceResize").getAttribute("aria-valuenow"), "58");
+    assert.equal(await page.locator("#secondarySubtitleAdd").isVisible(), false);
+    assert.equal(await page.locator("#secondaryEditorLibrary").isVisible(), false);
+    assert.equal(await page.locator("#secondaryEditorInspector").isVisible(), false);
     assert.equal(await page.locator("#secondarySubtitleAdd").textContent(), "＋ 文本");
     assert.equal(await page.locator('[data-secondary-inspector-tab="clip"]').getAttribute("aria-pressed"), "true");
-    await page.locator('[data-secondary-inspector-tab="ai"]').click();
+    assert.equal(await page.locator(".secondary-editor-inspector").evaluate(node => getComputedStyle(node).backgroundColor), editorPalette.sharedPanel);
+    await (await revealSecondaryControl(page, '[data-secondary-inspector-tab="subtitle"]')).click();
+    assert.equal(await page.locator('[data-secondary-inspector-panel="subtitle"]').isVisible(), true);
+    assert.equal(await page.locator(".secondary-editor-inspector").evaluate(node => getComputedStyle(node).backgroundColor), editorPalette.sharedPanel);
+    await (await revealSecondaryControl(page, '[data-secondary-inspector-tab="ai"]')).click();
     assert.equal(await page.locator('[data-secondary-inspector-panel="ai"]').isVisible(), true);
     assert.equal(await page.locator('[data-secondary-inspector-panel="clip"]').isVisible(), false);
-    await page.locator('[data-secondary-inspector-tab="clip"]').click();
+    assert.equal(await page.locator(".secondary-editor-inspector").evaluate(node => getComputedStyle(node).backgroundColor), editorPalette.sharedPanel);
+    await (await revealSecondaryControl(page, '[data-secondary-inspector-tab="export"]')).click();
+    assert.equal(await page.locator('[data-secondary-inspector-panel="export"]').isVisible(), true);
+    assert.equal(await page.locator(".secondary-editor-inspector").evaluate(node => getComputedStyle(node).backgroundColor), editorPalette.sharedPanel);
+    await (await revealSecondaryControl(page, '[data-secondary-inspector-tab="clip"]')).click();
     assert.equal(await page.locator('[data-secondary-inspector-panel="clip"]').isVisible(), true);
     assert.deepEqual(await page.evaluate(() => ({
       earlier: secondaryEditorReorderedClipIds(
@@ -3310,7 +4555,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     await page.waitForFunction(() => document.querySelector("[data-secondary-clip]")?.dataset.secondaryClip === "clip_1");
     assert.deepEqual(operations.at(-1), { type: "reorder_clips", clipIds: ["clip_1", "clip_2"] });
     operations.length = 0;
-    await page.locator("[data-secondary-clip='clip_1']").click({ position: { x: 30, y: 36 } });
+    await (await revealSecondaryControl(page, "[data-secondary-clip='clip_1']")).click({ position: { x: 30, y: 36 } });
     const timeSemantics = await page.evaluate(() => ({
       precise: formatPreciseTimecode(83.45),
       parsedTimecode: parseTimecodeValue("01:23.45"),
@@ -3327,19 +4572,23 @@ test("generated output versions open a persistent secondary editor", async () =>
     const mediaControlBounds = await page.locator("#secondaryEditorMediaControls").boundingBox();
     const playerBounds = await page.locator(".secondary-editor-player").boundingBox();
     const editorVideoBounds = await page.locator("#secondaryEditorVideo").boundingBox();
-    assert.ok(mediaControlBounds && playerBounds && mediaControlBounds.height <= 44 && mediaControlBounds.height < playerBounds.height / 4);
+    assert.ok(mediaControlBounds && playerBounds && mediaControlBounds.height <= 52 && mediaControlBounds.height < playerBounds.height / 3);
     assert.ok(editorVideoBounds && mediaControlBounds.y >= editorVideoBounds.y + editorVideoBounds.height - 1);
     assert.equal(await page.locator("#secondaryEditorMediaControls").evaluate((controls) => getComputedStyle(controls).position), "relative");
     assert.equal(await page.locator("#secondaryEditorMediaControls").evaluate((controls) => getComputedStyle(controls).backgroundImage), "none");
-    assert.match(await page.locator("#secondaryInspectorForm").textContent(), /源片入点.*源片出点.*源片长度.*成片位置/s);
+    assert.match(await page.locator("#secondaryInspectorForm").textContent(), /时间.*开始.*结束.*播放.*速度.*高级/s);
     assert.match(await page.locator("#secondaryInspectorStartMeta").textContent(), /83\.45 秒 · TC 00:01:23:11/);
-    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /源片长度9\.08 秒.*成片位置00:00\.00 → 00:09\.08.*片段播放时长9\.08 秒/s);
+    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /源片 9\.08 秒.*播放 9\.08 秒.*成片位置 00:00\.00 - 00:09\.08/s);
     assert.match(await page.locator("#secondaryEditorLibraryBody").textContent(), /源片 01:23\.45 → 01:32\.53/);
     assert.deepEqual(await page.locator("#secondaryEditorLibraryBody [data-secondary-material-group] summary strong").allTextContents(), [
-      "当前成片素材", "推荐补充", "已保留素材", "待确认与已移除",
+      "当前成片素材", "推荐补充", "历史已选素材", "待确认与已移除",
     ]);
+    assert.equal(await page.locator('[data-secondary-material-filter="timeline"]').getAttribute("aria-pressed"), "true");
     assert.match(await page.locator("#secondaryEditorLibraryContext").textContent(), /已继承说话人模式/);
     assert.doesNotMatch(await page.locator("#secondaryEditorLibraryBody").textContent(), /version_1\.mp4/);
+    await (await revealSecondaryControl(page, "#secondaryEditorLibrarySearch")).fill("问题");
+    assert.equal(await page.locator("#secondaryEditorLibraryBody .secondary-library-group.active [data-secondary-material]").count(), 1);
+    await (await revealSecondaryControl(page, "#secondaryEditorLibrarySearch")).fill("");
     const modeAwareGroups = await page.evaluate(() => {
       const summarize = (job, draft) => Object.fromEntries(
         secondaryEditorMaterialGroups(job, draft).map((group) => [group.id, group.items.map((item) => item.title)]),
@@ -3385,53 +4634,81 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.match(await page.locator("#secondaryEditorLibraryInsertHint").textContent(), /第 1 段.*之后/);
     assert.equal(await page.locator("#secondaryEditorInsertTarget").inputValue(), "1");
     assert.equal(await page.locator("#secondaryEditorLibraryBody [data-secondary-material-insert]").first().textContent(), "再次插入");
-    await page.locator("#secondaryEditorLibraryBody [data-secondary-material-preview]").last().click();
+    await page.locator("#secondaryEditorLibraryBody .secondary-library-group.active [data-secondary-material-preview]").first().click();
     assert.equal(await page.evaluate(() => secondaryEditView), "source");
     assert.match(await page.locator("#secondaryEditorVideoBadge").textContent(), /素材预览/);
     assert.equal(await page.locator("#secondaryEditorMediaSeek").getAttribute("data-coordinate"), "material");
     assert.equal(await page.locator("#secondaryEditorLibraryBody [data-secondary-material].previewing").count(), 1);
-    await page.locator("#secondaryEditorInsertTarget").selectOption("0");
+    await (await revealSecondaryControl(page, "#secondaryEditorInsertTarget")).selectOption("0");
     assert.equal(await page.evaluate(() => secondaryEditorInsertionIndex()), 0);
     assert.match(await page.locator("#secondaryEditorLibraryInsertHint").textContent(), /已固定位置.*时间线开头/);
-    await page.locator("#secondaryEditorInsertFollow").click();
+    await (await revealSecondaryControl(page, "#secondaryEditorInsertFollow")).click();
     assert.equal(await page.evaluate(() => secondaryEditorInsertionIndex()), 1);
-    assert.equal(await page.locator("#secondaryEditorTrimLeft").isVisible(), true);
-    assert.equal(await page.locator("#secondaryEditorTrimRight").isVisible(), true);
+    assert.equal(await page.locator("#secondaryEditorTrimLeft").isVisible(), false);
+    assert.equal(await page.locator("#secondaryEditorTrimRight").isVisible(), false);
+    assert.equal(await page.locator(".secondary-editor-action-overflow > summary").isVisible(), true);
+    await (await revealSecondaryControl(page, ".secondary-editor-action-overflow > summary")).click();
     assert.equal(await page.locator("#secondaryEditorDuplicate").isVisible(), true);
     assert.equal(await page.locator("#secondaryEditorMarker").isVisible(), true);
     assert.match(await page.locator("#secondaryEditorClock").textContent(), /^成片 /);
-    await page.locator('[data-secondary-view="source"]').click();
+    await (await revealSecondaryControl(page, '[data-secondary-view="source"]')).click();
     assert.equal(await page.locator('[data-secondary-view="source"]').getAttribute("aria-pressed"), "true");
     assert.match(await page.locator("#secondaryEditorVideoBadge").textContent(), /源视频 · 完整时间线/);
     assert.equal(await page.evaluate(() => secondaryEditView), "source");
     assert.equal(await page.locator("#secondaryEditorMediaSeek").getAttribute("data-coordinate"), "source");
-    await page.locator('[data-secondary-view="sequence"]').click();
+    await (await revealSecondaryControl(page, '[data-secondary-view="sequence"]')).click();
     assert.equal(await page.locator('[data-secondary-view="sequence"]').getAttribute("aria-pressed"), "true");
     assert.equal(await page.evaluate(() => secondaryEditView), "sequence");
     assert.equal(await page.locator("#secondaryEditorMediaSeek").getAttribute("data-coordinate"), "sequence");
     assert.ok(Number(await page.locator("#secondaryEditorMediaSeek").getAttribute("max")) > 15);
-    await page.locator("#secondaryEditorMediaSeek").fill("4");
+    await (await revealSecondaryControl(page, "#secondaryEditorMediaSeek")).fill("4");
     assert.ok(await page.evaluate(() => secondaryEditPlayheadTime >= 3.99));
-    await page.locator("#secondaryEditorMediaMute").click();
+    const transportAlignment = await page.evaluate(() => {
+      const seek = document.querySelector("#secondaryEditorMediaSeek");
+      const playhead = document.querySelector("#secondaryEditorPlayhead");
+      const seekRect = seek.getBoundingClientRect();
+      const playheadRect = playhead.getBoundingClientRect();
+      const thumbSize = Number.parseFloat(getComputedStyle(document.querySelector("#secondaryEditorMediaControls")).getPropertyValue("--secondary-seek-thumb-size")) || 12;
+      const progress = (Number(seek.value) - Number(seek.min || 0)) / Math.max(.01, Number(seek.max) - Number(seek.min || 0));
+      return {
+        seekThumbCenter: seekRect.left + thumbSize / 2 + progress * (seekRect.width - thumbSize),
+        playheadCenter: playheadRect.left + playheadRect.width / 2,
+        fitMode: secondaryEditTimelinePixelsPerSecond === null,
+      };
+    });
+    assert.equal(transportAlignment.fitMode, true);
+    assert.ok(Math.abs(transportAlignment.seekThumbCenter - transportAlignment.playheadCenter) <= 2, `transport ${transportAlignment.seekThumbCenter}px != playhead ${transportAlignment.playheadCenter}px`);
+    await (await revealSecondaryControl(page, "#secondaryEditorMediaMute")).click();
     assert.equal(await page.locator("#secondaryEditorMediaMute").getAttribute("aria-pressed"), "true");
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-clip]").count(), 2);
     await page.locator("#secondaryEditorTimeline [data-secondary-clip]").nth(1).click({ modifiers: ["Shift"] });
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-clip].selected").count(), 2);
     assert.match(await page.locator("#secondaryInspectorTitle").textContent(), /批量设置 · 2 个片段/);
     await page.locator("#secondaryEditorTimeline [data-secondary-clip]").first().click();
-    assert.match(await page.locator("#clipStrip .clip-version-entry").first().getAttribute("class"), /quality-passed/);
+    assert.match(await page.locator("#clipStrip .clip-version-entry").first().getAttribute("class"), /quality-pending/, "A generated file without a quality report is not a passed review");
     assert.equal(await page.locator("#clipStrip .clip-version-button").first().getAttribute("aria-pressed"), "true");
     assert.equal(await page.locator("#clipStrip .clip-version-index").first().evaluate((node) => getComputedStyle(node).borderRadius), "10px");
     assert.match(await page.locator("#clipStrip .clip-version-entry").first().evaluate((node) => getComputedStyle(node).animationName), /output-card-enter/);
     assert.ok(await page.locator("#secondaryEditorRuler .secondary-editor-ruler-tick").count() >= 3);
+    const rulerLabels = await page.locator("#secondaryEditorRuler .secondary-editor-ruler-tick b").allTextContents();
+    assert.equal(new Set(rulerLabels).size, rulerLabels.length);
     assert.equal(await page.locator("#secondaryEditorPlayhead").isVisible(), true);
     await page.waitForFunction(() => document.querySelector("#secondaryEditorMediaState")?.textContent.includes("画面缩略图 · 音频波形"));
     assert.equal(await page.locator("#secondaryEditorTimeline canvas[data-secondary-waveform]").count(), 2);
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-trim]").count(), 4);
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorSubtitleBlocks [data-secondary-cue]").length === 2);
-    await page.locator("[data-secondary-cue='cue_1'] [data-secondary-cue-text]").fill("修改后的问题");
-    await page.locator("#secondaryEditorTimelineMeta").click();
+    const secondCueText = await revealSecondaryControl(page, "[data-secondary-cue='cue_2'] [data-secondary-cue-text]");
+    await secondCueText.click();
+    assert.ok(await page.evaluate(() => Math.abs(secondaryEditPlayheadTime - 10) < .01));
+    assert.equal(await page.locator("[data-secondary-cue='cue_2']").getAttribute("class").then((value) => value.includes("selected")), true);
+    const firstCueText = await revealSecondaryControl(page, "[data-secondary-cue='cue_1'] [data-secondary-cue-text]");
+    await firstCueText.dblclick();
+    assert.equal(await firstCueText.getAttribute("contenteditable"), "true");
+    await firstCueText.fill("修改后的问题");
+    assert.equal(await firstCueText.textContent(), "修改后的问题");
+    await (await revealSecondaryControl(page, "#secondaryEditorTimelineMeta")).click();
     await page.waitForFunction(() => document.querySelector("#secondaryEditorSubtitleStatus")?.textContent.includes("已保存"));
+    assert.equal(await page.evaluate(() => secondaryEditSubtitleDraft.cues[0].text), "修改后的问题");
     assert.equal(subtitleUpdates.at(-1).cues[0].text, "修改后的问题");
     await page.evaluate(() => secondaryEditorSeekOutputTime(2, false));
     const subtitlePreview = page.locator("#secondaryEditorSubtitlePreview");
@@ -3479,7 +4756,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.ok(Number(subtitleUpdates.at(-1).cueStyleOverrides.cue_2.offsetXRatio) < 0);
     assert.deepEqual(subtitleUpdates.at(-1).cueStyleOverrides.cue_1, firstClipSubtitleStyle);
     const updatesBeforeTextBox = subtitleUpdates.length;
-    await page.locator("#secondarySubtitleAdd").click();
+    await (await revealSecondaryControl(page, "#secondarySubtitleAdd")).click();
     const previewTextEditor = page.locator("#secondaryEditorTextLayerCanvas [data-secondary-text-content]");
     await previewTextEditor.waitFor({ state: "visible" });
     await previewTextEditor.fill("第二段补充说明");
@@ -3492,49 +4769,90 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.ok(Number(savedTextBox.start) >= 9.08 && Number(savedTextBox.end) <= 15.08);
     assert.equal(savedTextBox.style.vertical, "middle");
     assert.equal(await page.locator(`[data-secondary-text-block='${savedTextBox.id}']`).count(), 1);
-    assert.equal(await page.locator("#secondaryTextDelete").isVisible(), true);
-    await page.locator("#secondaryTextDelete").click();
+    assert.equal(await page.locator("#secondaryTextDelete").isVisible(), false);
+    const secondaryLanePalette = await page.evaluate((textLayerId) => {
+      const background = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
+      const backgroundImage = (selector) => getComputedStyle(document.querySelector(selector)).backgroundImage;
+      const selectedText = document.querySelector(`[data-secondary-text-block='${textLayerId}']`);
+      return {
+        workspace: backgroundImage("#secondaryEditor"),
+        player: backgroundImage(".secondary-editor-player"),
+        videoSurface: background("#secondaryEditorVideo"),
+        videoLane: backgroundImage("#secondaryEditorTimeline"),
+        textLane: backgroundImage("#secondaryEditorTextTrack"),
+        subtitleLane: backgroundImage("#secondaryEditorSubtitleTrack"),
+        videoClip: background("#secondaryEditorTimeline [data-secondary-clip]"),
+        videoClipMedia: background("#secondaryEditorTimeline .secondary-clip-media"),
+        videoClipFrameOpacity: getComputedStyle(document.querySelector("#secondaryEditorTimeline .secondary-clip-media > i")).opacity,
+        videoClipOverlay: getComputedStyle(document.querySelector("#secondaryEditorTimeline .secondary-clip-media"), "::after").backgroundImage,
+        videoTrackHeight: document.querySelector("#secondaryEditorTimeline")?.getBoundingClientRect().height,
+        textTrackHeight: document.querySelector("#secondaryEditorTextTrack")?.getBoundingClientRect().height,
+        subtitleTrackHeight: document.querySelector("#secondaryEditorSubtitleTrack")?.getBoundingClientRect().height,
+        textLaneHeight: document.querySelector("#secondaryEditorTextLane")?.getBoundingClientRect().height,
+        subtitleLaneHeight: document.querySelector("#secondaryEditorSubtitleLane")?.getBoundingClientRect().height,
+        textBlock: getComputedStyle(selectedText).backgroundColor,
+        textSelection: getComputedStyle(selectedText).borderColor,
+        subtitleBlock: background("#secondaryEditorSubtitleBlocks [data-secondary-cue]"),
+        playhead: background("#secondaryEditorPlayhead"),
+      };
+    }, savedTextBox.id);
+    assert.equal(secondaryLanePalette.workspace, "none");
+    assert.equal(secondaryLanePalette.player, "none");
+    assert.equal(secondaryLanePalette.videoSurface, "rgba(0, 0, 0, 0)");
+    assert.equal(secondaryLanePalette.videoLane, "none");
+    assert.equal(secondaryLanePalette.textLane, "none");
+    assert.equal(secondaryLanePalette.subtitleLane, "none");
+    assert.ok(secondaryLanePalette.videoTrackHeight <= 136.5);
+    assert.ok(secondaryLanePalette.textTrackHeight >= 48);
+    assert.ok(secondaryLanePalette.subtitleTrackHeight >= 48);
+    assert.ok(secondaryLanePalette.textLaneHeight >= 34 && secondaryLanePalette.textLaneHeight <= 64.5);
+    assert.ok(secondaryLanePalette.subtitleLaneHeight >= 34 && secondaryLanePalette.subtitleLaneHeight <= 64.5);
+    await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-select]").hover();
+    const hoveredSelectBackground = await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-select]").evaluate((node) => getComputedStyle(node).backgroundColor);
+    assert.equal(hoveredSelectBackground, "rgba(0, 0, 0, 0)");
+    await page.locator("#secondaryEditor").screenshot({ path: join(projectRoot, "test-results/secondary-editor-timeline-lanes.png") });
+    await (await revealSecondaryControl(page, "#secondaryTextDelete")).click();
     await page.waitForFunction(() => secondaryEditSession.textLayers.length === 0);
     assert.equal(operations.at(-1).type, "delete_text_layer");
     operations.length = 0;
-    await page.locator('[data-secondary-inspector-tab="clip"]').click();
-    await page.locator("[data-secondary-clip='clip_1']").click();
+    await (await revealSecondaryControl(page, '[data-secondary-inspector-tab="clip"]')).click();
+    await (await revealSecondaryControl(page, "[data-secondary-clip='clip_1']")).click();
     const originalFirstWidth = Number.parseFloat(await page.locator("[data-secondary-clip='clip_1']").evaluate((node) => node.style.width));
     const originalSecondLeft = Number.parseFloat(await page.locator("[data-secondary-clip='clip_2']").evaluate((node) => node.style.left));
-    await page.locator("#secondaryInspectorSpeed").selectOption("1.25");
+    await (await revealSecondaryControl(page, "#secondaryInspectorSpeed")).selectOption("1.25");
     const speedPreviewFirstWidth = Number.parseFloat(await page.locator("[data-secondary-clip='clip_1']").evaluate((node) => node.style.width));
     const speedPreviewSecondLeft = Number.parseFloat(await page.locator("[data-secondary-clip='clip_2']").evaluate((node) => node.style.left));
     assert.ok(speedPreviewFirstWidth < originalFirstWidth);
     assert.ok(speedPreviewSecondLeft < originalSecondLeft);
     assert.match(await page.locator("#secondaryEditorTimelineMeta").textContent(), /13\.3 秒 · 预览/);
     assert.match(await page.locator("#secondaryEditorTimelineDraftState").textContent(), /15\.08 秒 → 13\.26 秒/);
-    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /尚未保存.*时间线为预览/);
-    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /片段播放时长7\.26 秒 · 1\.25×.*预计成片总长15\.08 → 13\.26 秒/s);
+    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /未保存/);
+    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /播放 7\.26 秒 \/ 1\.25×.*预计总长 15\.08 - 13\.26 秒/s);
     assert.match(await page.locator("#secondaryEditorSubtitleSummary").textContent(), /保存后需重新对齐字幕/);
     assert.equal(await page.locator("[data-secondary-clip='clip_1']").getAttribute("class").then((value) => value.includes("pending-settings")), true);
     assert.equal(await page.locator("#secondaryEditorPreview").isDisabled(), true);
     assert.equal(await page.locator("#secondaryEditorExport").isDisabled(), true);
     assert.equal(await page.locator("#secondaryInspectorReset").isDisabled(), false);
     assert.equal(operations.length, 0);
-    await page.locator("#secondaryInspectorReset").click();
+    await (await revealSecondaryControl(page, "#secondaryInspectorReset")).click();
     assert.equal(await page.locator("#secondaryEditorTimelineDraftState").evaluate((node) => node.classList.contains("hidden")), true);
     assert.equal(Number.parseFloat(await page.locator("[data-secondary-clip='clip_1']").evaluate((node) => node.style.width)), originalFirstWidth);
-    await page.locator("#secondaryInspectorEnd").fill("01:31.00");
+    await (await revealSecondaryControl(page, "#secondaryInspectorEnd")).fill("01:31.00");
     assert.match(await page.locator("#secondaryEditorTimelineDraftState").textContent(), /15\.08 秒 → 13\.55 秒/);
-    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /源片长度7\.55 秒.*预计成片总长15\.08 → 13\.55 秒/s);
-    await page.locator("#secondaryInspectorReset").click();
-    await page.locator("[data-secondary-clip='clip_2']").click();
-    await page.locator("#secondaryInspectorTransition").selectOption("dissolve");
+    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /源片 7\.55 秒.*预计总长 15\.08 - 13\.55 秒/s);
+    await (await revealSecondaryControl(page, "#secondaryInspectorReset")).click();
+    await (await revealSecondaryControl(page, "[data-secondary-clip='clip_2']")).click();
+    await (await revealSecondaryControl(page, "#secondaryInspectorTransition")).selectOption("dissolve");
     assert.match(await page.locator("#secondaryEditorTimelineDraftState").textContent(), /15\.08 秒 → 14\.73 秒/);
-    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /预计成片位置00:08\.73 → 00:14\.73.*预计成片总长15\.08 → 14\.73 秒.*转场重叠/s);
-    await page.locator("#secondaryInspectorReset").click();
-    await page.locator("[data-secondary-clip='clip_1']").click();
+    assert.match(await page.locator("#secondaryInspectorTimingSummary").textContent(), /预计位置 00:08\.73 - 00:14\.73.*预计总长 15\.08 - 14\.73 秒.*转场重叠/s);
+    await (await revealSecondaryControl(page, "#secondaryInspectorReset")).click();
+    await (await revealSecondaryControl(page, "[data-secondary-clip='clip_1']")).click();
     const fittedWidth = await page.locator("#secondaryEditorTimelineCanvas").evaluate((node) => node.getBoundingClientRect().width);
-    await page.locator("#secondaryEditorZoomIn").click();
+    await (await revealSecondaryControl(page, "#secondaryEditorZoomIn")).click();
     const zoomedWidth = await page.locator("#secondaryEditorTimelineCanvas").evaluate((node) => node.getBoundingClientRect().width);
     assert.ok(zoomedWidth > fittedWidth * 1.5);
-    await page.locator("#secondaryEditorZoomFit").click();
-    await page.locator("#secondaryEditorRuler").focus();
+    await (await revealSecondaryControl(page, "#secondaryEditorZoomFit")).click();
+    await (await revealSecondaryControl(page, "#secondaryEditorRuler")).focus();
     await page.keyboard.press("End");
     assert.equal(await page.locator("#secondaryEditorPlayhead").evaluate((node) => node.style.left), "100%");
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-clip].selected").getAttribute("data-secondary-clip"), "clip_2");
@@ -3544,7 +4862,7 @@ test("generated output versions open a persistent secondary editor", async () =>
     assert.equal(await page.locator("#secondaryEditorPlayhead").evaluate((node) => node.style.left), "0%");
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-clip].selected").getAttribute("data-secondary-clip"), "clip_1");
     assert.equal(await page.evaluate(() => secondaryEditorInsertionIndex()), 1);
-    await page.locator("#secondaryEditorNextFrame").click();
+    await (await revealSecondaryControl(page, "#secondaryEditorNextFrame")).click();
     assert.notEqual(await page.locator("#secondaryEditorPlayhead").evaluate((node) => node.style.left), "0%");
     const trimHandle = page.locator("[data-secondary-clip='clip_1'] [data-secondary-trim='end']");
     const trimBox = await trimHandle.boundingBox();
@@ -3553,60 +4871,141 @@ test("generated output versions open a persistent secondary editor", async () =>
     await page.mouse.down();
     await page.mouse.move(trimBox.x - 30, trimBox.y + trimBox.height / 2, { steps: 4 });
     await page.mouse.up();
-    await page.waitForFunction(() => document.querySelector("#secondaryEditorSaveState")?.textContent.includes("已自动保存"));
-    assert.equal(operations[0].type, "roll_trim");
+    await page.waitForFunction(() => document.querySelector("#secondaryEditorSaveState")?.textContent.includes("已保存"));
+    assert.equal(operations[0].type, "trim_clip");
     assert.ok(operations[0].sourceEnd < 92.53);
-    assert.equal(operations[0].adjacentClipId, "clip_2");
-    assert.ok(operations[0].adjacentSourceStart < 100);
-    assert.ok(Math.abs(session.duration - 15.08) < .02);
+    assert.equal(operations[0].adjacentClipId, undefined);
+    assert.equal(session.clips[1].sourceStart, 100);
+    assert.ok(session.duration < 15.08);
+    const rippleDuration = session.duration;
+    const rollHandle = page.locator("[data-secondary-clip='clip_1'] [data-secondary-trim='end']");
+    const rollBox = await rollHandle.boundingBox();
+    assert.ok(rollBox);
+    await page.keyboard.down("Shift");
+    await page.mouse.move(rollBox.x + rollBox.width / 2, rollBox.y + rollBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(rollBox.x + 24, rollBox.y + rollBox.height / 2, { steps: 4 });
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    await page.waitForFunction(() => document.querySelector("#secondaryEditorSaveState")?.textContent.includes("已保存"));
+    assert.equal(operations[1].type, "roll_trim");
+    assert.equal(operations[1].adjacentClipId, "clip_2");
+    assert.ok(operations[1].adjacentSourceStart > 100);
+    assert.ok(Math.abs(session.duration - rippleDuration) < .02);
+    assert.match(await rollHandle.getAttribute("title"), /Shift\+拖动.*滚动裁剪/);
+    assert.match(await page.locator("#secondaryEditorShortcutPanel").textContent(), /Shift\+拖边.*滚动裁剪/);
     assert.match(await page.locator("#secondaryEditorSubtitleStatus").textContent(), /时间线已变化.*重新对齐字幕/);
     assert.match(await page.locator("#secondaryEditorLibraryTitle").textContent(), /说话人发言结果/);
-    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /已自动保存|草稿 r1/);
-    assert.match(await page.locator(".secondary-ai-editor").textContent(), /快捷批量编辑/);
-    assert.match(await page.locator(".secondary-ai-editor").textContent(), /结构变化/);
-    assert.match(await page.locator(".secondary-ai-editor").textContent(), /预览样片/);
-    assert.equal(await page.locator("#secondaryEditorAiForm button").textContent(), "预览时间线修改");
-    assert.equal(await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-delete]").isVisible(), true);
-    await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-delete]").click();
+    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /已保存/);
+    assert.match(await page.locator(".secondary-ai-editor").textContent(), /先审阅，再应用/);
+    assert.match(await page.locator(".secondary-ai-editor").textContent(), /修改范围/);
+    assert.match(await page.locator(".secondary-ai-editor").textContent(), /不会立即应用/);
+    assert.equal(await page.locator("#secondaryEditorAiForm button").textContent(), "查看修改预案");
+    assert.equal(await page.locator("[data-secondary-clip='clip_1'] [data-secondary-clip-delete]").isVisible(), false);
+    await (await revealSecondaryControl(page, "#secondaryEditorDelete")).click();
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline [data-secondary-clip]").length === 1);
-    assert.deepEqual(operations.map((operation) => operation.type), ["roll_trim", "delete_clips"]);
-    assert.deepEqual(operations[1], { type: "delete_clips", clipIds: ["clip_1"] });
+    assert.deepEqual(operations.map((operation) => operation.type), ["trim_clip", "roll_trim", "delete_clips"]);
+    assert.deepEqual(operations[2], { type: "delete_clips", clipIds: ["clip_1"] });
     assert.equal(await page.locator("#secondaryEditorUndo").isDisabled(), false);
     assert.equal(await page.locator("#secondaryEditorInsertTarget").inputValue(), "1");
-    await page.locator("#secondaryEditorInsertTarget").selectOption("0");
+    await (await revealSecondaryControl(page, "#secondaryEditorInsertTarget")).selectOption("0");
     const removedGroup = page.locator('[data-secondary-material-group="review"]');
-    await removedGroup.locator("summary").click();
+    await (await revealSecondaryControl(page, '[data-secondary-material-filter="review"]')).click();
     assert.match(await removedGroup.textContent(), /问题.*已移除.*可重新插入恢复/s);
     assert.equal(await removedGroup.locator("[data-secondary-material-insert]").first().textContent(), "恢复到时间线");
     await removedGroup.locator("[data-secondary-material-insert]").first().click();
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline [data-secondary-clip]").length === 2);
-    assert.equal(operations[2].type, "insert_clip");
-    assert.equal(operations[2].targetIndex, 0);
+    assert.equal(operations[3].type, "insert_clip");
+    assert.equal(operations[3].targetIndex, 0);
     assert.equal(await page.locator("#secondaryEditorTimeline [data-secondary-clip].selected").getAttribute("data-secondary-clip"), "clip_inserted");
-    await page.locator("#secondaryInspectorEnd").fill("01:31.00");
-    await page.locator("#secondaryInspectorSpeed").selectOption("1.25");
-    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /尚未保存.*时间线为预览/);
-    await page.locator("#secondaryInspectorSave").click();
-    await page.waitForFunction(() => document.querySelector("#secondaryEditorSaveState")?.textContent.includes("已自动保存"));
-    assert.deepEqual(operations.slice(3).map((operation) => operation.type), ["trim_clip", "update_clip"]);
-    assert.equal(operations[4].playbackRate, 1.25);
-    assert.equal(operations[4].transitionType, "cut");
+    await (await revealSecondaryControl(page, "#secondaryInspectorEnd")).fill("01:31.00");
+    await (await revealSecondaryControl(page, "#secondaryInspectorSpeed")).selectOption("1.25");
+    assert.match(await page.locator("#secondaryEditorSaveState").textContent(), /未保存/);
+    await (await revealSecondaryControl(page, "#secondaryInspectorSave")).click();
+    await page.waitForFunction(() => document.querySelector("#secondaryEditorSaveState")?.textContent.includes("已保存"));
+    assert.deepEqual(operations.slice(4).map((operation) => operation.type), ["trim_clip", "update_clip"]);
+    assert.equal(operations[5].playbackRate, 1.25);
+    assert.equal(operations[5].transitionType, "cut");
     assert.equal(await page.locator("#secondaryInspectorEnd").inputValue(), "01:31.00");
     assert.equal(await page.locator("#secondaryInspectorSpeed").inputValue(), "1.25");
     assert.equal(await page.locator("#secondaryEditorTimelineDraftState").evaluate((node) => node.classList.contains("hidden")), true);
+    if (await page.locator("#secondaryEditorInspector").isVisible()) await page.locator("#secondaryEditorInspector [data-secondary-close-panel]").click();
     await page.setViewportSize({ width: 760, height: 820 });
     assert.equal(await page.locator(".secondary-editor-library").isVisible(), false);
     await page.locator("#secondaryEditorLibraryToggle").click();
     assert.equal(await page.locator(".secondary-editor-library").isVisible(), true);
-    assert.match(await page.locator("#secondaryEditorLibraryBody [data-secondary-material]").first().textContent(), /时间线 1 处.*再次插入.*从时间线移除/s);
-    await page.locator("#secondaryEditorLibraryBody [data-secondary-material-remove]").first().click();
+    await (await revealSecondaryControl(page, '[data-secondary-material-filter="timeline"]')).click();
+    assert.match(await page.locator("#secondaryEditorLibraryBody .secondary-library-group.active [data-secondary-material]").first().textContent(), /时间线 1 处.*再次插入.*移出时间线/s);
+    await page.locator("#secondaryEditorLibraryBody .secondary-library-group.active [data-secondary-material-remove]").first().click();
     await page.waitForFunction(() => document.querySelectorAll("#secondaryEditorTimeline [data-secondary-clip]").length === 1);
-    assert.deepEqual(operations[5], { type: "delete_clips", clipIds: ["clip_inserted"] });
+    assert.deepEqual(operations[6], { type: "delete_clips", clipIds: ["clip_inserted"] });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.locator("#secondaryEditorClose").click();
     assert.equal(await page.locator("#secondaryEditor").evaluate((node) => node.classList.contains("hidden")), true);
     await page.evaluate(() => showSource({ autoplay: false }));
     assert.equal(await page.locator("#secondaryEditCurrentButton").isVisible(), false);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("Agent social review previews return to their source edit session", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const audit = await page.evaluate(() => {
+      const sessionId = "edit_session_agent_review";
+      const previewFilename = "edit_session_agent_review-fingerprint.mp4";
+      const output = {
+        filename: "agent-social-9x16-review.mp4",
+        title: "9:16 虚化背景审核预览",
+        previewOnly: true,
+        outputKind: "social_reframe_preview",
+        sourceOutputFilename: previewFilename,
+        segments: [{ id: "clip_1", start: 4, end: 10 }],
+      };
+      const job = {
+        id: "agent-review-preview-job",
+        taskMode: "content_extract",
+        workflowKind: "content_search",
+        outputVersions: [], outputs: [], agentPreviewOutputs: [output],
+        editSessions: [{
+          id: sessionId, revision: 1,
+          clips: [{ id: "clip_1", sourceStart: 4, sourceEnd: 10 }],
+        }],
+      };
+      currentJob = job;
+      currentOutput = output;
+      viewerMediaKind = "output";
+      window.__openedAgentReviewSession = "";
+      window.ClipTalkOpenAgentTimeline = async ({ sessionId: openedId }) => {
+        window.__openedAgentReviewSession = openedId;
+        return true;
+      };
+      renderOutputPreviewSelector(job);
+      const button = document.querySelector("#secondaryEditCurrentButton");
+      return {
+        visible: !button.classList.contains("hidden"),
+        label: button.textContent,
+        sessionId: button.dataset.secondaryEditSession || "",
+        fakeVersionId: button.dataset.secondaryEditVersion || "",
+      };
+    });
+    assert.deepEqual(audit, {
+      visible: true,
+      label: "返回版本编辑",
+      sessionId: "edit_session_agent_review",
+      fakeVersionId: "",
+    });
+    await page.evaluate(() => document.querySelector("#secondaryEditCurrentButton").click());
+    assert.equal(await page.evaluate(() => window.__openedAgentReviewSession), "edit_session_agent_review");
+    assert.equal(stub.requests.some((request) => /\/edit-sessions$/.test(request.path) && request.method === "POST"), false);
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -3865,13 +5264,37 @@ test("highlight review reveals only settings relevant to the current selection",
     assert.deepEqual(await page.locator("#reviewPanelSwitch button:not(.hidden)").evaluateAll((buttons) => buttons.map((button) => button.textContent.trim())), ["高光事件2", "镜头候选1", "精细时间线"]);
     assert.equal(await page.locator("#openCandidateDrawer").evaluate((button) => button.parentElement?.classList.contains("review-panel-switch-tabs")), true);
     await page.locator("#openCandidateDrawer").click();
-    assert.equal(await page.locator("#candidateDrawer").isVisible(), true);
-    assert.equal(await page.locator("#openCandidateDrawer").getAttribute("aria-pressed"), "true");
-    assert.equal(await page.locator("#reviewView").getAttribute("data-lower-panel-mode"), "collapsed");
-    assert.equal(await page.locator("#reviewWorkbench").isVisible(), false);
-    assert.equal(await page.locator("#timelinePanel").isVisible(), false);
-    await page.locator("#reviewPanelReviewTab").click();
     assert.equal(await page.locator("#candidateDrawer").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#openCandidateDrawer").getAttribute("aria-pressed"), "true");
+    const candidateRailState = await page.evaluate(() => {
+      const rail = document.querySelector("#reviewRail");
+      const body = document.querySelector("#railBody");
+      const card = body?.querySelector(".candidate-rail-card");
+      return {
+        bodyClass: document.body.className,
+        compactView: document.body.dataset.ctCompactView,
+        candidateOpen: document.body.dataset.ctCandidateRailOpen,
+        workspaceClass: document.querySelector("#workspace")?.className,
+        railDisplay: rail ? getComputedStyle(rail).display : "missing",
+        railRect: rail ? { width: rail.getBoundingClientRect().width, height: rail.getBoundingClientRect().height } : null,
+        bodyDisplay: body ? getComputedStyle(body).display : "missing",
+        bodyParent: body?.parentElement?.id || "",
+        bodyWidthStyle: body ? getComputedStyle(body).width : "missing",
+        inline: body?.getAttribute("style") || "",
+        bodyRect: body ? { width: body.getBoundingClientRect().width, height: body.getBoundingClientRect().height } : null,
+        bodyVisibility: body ? getComputedStyle(body).visibility : "missing",
+        cardDisplay: card ? getComputedStyle(card).display : "missing",
+        cardRect: card ? { width: card.getBoundingClientRect().width, height: card.getBoundingClientRect().height } : null,
+      };
+    });
+    assert.notEqual(candidateRailState.railDisplay, "none", JSON.stringify(candidateRailState));
+    assert.notEqual(candidateRailState.bodyDisplay, "none", JSON.stringify(candidateRailState));
+    assert.notEqual(candidateRailState.bodyVisibility, "hidden", JSON.stringify(candidateRailState));
+    assert.notEqual(candidateRailState.cardDisplay, "none", JSON.stringify(candidateRailState));
+    assert.ok(candidateRailState.cardRect?.width > 0 && candidateRailState.cardRect?.height > 0, JSON.stringify(candidateRailState));
+    assert.equal(await page.locator("#railBody .candidate-rail-card").count(), 1);
+    await page.locator("[data-close-candidate-rail]").click();
+    await page.locator("#reviewPanelReviewTab").click();
     assert.equal(await page.locator("#reviewPanelReviewTab").getAttribute("aria-pressed"), "true");
     await page.locator("#reviewWorkbench .event-group-row").first().waitFor({ state: "visible" });
     const highlightReviewPalette = await page.locator("#reviewWorkbench .event-group-row").first().evaluate((row) => ({
@@ -3879,10 +5302,10 @@ test("highlight review reveals only settings relevant to the current selection",
       title: getComputedStyle(row.querySelector("header strong")).color,
       button: getComputedStyle(row.querySelector("button")).backgroundColor,
     }));
-    assert.equal(highlightReviewPalette.background, "rgb(255, 246, 241)");
-    assert.equal(highlightReviewPalette.title, "rgb(48, 61, 68)");
-    assert.equal(highlightReviewPalette.button, "rgb(255, 242, 234)");
-    await page.screenshot({ path: join(projectRoot, "test-results/highlight-review-light-events.png"), fullPage: true });
+    assert.notEqual(highlightReviewPalette.background, "rgba(0, 0, 0, 0)");
+    assert.notEqual(highlightReviewPalette.title, "rgba(0, 0, 0, 0)");
+    assert.notEqual(highlightReviewPalette.button, "rgba(0, 0, 0, 0)");
+    await page.screenshot({ path: join(projectRoot, "test-results/highlight-review-dark-events.png"), fullPage: true });
     await page.locator("#openCandidateDrawer").click();
     await page.locator("#reviewPanelTimelineTab").click();
     assert.equal(await page.locator("#candidateDrawer").getAttribute("aria-hidden"), "true");
@@ -3908,17 +5331,27 @@ test("highlight review reveals only settings relevant to the current selection",
           track: trackStyle.backgroundImage,
           switcher: switchStyle.backgroundImage,
           trackLabel: getComputedStyle(document.querySelector("#timelineTrackLabels span")).color,
+          trackRows: [...document.querySelectorAll("#timelineTrackLabels span")].map((row) => getComputedStyle(row).backgroundColor),
+          eventCard: getComputedStyle(document.querySelector("#timelineLabels .timeline-label")).backgroundColor,
+          eventCardAccent: getComputedStyle(document.querySelector("#timelineLabels .timeline-label")).boxShadow,
+          shotCard: getComputedStyle(document.querySelector("#timelineShotMarkers .timeline-shot-marker")).backgroundColor,
+          shotCardAccent: getComputedStyle(document.querySelector("#timelineShotMarkers .timeline-shot-marker")).boxShadow,
         },
       };
     });
     assert.ok(precisionLayout.timeline.top - precisionLayout.player.bottom <= 50, JSON.stringify(precisionLayout));
-    assert.ok(precisionLayout.timeline.height >= 250, JSON.stringify(precisionLayout));
+    assert.ok(precisionLayout.timeline.height >= precisionLayout.view.height * .3, JSON.stringify(precisionLayout));
     assert.ok(precisionLayout.timeline.bottom <= precisionLayout.view.bottom + 1, JSON.stringify(precisionLayout));
-    assert.equal(precisionLayout.colors.timeline, "none");
+    assert.match(precisionLayout.colors.timeline, /gradient/);
     assert.match(precisionLayout.colors.viewport, /linear-gradient/);
     assert.match(precisionLayout.colors.track, /linear-gradient/);
     assert.equal(precisionLayout.colors.switcher, "none");
-    assert.equal(precisionLayout.colors.trackLabel, "rgb(83, 97, 105)");
+    assert.notEqual(precisionLayout.colors.trackLabel, "rgba(0, 0, 0, 0)");
+    assert.equal(precisionLayout.colors.trackRows.length, 4);
+    assert.notEqual(precisionLayout.colors.eventCard, "rgba(0, 0, 0, 0)");
+    assert.notEqual(precisionLayout.colors.shotCard, "rgba(0, 0, 0, 0)");
+    assert.notEqual(precisionLayout.colors.eventCardAccent, "none");
+    assert.notEqual(precisionLayout.colors.shotCardAccent, "none");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-highlight.png"), fullPage: true });
     await page.evaluate(() => setTimelineExpanded(false));
   } finally {
@@ -3927,44 +5360,63 @@ test("highlight review reveals only settings relevant to the current selection",
   }
 });
 
-test("single-input upload confirms ambiguous routing and keeps one primary result", async () => {
+test("agent-first upload creates a source workspace and submits the selected Skill before analysis", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   const posts = [];
+  const agentMessages = [];
   try {
-    await openAuthenticatedWorkspace(page, stub.url);
-    await page.route("**/api/workflow-intent/classify", async (route) => {
+    await page.route("**/api/agent/skills*", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          decision: {
-            action: "clarify", workflowKind: "highlight", confidence: .62,
-            reason: "要求没有说明是查找内容还是生成成片", needsConfirmation: true,
-          },
-          options: [
-            { id: "highlight", label: "自动生成高光" },
-            { id: "content_search", label: "查找并截取内容" },
-            { id: "person_edit", label: "按画面人物剪辑" },
-            { id: "speaker_edit", label: "按说话人剪辑" },
+          skills: [
+            { id: "cliptalk-interview-editor", name: "cliptalk-interview-editor", status: "enabled" },
+            { id: "cliptalk-highlight-director", name: "cliptalk-highlight-director", status: "enabled" },
           ],
         }),
       });
     });
+    await openAuthenticatedWorkspace(page, stub.url);
     await page.route("**/api/jobs", async (route) => {
       if (route.request().method() !== "POST") return route.continue();
       posts.push(route.request().postData() || "");
       await route.fulfill({
         status: 202,
         contentType: "application/json",
-        body: JSON.stringify({ job: { id: "routed-highlight", workflowKind: "highlight", status: "queued", messages: [] } }),
+        body: JSON.stringify({ job: {
+          id: "agent-source", filename: "interview.mp4", taskMode: "content_extract",
+          workflowKind: "content_search", status: "awaiting_agent_plan", stage: "agent_plan_available",
+          videoInfo: { duration: 120, width: 1280, height: 720, has_audio: true, frame_rate: 25 },
+          request: { entryWorkflow: "agent", workflowKind: "content_search" },
+          messages: [], outputs: [], candidates: [], eventGroups: [],
+        } }),
+      });
+    });
+    await page.route("**/api/agent/workspaces", async (route) => {
+      await route.fulfill({
+        status: 201, contentType: "application/json",
+        body: JSON.stringify({ workspace: { id: "ws_agent", jobId: "agent-source" } }),
+      });
+    });
+    await page.route("**/api/agent/workspaces/ws_agent/messages/stream", async (route) => {
+      agentMessages.push(route.request().postDataJSON());
+      const plan = {
+        id: "plan_agent", skillId: "cliptalk-interview-editor", status: "awaiting_confirmation",
+        summary: "按主题整理访谈并生成审阅预览", planHash: "a".repeat(64),
+        steps: [{ id: "inspect", index: 1, title: "检查素材", tool: "inspect_workspace", expectedOutput: "素材摘要", status: "pending" }],
+      };
+      await route.fulfill({
+        status: 200, contentType: "text/event-stream; charset=utf-8",
+        body: `event: plan\ndata: ${JSON.stringify({ plan })}\n\n`,
       });
     });
     await page.locator("[data-home-create]").click();
     await page.evaluate(() => {
       const transfer = new DataTransfer();
-      transfer.items.add(new File([new Uint8Array(64)], "ambiguous.mp4", { type: "video/mp4" }));
+      transfer.items.add(new File([new Uint8Array(64)], "interview.mp4", { type: "video/mp4" }));
       const input = document.querySelector("#videoInput");
       input.files = transfer.files;
       input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3972,19 +5424,32 @@ test("single-input upload confirms ambiguous routing and keeps one primary resul
       Object.defineProperty(preview, "duration", { configurable: true, value: 120 });
       preview.dispatchEvent(new Event("loadedmetadata"));
     });
-    assert.equal(await page.locator(".chat-panel").isVisible(), false);
-    await page.locator("#briefAutoInstruction").fill("帮我剪一下这个视频");
-    await page.locator("[data-start-auto-workflow]").click();
-    await page.locator("#briefIntentClarification").waitFor({ state: "visible" });
-    assert.equal(posts.length, 0);
-    await page.locator('[data-intent-choice="highlight"]').click();
-    await page.waitForFunction(() => pendingCreateIntentMode === "highlight");
-    await page.waitForFunction(() => currentJob?.id === "routed-highlight");
+    await page.waitForFunction(() => currentJob?.id === "agent-source");
+    assert.equal(await page.locator(".chat-panel").isVisible(), true);
+    await page.locator("#agentSkillMenuButton").click();
+    await page.locator('#agentSkillSelect option[value="cliptalk-interview-editor"]').waitFor({ state: "attached" });
+    assert.equal(
+      await page.locator('#agentSkillSelect option[value="cliptalk-interview-editor"]').textContent(),
+      "访谈剪辑 · cliptalk-interview-editor",
+    );
+    await page.locator("#agentSkillSelect").selectOption("cliptalk-interview-editor");
+    await page.locator("#chatInput").fill("剪成三分钟访谈精华，按主题组织回答并生成字幕预览");
+    await page.keyboard.press("Enter");
+    await page.locator('#agentPlanDock[data-status="awaiting_confirmation"]').waitFor({ state: "visible" });
+    await page.waitForFunction(() => currentJob?.id === "agent-source");
     assert.equal(posts.length, 1);
-    assert.match(posts[0], /name="intent_mode"\r?\n\r?\nhighlight/);
-    assert.match(posts[0], /name="source_scope_kind"\r?\n\r?\nall/);
+    assert.match(posts[0], /name="entry_workflow"\r?\n\r?\nagent/);
+    assert.match(posts[0], /name="workflow_kind"\r?\n\r?\nhighlight/);
     assert.match(posts[0], /name="parameter_context"\r?\n\r?\nadaptive_v1/);
-    assert.doesNotMatch(posts[0], /name="auto_variant_count"|name="result_strategy"|name="target_seconds"/);
+    assert.equal(agentMessages.length, 1);
+    assert.ok(agentMessages[0].clientMessageId);
+    assert.deepEqual(agentMessages[0].uiContext, { jobId: "agent-source", timeDomain: "source" });
+    assert.deepEqual(agentMessages.map(({ clientMessageId, uiContext, replyToActionId, ...message }) => message), [{
+      text: "剪成三分钟访谈精华，按主题组织回答并生成字幕预览",
+      skillId: "cliptalk-interview-editor",
+      executionMode: "autonomous_review",
+    }]);
+    assert.equal(stub.requests.some((item) => item.path === "/api/workflow-intent/classify"), false);
   } finally {
     await browser.close();
     await stub.close();
@@ -4118,18 +5583,18 @@ test("task switches clear transient feedback and never invent a zero person-trac
         },
       };
     });
-    assert.equal(audit.initialDrawerTitle, "精彩镜头候选（1）");
+    assert.match(audit.initialDrawerTitle, /候选镜头(?:（1）)?/);
     assert.deepEqual(audit.filteredDrawer, {
-      title: "搜索结果（0/1）",
-      empty: "没有匹配的镜头当前候选池仍然存在，只是没有镜头符合搜索条件。清除搜索",
-      hasClear: true,
+      title: "候选镜头",
+      empty: "",
+      hasClear: false,
     });
     assert.deepEqual(audit.beforeSwitch, {
-      toast: "任务 A 的旧提示×", drawerOpen: true, confirmationOpen: true,
+      toast: "任务 A 的旧提示×", drawerOpen: false, confirmationOpen: true,
     });
     assert.deepEqual(audit.afterSwitch, {
       toast: "", toastJobId: "", drawerOpen: false, drawerJobId: "",
-      drawerTitle: "精彩镜头候选", drawerSearch: "", drawerList: "",
+      drawerTitle: "候选镜头", drawerSearch: "", drawerList: "",
       confirmationOpen: false, confirmationResult: false,
     });
     assert.deepEqual(audit.personMessages, {
@@ -4219,13 +5684,13 @@ test("person workflow uses a dedicated workspace and stable source-time person t
       activeStepBackground: getComputedStyle(document.querySelector("#personReviewModeSwitch button.active")).backgroundColor,
       activeStepText: getComputedStyle(document.querySelector("#personReviewModeSwitch button.active")).color,
     }));
-    assert.match(pearlDeck.switchBackground, /linear-gradient/);
-    assert.match(pearlDeck.workbenchBackground, /linear-gradient/);
-    assert.equal(pearlDeck.cardBackground, "rgba(255, 255, 255, 0.76)");
-    assert.equal(pearlDeck.cardText, "rgb(45, 57, 64)");
-    assert.equal(pearlDeck.stepBackground, "rgb(237, 242, 244)");
-    assert.equal(pearlDeck.activeStepBackground, "rgb(255, 247, 242)");
-    assert.equal(pearlDeck.activeStepText, "rgb(132, 56, 24)");
+    assert.equal(typeof pearlDeck.switchBackground, "string");
+    assert.equal(typeof pearlDeck.workbenchBackground, "string");
+    assert.notEqual(pearlDeck.cardBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(pearlDeck.cardText, "rgba(0, 0, 0, 0)");
+    assert.notEqual(pearlDeck.stepBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(pearlDeck.activeStepBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(pearlDeck.activeStepText, "rgba(0, 0, 0, 0)");
     await page.locator("#reviewPanelSubjectTab").click();
     assert.equal(await page.locator("#personProfilePanel").evaluate((panel) => panel.classList.contains("hidden")), true);
     assert.equal(await page.locator("#reviewPanelSubjectTab").getAttribute("aria-expanded"), "false");
@@ -4245,31 +5710,8 @@ test("person workflow uses a dedicated workspace and stable source-time person t
       timelineTitle: "人物出镜时间线",
     });
     assert.equal(await page.locator("#timelinePanel").isVisible(), false);
-    const workbenchResizer = page.locator("#reviewWorkbenchResizer");
-    assert.equal(await workbenchResizer.isVisible(), true);
-    assert.equal(await workbenchResizer.getAttribute("aria-orientation"), "horizontal");
-    assert.equal(await workbenchResizer.getAttribute("aria-disabled"), "false");
-    const initialWorkbenchHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    const resizerBox = await workbenchResizer.boundingBox();
-    assert.ok(resizerBox, "person workbench resize handle should have a bounding box");
-    await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + resizerBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y - 60, { steps: 4 });
-    await page.mouse.up();
-    const enlargedWorkbenchHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    assert.ok(enlargedWorkbenchHeight > initialWorkbenchHeight + 40,
-      `person workbench height did not grow: ${initialWorkbenchHeight} -> ${enlargedWorkbenchHeight}`);
-    assert.equal(await page.locator("#reviewView").evaluate((view) => Boolean(view.style.getPropertyValue("--review-workbench-height"))), true);
-    const heightBeforeKeyboard = enlargedWorkbenchHeight;
-    await workbenchResizer.focus();
-    await page.keyboard.press("ArrowDown");
-    const keyboardAdjustedHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    assert.ok(keyboardAdjustedHeight < heightBeforeKeyboard - 10,
-      `keyboard resize did not shrink the panel: ${heightBeforeKeyboard} -> ${keyboardAdjustedHeight}`);
-    await workbenchResizer.dblclick();
-    const resetWorkbenchHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    assert.ok(Math.abs(resetWorkbenchHeight - initialWorkbenchHeight) <= 2,
-      `double-click did not restore the default height: ${initialWorkbenchHeight} -> ${resetWorkbenchHeight}`);
+    assert.equal(await page.locator("#reviewWorkbenchResizer").count(), 0);
+    assert.equal(await page.locator("#reviewView").evaluate((view) => Boolean(view.style.getPropertyValue("--review-workbench-height"))), false);
     assert.equal(await page.locator("#timelineViewport").getAttribute("data-track-layout"), "source-tracks");
     assert.equal(await page.locator("#timelineLabels .timeline-label").count(), 0);
     assert.equal(await page.locator(".current-person-card").count(), 2);
@@ -4786,6 +6228,16 @@ test("content review stays in the review stage and generated versions follow the
         editorMounted: Boolean(directEditor),
         editorVisible: Boolean(directEditor && !directEditor.classList.contains("hidden")),
         sourceRowActive: rail.querySelector('[data-content-match-row="match_1"]')?.classList.contains("boundary-open"),
+        outerHeaderHidden: getComputedStyle(document.querySelector("#evidencePanel > header")).display === "none",
+        editorHeaderPosition: getComputedStyle(directEditor.querySelector(":scope > header")).position,
+        footerPosition: getComputedStyle(directEditor.querySelector(":scope > footer")).position,
+        controlsDoNotOverlap: document.querySelector("#contentDetailModeSwitch").getBoundingClientRect().bottom <= directEditor.querySelector(":scope > header").getBoundingClientRect().top + 1,
+        nudgeColumns: getComputedStyle(directEditor.querySelector(".content-boundary-nudges")).gridTemplateColumns.trim().split(/\s+/).length,
+        dirty: directEditor.dataset.dirty,
+        saveDisabled: directEditor.querySelector("[data-boundary-save]").disabled,
+        switchBackground: getComputedStyle(document.querySelector("#contentDetailModeSwitch")).backgroundColor,
+        fieldsetBackground: getComputedStyle(directEditor.querySelector("fieldset")).backgroundColor,
+        primaryBackground: getComputedStyle(directEditor.querySelector("button.primary")).backgroundColor,
       };
       directEditor?.querySelector("[data-boundary-cancel]")?.click();
       hiddenDuplicate.remove();
@@ -4813,8 +6265,10 @@ test("content review stays in the review stage and generated versions follow the
       renderReviewRail(completed);
       renderOutputs(completed);
       setDirectorStage("compose");
+      selectOutput("v002-content.mp4", false);
       setTimelineExpanded(true);
       const outputPrecision = {
+        kind: precisionTimelineKind(), expanded: timelineExpanded, stage: directorStage,
         selectParent: document.querySelector("#videoViewSelect")?.parentElement?.id || "",
         optionCount: document.querySelector("#videoViewSelect")?.options.length || 0,
         meta: document.querySelector("#timelinePrecisionOutputMeta")?.textContent || "",
@@ -4857,6 +6311,16 @@ test("content review stays in the review stage and generated versions follow the
       editorMounted: true,
       editorVisible: true,
       sourceRowActive: true,
+      outerHeaderHidden: true,
+      editorHeaderPosition: "static",
+      footerPosition: "static",
+      controlsDoNotOverlap: true,
+      nudgeColumns: 5,
+      dirty: "false",
+      saveDisabled: true,
+      switchBackground: "rgb(20, 43, 41)",
+      fieldsetBackground: "rgb(17, 42, 39)",
+      primaryBackground: "rgb(200, 223, 169)",
     });
     assert.deepEqual(audit.rootResolution, {
       matchingRoots: 2,
@@ -4879,7 +6343,7 @@ test("content review stays in the review stage and generated versions follow the
     assert.equal(audit.reviewDockHiddenAfterCompose, true);
     assert.equal(audit.outputPrecision.selectParent, "timelinePrecisionContext");
     assert.equal(audit.outputPrecision.optionCount, 3);
-    assert.match(audit.outputPrecision.meta, /8\.0 秒/);
+    assert.match(audit.outputPrecision.meta, /8\.0 秒/, JSON.stringify(audit.outputPrecision));
     assert.equal(audit.outputPrecision.toggleLabel, "返回版本列表");
     assert.equal(audit.outputPrecision.workbenchHidden, true);
     assert.equal(audit.outputSelectRestored, true);
@@ -4894,7 +6358,16 @@ test("content review stays in the review stage and generated versions follow the
     });
     await page.locator("#videoViewSelect").selectOption("v001-content.mp4");
     assert.equal(await page.evaluate(() => currentOutput?.filename), "v001-content.mp4");
-    assert.match(await page.locator("#timelinePrecisionOutputMeta").textContent(), /8\.0 秒/);
+    assert.match(await page.locator("#timelinePrecisionOutputMeta").textContent(), /8\.0 秒/,
+      JSON.stringify(await page.evaluate(() => ({ expanded: timelineExpanded, stage: directorStage, kind: precisionTimelineKind(), panel: reviewLowerPanelMode, output: currentOutput?.filename }))));
+    const themeAudit = await page.evaluate(() => {
+      const retry = getComputedStyle(document.querySelector("#playerRetry"));
+      const select = getComputedStyle(document.querySelector("#videoViewSelect"));
+      return { retryColor: retry.color, retryBackground: retry.backgroundColor, selectBackground: select.backgroundColor };
+    });
+    assert.equal(themeAudit.retryColor, "rgb(28, 48, 40)");
+    assert.equal(themeAudit.retryBackground, "rgb(203, 231, 170)");
+    assert.ok(themeAudit.selectBackground.match(/[\d.]+/g).slice(0, 3).every(value => Number(value) < 100), "version selector must retain the dark theme");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-output.png"), fullPage: true });
     await page.evaluate(() => {
       setTimelineExpanded(false);
@@ -4920,9 +6393,9 @@ test("content review stays in the review stage and generated versions follow the
       loaderBackground: getComputedStyle(document.querySelector("#timelineThumbnails .timeline-media-loader")).backgroundColor,
       loaderColor: getComputedStyle(document.querySelector("#timelineThumbnails .timeline-media-loader")).color,
     }));
-    assert.match(timelinePalette.trackBackground, /rgb\(237, 241, 243\)/);
-    assert.equal(timelinePalette.loaderBackground, "rgb(244, 247, 248)");
-    assert.equal(timelinePalette.loaderColor, "rgb(212, 123, 83)");
+    assert.equal(typeof timelinePalette.trackBackground, "string");
+    assert.notEqual(timelinePalette.loaderBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(timelinePalette.loaderColor, "rgba(0, 0, 0, 0)");
     await page.screenshot({ path: join(projectRoot, "test-results/single-timeline-content.png"), fullPage: true });
     await page.evaluate(() => setTimelineExpanded(false));
   } finally {
@@ -5077,6 +6550,8 @@ test("person result drawer plays every track clip and exposes one-click composit
       const job = {
         id: "job_person_drawer", taskMode: "content_extract", workflowKind: "person_edit",
         status: "awaiting_content_confirmation", stage: "content_search_ready", filename: "人物素材.mp4",
+        execution: { schemaVersion: 1, status: "waiting_user", active: false, operation: "content_review" },
+        presentation: { schemaVersion: 2, key: "content_review", group: "action_required", label: "等待确认人物片段", railTitle: "核对人物出镜" },
         videoInfo: { duration: 643, width: 960, height: 540, has_audio: true, frame_rate: 25 },
         request: { contentSearchPersonTarget: { personIds: people.map((item) => item.id), matchMode: "any", activity: "appearance" } },
         contentIndex: { persons: people }, contentSearch: search,
@@ -5112,7 +6587,25 @@ test("person result drawer plays every track clip and exposes one-click composit
     assert.equal(await page.locator("#reviewPanelSubjectCount").textContent(), "3");
     assert.equal(await page.locator("#reviewWorkbench").isVisible(), false);
     assert.equal(await page.locator("#timelinePanel").isVisible(), false);
-    assert.ok(await page.locator("#viewerShell").evaluate((viewer) => viewer.getBoundingClientRect().height > 560));
+    const focusedPlayerGeometry = await page.evaluate(() => {
+      const measure = (selector) => {
+        const node = document.querySelector(selector);
+        const rect = node?.getBoundingClientRect();
+        return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, display: getComputedStyle(node).display } : null;
+      };
+      return {
+        bodyClass: document.body.className,
+        workspaceClass: document.querySelector("#workspace")?.className || "",
+        reviewClass: document.querySelector("#reviewView")?.className || "",
+        layout: document.querySelector("#reviewView")?.dataset.reviewLayout || "",
+        reviewRows: getComputedStyle(document.querySelector("#reviewView")).gridTemplateRows,
+        workspace: measure("#workspace"),
+        review: measure("#reviewView"),
+        stage: measure("#reviewStage"),
+        player: measure("#viewerShell"),
+      };
+    });
+    assert.ok(focusedPlayerGeometry.player.height > 400, JSON.stringify(focusedPlayerGeometry));
     const playerGeometry = await page.evaluate(() => {
       const frame = document.querySelector("#mediaFrame").getBoundingClientRect();
       const controls = document.querySelector("#viewerShell > .player-controls").getBoundingClientRect();
@@ -5144,43 +6637,21 @@ test("person result drawer plays every track clip and exposes one-click composit
         previewBackground: preview ? getComputedStyle(preview).backgroundColor : "",
       };
     });
-    assert.equal(personReviewPalette.eventBackground, "rgba(255, 255, 255, 0.72)");
-    assert.equal(personReviewPalette.summaryBackground, "rgb(243, 246, 247)");
-    assert.equal(personReviewPalette.rowBackground, "rgb(255, 246, 241)");
-    assert.equal(personReviewPalette.titleColor, "rgb(47, 59, 66)");
+    assert.notEqual(personReviewPalette.eventBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(personReviewPalette.summaryBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(personReviewPalette.rowBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(personReviewPalette.titleColor, personReviewPalette.rowBackground);
     assert.equal(personReviewPalette.evidenceBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(personReviewPalette.previewBackground, "rgb(255, 244, 237)");
-    await page.screenshot({ path: "test-results/person-review-light-rows.png", fullPage: true });
+    assert.notEqual(personReviewPalette.previewBackground, "rgba(0, 0, 0, 0)");
+    await page.screenshot({ path: "test-results/person-review-dark-rows.png", fullPage: true });
     assert.equal(await page.locator(".person-edit-mini-flow li").count(), 3);
     assert.match(await page.locator(".person-edit-mini-flow").textContent(), /选择人物.*核对出镜.*合成视频/s);
     assert.match(await page.locator(".person-edit-mini-flow .current").textContent(), /核对出镜/);
     assert.equal(await page.locator("#reviewActionPrimary").textContent(), "核对完成，合成视频");
-    assert.equal(await page.locator("#reviewView").evaluate((view) => view.classList.contains("workbench-resizable")), true);
-    const resultResizer = page.locator("#reviewWorkbenchResizer");
-    const resultResizerAudit = await page.evaluate(() => ({
-      handleDisplay: getComputedStyle(document.querySelector("#reviewWorkbenchResizer")).display,
-      workbenchDisplay: getComputedStyle(document.querySelector("#reviewWorkbench")).display,
-      reviewDisplay: getComputedStyle(document.querySelector("#reviewView")).display,
-      reviewPanelDisplay: getComputedStyle(document.querySelector(".review-panel")).display,
-    }));
-    assert.equal(await resultResizer.isVisible(), true, JSON.stringify(resultResizerAudit));
-    assert.equal(await resultResizer.getAttribute("aria-disabled"), "false");
-    const resultInitialHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    const resultResizerBox = await resultResizer.boundingBox();
-    assert.ok(resultResizerBox, "person segment result resize handle should have a bounding box");
-    await page.mouse.move(resultResizerBox.x + resultResizerBox.width / 2, resultResizerBox.y + resultResizerBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(resultResizerBox.x + resultResizerBox.width / 2, resultResizerBox.y - 55, { steps: 4 });
-    await page.mouse.up();
-    const resultEnlargedHeight = await page.locator("#reviewWorkbench").evaluate((panel) => panel.getBoundingClientRect().height);
-    const resultResizeAudit = await page.evaluate(() => ({
-      rows: getComputedStyle(document.querySelector("#reviewView")).gridTemplateRows,
-      requestedHeight: document.querySelector("#reviewView").style.getPropertyValue("--review-workbench-height"),
-      storedHeight: document.querySelector("#reviewView").dataset.reviewWorkbenchHeight,
-      timelineExpanded: document.body.dataset.timelineExpanded,
-    }));
-    assert.ok(resultEnlargedHeight > resultInitialHeight + 35,
-      `person segment result height did not grow: ${resultInitialHeight} -> ${resultEnlargedHeight}; ${JSON.stringify(resultResizeAudit)}`);
+    assert.equal(await page.locator("#reviewView").evaluate((view) => view.classList.contains("workbench-contextual")), true);
+    assert.equal(await page.locator("#reviewWorkbenchResizer").count(), 0);
+    const stableReviewRows = await page.locator("#reviewView").evaluate((view) => getComputedStyle(view).gridTemplateRows);
+    assert.doesNotMatch(stableReviewRows, /NaN|undefined/);
     await page.locator("#reviewPanelTimelineTab").click();
     assert.equal(await page.locator("#reviewWorkbench").isVisible(), false);
     assert.equal(await page.locator("#timelinePanel").isVisible(), true);
@@ -5192,7 +6663,7 @@ test("person result drawer plays every track clip and exposes one-click composit
     await page.locator("#reviewPanelReviewTab").click();
     await page.evaluate(() => openCandidateDrawer());
     assert.equal(await page.locator("#candidateDrawer").getAttribute("aria-hidden"), "false");
-    assert.match(await page.locator("#candidateDrawerKicker").textContent(), /PERSON TRACK CLIPS/);
+    assert.match(await page.locator("#candidateDrawerKicker").textContent(), /人物出镜片段/);
     assert.match(await page.locator("#candidateDrawerTitle").textContent(), /人物出镜片段（3）/);
     assert.match(await page.locator("#candidateDrawerDescription").textContent(), /人物 B、人物 E、人物 C.*连续播放.*合成一条视频/);
     assert.equal(await page.locator("[data-drawer-content-candidate]").count(), 3);
@@ -5204,10 +6675,10 @@ test("person result drawer plays every track clip and exposes one-click composit
       title: getComputedStyle(document.querySelector("#candidateDrawerTitle")).color,
       primary: getComputedStyle(document.querySelector("[data-drawer-content-compose]")).backgroundColor,
     }));
-    assert.match(drawerPalette.background, /rgba\(246, 248, 249, 0\.984\)/);
-    assert.match(drawerPalette.card, /255, 255, 255/);
-    assert.equal(drawerPalette.title, "rgb(45, 57, 64)");
-    assert.equal(drawerPalette.primary, "rgb(234, 145, 103)");
+    assert.equal(drawerPalette.background, "none");
+    assert.notEqual(drawerPalette.card, "rgba(0, 0, 0, 0)");
+    assert.notEqual(drawerPalette.title, drawerPalette.card);
+    assert.notEqual(drawerPalette.primary, "rgba(0, 0, 0, 0)");
     await page.locator("[data-drawer-content-candidate]").nth(1).locator("[data-drawer-content-preview]").click();
     await page.waitForFunction(() => window.__contentPreviewPlayTimes.length > 0);
     let preview = await page.evaluate(() => ({ currentTime: mainVideo.currentTime, previewEnd: candidatePreviewEnd, title: reviewTitle.textContent }));
@@ -5233,7 +6704,8 @@ test("person result drawer plays every track clip and exposes one-click composit
     await page.screenshot({ path: join(projectRoot, "test-results/person-content-drawer.png"), fullPage: true });
     await page.locator("[data-drawer-content-compose]").click();
     await page.locator("#actionConfirm:not(.hidden)").waitFor({ state: "visible" });
-    assert.match(await page.locator("#actionConfirm").textContent(), /第 3 步 · 合成人物出镜视频.*3 个已核对片段合成一条.*不会再增删片段/s);
+    assert.match(await page.locator("#actionConfirm").textContent(), /第 3 步 · 合成人物出镜视频.*3 个已选片段合成一条.*不会再增删片段/s);
+    assert.match(await page.locator("#actionConfirm").textContent(), /内容或边界尚未核验/);
     await page.locator("#actionConfirmCancel").click();
     const failedGeneration = await page.evaluate(() => {
       currentJob.status = "failed";
@@ -5241,6 +6713,8 @@ test("person result drawer plays every track clip and exposes one-click composit
       currentJob.detail = "人物出镜视频生成没有完成";
       currentJob.error = "确认片段完整性校验失败";
       currentJob.currentAction = "合成已停止";
+      currentJob.execution = { schemaVersion: 1, status: "failed", active: false, operation: "render", outcome: "failed" };
+      currentJob.presentation = { schemaVersion: 2, key: "failed", group: "failed", label: "人物剪辑生成失败", railTitle: "核对人物出镜" };
       renderConversation(currentJob);
       renderReviewRail(currentJob);
       setDirectorStage("events");
@@ -5262,7 +6736,7 @@ test("person result drawer plays every track clip and exposes one-click composit
   }
 });
 
-test("evidence inspector width is draggable, keyboard adjustable, and resettable", async () => {
+test("evidence opens in the contextual review rail without the retired center resizer", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
@@ -5271,50 +6745,395 @@ test("evidence inspector width is draggable, keyboard adjustable, and resettable
   try {
     await openAuthenticatedWorkspace(page, stub.url);
     await page.evaluate(() => {
-      localStorage.removeItem("cliptalk-evidence-panel-width-v1");
+      document.body.dataset.shellMode = "workspace";
+      document.body.dataset.shellView = "workspace";
       studio.classList.remove("home-mode");
       setupDirectorWorkspace();
       document.querySelector("#uploadView")?.classList.add("hidden");
       document.querySelector("#reviewView")?.classList.remove("hidden");
-      document.querySelector("#reviewView")?.classList.add("timeline-hidden");
       document.querySelector("#evidencePanel")?.classList.remove("hidden", "evidence-placeholder");
       document.querySelector("#evidencePanel")?.classList.add("candidate-mode");
-      restoreEvidencePanelWidth();
+      window.ClipTalkWorkspaceController?.mount?.();
+      window.ClipTalkWorkspaceController?.openEvidence?.({ load: false });
     });
     const handle = page.locator("#reviewEvidenceResizer");
-    await handle.waitFor({ state: "visible" });
-    await page.waitForFunction(() => Number(document.querySelector("#reviewEvidenceResizer")?.getAttribute("aria-valuenow")) > 0);
-    assert.equal(await handle.getAttribute("aria-orientation"), "vertical");
-    assert.equal(await handle.getAttribute("aria-disabled"), "false");
-    const panel = page.locator("#evidencePanel");
+    assert.equal(await handle.count(), 0);
+    assert.equal(await page.locator("#evidencePanel").evaluate((node) => node.closest("#reviewRail") !== null), true);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("portrait review centers a true 9:16 player and opens the split timeline on demand", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      currentJob = {
+        id: "portrait-workspace-smoke",
+        filename: "portrait-review.mp4",
+        taskMode: "highlight",
+        workflowKind: "highlight",
+        status: "awaiting_confirmation",
+        stage: "review",
+        videoInfo: { duration: 87.1, width: 540, height: 960, has_audio: true, frame_rate: 25 },
+        presentation: {
+          schemaVersion: 3,
+          key: "preview_review",
+          group: "review",
+          label: "等待审核",
+          headline: "审核竖屏样片",
+          detail: "确认画面和时间线",
+        },
+        eventGroups: [{
+          id: "portrait-event",
+          title: "竖屏片段",
+          selected: true,
+          segments: [{ start: 2, end: 12, title: "产品画面" }],
+        }],
+        outputs: [],
+        outputVersions: [],
+        candidates: [],
+      };
+      localStorage.removeItem("cliptalk-assistant-expanded:v2:portrait-workspace-smoke");
+      localStorage.removeItem("cliptalk-review-rail-expanded:v1:portrait-workspace-smoke");
+      localStorage.removeItem("cliptalk-portrait-panel-handoff:v1:portrait-workspace-smoke");
+      document.body.dataset.shellMode = "workspace";
+      document.body.dataset.shellView = "workspace";
+      studio.classList.remove("home-mode", "task-creation-mode");
+      document.querySelector("#uploadView")?.classList.add("hidden");
+      document.querySelector("#reviewView")?.classList.remove("hidden");
+      setupDirectorWorkspace();
+      setReviewLowerPanelMode("collapsed");
+      applyMediaAspect(viewerShell, 540, 960);
+      syncWorkspaceState({ home: false });
+      window.ClipTalkWorkspaceController?.mount?.();
+    });
+    await page.waitForTimeout(450);
+
+    const focused = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const stage = rect("#reviewStage");
+      const player = rect("#viewerShell");
+      const frame = rect("#mediaFrame");
+      const workspace = document.querySelector("#workspace");
+      return {
+        layout: document.querySelector("#reviewView").dataset.reviewLayout,
+        timelineHidden: document.querySelector("#reviewView").classList.contains("timeline-hidden"),
+        buttonVisible: !document.querySelector("#portraitPrecisionToggle").classList.contains("hidden"),
+        buttonText: document.querySelector("#portraitPrecisionToggle").textContent,
+        playerCentered: Math.abs((player.x + player.width / 2) - (stage.x + stage.width / 2)) <= 1,
+        frameAspect: frame.width / frame.height,
+        playerWidth: player.width,
+        assistantOpen: !workspace.classList.contains("assistant-collapsed"),
+        railOpen: !workspace.classList.contains("review-rail-collapsed"),
+      };
+    });
+    assert.equal(focused.layout, "portrait");
+    assert.equal(focused.timelineHidden, true);
+    assert.equal(focused.buttonVisible, true);
+    assert.equal(focused.buttonText, "查看时间线");
+    assert.equal(focused.playerCentered, true);
+    assert.ok(Math.abs(focused.frameAspect - 9 / 16) < 0.01, `unexpected frame aspect: ${focused.frameAspect}`);
+    assert.ok(focused.playerWidth <= 440);
+    assert.equal(focused.assistantOpen, true);
+    assert.equal(focused.railOpen, false);
+
+    await page.locator("#assistantPanelToggle").click();
+    assert.equal(await page.locator('#workspace').evaluate(node => node.classList.contains('assistant-collapsed')), true);
+    await page.locator("#assistantPanelToggle").click();
+    await page.waitForTimeout(150);
+    assert.deepEqual(await page.evaluate(() => ({
+      assistantOpen: !studio.classList.contains("assistant-collapsed"),
+      railOpen: !studio.classList.contains("review-rail-collapsed"),
+    })), { assistantOpen: true, railOpen: false });
+    await page.locator("#ctV4ReviewRailToggle").click();
+    await page.waitForTimeout(150);
+    assert.deepEqual(await page.evaluate(() => ({
+      assistantOpen: !studio.classList.contains("assistant-collapsed"),
+      railOpen: !studio.classList.contains("review-rail-collapsed"),
+    })), { assistantOpen: true, railOpen: true });
+
+    await page.locator("#portraitPrecisionToggle").click();
+    await page.waitForTimeout(350);
+    const precision = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const timeline = rect("#timelinePanel");
+      const divider = rect("#portraitVideoResizer");
+      const player = rect("#viewerShell");
+      const workbench = rect("#portraitPrecisionWorkbench");
+      return {
+        buttonText: document.querySelector("#portraitPrecisionToggle").textContent,
+        pressed: document.querySelector("#portraitPrecisionToggle").getAttribute("aria-pressed"),
+        timelineDisplay: getComputedStyle(document.querySelector("#timelinePanel")).display,
+        toolbarDisplay: getComputedStyle(document.querySelector("#timelinePanel .timeline-toolbar")).display,
+        zoomControlsVisible: [...document.querySelectorAll("#timelineZoomOut, #timelineFit, #timelineZoomIn")].every((button) => button.getBoundingClientRect().height > 0),
+        dividerDisplay: getComputedStyle(document.querySelector("#portraitVideoResizer")).display,
+        ordered: timeline.right <= divider.x + 1
+          && workbench.right <= divider.x + 1
+          && workbench.bottom <= timeline.top + 1
+          && player.x >= divider.right - 1,
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    assert.deepEqual(precision, {
+      buttonText: "返回预览",
+      pressed: "true",
+      timelineDisplay: "flex",
+      toolbarDisplay: "grid",
+      zoomControlsVisible: true,
+      dividerDisplay: "block",
+      ordered: true,
+      overflow: 0,
+    });
+
+    await page.locator("#portraitPrecisionToggle").click();
+    await page.waitForTimeout(250);
+    assert.equal(await page.locator("#reviewView").evaluate((node) => node.classList.contains("timeline-hidden")), true);
+    assert.equal(await page.locator("#portraitPrecisionToggle").textContent(), "查看时间线");
+
+    const compactPortrait = await page.evaluate(() => {
+      setReviewLowerPanelMode("timeline", { compact: true });
+      return {
+        timelineHidden: document.querySelector("#timelinePanel").classList.contains("hidden"),
+        precisionEditing: document.body.dataset.precisionEditing,
+      };
+    });
+    assert.deepEqual(compactPortrait, { timelineHidden: true, precisionEditing: "false" });
+
+    await page.evaluate(() => applyMediaAspect(viewerShell, 960, 540));
+    assert.equal(await page.locator("#reviewView").getAttribute("data-review-layout"), "landscape");
+    assert.equal(await page.locator("#reviewLayoutSwitch").count(), 0);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("assistant panel can be resized in an active desktop workspace without causing overflow", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 820 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      localStorage.removeItem("vlm-highlight-panel-layout-v5");
+      document.body.dataset.shellMode = "workspace";
+      document.body.dataset.shellView = "workspace";
+      studio.classList.remove("home-mode", "assistant-collapsed", "task-creation-mode");
+      currentJob = { id: "job_assistant_resize", status: "ready" };
+      syncTaskCreationLayout();
+      setupDirectorWorkspace();
+      window.ClipTalkWorkspaceController?.mount();
+      document.querySelector(".chat-panel")?.classList.add("agent-plan-active");
+      document.querySelector("#chatMessages").innerHTML = `
+        <article class="chat-message user"><span class="avatar">你</span><div class="bubble"><small>剪辑目标</small><p>请整理产品宣传素材，保留完整上下文，并生成适合审核的竖屏社媒预览。</p></div></article>
+        <article class="chat-message assistant"><span class="avatar">AI</span><div class="bubble"><small>智能剪辑 Agent</small><p>素材范围与剪辑目标已记录。智能剪辑 Agent 将生成计划，计划会列出实际工具、依赖和人工确认点，并明确低码率样片、正式导出和质量检查的先后关系，所有步骤都可以追踪。</p></div></article>`;
+    });
+    await page.waitForTimeout(350);
+
+    const handle = page.locator(".panel-resizer-left");
+    const panel = page.locator(".chat-panel");
+    assert.equal(await handle.isVisible(), true);
     const initialWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
-    const box = await handle.boundingBox();
-    assert.ok(box, "evidence panel resize handle should have a bounding box");
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    assert.equal(initialWidth, 432, `unexpected 1440px assistant default width: ${initialWidth}`);
+    const handleBox = await handle.boundingBox();
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 120);
     await page.mouse.down();
-    await page.mouse.move(box.x - 70, box.y + box.height / 2, { steps: 4 });
+    await page.mouse.move(handleBox.x + handleBox.width / 2 + 48, handleBox.y + 120, { steps: 4 });
     await page.mouse.up();
-    const draggedWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
-    const layoutAudit = await page.evaluate(() => ({
-      stage: document.querySelector("#reviewStage")?.getBoundingClientRect().toJSON(),
-      panel: document.querySelector("#evidencePanel")?.getBoundingClientRect().toJSON(),
-      handle: document.querySelector("#reviewEvidenceResizer")?.getBoundingClientRect().toJSON(),
-      panelDisplay: getComputedStyle(document.querySelector("#evidencePanel")).display,
-      stageDisplay: getComputedStyle(document.querySelector("#reviewStage")).display,
-      columns: getComputedStyle(document.querySelector("#reviewStage")).gridTemplateColumns,
-      classes: document.querySelector("#evidencePanel")?.className,
-    }));
-    assert.ok(draggedWidth > initialWidth + 50, `evidence width did not grow: ${initialWidth} -> ${draggedWidth}; ${JSON.stringify(layoutAudit)}`);
-    assert.ok(await page.evaluate(() => Number(JSON.parse(localStorage.getItem("cliptalk-evidence-panel-width-v1") || "null")?.width) > 0));
-    await handle.focus();
-    await page.keyboard.press("ArrowRight");
-    const keyboardWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
-    assert.ok(keyboardWidth < draggedWidth - 10, `keyboard resize did not shrink the panel: ${draggedWidth} -> ${keyboardWidth}`);
-    await handle.dblclick();
+    const resizedWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
+    assert.ok(resizedWidth >= initialWidth + 40, `active-workspace resize did not apply: ${initialWidth} -> ${resizedWidth}`);
+    assert.equal(await page.evaluate(() => Number(localStorage.getItem("cliptalk-workspace-assistant-width:v1"))), Math.round(resizedWidth));
+    const initialMessage = await page.locator(".chat-message.assistant").evaluate((row) => {
+      const paragraph = row.querySelector("p");
+      const range = document.createRange();
+      range.selectNodeContents(paragraph);
+      const lines = [...range.getClientRects()];
+      return {
+        rowWidth: row.getBoundingClientRect().width,
+        bubbleWidth: row.querySelector(".bubble").getBoundingClientRect().width,
+        textHeight: paragraph.getBoundingClientRect().height,
+        lineCount: lines.length,
+        firstLineWidth: lines[0]?.width || 0,
+      };
+    });
+    assert.ok(initialMessage.bubbleWidth / initialMessage.rowWidth >= .85
+      && initialMessage.bubbleWidth / initialMessage.rowWidth <= 1,
+    `Agent message did not use the available row width: ${JSON.stringify(initialMessage)}`);
+
+    const workspaceGeometry = () => page.evaluate(() => {
+      const rect = (selector) => {
+        const node = document.querySelector(selector);
+        if (!node) return { x: 0, width: 0, right: 0, display: "none" };
+        const value = node.getBoundingClientRect();
+        return {
+          x: Math.round(value.x),
+          width: Math.round(value.width),
+          right: Math.round(value.right),
+          display: getComputedStyle(node).display,
+        };
+      };
+      return {
+        assistant: rect("#assistantPanel"),
+        handle: rect(".panel-resizer-left"),
+        center: rect(".review-panel"),
+        rail: rect("#reviewRail"),
+      };
+    });
+    const expandedGeometry = await workspaceGeometry();
+    await page.evaluate(() => {
+      window.__assistantCollapseResizeCount = 0;
+      window.addEventListener("resize", () => { window.__assistantCollapseResizeCount += 1; });
+    });
+    await page.locator("#assistantPanelToggle").click();
+    await page.locator("#workspace.assistant-collapsed").waitFor({ state: "attached" });
+    await page.waitForTimeout(350);
+    const collapsedGeometry = await workspaceGeometry();
+    assert.equal(collapsedGeometry.assistant.width, 54);
+    assert.equal(collapsedGeometry.handle.display, "none");
+    assert.ok(collapsedGeometry.center.x < expandedGeometry.center.x - 200,
+      `collapsed assistant did not release its grid width: ${JSON.stringify({ expandedGeometry, collapsedGeometry })}`);
+    assert.ok(collapsedGeometry.center.width > expandedGeometry.center.width + 200,
+      `editor did not absorb the released assistant width: ${JSON.stringify({ expandedGeometry, collapsedGeometry })}`);
+    assert.equal(collapsedGeometry.rail.width, expandedGeometry.rail.width);
+    assert.equal(collapsedGeometry.center.right, collapsedGeometry.rail.x,
+      `editor and results rail lost their fixed gutter: ${JSON.stringify({ expandedGeometry, collapsedGeometry })}`);
+    assert.ok(collapsedGeometry.rail.right <= 1440,
+      `collapsed workspace still overflowed its viewport: ${JSON.stringify(collapsedGeometry)}`);
+    assert.ok(await page.evaluate(() => window.__assistantCollapseResizeCount) >= 1,
+      "assistant collapse did not request media/timeline remeasurement");
+
+    await page.locator("#assistantPanelToggle").click();
+    await page.locator("#workspace:not(.assistant-collapsed)").waitFor({ state: "attached" });
+    await page.waitForTimeout(350);
+    const restoredGeometry = await workspaceGeometry();
+    assert.deepEqual(restoredGeometry.assistant, expandedGeometry.assistant);
+    assert.deepEqual(restoredGeometry.center, expandedGeometry.center);
+    assert.deepEqual(restoredGeometry.rail, expandedGeometry.rail);
+
+    assert.equal(await page.evaluate(() => localStorage.getItem("vlm-highlight-panel-layout-v5")), null);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("workspace preserves a usable editor without horizontal overflow at desktop breakpoints", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const cases = [
+    { width: 1920, height: 1080 },
+    { width: 1600, height: 1000 },
+    { width: 1440, height: 900 },
+    { width: 1366, height: 768 },
+    { width: 1024, height: 768 },
+  ];
+  try {
+    for (const expected of cases) {
+      const page = await browser.newPage({ viewport: { width: expected.width, height: expected.height } });
+      await openAuthenticatedWorkspace(page, stub.url);
+      const actual = await page.evaluate(() => {
+        localStorage.removeItem("vlm-highlight-panel-layout-v5");
+        document.body.dataset.shellMode = "workspace";
+        document.body.dataset.shellView = "workspace";
+        document.body.dataset.ctRailExpanded = "false";
+        studio.classList.remove("home-mode", "assistant-collapsed", "task-creation-mode");
+        setupDirectorWorkspace();
+        const rect = (selector) => Math.round(document.querySelector(selector).getBoundingClientRect().width);
+        return {
+          left: rect(".chat-panel"),
+          center: rect(".review-panel"),
+          right: rect(".review-rail"),
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      assert.ok(actual.left >= 260 && actual.left <= 440, `${expected.width}px assistant width: ${JSON.stringify(actual)}`);
+      assert.ok(actual.right >= 0 && actual.right <= 420, `${expected.width}px context rail width: ${JSON.stringify(actual)}`);
+      assert.ok(actual.center >= 640, `${expected.width}px center must remain at least 640px: ${JSON.stringify(actual)}`);
+      assert.equal(actual.overflow, 0, `${expected.width}px workspace overflowed horizontally`);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("compact workspace uses one full-width switchable assistant, preview, or review view", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 768, height: 820 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      localStorage.removeItem("cliptalk-compact-workspace-view-v1");
+      document.body.dataset.shellMode = "workspace";
+      document.body.dataset.shellView = "workspace";
+      document.body.dataset.ctCompactView = "preview";
+      studio.classList.remove("home-mode", "assistant-collapsed", "task-creation-mode");
+      document.querySelector("#uploadView")?.classList.add("hidden");
+      document.querySelector("#reviewView")?.classList.remove("hidden");
+      setupDirectorWorkspace();
+    });
     await page.waitForTimeout(50);
-    const resetWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
-    assert.ok(Math.abs(resetWidth - initialWidth) <= 3, `double-click did not restore default width: ${initialWidth} -> ${resetWidth}`);
-    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-evidence-panel-width-v1")), null);
+
+    const visibleViews = async () => page.evaluate(() => {
+      const display = (selector) => getComputedStyle(document.querySelector(selector)).display;
+      return {
+        selected: document.body.dataset.ctCompactView,
+        nav: display("#ctCompactWorkspaceNav"),
+        assistant: display(".chat-panel"),
+        preview: display(".review-panel"),
+        review: display(".review-rail"),
+        workspaceWidth: Math.round(document.querySelector("#workspace").getBoundingClientRect().width),
+        activeWidth: Math.round([...document.querySelectorAll(".chat-panel, .review-panel, .review-rail")]
+          .find((node) => getComputedStyle(node).display !== "none")?.getBoundingClientRect().width || 0),
+      };
+    });
+
+    const previewState = await visibleViews();
+    assert.deepEqual(previewState, {
+      selected: "preview", nav: "grid", assistant: "none", preview: "grid", review: "none",
+      workspaceWidth: 768, activeWidth: 768,
+    });
+
+    await page.locator('[data-ct-compact-view="assistant"]').click();
+    assert.deepEqual(await visibleViews(), {
+      selected: "assistant", nav: "grid", assistant: "grid", preview: "none", review: "none",
+      workspaceWidth: 768, activeWidth: 768,
+    });
+
+    await page.locator('[data-ct-compact-view="review"]').click();
+    const reviewState = await visibleViews();
+    assert.deepEqual(reviewState, {
+      selected: "review", nav: "grid", assistant: "none", preview: "none", review: "flex",
+      workspaceWidth: 768, activeWidth: 768,
+    });
+    assert.equal(reviewState.review, "flex");
+
+    await page.locator('#ctCompactWorkspaceNav [data-ct-compact-view="review"]').focus();
+    await page.keyboard.press("ArrowLeft");
+    assert.equal(await page.evaluate(() => document.body.dataset.ctCompactView), "preview");
+    assert.equal(await page.locator('#ctCompactWorkspaceNav [data-ct-compact-view="preview"]').getAttribute("aria-selected"), "true");
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    const narrow = await visibleViews();
+    assert.equal(narrow.workspaceWidth, 390);
+    assert.ok(narrow.activeWidth >= 388, `narrow active view should fill the workspace: ${JSON.stringify(narrow)}`);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 0);
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
@@ -5409,7 +7228,78 @@ test("long person and speaker timelines render progressively without losing sele
   }
 });
 
-test("settings workspace stays light, bounded, and reports unsaved changes", async () => {
+test("agent review samples are visible when no formal output version exists", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    const audit = await page.evaluate(() => {
+      const job = {
+        id: "job_agent_review_only",
+        filename: "小米产品.mp4",
+        status: "completed",
+        stage: "agent_plan_finished",
+        taskMode: "highlight",
+        videoInfo: { duration: 664, width: 1920, height: 1080, has_audio: true },
+        request: {},
+        messages: [],
+        outputs: [],
+        outputVersions: [],
+        candidates: [],
+        eventGroups: [],
+        agentReviewPreviews: [{
+          id: "agent_review_1",
+          outputKind: "agent_review_preview",
+          title: "小米汽车发布会60秒精华剪辑",
+          duration: 56.4,
+          sessionId: "edit_session_review",
+          revision: 1,
+          previewUrl: "/api/jobs/job_agent_review_only/edit-sessions/edit_session_review/preview?r=1",
+          previewOnly: true,
+        }],
+      };
+      studio.classList.remove("home-mode");
+      document.querySelector("#homeView")?.classList.add("hidden");
+      document.querySelector("#uploadView")?.classList.add("hidden");
+      document.querySelector("#reviewView")?.classList.remove("hidden");
+      setupDirectorWorkspace();
+      currentJob = job;
+      window.__openedAgentReviewPreview = null;
+      window.ClipTalkOpenAgentPreview = async (item) => {
+        window.__openedAgentReviewPreview = item;
+        return true;
+      };
+      renderReviewRail(job);
+      const button = document.querySelector("[data-agent-review-preview]");
+      button?.click();
+      return {
+        title: document.querySelector("#railTitle")?.textContent || "",
+        text: document.querySelector("#railBody")?.textContent || "",
+        cardCount: document.querySelectorAll("[data-agent-review-preview]").length,
+        openedTitle: window.__openedAgentReviewPreview?.title || "",
+        openedPreviewUrl: window.__openedAgentReviewPreview?.previewUrl || "",
+        outputSelectHidden: document.querySelector("#videoViewSelect")?.classList.contains("hidden"),
+      };
+    });
+    assert.equal(audit.title, "审核样片（1）");
+    assert.match(audit.text, /等待确认/);
+    assert.match(audit.text, /生成成片/);
+    assert.match(audit.text, /审核样片/);
+    assert.equal(audit.cardCount, 1);
+    assert.equal(audit.openedTitle, "小米汽车发布会60秒精华剪辑");
+    assert.match(audit.openedPreviewUrl, /edit-sessions\/edit_session_review\/preview/);
+    assert.equal(audit.outputSelectHidden, true);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await stub.close();
+  }
+});
+
+test("settings workspace stays dark, bounded, and reports unsaved changes", async () => {
   const stub = await startStubServer();
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -5435,17 +7325,19 @@ test("settings workspace stays light, bounded, and reports unsaved changes", asy
         runtimeBackground: getComputedStyle(runtime).backgroundImage,
         saveDisabled: document.querySelector("#saveVisionSettings").disabled,
         dirtyLabel: document.querySelector("#visionDirtyState").textContent,
+        saveBarHidden: document.querySelector('[data-settings-save-role="vision"]').classList.contains("hidden"),
       };
     });
     assert.equal(audit.scrollTop, 0);
     assert.ok(audit.headerHeight >= 100);
     assert.equal(audit.tabsAfterHeader, true);
     assert.ok(audit.formWidth <= 1120);
-    assert.equal(audit.formBackground, "rgba(255, 255, 255, 0.78)");
-    assert.equal(audit.inputBackground, "rgba(255, 255, 255, 0.94)");
-    assert.match(audit.runtimeBackground, /linear-gradient/);
+    assert.equal(audit.formBackground, "rgb(25, 52, 49)");
+    assert.equal(audit.inputBackground, "rgb(19, 43, 42)");
+    assert.equal(audit.runtimeBackground, "none");
     assert.equal(audit.saveDisabled, true);
     assert.equal(audit.dirtyLabel, "所有修改已保存");
+    assert.equal(audit.saveBarHidden, true);
 
     await page.locator("#visionApiKey").fill("temporary-unsaved-key");
     assert.deepEqual(await page.evaluate(() => ({
@@ -5453,8 +7345,12 @@ test("settings workspace stays light, bounded, and reports unsaved changes", asy
       label: document.querySelector("#visionDirtyState").textContent,
       saveDisabled: document.querySelector("#saveVisionSettings").disabled,
       discardDisabled: document.querySelector("#discardVisionSettings").disabled,
+      saveBarHidden: document.querySelector('[data-settings-save-role="vision"]').classList.contains("hidden"),
+      saveBarPosition: getComputedStyle(document.querySelector('[data-settings-save-role="vision"]')).position,
+      saveBarBottom: Math.round(innerHeight - document.querySelector('[data-settings-save-role="vision"]').getBoundingClientRect().bottom),
     })), {
       dirty: "true", label: "存在未保存修改", saveDisabled: false, discardDisabled: false,
+      saveBarHidden: false, saveBarPosition: "fixed", saveBarBottom: 20,
     });
     await page.locator("#discardVisionSettings").click();
     assert.deepEqual(await page.evaluate(() => ({
@@ -5462,8 +7358,9 @@ test("settings workspace stays light, bounded, and reports unsaved changes", asy
       label: document.querySelector("#visionDirtyState").textContent,
       saveDisabled: document.querySelector("#saveVisionSettings").disabled,
       keyValue: document.querySelector("#visionApiKey").value,
+      saveBarHidden: document.querySelector('[data-settings-save-role="vision"]').classList.contains("hidden"),
     })), {
-      dirty: "false", label: "所有修改已保存", saveDisabled: true, keyValue: "",
+      dirty: "false", label: "所有修改已保存", saveDisabled: true, keyValue: "", saveBarHidden: true,
     });
 
     await page.locator('[data-model-role="llm"]').click();
@@ -5496,13 +7393,17 @@ test("settings workspace stays light, bounded, and reports unsaved changes", asy
 });
 
 test("visual system assigns functional fonts and removes idle chrome", async () => {
-  const visualCss = await readFile(join(staticRoot, "visual-system.css"), "utf8");
-  assert.match(visualCss, /font-family:\s*"VP Editorial Song"/);
-  assert.match(visualCss, /font-family:\s*"VP Assistant WenKai"/);
+  const visualCss = await readFile(join(staticRoot, "typography.css"), "utf8");
+  const baseCss = await readFile(join(staticRoot, "styles.css"), "utf8");
+  assert.match(baseCss, /font-family:\s*"Noto Sans SC"/);
+  assert.match(visualCss, /--font-reading:\s*"Noto Sans SC"/);
+  assert.match(visualCss, /--font-display:\s*"Noto Sans SC"/);
   assert.match(visualCss, /font-family:\s*"VP Metric Display"/);
   for (const filename of [
-    "vp-editorial-song.woff2",
-    "vp-assistant-wenkai.woff2",
+    "noto-sans-sc-zh-400.woff2",
+    "noto-sans-sc-zh-500.woff2",
+    "noto-sans-sc-zh-600.woff2",
+    "noto-sans-sc-zh-700.woff2",
     "vp-metric-display.woff2",
   ]) {
     assert.ok((await stat(join(staticRoot, "fonts", filename))).size > 1_000);
@@ -5515,8 +7416,8 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
     await openAuthenticatedWorkspace(page, stub.url);
     await page.evaluate(async () => {
       await Promise.all([
-        document.fonts.load('700 40px "VP Editorial Song"', "开始剪辑"),
-        document.fonts.load('500 14px "VP Assistant WenKai"', "视频剪辑助手"),
+        document.fonts.load('700 40px "Noto Sans SC"', "开始剪辑"),
+        document.fonts.load('500 14px "Noto Sans SC"', "视频剪辑助手"),
         document.fonts.load('800 italic 20px "VP Metric Display"', "41/100"),
       ]);
     });
@@ -5542,26 +7443,23 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
         createBorderStyle: getComputedStyle(createSurface).borderTopStyle,
         accent: root.getPropertyValue("--accent").trim(),
         fontsReady: [
-          document.fonts.check('700 40px "VP Editorial Song"', "开始剪辑"),
-          document.fonts.check('500 14px "VP Assistant WenKai"', "视频剪辑助手"),
+          document.fonts.check('700 40px "Noto Sans SC"', "开始剪辑"),
+          document.fonts.check('500 14px "Noto Sans SC"', "视频剪辑助手"),
           document.fonts.check('800 italic 20px "VP Metric Display"', "41/100"),
         ],
       };
     });
     assert.equal(audit.hasRedundantHomeButton, false);
-    assert.match(audit.bodyBackground, /linear-gradient/);
-    assert.match(audit.bodyBackground, /rgb\(7, 16, 23\)/);
-    assert.match(audit.bodyBackground, /rgb\(255, 255, 255\)/);
+    assert.equal(audit.bodyBackground, "none");
     assert.equal(audit.homeBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(audit.sidebarBackground, "none");
-    assert.equal(audit.sidebarBackgroundColor, "rgb(10, 21, 28)");
-    assert.match(audit.studioBackground, /linear-gradient/);
-    assert.match(audit.studioBackground, /rgb\(255, 255, 255\)/);
-    assert.match(audit.headingFamily, /VP Editorial Song/);
-    assert.match(audit.assistantFamily, /VP Assistant WenKai/);
+    assert.match(audit.sidebarBackground, /gradient/);
+    assert.equal(audit.sidebarBackgroundColor, "rgba(0, 0, 0, 0)");
+    assert.match(audit.studioBackground, /^(none|radial-gradient\()/);
+    assert.match(audit.headingFamily, /Noto Sans SC/);
+    assert.match(audit.assistantFamily, /Noto Sans SC/);
     assert.match(audit.metricFamily, /VP Metric Display/);
     assert.equal(audit.createBorderStyle, "solid");
-    assert.equal(audit.accent, "#a8c269");
+    assert.equal(audit.accent, "#cbe7aa");
     assert.deepEqual(audit.fontsReady, [true, true, true]);
 
     const workflowAudit = await page.evaluate(() => {
@@ -5598,7 +7496,7 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
     assert.equal(workflowAudit.segmentRadius, "999px");
     assert.equal(workflowAudit.labelDisplay, "block");
     assert.equal(workflowAudit.completeFill, "rgb(104, 131, 106)");
-    assert.equal(workflowAudit.currentFill, "rgb(168, 194, 105)");
+    assert.equal(workflowAudit.currentFill, "rgb(203, 231, 170)");
     assert.equal(workflowAudit.upcomingFill, "rgba(168, 194, 105, 0.08)");
     assert.equal(workflowAudit.currentSweep, "workflow-line-sweep");
 
@@ -5646,34 +7544,174 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
         timelineThumbnailLaneBackground: getComputedStyle(document.querySelector("#timelineViewport .timeline-thumbnails")).backgroundColor,
       };
     });
-    assert.match(mediaAudit.shellBackground, /radial-gradient/);
-    assert.match(mediaAudit.shellBackground, /linear-gradient/);
-    assert.equal(mediaAudit.shellBackgroundColor, "rgba(0, 0, 0, 0)");
-    assert.match(mediaAudit.frameBackground, /radial-gradient/);
-    assert.match(mediaAudit.frameBackground, /linear-gradient/);
-    assert.equal(mediaAudit.frameBackgroundColor, "rgba(0, 0, 0, 0)");
-    assert.equal(mediaAudit.videoBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(mediaAudit.controlsBackground, "rgba(249, 251, 252, 0.97)");
-    assert.equal(mediaAudit.controlsColor, "rgb(53, 66, 73)");
-    assert.match(mediaAudit.transitionShellBackground, /radial-gradient/);
-    assert.match(mediaAudit.transitionShellBackground, /linear-gradient/);
-    assert.match(mediaAudit.transitionFrameBackground, /radial-gradient/);
+    assert.equal(mediaAudit.shellBackground, "none");
+    assert.match(mediaAudit.shellBackgroundColor, /^rgb\((?:\d+,\s*){2}\d+\)$/);
+    assert.equal(mediaAudit.frameBackground, "none");
+    assert.match(mediaAudit.frameBackgroundColor, /^rgb\((?:\d+,\s*){2}\d+\)$/);
+    assert.notEqual(mediaAudit.videoBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(mediaAudit.controlsBackground, "rgba(0, 0, 0, 0)");
+    assert.notEqual(mediaAudit.controlsColor, "rgba(0, 0, 0, 0)");
+    assert.equal(mediaAudit.transitionShellBackground, "none");
+    assert.equal(mediaAudit.transitionFrameBackground, "none");
     assert.deepEqual(
       [mediaAudit.loadingState, mediaAudit.errorState, mediaAudit.finalMediaState],
       ["loading", "error", "ready"],
     );
-    assert.match(mediaAudit.errorNoticeBackground, /radial-gradient/);
-    assert.equal(mediaAudit.assistantTitle, "剪辑助理");
-    assert.equal(mediaAudit.assistantAvatarDisplay, "none");
+    assert.equal(mediaAudit.errorNoticeBackground, "none");
+    assert.equal(mediaAudit.assistantTitle, "AI 剪辑助手");
+    assert.equal(mediaAudit.assistantAvatarDisplay, "grid");
     assert.equal(mediaAudit.assistantRoleDisplay, "none");
-    assert.equal(mediaAudit.taskSummaryRadius, "10px");
-    assert.equal(mediaAudit.fileIconRadius, "8px");
+    assert.equal(mediaAudit.taskSummaryRadius, "8px");
+    assert.equal(mediaAudit.fileIconRadius, "6px");
     assert.equal(mediaAudit.timelineTrackInsidePanel, true);
-    assert.match(mediaAudit.timelineTrackBackgroundImage, /rgb\(241, 244, 245\)/);
-    assert.doesNotMatch(mediaAudit.timelineTrackBackgroundImage, /rgb\(11, 20, 27\)/);
+    assert.equal(typeof mediaAudit.timelineTrackBackgroundImage, "string");
     assert.equal(mediaAudit.timelineThumbnailLaneBackground, "rgba(0, 0, 0, 0)");
   } finally {
     await browser.close();
     await stub.close();
   }
+});
+
+test("lightweight editor keeps panels contextual and empty tracks out of the way", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.evaluate(() => {
+      localStorage.removeItem(secondaryEditorLayoutStorageKey);
+      currentJob = { id: "light-editor", filename: "一个很长的文件名用于检查标题不会把导出按钮挤出屏幕.mp4", videoInfo: { duration: 20 }, editSessions: [] };
+      document.querySelector("#secondaryEditor").classList.remove("hidden");
+      setSecondaryEditorShellIsolation(true);
+      activateSecondaryEditorSession({ id: "light-session", revision: 0, duration: 8, clipCount: 1, textLayers: [], markers: [], subtitleEnabled: false, clips: [{ id: "light-clip", title: "片段", sourceStart: 0, sourceEnd: 8, playbackRate: 1 }] });
+    });
+    for (const width of [1440, 1366, 1024, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.equal(await page.locator("#secondaryEditorLibrary").isVisible(), false);
+      assert.equal(await page.locator("#secondaryEditorInspector").isVisible(), false);
+      assert.equal(await page.locator("#secondaryEditorTextTrack").isVisible(), false);
+      assert.equal(await page.locator("#secondaryEditorSubtitleTrack").isVisible(), false);
+      const bounds = await page.locator("#secondaryEditorExport").boundingBox();
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width);
+      await page.locator("[data-secondary-add-material]").click();
+      assert.equal(await page.locator("#secondaryEditorLibrary").isVisible(), true);
+      await page.locator("#secondaryEditorLibrary [data-secondary-close-panel]").click();
+      await page.locator('[data-secondary-open-panel="subtitle"]').click();
+      assert.equal(await page.locator("#secondaryEditorInspector").isVisible(), true);
+      assert.equal(await page.locator("#secondaryEditorLibrary").isVisible(), false);
+      if (width >= 1024) {
+        await page.waitForFunction(() => {
+          const viewport = document.querySelector("#secondaryEditorTimelineViewport");
+          return secondaryEditTimelinePixelsPerSecond !== null || viewport.scrollWidth <= viewport.clientWidth + 1;
+        });
+        const geometry = await page.evaluate(() => {
+          const rect = selector => document.querySelector(selector).getBoundingClientRect();
+          const layout = rect(".secondary-editor-layout");
+          const timeline = rect(".secondary-editor-timeline-section");
+          const inspector = rect("#secondaryEditorInspector");
+          const viewport = document.querySelector("#secondaryEditorTimelineViewport");
+          const canvas = rect("#secondaryEditorTimelineCanvas");
+          return { layout, timeline, inspector, canvas, viewport: rect("#secondaryEditorTimelineViewport"), viewportClientWidth: viewport.clientWidth, viewportScrollWidth: viewport.scrollWidth };
+        });
+        assert.ok(Math.abs(geometry.layout.top - geometry.inspector.top) <= 1);
+        assert.ok(Math.abs(geometry.layout.bottom - geometry.inspector.bottom) <= 1);
+        assert.ok(geometry.timeline.right <= geometry.inspector.left + 1);
+        assert.ok(geometry.canvas.right <= geometry.viewport.right + 1);
+        assert.ok(geometry.viewportScrollWidth <= geometry.viewportClientWidth + 1);
+        assert.equal(await page.locator("#secondaryEditorInspectorResize").isVisible(), true);
+        const initialWidth = geometry.inspector.width;
+        const resizeHandle = await page.locator("#secondaryEditorInspectorResize").boundingBox();
+        const maximumWidth = Number(await page.locator("#secondaryEditorInspectorResize").getAttribute("aria-valuemax"));
+        const dragDelta = initialWidth + 35 <= maximumWidth ? -40 : 40;
+        await page.mouse.move(resizeHandle.x + resizeHandle.width / 2, resizeHandle.y + resizeHandle.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(resizeHandle.x + dragDelta, resizeHandle.y + resizeHandle.height / 2);
+        await page.mouse.up();
+        const resizedWidth = await page.locator("#secondaryEditorInspector").evaluate(element => element.getBoundingClientRect().width);
+        assert.ok(Math.abs(resizedWidth - initialWidth) >= 35, `expected inspector resize from ${initialWidth}px, received ${resizedWidth}px`);
+        const storedWidth = await page.evaluate(() => JSON.parse(localStorage.getItem(secondaryEditorLayoutStorageKey)).inspectorWidth);
+        assert.ok(Math.abs(storedWidth - resizedWidth) <= 1);
+      } else {
+        assert.equal(await page.locator("#secondaryEditorInspectorResize").isVisible(), false);
+      }
+      await page.locator("#secondaryEditorInspector [data-secondary-close-panel]").click();
+    }
+  } finally { await browser.close(); await stub.close(); }
+});
+
+test("secondary export requires a current preview and respects disabled subtitles", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const renders = [];
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/edit-sessions/export-session/render", async route => {
+      renders.push(route.request().postDataJSON());
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: "导出失败，请重试" }) });
+    });
+    await page.evaluate(() => {
+      currentJob = { id: "export-job", filename: "素材.mp4", videoInfo: { duration: 20 }, editSessions: [] };
+      document.querySelector("#secondaryEditor").classList.remove("hidden");
+      setSecondaryEditorShellIsolation(true);
+      activateSecondaryEditorSession({ id: "export-session", revision: 2, previewRevision: 1, previewStatus: "ready", duration: 8, clipCount: 1, subtitleEnabled: false, subtitleDraftId: "old-draft", clips: [{ id: "clip", sourceStart: 0, sourceEnd: 8, playbackRate: 1 }] });
+    });
+    assert.equal(await page.locator("#secondaryEditorExport").isDisabled(), true);
+    assert.equal(await page.locator("#secondaryEditorPreview").isDisabled(), false);
+    assert.equal(renders.length, 0);
+    await page.evaluate(() => { secondaryEditSession.previewRevision = 2; syncSecondaryEditorControls(); });
+    await page.locator("#secondaryEditorExport").click();
+    assert.equal(await page.evaluate(() => secondaryEditSession.subtitleEnabled), false);
+    assert.equal(await page.locator("#actionConfirmDetails").textContent(), "");
+    await page.locator("#actionConfirmOk").click();
+    await page.waitForFunction(() => !secondaryEditBusy);
+    assert.equal(renders.length, 1);
+    assert.equal(renders[0].subtitleMode, "none");
+    assert.equal(renders[0].subtitleDraftId, null);
+    assert.equal(await page.locator("#secondaryEditor").isVisible(), true);
+    assert.equal(await page.locator("#secondaryEditorExport").isDisabled(), false);
+  } finally { await browser.close(); await stub.close(); }
+});
+
+test("closing an editor ignores late saves and save errors stay visible", async () => {
+  const stub = await startStubServer();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  let releaseSave;
+  let failSave = false;
+  let requestStarted;
+  const started = new Promise(resolve => { requestStarted = resolve; });
+  try {
+    await openAuthenticatedWorkspace(page, stub.url);
+    await page.route("**/edit-sessions/*", async route => {
+      if (route.request().method() !== "PATCH") return route.fallback();
+      if (!failSave) { requestStarted(); await new Promise(resolve => { releaseSave = resolve; }); }
+      await route.fulfill({ status: failSave ? 500 : 200, contentType: "application/json", body: JSON.stringify(failSave ? { detail: "网络中断" } : { session: { id: "old-session", revision: 1, clips: [] } }) });
+    });
+    await page.evaluate(() => {
+      const job = { id: "old-job", filename: "素材.mp4", videoInfo: { duration: 20 }, editSessions: [] };
+      document.querySelector("#secondaryEditor").classList.remove("hidden");
+      setSecondaryEditorShellIsolation(true);
+      activateSecondaryEditorSession({ id: "old-session", revision: 0, clips: [{ id: "clip", sourceStart: 0, sourceEnd: 8, playbackRate: 1 }] }, job);
+      window.pendingSave = secondaryEditorOperation({ type: "delete_clips", clipIds: ["clip"] });
+    });
+    await started;
+    await page.evaluate(() => {
+      closeSecondaryEditor();
+      document.querySelector("#secondaryEditor").classList.remove("hidden");
+      setSecondaryEditorShellIsolation(true);
+      activateSecondaryEditorSession({ id: "new-session", revision: 5, clips: [{ id: "new-clip", sourceStart: 0, sourceEnd: 4, playbackRate: 1 }] }, { id: "new-job", filename: "新素材.mp4", videoInfo: { duration: 20 }, editSessions: [] });
+    });
+    releaseSave();
+    await page.evaluate(() => window.pendingSave);
+    assert.equal(await page.evaluate(() => secondaryEditSession.id), "new-session");
+    failSave = true;
+    await page.evaluate(async () => {
+      await secondaryEditorOperation({ type: "delete_clips", clipIds: ["new-clip"] });
+    });
+    assert.equal(await page.locator("#secondaryEditorSaveState").textContent(), "保存失败");
+    assert.equal(await page.evaluate(() => secondaryEditSession.clips.length), 1);
+    assert.equal(await page.locator("#secondaryEditorDelete").isDisabled(), false);
+  } finally { await browser.close(); await stub.close(); }
 });

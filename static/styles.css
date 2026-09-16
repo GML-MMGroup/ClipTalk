@@ -5942,7 +5942,8 @@ body:has(.studio.home-mode) .home-button { display: none !important; }
 .workflow-launch-context header { width: 100%; display: flex; align-items: center; justify-content: space-between; color: #edf2f4; }
 .workflow-launch-context header button { width: 24px; height: 24px; padding: 0; border: 0; color: #9ba8ae; background: transparent; }
 .workflow-launch-context label { min-width: 104px; display: grid; gap: 4px; color: var(--work-muted); font-size: 10px; }
-.workflow-launch-context select, .workflow-launch-context input { height: 30px; padding: 0 8px; border: 1px solid #3a4953; border-radius: 6px; color: var(--work-body); background: #0e171e; }
+.workflow-launch-context select, .workflow-launch-context input, .workflow-launch-context textarea { padding: 0 8px; border: 1px solid #3a4953; border-radius: 6px; color: var(--work-body); background: #0e171e; }
+.workflow-launch-context select, .workflow-launch-context input { height: 30px; }
 .workflow-launch-context .workflow-launch-start { width: auto; min-height: 30px; padding: 0 12px; }
 .quick-workflow-launch {
   display: grid;
@@ -6004,11 +6005,31 @@ body:has(.studio.home-mode) .home-button { display: none !important; }
   font-size: 10.5px;
 }
 .quick-workflow-launch select,
-.quick-workflow-launch input {
+.quick-workflow-launch input,
+.quick-workflow-launch textarea {
   width: 100%;
   height: 34px;
   color: #dfe8ea;
   background: #0b151b;
+}
+.quick-workflow-launch .workflow-launch-instruction {
+  display: grid;
+  gap: 6px;
+  color: #94a4aa;
+  font-size: 10.5px;
+}
+.quick-workflow-launch .workflow-launch-instruction textarea {
+  min-height: 92px;
+  height: auto;
+  padding: 9px 10px;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
+}
+.quick-workflow-launch .workflow-launch-instruction small {
+  color: #82949a;
+  font-size: 9.5px;
+  line-height: 1.4;
 }
 .quick-workflow-launch footer {
   display: flex;
@@ -6804,7 +6825,7 @@ body:has(.studio.home-mode) .home-button { display: none !important; }
 .chat-composer > small { color: var(--work-faint) !important; }
 
 /* Review header, video and timeline. */
-.review-panel { background: #0d151c !important; scrollbar-color: #344650 transparent !important; }
+body:not(.ct-workbench-v4) .review-panel { background: #0d151c !important; scrollbar-color: #344650 transparent !important; }
 .review-view { padding: 14px !important; }
 .review-header { border-bottom-color: #26343e !important; }
 .asset-heading h2, .review-header h2 { color: #edf2f4 !important; }
@@ -7311,21 +7332,22 @@ select:focus-visible,
 
 /* Upload and manual-selection surfaces must use the same dark reading
    hierarchy as the editor, including the states rendered after file pick. */
-.upload-view { background: radial-gradient(circle at 64% 42%, rgba(201, 151, 79, .10), transparent 28%) !important; }
-.intro > p { color: var(--work-gold) !important; }
-.intro h1 { color: #edf2f4 !important; }
-.intro h1 em { color: var(--work-gold-bright) !important; }
-.intro > span { color: #8b999f !important; }
-.upload-card { border-color: #2d3b45 !important; background: #101920 !important; box-shadow: 0 18px 40px rgba(0, 0, 0, .2) !important; }
-.drop-zone { border-color: #53636b !important; background: #141e27 !important; }
-.drop-zone:hover, .drop-zone.dragging { border-color: var(--work-gold) !important; background: #1b2932 !important; box-shadow: inset 0 0 30px rgba(201, 151, 79, .05) !important; }
-.drop-zone > span { border-color: #80643c !important; color: var(--work-gold-bright) !important; background: rgba(201, 151, 79, .14) !important; box-shadow: none !important; }
-.intro > p { font-size: 10px !important; font-weight: 600 !important; letter-spacing: .12em; }
-.intro h1 { font-size: clamp(30px, 3.1vw, 40px) !important; font-weight: 600 !important; line-height: 1.15 !important; letter-spacing: -.035em; text-wrap: balance; }
-.intro h1 em { font-style: normal; }
-.intro > span { max-width: 54ch; font-size: 13px !important; line-height: 1.7 !important; }
-.drop-zone strong { font-size: 14px !important; font-weight: 600 !important; }
-.drop-zone small { font-size: 11px !important; line-height: 1.45; }
+.studio:not(.new-task-workbench) .upload-view { background: radial-gradient(circle at 64% 42%, rgba(201, 151, 79, .10), transparent 28%) !important; }
+body:not(.ct-workbench-v4) .intro > p { color: var(--work-gold) !important; }
+body:not(.ct-workbench-v4) .intro h1 { color: #edf2f4 !important; }
+body:not(.ct-workbench-v4) .intro h1 em { color: var(--work-gold-bright) !important; }
+body:not(.ct-workbench-v4) .intro > span { color: #8b999f !important; }
+body:not(.ct-workbench-v4) .upload-card { border-color: #2d3b45 !important; background: #101920 !important; box-shadow: 0 18px 40px rgba(0, 0, 0, .2) !important; }
+body:not(.ct-workbench-v4) .drop-zone { border-color: #53636b !important; background: #141e27 !important; }
+body:not(.ct-workbench-v4) .drop-zone:hover,
+body:not(.ct-workbench-v4) .drop-zone.dragging { border-color: var(--work-gold) !important; background: #1b2932 !important; box-shadow: inset 0 0 30px rgba(201, 151, 79, .05) !important; }
+body:not(.ct-workbench-v4) .drop-zone > span { border-color: #80643c !important; color: var(--work-gold-bright) !important; background: rgba(201, 151, 79, .14) !important; box-shadow: none !important; }
+body:not(.ct-workbench-v4) .intro > p { font-size: 10px !important; font-weight: 600 !important; letter-spacing: .12em; }
+body:not(.ct-workbench-v4) .intro h1 { font-size: clamp(30px, 3.1vw, 40px) !important; font-weight: 600 !important; line-height: 1.15 !important; letter-spacing: -.035em; text-wrap: balance; }
+body:not(.ct-workbench-v4) .intro h1 em { font-style: normal; }
+body:not(.ct-workbench-v4) .intro > span { max-width: 54ch; font-size: 13px !important; line-height: 1.7 !important; }
+body:not(.ct-workbench-v4) .drop-zone strong { font-size: 14px !important; font-weight: 600 !important; }
+body:not(.ct-workbench-v4) .drop-zone small { font-size: 11px !important; line-height: 1.45; }
 .speaker-filter select,
 .timeline-selection-actions input,
 .timeline-selection-actions button {

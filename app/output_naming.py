@@ -16,7 +16,7 @@ _ASPECT_PREFIX = re.compile(r"^(?:16\s*[:x×]\s*9|9\s*[:x×]\s*16|1\s*[:x×]\s*1
 _GENERIC_VARIANTS = {
     "", "成片", "内容视频", "高光成片", "正式成片", "审核样片", "审核预览", "agent 审核预览",
 }
-_GENERIC_SUBJECTS = {"事件高光合集", "内容探索", "视频剪辑", "高光剪辑", "自动剪辑"}
+_GENERIC_SUBJECTS = {"事件高光合集", "内容探索", "内容检索", "视频剪辑", "高光剪辑", "智能高光", "自动剪辑"}
 _GENERIC_SUBJECT_MARKERS = (
     "自动分析整个源视频", "先发现真实精彩事件", "综合判断", "关键事件", "完整表达",
 )
@@ -44,6 +44,9 @@ def _filename_component(value: Any, fallback: str, maximum: int) -> str:
 
 
 def _meaningful_subject(value: Any) -> str:
+    raw = str(value or "").strip()
+    if len(raw) > 48 or raw.startswith(("仅根据对白", "分别检索", "请根据当前视频", "按源视频时间顺序")):
+        return ""
     text = _display_text(value, 48)
     if not text or text in _GENERIC_SUBJECTS or any(marker in text for marker in _GENERIC_SUBJECT_MARKERS):
         return ""
@@ -53,6 +56,8 @@ def _meaningful_subject(value: Any) -> str:
 
 def _normalized_variant(value: Any, subject: str = "") -> str:
     text = _display_text(value, 40)
+    if "安全时间线草案" in text or "时间线草稿" in text:
+        return "精剪版"
     text = _ENGINE_PREFIX.sub("", text)
     text = re.sub(r"\s*[·|｜]\s*(?:视觉推荐|剪辑规划|成片审片|高清导出|AI 样片|高清成片)\s*$", "", text)
     text = _ASPECT_PREFIX.sub("", text)
