@@ -722,18 +722,10 @@ test("theme switch updates the application palette and persists the user's choic
     await openAuthenticatedWorkspace(page, stub.url);
     const toggle = page.locator("#themeToggle");
     await toggle.waitFor({ state: "visible" });
-    assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
-
-    const darkPalette = await page.evaluate(() => ({
-      page: getComputedStyle(document.documentElement).backgroundColor,
-      navigation: getComputedStyle(document.body).getPropertyValue("--pw-rail").trim(),
-    }));
-    await toggle.click();
     assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
     assert.equal(await toggle.getAttribute("aria-pressed"), "false");
     assert.equal(await toggle.locator("span").textContent(), "浅色");
-    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-color-theme-v1")), "light");
+    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-color-theme-v1")), null);
 
     const lightPalette = await page.evaluate(() => ({
       page: getComputedStyle(document.documentElement).backgroundColor,
@@ -741,12 +733,25 @@ test("theme switch updates the application palette and persists the user's choic
       scheme: getComputedStyle(document.documentElement).colorScheme,
       themeColor: document.querySelector('meta[name="theme-color"]')?.content,
     }));
+    await toggle.click();
+    assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+    assert.equal(await toggle.locator("span").textContent(), "深色");
+    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-color-theme-v1")), "dark");
+
+    const darkPalette = await page.evaluate(() => ({
+      page: getComputedStyle(document.documentElement).backgroundColor,
+      navigation: getComputedStyle(document.body).getPropertyValue("--pw-rail").trim(),
+    }));
     assert.notEqual(lightPalette.page, darkPalette.page);
     assert.notEqual(lightPalette.navigation, darkPalette.navigation);
     assert.equal(lightPalette.page, "rgb(243, 243, 240)");
     assert.equal(lightPalette.navigation, "#f2f2f0");
     assert.equal(lightPalette.scheme, "light");
     assert.equal(lightPalette.themeColor, "#f3f3f0");
+    await toggle.click();
+    assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+    assert.equal(await page.evaluate(() => localStorage.getItem("cliptalk-color-theme-v1")), "light");
     await page.waitForTimeout(350);
     const homeContrast = await auditVisibleContrast(page);
     const homeTextContrast = await auditVisibleContrast(page, false);

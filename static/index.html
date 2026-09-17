@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#102625" />
+    <meta name="theme-color" content="#f3f3f0" />
     <meta name="description" content="使用多模态分析发现视频高光，或按描述查找并截取指定内容。" />
     <title>ClipTalk</title>
     <link rel="icon" type="image/png" href="/static/assets/cliptalk-icon.png?v=20260812-transparent-1" />
     <link rel="preload" href="/static/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin />
-    <script src="/static/theme-runtime.js?v=20260910-reference-light-1"></script>
+    <script src="/static/theme-runtime.js?v=20260917-default-light-1"></script>
     <link rel="stylesheet" href="/static/generative-loaders.css?v=20260909-theme-cleanup-1" />
     <link rel="stylesheet" href="/static/styles.css?v=20260915-workflow-instruction-1" />
     <link rel="stylesheet" href="/static/typography.css?v=20260910-typography-1" />
@@ -48,8 +48,8 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 9h16M8 5v4M16 5v4M9.5 12l5 2.5-5 2.5z" /></svg><span>成片</span><b id="sidebarOutputCount" class="hidden">0</b>
         </button>
         <div class="app-sidebar-utility" aria-label="系统功能">
-          <button id="themeToggle" class="app-sidebar-action app-sidebar-theme" type="button" aria-label="切换到浅色主题" aria-pressed="true" title="切换到浅色主题">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><g class="theme-icon-dark"><path d="M20 14.2A8.3 8.3 0 0 1 9.8 4a8.3 8.3 0 1 0 10.2 10.2z" /></g><g class="theme-icon-light"><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M4 4l1.5 1.5M18.5 18.5 20 20M2.5 12h2M19.5 12h2M4 20l1.5-1.5M18.5 5.5 20 4" /></g></svg><span>深色</span>
+          <button id="themeToggle" class="app-sidebar-action app-sidebar-theme" type="button" aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><g class="theme-icon-dark"><path d="M20 14.2A8.3 8.3 0 0 1 9.8 4a8.3 8.3 0 1 0 10.2 10.2z" /></g><g class="theme-icon-light"><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M4 4l1.5 1.5M18.5 18.5 20 20M2.5 12h2M19.5 12h2M4 20l1.5-1.5M18.5 5.5 20 4" /></g></svg><span>浅色</span>
           </button>
           <button id="engineState" class="app-sidebar-action app-sidebar-service" type="button" data-shell-action="status" aria-label="查看服务状态" title="正在检查服务状态">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12h4l2-4 3.2 8 2.1-4H20.5M6 5.5h12M6 18.5h12" /></svg><span>检查服务</span><i aria-hidden="true"></i>

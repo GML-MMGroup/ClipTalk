@@ -3,6 +3,7 @@
 
   const storageKey = "cliptalk-color-theme-v1";
   const themes = new Set(["dark", "light"]);
+  const defaultTheme = "light";
   const root = document.documentElement;
 
   function storedTheme() {
@@ -27,7 +28,7 @@
   }
 
   function applyTheme(theme, { persist = false } = {}) {
-    const normalized = themes.has(theme) ? theme : "dark";
+    const normalized = themes.has(theme) ? theme : defaultTheme;
     root.dataset.theme = normalized;
     root.style.colorScheme = normalized;
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
@@ -47,11 +48,11 @@
     return applyTheme(root.dataset.theme === "light" ? "dark" : "light", { persist: true });
   }
 
-  applyTheme(storedTheme() || "dark");
-  window.ClipTalkTheme = { apply: applyTheme, current: () => root.dataset.theme || "dark", toggle: toggleTheme };
+  applyTheme(storedTheme() || defaultTheme);
+  window.ClipTalkTheme = { apply: applyTheme, current: () => root.dataset.theme || defaultTheme, toggle: toggleTheme };
 
   document.addEventListener("DOMContentLoaded", () => {
-    syncToggle(root.dataset.theme || "dark");
+    syncToggle(root.dataset.theme || defaultTheme);
     document.querySelector("#themeToggle")?.addEventListener("click", toggleTheme);
   }, { once: true });
 })();
