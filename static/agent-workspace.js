@@ -2161,7 +2161,7 @@
       // prepare_plan_request() has already reserved planning on the server
       // before the streaming response starts. Refresh the shared task state
       // immediately, rather than waiting for the plan to finish.
-      global.ClipTalkRefreshCurrentJob?.();
+      global.ClipTalkRefreshCurrentJob?.({ retryUntilChanged: true });
       const reader = response.body?.getReader();
       if (!reader) throw new Error("浏览器不支持 Agent 流式响应");
       const decoder = new TextDecoder();

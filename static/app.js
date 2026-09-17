@@ -246,9 +246,22 @@ const viewerShell = $("#viewerShell");
 const mediaFrame = $("#mediaFrame");
 const localPreviewPanel = $("#localPreviewPanel");
 let currentJob = null;
+const JOB_REFRESH_SETTLE_MS = 6000;
+const JOB_REFRESH_RETRY_MS = 350;
+let pendingJobRefresh = null;
 window.ClipTalkCurrentJobId = () => String(currentJob?.id || "");
 window.ClipTalkCurrentJobSnapshot = () => currentJob;
-window.ClipTalkRefreshCurrentJob = () => { if (currentJob) pollJob(); };
+window.ClipTalkRefreshCurrentJob = (options = {}) => {
+  if (!currentJob) return;
+  if (options?.retryUntilChanged) {
+    pendingJobRefresh = {
+      jobId: String(currentJob.id || ""),
+      revision: Number(currentJob.revision || 0),
+      expiresAt: Date.now() + JOB_REFRESH_SETTLE_MS,
+    };
+  }
+  pollJob();
+};
 window.ClipTalkSwitchWorkspaceJob = async (job) => {
   const targetId = String(job?.id || "");
   if (!targetId) return;
@@ -2365,6 +2378,20 @@ function executionCancelLabel(job = currentJob) {
 
 function jobNeedsPolling(job = currentJob) {
   return Boolean(executionForJob(job).active);
+}
+
+function jobRefreshRetryPending(job = currentJob) {
+  if (!pendingJobRefresh) return false;
+  if (String(job?.id || "") !== pendingJobRefresh.jobId || Date.now() >= pendingJobRefresh.expiresAt) {
+    pendingJobRefresh = null;
+    return false;
+  }
+  return Number(job?.revision || 0) <= pendingJobRefresh.revision;
+}
+
+function finishPendingJobRefresh(jobId = "") {
+  if (!pendingJobRefresh || (jobId && pendingJobRefresh.jobId !== String(jobId))) return;
+  pendingJobRefresh = null;
 }
 
 function jobPollDelay(job = currentJob) {
@@ -15139,9 +15166,16 @@ async function pollJob() {
     pollFailureDelay = 2500;
     clearRecoveredPollError();
     if (!response.changed) {
-      if (jobNeedsPolling(currentJob)) pollTimer = setTimeout(pollJob, jobPollDelay(currentJob));
+      const waitingForSubmittedState = jobRefreshRetryPending(currentJob);
+      if (jobNeedsPolling(currentJob) || waitingForSubmittedState) {
+        pollTimer = setTimeout(
+          pollJob,
+          waitingForSubmittedState ? JOB_REFRESH_RETRY_MS : jobPollDelay(currentJob),
+        );
+      }
       return;
     }
+    finishPendingJobRefresh(polledJobId);
     const snapshot = response.job || {};
     const needsFullRefresh = Number(snapshot.candidateCount || 0) !== Number(currentJob.candidates?.length || 0)
       || Number(snapshot.eventGroupCount || 0) !== Number(currentJob.eventGroups?.length || 0)

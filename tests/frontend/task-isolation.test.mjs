@@ -73,7 +73,7 @@ async function chooseQuickWorkflow(page, workflowKind) {
   await page.locator(`#quickWorkflowPicker [data-workflow-switch='${workflowKind}']`).click();
 }
 
-async function startStubServer({ holdFirstJob = false, omitAgentDraftFlag = false } = {}) {
+async function startStubServer({ holdFirstJob = false, omitAgentDraftFlag = false, delayedAgentProgress = false } = {}) {
   const uploads = new Map();
   const uploadCreates = [];
   const jobPosts = [];
@@ -81,6 +81,9 @@ async function startStubServer({ holdFirstJob = false, omitAgentDraftFlag = fals
   const agentMessages = [];
   let uploadIndex = 0;
   let jobIndex = 0;
+  let agentPlanningProjected = false;
+  let agentProgressReported = false;
+  let agentStatusPolls = 0;
   let releaseFirstJob = () => {};
   const firstJobReleased = holdFirstJob
     ? new Promise((resolveRelease) => { releaseFirstJob = resolveRelease; })
@@ -177,14 +180,43 @@ async function startStubServer({ holdFirstJob = false, omitAgentDraftFlag = fals
       const body = JSON.parse((await readRequestBody(request)).toString("utf8") || "{}");
       agentMessages.push({ id, body });
       response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      if (delayedAgentProgress) {
+        response.write('event: planning.progress\ndata: {"phase":"context_loading","title":"正在核对输入与引用范围"}\n\n');
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+        agentPlanningProjected = true;
+        response.write('event: planning.progress\ndata: {"phase":"decomposing_goal","title":"正在整理待确认方案"}\n\n');
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+      }
       response.end("event: error\ndata: {\"message\":\"stubbed agent stream\"}\n\n");
       return;
     }
     if (url.pathname.startsWith("/api/jobs/")) {
       const id = url.pathname.split("/")[3];
       response.setHeader("Content-Type", "application/json");
-      const job = draftJob(id);
+      const job = agentPlanningProjected && id === "job_first" ? {
+        ...draftJob(id), revision: 2, status: "awaiting_agent_plan", stage: "agent_plan_generating",
+        instructionSubmitted: true,
+        detail: "正在拆解目标并整理可确认的剪辑步骤",
+        currentAction: "正在生成 Agent 执行计划",
+        agent: { workspaceId: "ws_job_first", workspaceStatus: "planning", status: "planning" },
+        execution: {
+          schemaVersion: 1, status: "running", operation: "agent_planning",
+          phase: "agent_plan_generating", active: true,
+          detail: "正在拆解目标并整理可确认的剪辑步骤",
+          capabilities: { canCancel: false },
+        },
+      } : draftJob(id);
       if (omitAgentDraftFlag) delete job.agentDraft;
+      if (delayedAgentProgress && id === "job_first" && url.pathname.endsWith("/status")) {
+        agentStatusPolls += 1;
+        if (!agentPlanningProjected || agentProgressReported) {
+          response.end(JSON.stringify({ changed: false, revision: agentPlanningProjected ? 2 : 0 }));
+          return;
+        }
+        agentProgressReported = true;
+        response.end(JSON.stringify({ changed: true, revision: 2, job }));
+        return;
+      }
       response.end(JSON.stringify({ job, ready: false, preparing: false }));
       return;
     }
@@ -210,6 +242,7 @@ async function startStubServer({ holdFirstJob = false, omitAgentDraftFlag = fals
     jobPosts,
     legacyActivations,
     agentMessages,
+    get agentStatusPolls() { return agentStatusPolls; },
     releaseFirstJob,
     close: () => new Promise((resolveClose) => server.close(resolveClose)),
   };
@@ -336,6 +369,19 @@ test("a requirement committed before upload continues into Agent planning after 
     await waitUntil(() => stub.agentMessages.length === 1, "committed draft was not submitted to the Agent after upload");
     assert.equal(stub.agentMessages[0].body.text, "找出所有汽车画面，剪成 9:16 审核样片并添加字幕");
   });
+});
+
+test("a submitted requirement shows planning progress when the first status poll races the backend", async () => {
+  await withPage(async ({ page, stub, video }) => {
+    await page.setInputFiles("#videoInput", video);
+    await page.waitForFunction(() => window.ClipTalkCurrentJobId?.() === "job_first");
+    await page.locator("#chatInput").fill("保留完整人物发言并整理为一分钟短片");
+    await page.keyboard.press("Enter");
+
+    await page.locator("#inlineAnalysisProgress").waitFor({ state: "visible", timeout: 5000 });
+    assert.ok(stub.agentStatusPolls >= 2, `expected a retry after the initial unchanged status, got ${stub.agentStatusPolls}`);
+    assert.match(await page.locator("#inlineAnalysisProgress").textContent(), /正在生成 Agent 执行计划|正在拆解目标/);
+  }, { delayedAgentProgress: true });
 });
 
 test("late upload response from an older creation session cannot replace the newer task", async () => {
