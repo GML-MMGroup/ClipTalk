@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from .ark_client import VisionRequestError, vision_provider_label
 from .security import SecurityConfigurationError, validate_public_http_endpoint
-from .setup_readiness import save_agent_probe
+from .setup_readiness import invalidate_agent_probe, save_agent_probe
 from .vision_settings import (
     LLM_PROVIDER_DEFINITIONS,
     LlmConfigurationStore,
@@ -338,6 +338,8 @@ def build_settings_router(
                     save_agent_probe(agent_probe_record, model, result)
                 return result
             except Exception as error:
+                if agent_probe_record is not None:
+                    invalidate_agent_probe(agent_probe_record, model)
                 raise HTTPException(400, f"Agent Tool Calling 探测失败：{error}") from error
 
         @router.post("/agent/probe-effective")
@@ -355,6 +357,8 @@ def build_settings_router(
                     save_agent_probe(agent_probe_record, model, result)
                 return result
             except Exception as error:
+                if agent_probe_record is not None:
+                    invalidate_agent_probe(agent_probe_record, model)
                 raise HTTPException(400, f"Agent Tool Calling 探测失败：{error}") from error
 
         @router.post("/agent")

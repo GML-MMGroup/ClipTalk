@@ -30,7 +30,8 @@ def build_health_snapshot(
     return {
         "capabilityStatus": "degraded" if unavailable else "preparing" if preparing else "ready",
         "capabilityIssues": unavailable,
-        "capabilityLabel": "部分功能不可用" if unavailable else "语音模型准备中" if preparing else "服务正常",
+        "capabilityLabel": "部分功能不可用" if unavailable else "语音模型准备中" if preparing else "服务已连接",
+        "uiContractVersion": 2,
         "ok": True,
         "service": "cliptalk",
         "visionConfigured": vision_configured,

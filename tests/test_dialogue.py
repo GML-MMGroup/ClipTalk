@@ -3,6 +3,29 @@ from __future__ import annotations
 from app.content_query import QUERY_PLAN_VERSION, compile_query_plan, predicate_modality, temporal_join_matches
 from app.dialogue import dialogue_role_matches, normalize_dialogue_graph
 from unittest.mock import patch
+import pytest
+
+
+@pytest.mark.parametrize("mode", ["complete", "exact"])
+def test_fresh_topic_intersections_restore_complete_answer(mode):
+    from app.dialogue import restore_complete_response_ranges
+    graph = normalize_dialogue_graph(_segments(), [_model_result()])
+    candidates = [{"id": "a", "start": 3, "end": 4, "matchType": "multi_predicate",
+                   "speaker": "Speaker 2, Speaker 1, Speaker 2"}, {"id": "b", "start": 6, "end": 7}]
+    predicates = [{"kind": "speech.dialogue_role", "role": "answerer"}, {"kind": "speech.semantic"}]
+    result = restore_complete_response_ranges(candidates, graph, predicates, mode=mode,
+                                             scope={"start": 0, "end": 10}, logic={"op": "all"})
+    if mode == "exact":
+        assert result == candidates
+    else:
+        assert len(result) == 1
+        assert [result[0]["start"], result[0]["end"]] == [2, 8]
+        assert result[0]["expressionCompleteness"] == "pending"
+        assert len(result[0]["retrievalRanges"]) == 2
+        assert result[0]["requiresReview"]
+    candidates[0]["manualBoundary"] = True
+    assert restore_complete_response_ranges(candidates, graph, predicates, mode=mode,
+        scope={"start": 0, "end": 10}, logic={"op": "all"})[0] == candidates[0]
 
 
 def _segments() -> list[dict]:

@@ -62,6 +62,17 @@ class ActionResolutionRequest(BaseModel):
     value: dict[str, Any] | None = None
 
 
+class CoverRevisionRequest(BaseModel):
+    coverSourceTime: float | None = Field(default=None, ge=0)
+    coverSubject: str = Field(default="", max_length=120)
+    coverTitle: str = Field(default="", max_length=200)
+    coverAspect: Literal["16:9", "9:16", "1:1"] = "16:9"
+
+
+class ActionRetryRequest(BaseModel):
+    cover: CoverRevisionRequest | None = None
+
+
 def _safe_extract(archive: Path, destination: Path, *, max_uncompressed: int = 50 * 1024 * 1024) -> None:
     total = 0
     destination = destination.resolve()
@@ -199,7 +210,7 @@ def build_agent_router(
                 planning_announced = False
                 # Shield the durable request from an HTTP disconnect.
                 try:
-                    yield 'event: planning.progress\ndata: {"phase":"context_loading","title":"正在核对输入与引用范围"}\n\n'
+                    yield 'event: planning.progress\ndata: {"phase":"context_loading","title":"正在核对目标与素材范围"}\n\n'
                     while not task.done():
                         await asyncio.wait({task}, timeout=2)
                         if not task.done():
@@ -259,7 +270,7 @@ def build_agent_router(
                     value = {"text": raw}
                 if current_type == "plan":
                     if not isinstance(value, dict):
-                        return "error", {"message": "Pi Agent 返回的计划事件格式无效"}
+                        return "error", {"message": "Pi Agent 返回的计划事件格式无效。"}
                     try:
                         plan = await asyncio.to_thread(
                             platform.persist_plan_result,
@@ -419,9 +430,10 @@ def build_agent_router(
         return {"plan": plan}
 
     @router.post("/plans/{plan_id}/actions/retry")
-    def retry_plan_action(plan_id: str) -> dict[str, Any]:
+    def retry_plan_action(plan_id: str, request: ActionRetryRequest | None = None) -> dict[str, Any]:
         try:
-            return {"plan": platform.retry_action(plan_id)}
+            cover = request.cover.model_dump() if request and request.cover else None
+            return {"plan": platform.retry_action(plan_id, cover_revision=cover)} if cover is not None else {"plan": platform.retry_action(plan_id)}
         except KeyError as error:
             raise HTTPException(404, "执行计划不存在") from error
         except ValueError as error:

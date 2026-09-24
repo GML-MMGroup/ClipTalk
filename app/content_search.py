@@ -14,11 +14,12 @@ from .content_query import (
     predicate_query_text,
 )
 from .recognition import MULTIMODAL_INDEX_VERSION, evidence_ref
+from .content_requirements import requirement_errors
 
 CONTENT_INDEX_VERSION = MULTIMODAL_INDEX_VERSION
 CONTENT_SEARCH_VERSION = "content-search-v41-evidence-edit-contract-20260910"
 CONTENT_INTENT_SCHEMA_VERSION = "content-intent-v2-typed-logic-20260820"
-CONTENT_INTENT_PARSER_VERSION = "content-intent-parser-v3-described-person-speaking-20260827"
+CONTENT_INTENT_PARSER_VERSION = "content-intent-parser-v4-requirement-preservation-20260922"
 CONTENT_INTENT_PROMPT_VERSION = "content-intent-prompt-v3-described-person-speaking-20260827"
 
 SEARCH_SCOPE_KINDS = frozenset({
@@ -192,6 +193,8 @@ confidence 是 0 到 1，仅表示你对所选 action 的把握，不会被系�
 只有缺失的信息确实阻止形成可执行意图时才使用 clarification，并在 clarificationQuestion 中只问一个问题。
 
 复合检索必须把每个条件拆成 predicates，并用 logic 表达布尔逻辑、用 relations 表达时间或事件关系。
+不能只保留复合目标的前半句；不同内容目标分别保留，不能把“新老替换”和“核心卖点”等不同要求当成同一条件的多模态同义词。
+成片组合目标可以由不同片段分别覆盖；只有用户明确要求同一画面同时出现时才按同帧同时满足处理。
 每个 predicate 必须包含 sourceSpan={{"start":起始字符下标,"end":结束字符下标,"text":"用户原文中的连续片段"}}，并保留 subject.type。
 logic 节点只能是 {{"op":"predicate","predicateId":"p1"}}、{{"op":"any|all","children":[...]}}、{{"op":"not","child":...}}。
 不要用 required=false 表示“也可以”；备选证据来源必须用 any，必须同时满足用 all，排除条件必须用 not。
@@ -812,6 +815,10 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
         retrieval_scope == "broad_multisource"
         and {"visual.semantic", "speech.semantic", "screen_text.text"} <= broad_kinds
         and str((raw.get("logic") or {}).get("op") or "").strip().lower() == "any"
+        # Sharing an object does not make different requested topics equivalent.
+        # Collapse only when all branches cite the same original requirement.
+        and len({str((item.get("sourceSpan") or {}).get("text") or item.get("value") or "").strip()
+                 for item in predicates}) == 1
     )
     if equivalent_union and concrete_subject and not breadth_wording and broad_visual is not None:
         predicates = [copy.deepcopy(broad_visual)]
@@ -913,6 +920,7 @@ def parse_content_intent(text: str, model_result: dict[str, Any] | None = None) 
                 "code": "dialogue_role_requires_valid_role",
                 "message": "speech.dialogue_role 必须填写有效 role。",
             })
+    validation_errors.extend(requirement_errors(query, compiled_predicates))
     parsed["validationErrors"] = validation_errors
     parsed["atomicClauses"] = [{
         "id": str(item.get("id") or ""),

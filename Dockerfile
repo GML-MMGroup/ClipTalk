@@ -62,6 +62,12 @@ COPY tools/prepare_speech_models.py ./tools/prepare_speech_models.py
 COPY tools/container_smoke.py ./tools/container_smoke.py
 COPY tools/render_html_motion.mjs ./tools/render_html_motion.mjs
 
+# Fail the image build when the application and dialogue module come from
+# mismatched revisions.  This contract is intentionally checked after the
+# complete app tree is copied so a partial release cannot reach container
+# startup with a missing symbol.
+RUN python -c "from app.dialogue import restore_complete_response_ranges; assert callable(restore_complete_response_ranges)"
+
 RUN useradd --create-home --uid 10001 cliptalk \
     && mkdir -p /app/data \
     && chown -R cliptalk:cliptalk /app

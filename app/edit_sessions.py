@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import copy_messages
 from .edit_boundaries import load_transcript_segments
 from .editing_techniques import composition_schedule
 from .content_contract import selection_binding, timeline_content_report
@@ -232,32 +233,32 @@ def edit_session_preflight(
     for index, clip in enumerate(clips):
         source_duration = float(clip.get("sourceEnd") or 0) - float(clip.get("sourceStart") or 0)
         if source_duration < MIN_EDIT_CLIP_SECONDS:
-            issues.append({"severity": "error", "code": "clip_too_short", "clipId": clip.get("id"), "message": f"片段 {index + 1} 短于 {MIN_EDIT_CLIP_SECONDS:.2f} 秒"})
+            issues.append({"severity": "error", "code": "clip_too_short", "clipId": clip.get("id"), "message": f"片段 {index + 1} 短于 {MIN_EDIT_CLIP_SECONDS:.2f} 秒。"})
         transition = clip.get("transitionIn") if isinstance(clip.get("transitionIn"), dict) else {}
         transition_duration = float(transition.get("duration") or 0)
         effective_duration = _duration(float(clip.get("sourceStart") or 0), float(clip.get("sourceEnd") or 0), float(clip.get("playbackRate") or 1))
         if index and transition_duration >= min(effective_duration, float(clips[index - 1].get("duration") or 0)):
-            issues.append({"severity": "error", "code": "transition_too_long", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的转场长于相邻片段"})
+            issues.append({"severity": "error", "code": "transition_too_long", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的转场长于相邻片段。"})
         if float(clip.get("playbackRate") or 1) != 1:
-            issues.append({"severity": "info", "code": "speed_changed", "clipId": clip.get("id"), "message": f"片段 {index + 1} 使用 {float(clip.get('playbackRate') or 1):g}× 速度"})
+            issues.append({"severity": "info", "code": "speed_changed", "clipId": clip.get("id"), "message": f"片段 {index + 1} 使用 {float(clip.get('playbackRate') or 1):g}× 速度。"})
         if bool(clip.get("muted")):
-            issues.append({"severity": "info", "code": "muted", "clipId": clip.get("id"), "message": f"片段 {index + 1} 已静音"})
+            issues.append({"severity": "info", "code": "muted", "clipId": clip.get("id"), "message": f"片段 {index + 1} 已静音。"})
         if float(clip.get("boundaryConfidence", 1.0) or 0) < .6:
-            issues.append({"severity": "warning", "code": "uncertain_action_boundary", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的动作边界置信度较低，建议先预览"})
+            issues.append({"severity": "warning", "code": "uncertain_action_boundary", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的动作边界置信度较低，建议先预览。"})
         if index:
             previous = clips[index - 1]
             source_gap = abs(float(clip.get("sourceStart") or 0) - float(previous.get("sourceEnd") or 0))
             bridge = str((clip.get("audioBridge") or {}).get("type") or "none")
             if source_gap > 20 and not clip.get("muted") and not previous.get("muted") and bridge == "none":
-                issues.append({"severity": "warning", "code": "audio_jump", "clipId": clip.get("id"), "message": f"片段 {index} 与 {index + 1} 的源声音跨度较大，建议试听衔接"})
+                issues.append({"severity": "warning", "code": "audio_jump", "clipId": clip.get("id"), "message": f"片段 {index} 与 {index + 1} 的源声音跨度较大，建议试听衔接。"})
             previous_event = str((previous.get("origin") or {}).get("eventId") or "")
             current_event = str((clip.get("origin") or {}).get("eventId") or "")
             if previous_event and current_event and previous_event != current_event and str(transition.get("type") or "cut") != "cut":
-                issues.append({"severity": "warning", "code": "cross_event_transition", "clipId": clip.get("id"), "message": f"片段 {index + 1} 跨事件使用柔和转场，可能弱化叙事切点"})
+                issues.append({"severity": "warning", "code": "cross_event_transition", "clipId": clip.get("id"), "message": f"片段 {index + 1} 跨事件使用柔和转场，可能弱化叙事切点。"})
     if not clips:
-        issues.append({"severity": "error", "code": "empty_timeline", "message": "成片时间线为空"})
+        issues.append({"severity": "error", "code": "empty_timeline", "message": "成片时间线为空。"})
     if session.get("subtitleEnabled") and not session.get("subtitleDraftId"):
-        issues.append({"severity": "warning", "code": "subtitle_unconfirmed", "message": "字幕已开启，但还没有确认的字幕草稿"})
+        issues.append({"severity": "warning", "code": "subtitle_unconfirmed", "message": "字幕已开启，但还没有确认的字幕草稿。"})
     for left_index, left in enumerate(clips):
         for right in clips[left_index + 1:]:
             overlap = max(0.0, min(float(left.get("sourceEnd") or 0), float(right.get("sourceEnd") or 0)) - max(float(left.get("sourceStart") or 0), float(right.get("sourceStart") or 0)))
@@ -266,12 +267,12 @@ def edit_session_preflight(
                 float(right.get("sourceEnd") or 0) - float(right.get("sourceStart") or 0),
             )
             if shorter > 0 and overlap / shorter >= .8:
-                issues.append({"severity": "warning", "code": "duplicate_source", "clipId": right.get("id"), "message": "时间线中存在高度重复的源片段"})
+                issues.append({"severity": "warning", "code": "duplicate_source", "clipId": right.get("id"), "message": "时间线中存在高度重复的源片段。"})
                 break
     event_sequence = [str((item.get("origin") or {}).get("eventId") or "") for item in clips]
     compact_events = [value for index, value in enumerate(event_sequence) if value and (index == 0 or value != event_sequence[index - 1])]
     if len(compact_events) != len(set(compact_events)):
-        issues.append({"severity": "warning", "code": "event_interleave", "message": "同一事件被其他事件切开后再次出现，建议确认叙事顺序"})
+        issues.append({"severity": "warning", "code": "event_interleave", "message": "同一事件被其他事件切开后再次出现，建议确认叙事顺序。"})
     transcript = _job_transcript_segments(job)
     for index, clip in enumerate(clips):
         for boundary_name, boundary in (("入点", float(clip.get("sourceStart") or 0)), ("出点", float(clip.get("sourceEnd") or 0))):
@@ -280,7 +281,7 @@ def edit_session_preflight(
                 and str(item.get("text") or "").strip()
                 for item in transcript if isinstance(item, dict)
             ):
-                issues.append({"severity": "warning", "code": "speech_truncation", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的{boundary_name}落在一句话中间"})
+                issues.append({"severity": "warning", "code": "speech_truncation", "clipId": clip.get("id"), "message": f"片段 {index + 1} 的{boundary_name}落在一句话中间。"})
                 break
     content_report = timeline_content_report(session, job)
     issues.extend(content_report["issues"])
@@ -1004,7 +1005,7 @@ def apply_edit_operation(
 
 def undo_edit_session(session: dict[str, Any], revision: int) -> dict[str, Any]:
     if int(session.get("revision") or 0) != int(revision):
-        raise EditSessionError("编辑草稿已更新，请刷新后重试")
+        raise EditSessionError(copy_messages.STALE_EDIT_DRAFT)
     history = session.setdefault("undo", [])
     if not history:
         raise EditSessionError("没有可撤销的修改")
@@ -1021,7 +1022,7 @@ def undo_edit_session(session: dict[str, Any], revision: int) -> dict[str, Any]:
 
 def redo_edit_session(session: dict[str, Any], revision: int) -> dict[str, Any]:
     if int(session.get("revision") or 0) != int(revision):
-        raise EditSessionError("编辑草稿已更新，请刷新后重试")
+        raise EditSessionError(copy_messages.STALE_EDIT_DRAFT)
     history = session.setdefault("redo", [])
     if not history:
         raise EditSessionError("没有可重做的修改")

@@ -12,7 +12,7 @@ import json
 import math
 from typing import Any, Callable
 
-VERSION = "content-contract-v1"
+VERSION = "content-contract-v2-complete-evidence-20260922"
 VISIBLE_KINDS = {"visual.object", "visual.text", "visual.scene", "person.visible", "person.appearance", "screen.text", "screen_text.text"}
 
 
@@ -133,18 +133,36 @@ def verification_current(match: dict, contract: dict) -> bool:
     verification = match.get("boundaryVerification") or {}
     return (verification.get("version") == VERSION
             and verification.get("contractFingerprint") == contract.get("fingerprint")
-            and verification.get("status") in {"verified", "human_confirmed"}
+            and (verification.get("status") == "verified" or (
+                verification.get("status") == "human_confirmed"
+                and verification.get("manualOverride") is True))
             and verification.get("verifiedRange") == [match.get("start"), match.get("end")])
 
 
 def confirm_human_range(match: dict, contract: dict) -> None:
-    """Only called from an explicit per-candidate user review action."""
+    """Explicit manual boundary override, not merely checking a selection box."""
     match["boundaryVerification"] = {
-        "version": VERSION, "status": "human_confirmed", "method": "human_review",
+        "version": VERSION, "status": "human_confirmed", "method": "human_review", "manualOverride": True,
         "contractFingerprint": contract["fingerprint"], "strategy": contract["strategy"],
         "verifiedRange": [match.get("start"), match.get("end")], "exhaustive": False,
     }
     match["allowedRanges"] = [{"start": match["start"], "end": match["end"]}]
+
+
+def candidate_selection(match: dict) -> None:
+    """Record intent to use a clip without erasing independent quality evidence."""
+    match.update({"selected": True, "reviewStatus": "kept"})
+    check = match.get("boundaryVerification") or {}
+    verified = check.get("version") == VERSION and (
+        check.get("status") == "verified"
+        or (check.get("status") == "human_confirmed" and check.get("manualOverride") is True))
+    match["requiresReview"] = not verified
+    decision = match.setdefault("decision", {})
+    decision["reviewRequired"] = not verified
+    if not verified:
+        decision["reviewReasons"] = list(dict.fromkeys([
+            *(decision.get("reviewReasons") or []), "内容完整性或边界仍待核验",
+        ]))
 
 
 def pending_match(match: dict, contract: dict, reason: str) -> dict:
@@ -160,6 +178,35 @@ def pending_match(match: dict, contract: dict, reason: str) -> dict:
     return result
 
 
+def semantic_anchor_window(match: dict, contract: dict, duration: float) -> dict:
+    """A retrieved still is a search anchor, not a certified two-second edit.
+
+    Explore a bounded local window only on fresh machine candidates. Explicit
+    human choices and previously checked ranges are never silently expanded.
+    """
+    result = copy.deepcopy(match)
+    anchors = [finite(t) for t in match.get("evidenceTimes") or []]
+    if (contract.get("strategy") not in {"semantic_context", "complete_event"}
+            or contract.get("boundaryMode") != "complete"
+            or len(anchors) != 1 or anchors[0] is None
+            or match.get("matchType") != "visual_dense_fallback"
+            or match.get("manualBoundary") or match.get("boundaryVerification")
+            or match.get("reviewStatus") in {"kept", "confirmed", "rejected"}):
+        return result
+    start, end = finite(match.get("start")), finite(match.get("end"))
+    if start is None or end is None or not 0 < end - start <= 2.1:
+        return result
+    scope = contract.get("scope") or {}
+    lower = finite(scope.get("start")) or (finite(scope.get("startUs")) or 0) / 1e6
+    upper = finite(scope.get("end")) or (finite(scope.get("endUs")) or 0) / 1e6 or duration
+    left, right = max(lower, anchors[0] - 8), min(duration, upper, anchors[0] + 8)
+    if left <= start < end <= right:
+        result.update({"start": left, "end": right, "duration": right - left,
+                       "retrievalAnchorRange": {"start": start, "end": end},
+                       "boundarySource": "semantic_anchor_context"})
+    return result
+
+
 def refine_matches(matches: list[dict], contract: dict, inspect: Callable,
                    *, duration: float, fps: float = 25, max_frames: int = 480) -> list[dict]:
     """Inspect returns timestamped predicate verdicts or semantic interval verdicts.
@@ -172,6 +219,7 @@ def refine_matches(matches: list[dict], contract: dict, inspect: Callable,
     remaining = max_frames
     fps = fps if math.isfinite(fps) and fps > 0 else 25
     for original in matches:
+        original = semantic_anchor_window(original, contract, duration)
         if verification_current(original, contract):
             output.append(copy.deepcopy(original))
             continue
@@ -228,6 +276,7 @@ def refine_matches(matches: list[dict], contract: dict, inspect: Callable,
                 if len(run) >= 2:
                     ranges.append((run[0], run[-1]))
             else:
+                rejection_counts = {}
                 for row in response.get("intervals") or []:
                     a, b = finite(row.get("start")), finite(row.get("end"))
                     allowed = response.get("allowedBoundaryTimes") or times
@@ -235,15 +284,83 @@ def refine_matches(matches: list[dict], contract: dict, inspect: Callable,
                             and left <= a < b <= right and row.get("wholeIntervalSupported") is True
                             and row_verdict(row, contract) is True):
                         ranges.append((a, b))
+                    else:
+                        reason = ("unsupported_predicates" if row_verdict(row, contract) is not True
+                                  else "whole_interval_unproven" if row.get("wholeIntervalSupported") is not True
+                                  else "invalid_boundary")
+                        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            # A short semantic range must still contain the evidence used to
+            # describe the complete event. Otherwise a setup can replace its
+            # payoff while retaining the old retrieval explanation.
+            lost_support = False
+            if not visible and contract.get("boundaryMode") == "complete":
+                anchors = [finite(t) for t in original.get("evidenceTimes") or []]
+                anchors = [t for t in anchors if t is not None and start <= t <= end]
+                if len(anchors) >= 2:
+                    kept = [(a, b) for a, b in ranges
+                            if a <= min(anchors) + 1 / fps and b >= max(anchors) - 1 / fps]
+                    lost_support = bool(ranges) and not kept
+                    ranges = kept
+                    if lost_support and remaining >= len(times):
+                        # One bounded repair in the same source window, never
+                        # expand the user's selection or loop indefinitely.
+                        remaining -= len(times)
+                        retry_contract = {**contract, "boundaryRepair": {
+                            "reason": "supporting_evidence_trimmed",
+                            "requiredEvidenceTimes": anchors,
+                            "instruction": "上一范围裁掉了完整事件的证据。请重新确定包含这些证据和事件结果的完整范围；无法确认就返回空列表。",
+                        }}
+                        retry = inspect(retry_contract, original, times, "intervals")
+                        if isinstance(retry, dict):
+                            response = retry
+                            allowed = retry.get("allowedBoundaryTimes") or times
+                            for row in retry.get("intervals") or []:
+                                a, b = finite(row.get("start")), finite(row.get("end"))
+                                if (a is not None and b is not None and a in allowed and b in allowed
+                                        and left <= a < b <= right
+                                        and a <= min(anchors) + 1 / fps and b >= max(anchors) - 1 / fps
+                                        and row.get("wholeIntervalSupported") is True
+                                        and row_verdict(row, contract) is True):
+                                    ranges.append((a, b))
+                            lost_support = not bool(ranges)
             # Never expand a user-selected candidate without explicit review.
             ranges = sorted(set((round(math.ceil(max(a, start) * fps) / fps, 3),
                                  round(math.floor(min(b, end) * fps) / fps, 3)) for a, b in ranges))
             ranges = [(a, b) for a, b in ranges if b - a >= .25]
+            supported_partial = bool(ranges)
+            if original.get("expressionRange") and contract.get("boundaryMode") == "complete":
+                # A relevant short sentence is not proof of a complete answer.
+                ranges = [(a, b) for a, b in ranges
+                          if abs(a - start) <= 1 / fps + .001 and abs(b - end) <= 1 / fps + .001]
             if not ranges:
-                output.append(pending_match(original, contract, "no_supported_interval"))
+                pending = pending_match(original, contract,
+                    "supporting_evidence_trimmed" if lost_support else
+                    "incomplete_expression" if original.get("expressionRange") and supported_partial else "no_supported_interval")
+                if not visible:
+                    pending["boundaryVerification"]["diagnostics"] = {
+                        "returnedIntervalCount": len(response.get("intervals") or []),
+                        "rejectedIntervals": rejection_counts,
+                        "requiresFullExpression": bool(original.get("expressionRange")),
+                    }
+                output.append(pending)
                 continue
             for index, (a, b) in enumerate(ranges):
                 result = copy.deepcopy(original)
+                if not visible:
+                    proof = next((row for row in response.get("intervals") or []
+                                  if finite(row.get("start")) is not None and finite(row.get("end")) is not None
+                                  and abs(float(row["start"]) - a) <= 1 / fps + .001
+                                  and abs(float(row["end"]) - b) <= 1 / fps + .001
+                                  and row.get("wholeIntervalSupported") is True
+                                  and row_verdict(row, contract) is True), {})
+                    valid_ids = {p.get("id") for p in contract.get("predicates") or []}
+                    result["verifiedPredicateIds"] = [key for key, value in (proof.get("predicates") or {}).items()
+                                                      if key in valid_ids and value is True]
+                    result["boundaryEvidence"] = {"start": a, "end": b,
+                        "predicates": copy.deepcopy(proof.get("predicates") or {}),
+                        "reason": str(proof.get("reason") or "")[:600]}
+                if original.get("expressionRange"):
+                    result["expressionCompleteness"] = "verified"
                 result.update({"start": a, "end": b, "duration": round(b-a, 3),
                                "startUs": round(a*1e6), "endUs": round(b*1e6),
                                "sourceRange": {"startUs": round(a*1e6), "endUs": round(b*1e6)},
@@ -310,17 +427,17 @@ def timeline_content_report(session: dict, job: dict | None = None) -> dict:
                     abs(a - match["start"]) > .001 or abs(b - match["end"]) > .001
                 ):
                     issues.append({"severity": "warning", "code": "content_semantic_boundary_changed",
-                        "clipId": clip.get("id"), "message": "完整表达或事件的范围已改变，需要重新核验语义完整性"})
+                        "clipId": clip.get("id"), "message": "完整表达或事件的范围已改变，需要重新核验语义完整性。"})
                 continue
             code, message = "content_range_exceeded", "时间线超出了已核验的可剪范围，请审核新增内容"
         issues.append({"severity": "warning", "code": code, "clipId": clip.get("id"), "message": message})
     if session.get("cutaways") and any(c.get("id") not in (session.get("disabledCutawayIds") or []) for c in session["cutaways"]):
-        issues.append({"severity": "warning", "code": "content_cutaway_unverified", "message": "补画面尚未核验是否符合原检索条件"})
+        issues.append({"severity": "warning", "code": "content_cutaway_unverified", "message": "补画面尚未核验是否符合原检索条件。"})
     expected = [str(m.get("id")) for m in binding.get("matches") or []]
     actual = list(dict.fromkeys(str((c.get("sourceRef") or {}).get("id")) for c in session.get("clips") or []))
     if expected and actual != expected:
         issues.append({"severity": "warning", "code": "content_selection_changed",
-                       "message": "片段选择或顺序与确认的检索结果不同，请审核这次改动"})
+                       "message": "片段选择或顺序与确认的检索结果不同，请审核这次改动。"})
     return {"version": VERSION, "status": "needs_review" if issues else "passed", "passed": not issues,
             "method": "source_range_contract_check", "exhaustive": False, "issues": issues,
             "contractFingerprint": contract.get("fingerprint")}

@@ -17,6 +17,54 @@ DIALOGUE_ACTS = frozenset({
 DIALOGUE_ROLES = frozenset({"questioner", "answerer", "instructor", "student", "speaker"})
 
 
+def restore_complete_response_ranges(matches: list[dict], graph: dict, predicates: list[dict],
+                                     *, mode: str, scope: dict, logic: dict) -> list[dict]:
+    """Restore fresh topic intersections to their grounded answer block.
+
+    This prepares candidates for verification; it never approves the expanded
+    interval and must not be used on saved/manual review selections.
+    """
+    roles = [p for p in predicates if p.get("kind") == "speech.dialogue_role"
+             and p.get("required", True) and p.get("role", "answerer") == "answerer"
+             and p.get("dialogueMode", "answer_only") == "answer_only"]
+    if (mode != "complete" or len(roles) != 1
+            or logic.get("op", "all") not in {"all", "and", "predicate"}
+            or any(not str(p.get("kind", "")).startswith("speech.") for p in predicates)):
+        return copy.deepcopy(matches)
+    blocks = dialogue_role_matches(graph, roles[0])
+    output, seen = [], {}
+    for source in matches:
+        item = copy.deepcopy(source)
+        if item.get("manualBoundary") or item.get("boundaryVerification"):
+            output.append(item)
+            continue
+        start, end = _number(item.get("start")), _number(item.get("end"))
+        speakers = {value.strip() for value in re.split(r"[,，]", str(item.get("speaker") or "")) if value.strip()}
+        eligible = [b for b in blocks if b["start"] <= start + .05 and b["end"] >= end - .05
+                    and b["start"] >= _number(scope.get("start"))
+                    and b["end"] <= _number(scope.get("end"))
+                    and (not speakers or speakers == {b.get("speaker")}
+                         or (item.get("matchType") == "multi_predicate" and b.get("speaker") in speakers))]
+        if len(eligible) != 1:
+            output.append(item)
+            continue
+        block = eligible[0]
+        key = block["responseBlockId"]
+        if key in seen:
+            seen[key]["retrievalRanges"].append({"start": start, "end": end})
+            continue
+        item["retrievalRanges"] = [{"start": start, "end": end}]
+        for field in ("start", "end", "duration", "speechUnits", "targetSpeechRanges", "promptTurnIds",
+                      "answerTurnIds", "responseBlockId", "transcriptExcerpt", "speaker"):
+            item[field] = copy.deepcopy(block.get(field))
+        item.update(boundaryStatus="complete_response_pending", boundarySource="dialogue_response_restored",
+                    expressionRange=[block["start"], block["end"]],
+                    expressionCompleteness="pending", requiresReview=True, selected=False)
+        output.append(item)
+        seen[key] = item
+    return output
+
+
 def _number(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)

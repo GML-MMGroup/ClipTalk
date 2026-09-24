@@ -74,6 +74,7 @@ def aggregate_embeddings(embeddings: Iterable[Iterable[float]]) -> dict[str, Any
         "centroid": centroid.tolist(),
         "exemplars": [item.tolist() for item in retained],
         "sampleCount": len(retained),
+        "consistencyEstablished": len(retained) >= 2,
         "discardedCount": len(rows) - len(retained),
         "minimumSimilarity": round(min(consistency), 4),
         "meanSimilarity": round(float(np.mean(consistency)), 4),
@@ -459,6 +460,7 @@ def merge_target_speech_segments(
     segments: Iterable[dict[str, Any]], speaker: str,
     *, maximum_gap: float = SPEAKER_TURN_CONTINUITY_GAP_SECONDS,
 ) -> list[dict[str, Any]]:
+    segments = list(segments)
     wanted = str(speaker or "").casefold()
     rows = sorted([
         dict(item) for item in segments
@@ -480,8 +482,8 @@ def merge_target_speech_segments(
             )
             if start - previous_source_end <= maximum_gap and not gap_has_other:
                 bridged_gap = max(0.0, start - previous_source_end)
-                previous["_sourceEnd"] = end
-                previous["end"] = end + .2
+                previous["_sourceEnd"] = max(previous_source_end, end)
+                previous["end"] = max(previous_source_end, end) + .2
                 previous["text"] = "".join(filter(None, [str(previous.get("text") or ""), str(row.get("text") or "")]))
                 previous["sourceSegmentCount"] += 1
                 previous["bridgedSilenceSeconds"] = round(
@@ -496,3 +498,36 @@ def merge_target_speech_segments(
     for item in merged:
         item.pop("_sourceEnd", None)
     return merged
+
+
+def clean_voice_sample_ranges(segments: Iterable[dict[str, Any]], speaker: str,
+                              *, minimum_seconds: float = 2.0) -> list[dict[str, float]]:
+    """Embedding windows exclude other/unknown voices and playback padding."""
+    rows = [row for row in segments if isinstance(row, dict)
+            and isinstance(row.get("start"), (int, float)) and isinstance(row.get("end"), (int, float))
+            and math.isfinite(row["start"]) and math.isfinite(row["end"]) and row["end"] > row["start"]]
+    wanted = str(speaker).casefold()
+    own = [row for row in rows if str(row.get("speaker") or "").casefold() == wanted]
+    if not own:
+        return []
+    blockers = [row for row in rows if str(row.get("speaker") or "").casefold() != wanted]
+    output = []
+    for merged in merge_target_speech_segments(rows, speaker):
+        pieces = [(max(0, merged["start"] + .15), merged["end"] - .2)]
+        # start padding may have been clipped at zero; anchor to real speech.
+        pieces = [(min(row["start"] for row in own if row["end"] > merged["start"] and row["start"] < merged["end"]), pieces[0][1])]
+        for other in blockers:
+            revised = []
+            for start, end in pieces:
+                if other["end"] <= start or other["start"] >= end:
+                    revised.append((start, end))
+                else:
+                    revised.extend([(start, min(end, other["start"])), (max(start, other["end"]), end)])
+            pieces = [(a, b) for a, b in revised if b - a >= minimum_seconds]
+        for start, end in pieces:
+            # Bound each sample so long monologues supply multiple exemplars.
+            count = max(1, math.ceil((end - start) / 6))
+            width = (end - start) / count
+            if width >= minimum_seconds:
+                output.extend({"start": start + i * width, "end": start + (i + 1) * width} for i in range(count))
+    return output

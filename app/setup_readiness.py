@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from threading import RLock
 from typing import Any
 
 
@@ -44,7 +45,22 @@ def model_fingerprint(model: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+_probe_record_lock = RLock()
+
+
 def save_agent_probe(path: Path, model: dict[str, Any], result: dict[str, Any]) -> None:
+    with _probe_record_lock:
+        _write_agent_probe(path, model, result)
+
+
+def invalidate_agent_probe(path: Path, model: dict[str, Any]) -> None:
+    """A failed retest invalidates this model, never another model's result."""
+    with _probe_record_lock:
+        if agent_probe_ready(path, model):
+            _write_agent_probe(path, model, {"toolCalling": False})
+
+
+def _write_agent_probe(path: Path, model: dict[str, Any], result: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,

@@ -44,6 +44,7 @@ def test_cpu_and_gpu_manifests_cover_direct_runtime_dependencies() -> None:
 def test_environment_example_covers_runtime_settings() -> None:
     assert configuration_errors(ROOT) == []
     names = environment_names_from_example(ROOT / ".env.example")
+    names.update(environment_names_from_example(ROOT / "docs/environment.example"))
     assert environment_names_from_python(ROOT / "app" / "config.py") <= names
     assert {"HIGHLIGHT_LOG_FILE", "CONTENT_SEARCH_DIALOGUE_V2"} <= names
 
@@ -78,3 +79,12 @@ def test_deployment_mode_allows_local_runtime_artifacts_without_weakening_source
     source_errors = repository_errors(tmp_path, mode="source")
     assert any("真实环境文件" in error for error in source_errors)
     assert any("运行目录" in error for error in source_errors)
+
+
+def test_docker_build_checks_the_dialogue_import_contract() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    copy_position = dockerfile.index("COPY app ./app")
+    contract_position = dockerfile.index(
+        "from app.dialogue import restore_complete_response_ranges",
+    )
+    assert contract_position > copy_position

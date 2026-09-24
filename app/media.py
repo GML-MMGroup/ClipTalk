@@ -1096,7 +1096,7 @@ def format_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{second:02d}"
 
 
-def create_contact_sheet(frames: list[SampledFrame], output: Path, *, columns: int = 4) -> Path:
+def create_contact_sheet(frames: list[SampledFrame], output: Path, *, columns: int = 4, preserve_frame: bool = False) -> Path:
     if not frames:
         raise MediaError("没有可用于视觉分析的画面")
     tile_width, tile_height, label_height = 320, 180, 28
@@ -1106,7 +1106,10 @@ def create_contact_sheet(frames: list[SampledFrame], output: Path, *, columns: i
     font = ImageFont.load_default()
     for index, frame in enumerate(frames):
         with Image.open(frame.path) as source:
-            tile = ImageOps.fit(source.convert("RGB"), (tile_width, tile_height), method=Image.Resampling.LANCZOS)
+            if preserve_frame:
+                tile = ImageOps.pad(source.convert("RGB"), (tile_width, tile_height), method=Image.Resampling.LANCZOS, color="#111722")
+            else:
+                tile = ImageOps.fit(source.convert("RGB"), (tile_width, tile_height), method=Image.Resampling.LANCZOS)
         x = index % columns * tile_width
         y = index // columns * (tile_height + label_height)
         sheet.paste(tile, (x, y))
@@ -1179,6 +1182,101 @@ def create_labeled_contact_sheet(
     return output
 
 
+LETTERBOX_DETECT_POSITIONS = (0.12, 0.5, 0.88)
+_LETTERBOX_CACHE: dict[str, tuple[int, int, int, int, int, int] | None] = {}
+_LETTERBOX_CACHE_LOCK = threading.Lock()
+
+
+def _ffmpeg_media_duration(source: Path, ffmpeg: str) -> float:
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(source)],
+            capture_output=True, text=True, timeout=30,
+        )
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr or "")
+        if match:
+            return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0.0
+
+
+def detect_letterbox_crop(source: Path, *, ffmpeg: str, duration: float | None = None) -> tuple[int, int, int, int, int, int] | None:
+    """保守检测"烤"在画面里的黑边。
+
+    返回 (crop_w, crop_h, crop_x, crop_y, source_w, source_h)；任一采样帧边缘
+    出现画面内容（或检测失败）一律返回 None——宁可漏裁不可误裁。多帧取交集，
+    单帧的过裁只会让交集变小，不会放大。
+    """
+    try:
+        stat = source.stat()
+        cache_key = f"{source}::{stat.st_mtime_ns}::{stat.st_size}"
+    except OSError:
+        return None
+    with _LETTERBOX_CACHE_LOCK:
+        if cache_key in _LETTERBOX_CACHE:
+            return _LETTERBOX_CACHE[cache_key]
+    result: tuple[int, int, int, int, int, int] | None = None
+    try:
+        total = float(duration or 0.0) or _ffmpeg_media_duration(source, ffmpeg)
+        if total > 0.4:
+            positions = [max(0.0, total * fraction) for fraction in LETTERBOX_DETECT_POSITIONS]
+        else:
+            positions = [0.0]
+        boxes: list[tuple[int, int, int, int]] = []
+        source_width = source_height = 0
+        for timestamp in positions:
+            try:
+                probe = subprocess.run(
+                    [ffmpeg, "-hide_banner", "-ss", f"{timestamp:.3f}", "-i", str(source),
+                     "-t", "0.8", "-vf", "cropdetect=limit=40:round=2:reset=0", "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=60,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            stderr = probe.stderr or ""
+            if not source_width or not source_height:
+                dimension = re.search(r", (\d{2,5})x(\d{2,5})[ ,]", stderr)
+                if dimension:
+                    source_width, source_height = int(dimension.group(1)), int(dimension.group(2))
+            matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", stderr)
+            if matches:
+                width, height, offset_x, offset_y = (int(value) for value in matches[-1])
+                if width > 0 and height > 0:
+                    boxes.append((width, height, offset_x, offset_y))
+        if boxes and source_width > 0 and source_height > 0:
+            left = max(offset_x for _, _, offset_x, _ in boxes)
+            top = max(offset_y for _, _, _, offset_y in boxes)
+            right = min(offset_x + width for width, _, offset_x, _ in boxes)
+            bottom = min(offset_y + height for _, height, _, offset_y in boxes)
+            crop_width, crop_height = right - left, bottom - top
+            if crop_width >= 2 and crop_height >= 2:
+                crop_width -= crop_width % 2
+                crop_height -= crop_height % 2
+                left -= left % 2
+                top -= top % 2
+                crop_width = min(crop_width, source_width - left)
+                crop_height = min(crop_height, source_height - top)
+                vertical_removed = (source_height - crop_height) / source_height
+                horizontal_removed = (source_width - crop_width) / source_width
+                per_side_safe = (
+                    left / source_width <= .18 and (source_width - right) / source_width <= .18
+                    and top / source_height <= .18 and (source_height - bottom) / source_height <= .18
+                )
+                if (
+                    per_side_safe
+                    and crop_width >= source_width * .7
+                    and crop_height >= source_height * .7
+                    and (vertical_removed >= .05 or horizontal_removed >= .05)
+                ):
+                    result = (crop_width, crop_height, left, top, source_width, source_height)
+    except Exception:
+        result = None
+    with _LETTERBOX_CACHE_LOCK:
+        _LETTERBOX_CACHE[cache_key] = result
+    return result
+
+
 def render_clip(
     source: Path,
     output: Path,
@@ -1239,6 +1337,7 @@ def render_composition(
     cutaways: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[float], None] | None = None,
     strict_source_boundaries: bool = False,
+    auto_letterbox_crop: bool = True,
 ) -> float:
     """Render an editorial sequence, including timing and continuity techniques.
 
@@ -1288,6 +1387,15 @@ def render_composition(
             expanded.append(item)
     if not expanded:
         raise MediaError("事件高光没有可渲染的有效镜头")
+    letterbox = detect_letterbox_crop(source, ffmpeg=ffmpeg) if auto_letterbox_crop else None
+    if letterbox:
+        crop_w, crop_h, crop_x, crop_y, source_w, source_h = letterbox
+        letterbox_filter = f",crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+        # 字幕像素参考尺寸跟随裁剪后的画面，避免字号比例失真。
+        subtitle_frame_width = max(1, int(round(float(subtitle_frame_width or 1920) * crop_w / source_w)))
+        subtitle_frame_height = max(1, int(round(float(subtitle_frame_height or 1080) * crop_h / source_h)))
+    else:
+        letterbox_filter = ""
 
     count = len(expanded)
     schedule_segments = [
@@ -1347,7 +1455,7 @@ def render_composition(
         )
         filters.append(
             f"{video_source}trim=start={video_trim_start:.3f}:duration={render_source_duration:.3f},setpts=(PTS-STARTPTS)/{rate:.3f}"
-            f"{scale},fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[v{index}]"
+            f"{letterbox_filter}{scale},fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[v{index}]"
         )
         if has_audio:
             audio_source = f"[{index}:a]"
@@ -1432,7 +1540,7 @@ def render_composition(
         )
         cutaway_label = f"broll{cutaway_index}"
         filters.append(
-            f"[{input_index}:v]setpts=PTS-STARTPTS+{cutaway_start:.3f}/TB{scale},"
+            f"[{input_index}:v]setpts=PTS-STARTPTS+{cutaway_start:.3f}/TB{letterbox_filter}{scale},"
             f"fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[{cutaway_label}]"
         )
         next_label = f"voverlay{cutaway_index}"

@@ -42,7 +42,7 @@ def prepare_formal_export(job_id: str, version: dict[str, Any], request: Finaliz
         raise HTTPException(409, f"{summary}。如已人工预览并接受风险，请明确确认后再导出高清成片")
     output = select_export_output(version, request.outputFilename, request.outputRevision)
     if not request.outputFilename or not request.outputRevision or request.specVersion != 1:
-        raise HTTPException(409, {"code": "export_confirmation_required", "message": "请刷新样片并重新确认导出文件与规格"})
+        raise HTTPException(409, {"code": "export_confirmation_required", "message": "请刷新样片并重新确认导出文件与规格。"})
     style = normalize_subtitle_style(request.subtitleStyle)
     if request.subtitleMode == "burn" and (not subtitle_draft
             or request.subtitleDraftRevision != subtitle_draft.get("revision")
@@ -125,7 +125,7 @@ def output_capabilities(job: dict[str, Any], version: dict[str, Any], output: di
     preview = bool(version.get("previewOnly") or output.get("previewOnly"))
     source = bool(job.get("sourcePath") and Path(job["sourcePath"]).is_file())
     reasons = {
-        "keep": "审核样片不能存入成片库，请先确认并导出高清成片" if preview else "输出文件不可用" if not exists else "",
+        "keep": "审核样片不能长期保留，请先确认并生成成片" if preview else "输出文件不可用" if not exists else "",
         "download": "输出文件不可用" if not exists else "",
         "edit": "缺少可编辑时间线" if not output.get("segments") else "源视频不可用" if not source else "",
         "export": "该文件已经是正式成片" if not preview else "缺少可复现的时间线" if not output.get("segments") else "源视频不可用" if not source else "",

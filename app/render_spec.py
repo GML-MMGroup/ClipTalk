@@ -58,7 +58,7 @@ def freeze_spec(*, segments: list[dict], cutaways=None, chapters=None, technique
 
 def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict) or spec.get("schemaVersion") != SPEC_VERSION:
-        raise HTTPException(409, {"code": "export_confirmation_required", "message": "请重新生成样片并确认完整导出规格"})
+        raise HTTPException(409, {"code": "export_confirmation_required", "message": "请重新生成样片并确认完整导出规格。"})
     value = {key: value for key, value in spec.items() if key != "hash"}
     if spec.get("hash") != content_hash(value):
         raise HTTPException(409, "导出规格指纹不匹配，请重新确认")
@@ -76,7 +76,7 @@ def output_spec(output: dict, version: dict, *, subtitle_mode: str, subtitle_sty
         reframe = output.get("reframe", version.get("reframe"))
         if ((output.get("overlayVerification") or {}).get("textLayerCount") and text_layers is None
                 or (output.get("socialReframe") or version.get("socialReframe")) and not reframe):
-            raise HTTPException(409, {"code": "export_confirmation_required", "message": "旧样片缺少文字或画幅规格，请重新生成预览"})
+            raise HTTPException(409, {"code": "export_confirmation_required", "message": "旧样片缺少文字或画幅规格，请重新生成预览。"})
         base = {**output, "textLayers": text_layers or [], "reframe": reframe}
     return freeze_spec(segments=base.get("segments") or [], cutaways=base.get("cutaways"),
                        chapters=base.get("chapters"), technique_policy=base.get("techniquePolicy"),

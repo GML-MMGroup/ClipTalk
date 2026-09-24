@@ -26,6 +26,27 @@ COVER_ASPECT_SIZES = {
 COVER_DIRECTIONS = ("source_clean", "source_editorial", "source_cinematic")
 
 
+def _face_count(path: Path) -> int | None:
+    """Return a conservative face count when OpenCV's local detector exists."""
+    try:
+        import cv2  # type: ignore
+
+        cascade = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+        detector = cv2.CascadeClassifier(str(cascade))
+        image = cv2.imread(str(path))
+        if image is None or detector.empty():
+            return None
+        grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        faces = detector.detectMultiScale(
+            grayscale, scaleFactor=1.1, minNeighbors=5, minSize=(36, 36),
+        )
+        return int(len(faces))
+    except Exception:
+        # Face detection is a validation aid, not a reason to make generic
+        # cover generation unavailable on installations without OpenCV.
+        return None
+
+
 def _number(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -157,6 +178,7 @@ def inspect_cover_frame(path: Path) -> dict[str, Any]:
         "titleSafeSpace": max(0.0, min(1.0, 1.0 - safe_deviation / 70.0)),
         "blackFrame": dark_ratio >= .985 and mean <= 12,
         "perceptualHash": _average_hash(preview),
+        "faceCount": _face_count(path),
     }
 
 
@@ -173,6 +195,7 @@ def score_cover_frames(
     frames: Iterable[dict[str, Any]],
     *,
     request_focus: str = "",
+    require_person: bool = False,
     limit: int = 16,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Score extracted frames and greedily suppress perceptual duplicates."""
@@ -184,6 +207,9 @@ def score_cover_frames(
         metrics = inspect_cover_frame(Path(str(item["path"])))
         if metrics["blackFrame"]:
             rejected.append({**item, "rejectionReason": "black_frame", "metrics": metrics})
+            continue
+        if require_person and metrics.get("faceCount") == 0:
+            rejected.append({**item, "rejectionReason": "missing_person", "metrics": metrics})
             continue
         evidence_strength = max(0.0, min(1.0, _number(item.get("evidenceStrength"), .35)))
         evidence_text = str(item.get("evidenceText") or "").lower()

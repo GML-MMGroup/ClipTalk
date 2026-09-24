@@ -232,7 +232,7 @@ def ui_presentation_snapshot(
             title = str(agent.get("currentStepTitle") or "当前步骤")
             return result(
                 "content_review", group="action_required", label=f"需要确认：{title}", headline=title,
-                detail="完成当前选择后，Agent 会继续执行余下步骤。",
+                detail="完成当前选择后，将继续执行余下步骤。",
                 railTitle="等待确认", running=False, tone="attention", primaryActionKey="review_action",
             )
         if previews and agent_status not in {"approved", "running"}:
@@ -245,7 +245,7 @@ def ui_presentation_snapshot(
         if agent_status in {"approved", "running"}:
             suffix = f" · {min(completed, total)}/{total} 步" if total else ""
             return result(
-                "running", group="active", label=f"Agent 正在执行{suffix}",
+                "running", group="active", label=f"正在执行{suffix}",
                 headline=str(agent.get("currentStepTitle") or "正在执行剪辑计划"),
                 detail=f"已完成 {min(completed, total)}/{total} 步。" if total else "结果会写入当前任务。",
                 railTitle="执行剪辑计划", running=True, tone="active", primaryActionKey="view_activity",
