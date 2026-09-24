@@ -4,6 +4,14 @@
    workflow behaviour remain in styles.css. */
 
 @font-face {
+  font-family: "VP Interface Heading";
+  src: url("/static/fonts/vp-interface-heading.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "VP Editorial Song";
   src: url("/static/fonts/vp-editorial-song.woff2") format("woff2");
   font-style: normal;
@@ -34,17 +42,17 @@
      paragraphs and Song-style headings looked decorative beside compact UI
      controls and became tiring at small sizes. */
   --font-reading: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-display: "Noto Sans SC", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "VP Interface Heading", "Noto Sans SC", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-data: "Inter", "Noto Sans SC", ui-monospace, monospace;
-  --font-metric: "VP Metric Display", "Inter", ui-monospace, monospace;
+  --font-metric: var(--font-data);
   --font-body: var(--font-ui);
   --font-mono: var(--font-data);
 
   --text-micro: 11px;
   --text-meta: 12px;
-  --text-support: 12px;
+  --text-support: 13px;
   --text-control: 13px;
-  --text-body: 14px;
+  --text-body: 15px;
   --text-title: 16px;
   --text-section: 18px;
 
@@ -370,7 +378,7 @@ body:has(.studio.home-mode) .ambient-grid {
 .home-view .home-project-card > header strong {
   color: var(--home-text) !important;
   font-family: var(--font-metric) !important;
-  font-style: italic;
+  font-style: normal;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1067,7 +1075,7 @@ body .studio.director-merged:not(.home-mode) #directorTaskSummary {
   .progress-percent, .progress-metric strong
 ) {
   font-family: var(--font-metric) !important;
-  font-style: italic;
+  font-style: normal;
   font-variant-numeric: tabular-nums;
 }
 

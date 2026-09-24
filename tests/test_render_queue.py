@@ -35,3 +35,19 @@ def test_unknown_persisted_render_kind_is_rejected() -> None:
         assert "不支持的持久化渲染任务" in str(error)
     else:
         raise AssertionError("unknown render kind should fail")
+
+
+def test_agent_final_output_is_registered_for_persisted_resume() -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    def run_agent_final_output(job_id: str, session_id: str, revision: int) -> dict:
+        calls.append((job_id, session_id, revision))
+        return {"ok": True}
+
+    with patch.object(main_module, "run_agent_final_output", run_agent_final_output):
+        result = main_module.run_persisted_render_task(
+            "job_1", "run_agent_final_output", ["session_1", 3],
+        )
+
+    assert result == {"ok": True}
+    assert calls == [("job_1", "session_1", 3)]

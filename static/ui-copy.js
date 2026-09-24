@@ -67,14 +67,19 @@
     addToBasket: "加入成片清单",
     addToEvent: "加入事件",
     insertTimeline: "插入时间线",
-    preview: "生成剪辑预览",
-    exportVersion: "生成成片",
-    download: "下载",
+    preview: "生成预览",
+    exportVersion: "导出成片",
+    download: "下载成片",
   });
 
   function workflow(kind) {
     return WORKFLOWS[String(kind || "")] || WORKFLOWS.highlight;
   }
 
-  global.ClipTalkCopy = Object.freeze({ WORKFLOWS, ACTIONS, workflow });
+  // 操作前置守卫提示。此前同一句"请先保存或取消当前片段设置"在 app.js 里复制了 11 份。
+  const GUARDS = Object.freeze({
+    hotEditDirty: (suffix) => `请先保存或取消当前片段设置${suffix ? `，${suffix}` : ""}`,
+  });
+
+  global.ClipTalkCopy = Object.freeze({ WORKFLOWS, ACTIONS, GUARDS, workflow });
 })(window);

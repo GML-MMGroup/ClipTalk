@@ -493,6 +493,14 @@ def test_failed_render_does_not_restore_obsolete_current_version(delivery_job, m
 
 def test_real_synthetic_render_uses_frozen_spec(delivery_job, monkeypatch):
     job = delivery_job
+    encoders = subprocess.run(
+        [main.settings.ffmpeg, "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if encoders.returncode or "libx264" not in (encoders.stdout + encoders.stderr):
+        pytest.skip("FFmpeg libx264 encoder is unavailable in this environment")
     subprocess.run([main.settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                     "testsrc2=size=160x90:rate=12:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-y", job["sourcePath"]], check=True, capture_output=True, timeout=20)

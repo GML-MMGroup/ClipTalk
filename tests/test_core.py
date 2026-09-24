@@ -1013,7 +1013,48 @@ class PublicJobPayloadTests(unittest.TestCase):
             summary["primaryOutput"]["coverUrl"],
             "/api/jobs/job_bound_cover/outputs/final.mp4/cover",
         )
+        self.assertIsNone(summary["currentCoverVersionId"])
         self.assertNotIn("outputVersions", summary)
+
+    def test_public_agent_preview_inherits_the_approved_cover_for_export(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            outputs = root / "outputs"
+            work.mkdir()
+            outputs.mkdir()
+            source = root / "source.mp4"
+            source.touch()
+            cover = work / "approved-cover.jpg"
+            cover.write_bytes(b"approved-cover")
+            preview = outputs / "agent-preview.mp4"
+            preview.write_bytes(b"preview")
+            job = main_module.new_job_record(
+                job_id="job_preview_cover", source=source, filename="source.mp4",
+                size=0, count="auto", target_seconds="auto", theme="",
+            )
+            job.update({
+                "workDirectory": str(work), "outputDirectory": str(outputs),
+                "currentCoverVersionId": "cover_v001",
+                "coverVersions": [{
+                    "id": "cover_v001", "status": "current",
+                    "artifactFile": cover.name, "contentHash": "sha256:cover",
+                }],
+                "agentPreviewOutputs": [{
+                    "filename": preview.name, "title": "审核样片", "previewOnly": True,
+                }],
+            })
+
+            visible = main_module.public_job(job)
+
+        output = visible["agentPreviewOutputs"][0]
+        self.assertEqual(output["coverVersionId"], "cover_v001")
+        self.assertEqual(output["coverBindingStatus"], "locked_for_export")
+        self.assertEqual(
+            output["coverUrl"],
+            "/api/jobs/job_preview_cover/cover-artifacts/cover_v001",
+        )
+        self.assertNotIn("packageUrl", output)
 
     def test_execution_counts_independent_rejections_separately_from_repairs(self) -> None:
         snapshot = execution_snapshot({

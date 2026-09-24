@@ -1,6 +1,23 @@
 (function () {
   "use strict";
 
+  // 统一界面状态出口：ui-states.js 是唯一实现来源。
+  // 在只 eval 本文件的测试上下文中该库不可用，此时退化为等价的最小结构，
+  // 保证渲染不中断（生产页面始终经由 index.html 加载 ui-states.js）。
+  const ctEsc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ctEmpty = (o) => (window.ClipTalkUIStates
+    ? window.ClipTalkUIStates.emptyStateHtml(o)
+    : `<div class="ct-empty${o && o.className ? ` ${o.className}` : ""}" role="status"><strong>${ctEsc(o && o.title)}</strong>${o && o.hint ? `<p>${ctEsc(o.hint)}</p>` : ""}</div>`);
+  const ctPolling = (fn, ms) => {
+    const ui = window.ClipTalkUIStates;
+    if (ui && typeof ui.createPolling === "function") return ui.createPolling(fn, ms);
+    const id = setInterval(fn, ms);
+    return { interval: ms, refresh: fn, stop: () => clearInterval(id) };
+  };
+
+  const ctLoading = (o) => (window.ClipTalkUIStates
+    ? window.ClipTalkUIStates.loadingStateHtml(o)
+    : `<div class="ct-loading${o && o.className ? ` ${o.className}` : ""}" role="status" aria-live="polite"><strong>${ctEsc(o && o.label)}</strong></div>`);
   const request = window.ClipTalkApi?.request;
   if (!request) return;
 
@@ -25,6 +42,7 @@
     nextCursor: null,
     hasMore: false,
     filter: "all",
+    homeGroup: "",
     query: "",
     outputs: [],
     libraryQuery: "",
@@ -121,7 +139,7 @@
     if (group === "cancelled") return "已取消";
     if (group === "handed_off") return "已转入后续任务";
     if (group === "draft") return "待输入";
-    if (group === "no_result") return "无结果";
+    if (group === "no_result") return "未找到可用结果";
     return "已保存";
   }
 
@@ -136,8 +154,14 @@
       || "",
     ).trim();
     const generic = new Set(["事件高光合集", "自动剪辑", "智能剪辑", "内容探索", "内容检索", ""]);
+    let title = displayName
+      || (!generic.has(objective) && objective
+        ? (objective.length <= 24 ? objective : `${objective.slice(0, 24)}…`)
+        : filename);
+    const hashMatch = title.match(/^([0-9a-f]{8})[0-9a-f]{8,}([0-9a-f]{5})$/i);
+    if (hashMatch) title = `${hashMatch[1]}…${hashMatch[2]}`;
     return {
-      title: displayName || (!generic.has(objective) && objective.length <= 24 && !/[；;：:。]/.test(objective) ? objective : filename),
+      title,
       filename,
     };
   }
@@ -145,14 +169,18 @@
   function taskArtworkMarkup(job) {
     const output = job?.primaryOutput && typeof job.primaryOutput === "object" ? job.primaryOutput : null;
     const sourceUrl = String(job?.thumbnailUrl || (job?.id ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail` : ""));
-    const coverUrl = String(output?.coverUrl || "");
+    const taskCover = Boolean(job?.currentCoverVersionId);
+    const coverUrl = String(output?.coverUrl || (taskCover ? sourceUrl : ""));
     const artworkUrl = coverUrl || sourceUrl;
     if (!artworkUrl) return "";
-    const version = output ? `V${String(Number(output.versionNumber || 1)).padStart(2, "0")}` : "素材";
-    const description = coverUrl
-      ? `${output?.displayTitle || "当前成片"}的绑定封面`
+    const version = output ? `V${String(Number(output.versionNumber || 1)).padStart(2, "0")}` : taskCover ? "封面" : "素材";
+    const description = output?.coverUrl
+      ? `${output.displayTitle || "当前成片"}的绑定封面`
+      : taskCover
+        ? "当前任务已确认封面"
       : output ? `${output.displayTitle || "当前成片"}尚未设置封面，显示素材画面` : "任务素材画面";
-    return `<span class="shell-task-media" data-artwork-kind="${coverUrl ? "output-cover" : "source-thumbnail"}" title="${escapeHtml(description)}"><img src="${escapeHtml(artworkUrl)}"${coverUrl && sourceUrl ? ` data-artwork-fallback="${escapeHtml(sourceUrl)}"` : ""} data-task-artwork alt="${escapeHtml(description)}" loading="lazy"><b>${escapeHtml(version)}</b></span>`;
+    const artworkKind = output?.coverUrl ? "output-cover" : taskCover ? "task-cover" : "source-thumbnail";
+    return `<span class="shell-task-media" data-artwork-kind="${artworkKind}" title="${escapeHtml(description)}"><img src="${escapeHtml(artworkUrl)}"${output?.coverUrl && sourceUrl ? ` data-artwork-fallback="${escapeHtml(sourceUrl)}"` : ""} data-task-artwork alt="${escapeHtml(description)}" loading="lazy"><b>${escapeHtml(version)}</b></span>`;
   }
 
   function wireTaskArtwork(root) {
@@ -182,12 +210,14 @@
     const updated = formatDate(job?.updatedAt || job?.createdAt).replace("保存时间未知", "更新时间未知");
     const output = job?.primaryOutput && typeof job.primaryOutput === "object" ? job.primaryOutput : null;
     const versionLabel = output ? `V${String(Number(output.versionNumber || 1)).padStart(2, "0")}` : "";
-    const outputLabel = output ? ` · ${versionLabel} ${output.coverUrl ? "封面已绑定" : "使用素材画面"}` : "";
+    const outputLabel = output
+      ? ` · ${versionLabel} ${output.coverUrl ? "封面已绑定" : "使用素材画面"}`
+      : job?.currentCoverVersionId ? " · 封面已锁定" : "";
     const historyIds = (job.executionHistory || []).map((record) => String(record?.id || "")).filter(Boolean);
     const deleteLabel = historyIds.length ? `删除任务及 ${historyIds.length} 条历史记录` : "删除任务";
     return `<article class="shell-task-card${current ? " is-current" : ""}${home ? " home-shell-task" : ""}" data-shell-job="${escapeHtml(job?.id)}" data-status-group="${group}">
       ${deletable && taskCanDelete(job) ? `<details class="shell-task-menu"><summary aria-label="${escapeHtml(`${display.title}的任务操作`)}" title="任务操作">•••</summary><div><button type="button" data-shell-delete="${escapeHtml(job?.id)}" data-shell-delete-related="${escapeHtml(historyIds.join(","))}">${escapeHtml(deleteLabel)}</button></div></details>` : ""}
-      <button class="shell-task-open" type="button" data-shell-open="${escapeHtml(job?.openJobId || job?.id)}"${output?.filename ? ` data-shell-output="${escapeHtml(output.filename)}"` : ""}>
+      <button class="shell-task-open" type="button" data-shell-open="${escapeHtml(job?.openJobId || job?.id)}"${output?.filename && group === "completed" ? ` data-shell-output="${escapeHtml(output.filename)}"` : ""}>
         ${home ? taskArtworkMarkup(job) : ""}
         <span class="shell-task-heading"><strong title="${escapeHtml(display.title)}">${escapeHtml(display.title)}</strong><b class="shell-task-state">${escapeHtml(taskStateLabel(group))}</b></span>
         <small>${escapeHtml(workflow)} · ${escapeHtml(display.filename)}${escapeHtml(outputLabel)}${current ? " · 当前任务" : ""}</small>
@@ -234,6 +264,12 @@
     if (homeOutputCount) homeOutputCount.textContent = String(state.outputs.length);
   }
 
+  function homeGroupFor(job) {
+    const status = statusGroup(job);
+    return ["action_required", "failed", "no_result"].includes(status) ? "attention"
+      : ["active", "agent_planning"].includes(status) ? "running" : "recent";
+  }
+
   function renderSidebar() {
     const root = $("#sidebarHistoryList");
     if (!root) return;
@@ -241,15 +277,28 @@
     const visibleIds = new Set(state.sidebarJobs.map(job => String(job.id)));
     const jobs = window.ClipTalkWorkspaceState.logicalTasks([...state.catalog, ...state.sidebarJobs])
       .filter(job => visibleIds.has(String(job.id)) || job.executionHistory.some(record => visibleIds.has(String(record.id))))
+      .filter(job => !state.homeGroup || homeGroupFor(job) === state.homeGroup)
       .filter(job => state.filter === "all" || statusGroup(job) === state.filter).sort((left, right) => {
       if (String(left.id) === currentId) return -1;
       if (String(right.id) === currentId) return 1;
       return String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""));
     });
     $("#sidebarTaskCount").textContent = String(jobs.length);
+    let groupNotice = $("#sidebarGroupNotice");
+    if (!groupNotice) {
+      groupNotice = document.createElement("button");
+      groupNotice.id = "sidebarGroupNotice";
+      groupNotice.type = "button";
+      groupNotice.dataset.homeHistory = "";
+      root.before(groupNotice);
+    }
+    groupNotice.hidden = !state.homeGroup;
+    groupNotice.textContent = `${{ attention: "需要你处理", running: "正在进行", recent: "最近任务" }[state.homeGroup] || ""} · 清除分组筛选`;
     root.innerHTML = jobs.length
       ? jobs.map((job) => taskCard(job)).join("")
-      : `<div class="app-sidebar-empty">${state.query || state.filter !== "all" ? "没有符合条件的任务" : "还没有任务"}</div>`;
+      : ctEmpty(state.query || state.filter !== "all"
+        ? { title: "没有符合条件的任务", hint: "换个关键词，或把筛选切回「全部」再看看。", className: "app-sidebar-empty" }
+        : { title: "还没有任务", hint: "上传一段视频，剪辑助理会帮你规划第一版成片。", className: "app-sidebar-empty" });
     $("#sidebarLoadMore")?.classList.toggle("hidden", !state.hasMore);
     renderNavigationBadges();
   }
@@ -259,8 +308,6 @@
     const home = $("#homeView");
     if (!root || !home) return;
     const tasks = window.ClipTalkWorkspaceState.logicalTasks([...state.catalog, ...state.sidebarJobs]);
-    const actionJobs = tasks.filter((job) => ["active", "agent_planning", "action_required"].includes(statusGroup(job))).slice(0, 4);
-    const savedJobs = tasks.filter((job) => !["active", "agent_planning", "action_required"].includes(statusGroup(job))).slice(0, 6);
     const projectIds = new Set(state.catalog.map((job) => String(job.sourceProjectId || job.id)));
     const taskCount = $("#homeTaskCount");
     const assetCount = $("#homeAssetCount");
@@ -268,11 +315,18 @@
     if (taskCount) taskCount.textContent = `${tasks.length}${state.catalogHasMore || state.hasMore ? "+" : ""}`;
     if (assetCount) assetCount.textContent = String(projectIds.size);
     if (outputCount) outputCount.textContent = String(state.outputs.length);
-    home.dataset.homeState = state.catalog.length ? "ready" : "empty";
+    home.dataset.homeState = tasks.length ? "ready" : "empty";
     home.setAttribute("aria-busy", "false");
-    root.innerHTML = actionJobs.length || savedJobs.length
-      ? `${actionJobs.length ? `<section class="home-task-section"><header><strong>需要处理</strong><span>${actionJobs.length}</span></header><div>${actionJobs.map((job) => taskCard(job, { home: true })).join("")}</div></section>` : ""}${savedJobs.length ? `<section class="home-task-section"><header><strong>最近任务</strong><span>${savedJobs.length}</span></header><div>${savedJobs.map((job) => taskCard(job, { home: true })).join("")}</div></section>` : ""}`
-      : `<div class="home-current-empty"><div><strong>当前没有处理中的任务</strong><span>创建新任务后，进行中和待确认的内容会显示在这里。</span></div></div>`;
+    const sorted = [...tasks].sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+    const section = (key, title, hint) => {
+      const items = sorted.filter(job => homeGroupFor(job) === key);
+      const count = `${items.length}${state.catalogHasMore || state.hasMore ? "+" : ""}`;
+      if (!items.length && !state.catalogHasMore && !state.hasMore) return `<section class="home-task-section is-empty" data-home-group="${key}"><p class="home-task-hint">暂无${title}</p></section>`;
+      return `<section class="home-task-section" data-home-group="${key}"><header><strong>${title} · ${count}</strong><button type="button" class="home-task-view-all" data-home-history="${key}">查看全部</button></header><p class="home-task-hint">${hint}</p><div>${items.length ? items.slice(0, 4).map(job => taskCard(job, { home: true, deletable: false })).join("") : `<p class="home-task-hint">暂无${title}</p>`}</div></section>`;
+    };
+    root.innerHTML = tasks.length
+      ? `${section("attention", "需要你处理", "待确认、执行失败或未找到结果")}${section("running", "正在进行", "正在规划或处理，无需重复提交")}${section("recent", "最近任务", "按最近更新时间排列")}<button type="button" class="home-task-view-all" data-home-history>查看全部任务</button>`
+      : `<div class="home-current-empty"><div><strong>还没有剪辑任务</strong><span>上传一段视频，剪辑助理会帮你规划第一版成片。</span></div></div>`;
     wireTaskArtwork(root);
     renderNavigationBadges();
   }
@@ -390,7 +444,7 @@
     if (!sorted.length) {
       root.innerHTML = state.outputs.length
         ? '<div class="app-library-empty"><strong>没有符合条件的成片</strong><span>换一个关键词，或清除搜索条件。</span></div>'
-        : '<div class="app-library-empty"><strong>还没有生成成片</strong><span>审核样片确认后，生成的成片会自动出现在这里。</span><button type="button" data-library-tasks>打开任务列表</button></div>';
+        : ctEmpty({ title: "还没有生成成片", hint: "审核样片确认后，生成的成片会自动出现在这里。", actionLabel: "打开任务列表", actionAttr: "data-library-tasks", className: "app-library-empty" });
       return;
     }
     root.innerHTML = sorted.map((item, index) => {
@@ -409,7 +463,7 @@
     if (state.outputs.length && !force) return;
     state.loadingLibrary = true;
     const root = $("#libraryOutputList");
-    if (root && !state.outputs.length) root.innerHTML = '<div class="app-library-loading" role="status">正在读取成片库</div>';
+    if (root && !state.outputs.length) root.innerHTML = ctLoading({ label: "正在读取成片库", rows: 3, className: "app-library-loading" });
     try {
       const response = await request("/api/library/outputs");
       if (!Array.isArray(response?.outputs)) throw new Error("成片库响应不完整，请更新服务后重试");
@@ -456,6 +510,11 @@
     document.body.dataset.sidebarCollapsed = "true";
   }
 
+  function updateSidebarNewTaskLabel(view) {
+    const label = $("#sidebarNewTask span");
+    if (label) label.textContent = view === "library" ? "新建" : "新建任务";
+  }
+
   function showView(view, { route = true, push = false } = {}) {
     document.body.removeAttribute("data-mobile-nav-open");
     $("#mobileNavigationToggle")?.setAttribute("aria-expanded", "false");
@@ -468,6 +527,7 @@
     state.view = next;
     document.body.dataset.shellView = next;
     setSidebarMode(next);
+    updateSidebarNewTaskLabel(next);
     updateNav(next);
     renderNavigationBadges();
     const library = $("#libraryView");
@@ -630,10 +690,26 @@
       setHistoryDrawer(document.body.dataset.sidebarOverlay !== "true", { restoreFocus: true });
       return;
     }
+    if (target.closest("[data-home-history]")) {
+      state.homeGroup = target.closest("[data-home-history]").dataset.homeHistory || "";
+      state.filter = "all";
+      state.query = "";
+      const search = $("#sidebarTaskSearch");
+      if (search) search.value = "";
+      $$('[data-sidebar-filter]').forEach(button => {
+        const active = button.dataset.sidebarFilter === "all";
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+      setHistoryDrawer(true, { restoreFocus: true });
+      await loadSidebarCatalog();
+      return;
+    }
     if (target.closest("#sidebarHistoryClose") || target.closest("#appSidebarScrim")) { setHistoryDrawer(false, { restoreFocus: true }); return; }
     if (target.closest("[data-shell-retry]")) { await refreshCatalog(); return; }
     const filter = target.closest("[data-sidebar-filter]");
     if (filter) {
+      state.homeGroup = "";
       state.filter = filter.dataset.sidebarFilter || "all";
       $$('[data-sidebar-filter]').forEach((button) => {
         const active = button === filter;
@@ -822,5 +898,5 @@
   window.setInterval(() => {
     if (!document.hidden && (state.view === "home" || document.body.dataset.sidebarOverlay === "true")) void refreshCatalog();
   }, 15000);
-  window.setInterval(loadServiceState, 30000);
+  ctPolling(loadServiceState, 30000);
 })();

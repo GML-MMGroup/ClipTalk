@@ -56,12 +56,25 @@
   --ct-duration-state: 240ms;
   --ct-ease: cubic-bezier(.2, .75, .25, 1);
 
+  /* 层级：唯一权威定义。
+     原先 cliptalk-tokens.css 与 panel-system.css 各自定义一套，
+     命名重叠而语义不一致（--ct-z-menu 与 --ct-z-navigation 同为 100，
+     --ct-z-alert 与 --ct-z-modal-scrim 同为 500）。
+     此处合并为一份，数值一律保持原值，不改变任何现有层叠行为。 */
   --ct-z-header: 20;
+  --ct-z-navigation: 100;
   --ct-z-menu: 100;
   --ct-z-panel: 200;
+  --ct-z-popover: 200;
   --ct-z-scrim: 400;
+  --ct-z-drawer-scrim: 400;
+  --ct-z-drawer: 410;
   --ct-z-modal-menu: 420;
   --ct-z-alert: 500;
+  --ct-z-modal-scrim: 500;
+  --ct-z-modal: 510;
+  --ct-z-system-dialog: 600;
+  --ct-z-notice: 700;
 
   --ct-shadow-shell: 0 24px 70px rgba(31, 39, 34, .16);
   --ct-shadow-overlay: 0 20px 50px rgba(12, 19, 18, .38);

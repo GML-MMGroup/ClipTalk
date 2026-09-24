@@ -108,6 +108,41 @@ def test_uncertain_plugin_result_cannot_be_confirmed_as_success(tmp_path):
     assert calls == ["op"]
 
 
+def test_failed_cover_confirmation_can_be_reconciled_without_replaying_candidates(tmp_path: Path) -> None:
+    platform = platform_at(tmp_path)
+    workspace = platform.create_workspace(job_id="job_cover_reconcile")
+    calls: list[str] = []
+    platform.configure_tool_dispatcher(
+        lambda _workspace, tool, _arguments: calls.append(tool) or {
+            "artifact": {"kind": "current_cover", "cover": {"id": "cover_v004"}},
+        },
+    )
+    plan = platform.store.save("plans", {
+        "id": "plan_cover_reconcile", "workspaceId": workspace["id"],
+        "status": "failed", "executionMode": "stepwise_review",
+        "steps": [{
+            "id": "review", "index": 0, "title": "选择封面", "tool": "review_cover_variants",
+            "arguments": {}, "dependencies": [], "expectedOutput": "已选封面", "sideEffect": "review",
+            "estimatedSeconds": 0, "optional": False, "status": "completed", "attempts": 1,
+        }, {
+            "id": "confirm", "index": 1, "title": "保存封面", "tool": "confirm_cover",
+            "arguments": {}, "dependencies": ["review"], "expectedOutput": "当前封面", "sideEffect": "preview",
+            "estimatedSeconds": 1, "optional": False, "status": "failed", "attempts": 1,
+            "error": "source_subtitle_ack_required",
+        }],
+    })
+    workspace.update({"activePlanId": plan["id"], "status": "failed"})
+    platform.store.save("workspaces", workspace)
+
+    recovered = platform.retry_action(plan["id"])
+
+    assert calls == ["confirm_cover"]
+    assert recovered["status"] == "preview_ready"
+    assert recovered["steps"][0]["status"] == "completed"
+    assert recovered["steps"][1]["status"] == "completed"
+    assert recovered["steps"][1]["result"]["artifact"]["cover"]["id"] == "cover_v004"
+
+
 def test_cover_requested_with_a_short_video_still_compiles_a_timeline_delivery() -> None:
     brief = AgentPlatform._editing_brief(
         "把嘉宾发言剪成45秒短视频，添加字幕并生成一张16:9封面", {},
@@ -117,7 +152,8 @@ def test_cover_requested_with_a_short_video_still_compiles_a_timeline_delivery()
     assert brief["coverRequested"] is True
 
 
-def test_cover_review_retry_rebuilds_candidates_from_structured_goal_constraints(tmp_path: Path) -> None:
+@pytest.mark.parametrize("local_revision", [False, True])
+def test_cover_review_retry_rebuilds_candidates_from_structured_goal_constraints(tmp_path: Path, local_revision: bool) -> None:
     platform = platform_at(tmp_path)
     workspace = platform.create_workspace(job_id="job_cover_retry")
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -163,15 +199,25 @@ def test_cover_review_retry_rebuilds_candidates_from_structured_goal_constraints
     workspace["status"] = "action_required"
     platform.store.save("workspaces", workspace)
 
-    retried = platform.retry_action(plan["id"])
+    revision = {"coverSourceTime": 61.0, "coverTitle": "新标题", "coverSubject": "讲解者", "coverAspect": "9:16"}
+    retried = platform.retry_action(plan["id"], cover_revision=revision if local_revision else None)
 
     assert retried["status"] == "action_required"
-    assert retried["brief"]["coverSourceTime"] == 54.0
-    assert retried["brief"]["coverSubject"] == "小米创始人雷军"
+    assert retried["brief"]["coverSourceTime"] == (61.0 if local_revision else 54.0)
+    assert retried["brief"]["coverSubject"] == ("讲解者" if local_revision else "小米创始人雷军")
     candidate_arguments = next(step for step in retried["steps"] if step["tool"] == "propose_cover_candidates")["arguments"]
-    assert candidate_arguments["sourceTime"] == 54.0
-    assert candidate_arguments["subject"] == "小米创始人雷军"
-    assert [tool for tool, _arguments in calls] == [
+    assert candidate_arguments["sourceTime"] == (61.0 if local_revision else 54.0)
+    assert candidate_arguments["subject"] == ("讲解者" if local_revision else "小米创始人雷军")
+    assert next(s for s in retried["steps"] if s["tool"] == "inspect_workspace")["attempts"] == 1
+    assert retried["goal"] == plan["goal"]
+    if local_revision:
+        assert candidate_arguments["focus"] == "讲解者；新标题"
+        render_args = next(s for s in retried["steps"] if s["tool"] == "render_cover_variants")["arguments"]
+        assert render_args["titleText"] == "新标题"
+        assert render_args["aspectRatios"] == ["9:16"]
+        retried_again = platform.retry_action(plan["id"])
+        assert retried_again["brief"]["coverSourceTime"] == 61.0
+    assert [tool for tool, _arguments in calls[:2]] == [
         "propose_cover_candidates", "render_cover_variants",
     ]
     assert next(step for step in retried["steps"] if step["tool"] == "review_cover_variants")["status"] == "action_required"
@@ -247,6 +293,35 @@ def test_external_person_cover_is_parsed_without_silent_source_frame_fallback() 
     )
     assert source_cover["coverTitle"] == "关键时刻"
     assert source_cover["coverSourceKind"] == "source_frame"
+
+
+def test_cover_text_and_compose_instruction_are_parsed_as_separate_requirements() -> None:
+    goal = (
+        "为这个成片生成一个封面，封面用最有冲击感的画面就行，"
+        "封面上写：小米牛逼！！！,封面直接和成片进行合成就行。"
+    )
+    context = {
+        "delivery": {"outputAspect": "9:16", "outputFit": "blur"},
+        "editing": {"hasOutputs": True, "hasActiveSession": True},
+    }
+
+    brief = AgentPlatform._editing_brief(goal, context)
+
+    assert brief["operationIntent"] == "cover_asset"
+    assert brief["delivery"] == "artifact"
+    assert brief["socialDelivery"]["requested"] is False
+    assert brief["coverTitle"] == "小米牛逼！！！"
+    assert brief["coverAspect"] == "9:16"
+    assert brief["coverIntroRequested"] is True
+    assert brief["coverIntroDurationSeconds"] == 1.5
+
+    explicit = AgentPlatform._editing_brief(
+        "封面上写：小米牛逼，雷军牛逼！！！，并将封面作为2秒片头合成到当前成片。",
+        context,
+    )
+    assert explicit["coverTitle"] == "小米牛逼，雷军牛逼！！！"
+    assert explicit["coverIntroRequested"] is True
+    assert explicit["coverIntroDurationSeconds"] == 2.0
 
 
 def test_named_source_frame_cover_preserves_subject_and_exact_time() -> None:
@@ -376,7 +451,7 @@ def test_cover_timestamp_does_not_become_target_duration() -> None:
     understanding = AgentPlatform._plan_understanding(brief, {})
     by_label = {item["label"]: item["value"] for item in understanding["items"]}
     assert by_label["检索目标"] == "汽车"
-    assert by_label["成片时长"] == "不限制，使用符合条件的可靠片段"
+    assert "成片时长" not in by_label
     assert "9:16" in by_label["输出方式"]
     assert "小米牛逼！！雷军雷神！！！！" in by_label["封面"]
 
@@ -443,6 +518,21 @@ def test_intent_brief_handles_common_chinese_editing_ambiguities() -> None:
     assert product_shorter["retrievalQuery"] == "介绍XX产品"
     assert product_shorter["targetSeconds"] == 80
     assert product_shorter["durationSource"] == "relative"
+
+    # ux22 回归：“前三秒”描述成片开头，不是素材范围
+    output_opening = AgentPlatform._editing_brief(
+        "剪成一条 60 秒短视频，前三秒突出核心亮点，随后用紧凑节奏展开主要内容。",
+        context,
+    )
+    assert output_opening["sourceRange"] is None
+    assert output_opening["targetSeconds"] == 60
+
+    output_hook = AgentPlatform._editing_brief("前 3 秒进入 Hook，随后展示高潮", context)
+    assert output_hook["sourceRange"] is None
+
+    real_range = AgentPlatform._editing_brief("只保留前三秒的画面", context)
+    assert real_range["sourceRange"]["start"] == 0
+    assert real_range["sourceRange"]["end"] == 3
 
     social_only = AgentPlatform._editing_brief("做一个小红书视频，但不要裁切，保留完整画面", context)
     assert social_only["operationIntent"] == "reframe_existing"
@@ -682,6 +772,59 @@ workflow-profile: cover
         )
 
         assert selected["id"] == "cliptalk-content-extractor"
+
+
+def test_existing_vertical_output_cover_request_routes_to_one_final_intro_qc_chain() -> None:
+    root = Path(__file__).resolve().parents[1]
+    goal = (
+        "为当前9:16审核样片生成9:16封面，使用最有冲击感的画面，"
+        "封面文字仅为“小米牛逼！！！”，并作为1.5秒片头合成到成片开头。"
+    )
+    context = {
+        "editing": {"hasOutputs": True, "hasActiveSession": True},
+        "delivery": {"outputAspect": "9:16", "outputFit": "blur"},
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        platform = platform_at(Path(directory))
+        for skill_id in (
+            "cliptalk-cover-intro-composer",
+            "cliptalk-cover-director",
+            "cliptalk-dynamic-reframe-director",
+        ):
+            platform.install_skill(
+                markdown=(root / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8"),
+                source="test", status="enabled",
+            )
+
+        skill = platform.route_skill(goal, planning_context=context)
+        assert skill["id"] == "cliptalk-cover-intro-composer"
+        brief = platform._editing_brief(goal, context)
+        compiled = platform._compile_profile_plan(
+            {}, skill=skill, goal=goal, context=context,
+            skills=platform._compose_skills(skill, brief=brief, context=context),
+        )
+
+        assert [step["tool"] for step in compiled["steps"]] == [
+            "inspect_workspace",
+            "propose_cover_candidates",
+            "render_cover_variants",
+            "review_cover_variants",
+            "confirm_cover",
+            "compose_cover_intro",
+            "run_delivery_qc",
+        ]
+        by_tool = {step["tool"]: step for step in compiled["steps"]}
+        assert by_tool["propose_cover_candidates"]["arguments"]["aspectRatios"] == ["9:16"]
+        assert by_tool["render_cover_variants"]["arguments"]["titleText"] == "小米牛逼！！！"
+        assert by_tool["compose_cover_intro"]["arguments"] == {"duration": 1.5}
+        assert by_tool["run_delivery_qc"]["arguments"] == {
+            "strict": True,
+            "expectedAspect": "9:16",
+            "requireCover": True,
+            "requireCoverIntro": True,
+            "expectedCoverTitle": "小米牛逼！！！",
+        }
+        assert by_tool["run_delivery_qc"]["dependencies"] == [by_tool["compose_cover_intro"]["id"]]
 
 
 def test_short_topic_phrase_routes_to_content_not_shortform() -> None:
@@ -1201,6 +1344,32 @@ def test_workspace_rejects_a_second_planning_or_active_plan_request() -> None:
         assert plan["status"] == "awaiting_confirmation"
 
 
+def test_failed_replanning_restores_the_previous_terminal_workspace_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        platform = platform_at(Path(directory))
+        workspace = platform.create_workspace(job_id="job_replan_restore")
+        plan = platform.create_plan(workspace_id=workspace["id"], goal="生成第一版审核样片")
+        plan["status"] = "preview_ready"
+        platform.store.save("plans", plan)
+        workspace = platform.store.get("workspaces", workspace["id"])
+        workspace["status"] = "preview_ready"
+        platform.store.save("workspaces", workspace)
+
+        reserved, _skill, _payload = platform.prepare_plan_request(
+            workspace_id=workspace["id"], goal="生成新的可确认剪辑计划",
+        )
+        assert reserved["planningPreviousStatus"] == "preview_ready"
+        platform.release_plan_request(
+            workspace["id"], request_id=str(reserved["planningRequestId"]),
+        )
+
+        restored = platform.store.get("workspaces", workspace["id"])
+        assert restored["status"] == "preview_ready"
+        assert restored["activePlanId"] == plan["id"]
+        assert "planningPreviousStatus" not in restored
+        assert "planningRequestId" not in restored
+
+
 def test_planning_progress_is_persisted_for_task_polling_and_reload() -> None:
     with tempfile.TemporaryDirectory() as directory:
         platform = platform_at(Path(directory))
@@ -1238,6 +1407,7 @@ def test_stale_planning_reservation_is_recovered_after_a_server_restart() -> Non
         assert recovered is not None
         assert recovered["status"] == "ready"
         assert "planningRequestId" not in recovered
+        assert "planningPreviousStatus" not in recovered
         assert platform.store.events_after(workspace["id"])[-1]["type"] == "planning.recovered"
 
 
@@ -1414,6 +1584,70 @@ def test_delivery_qc_accepts_verified_subtitles_text_and_current_cover_intro(
         for value in artifact["reports"][0]["deliverables"].values()
         if value["required"]
     )
+
+
+def test_delivery_qc_prefers_final_cover_intro_output_when_intermediate_social_preview_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from app import main
+
+    job_id = "job_delivery_prefers_cover_intro"
+    social_filename = "social-preview.mp4"
+    final_filename = "cover-intro-preview.mp4"
+    (tmp_path / social_filename).write_bytes(b"social")
+    (tmp_path / final_filename).write_bytes(b"final")
+    job = {
+        "id": job_id,
+        "outputDirectory": str(tmp_path),
+        # Real editing jobs may still carry the older workflow brief. The
+        # plan's explicit QC arguments must therefore be sufficient.
+        "brief": {},
+        "coverDraft": {
+            "titleText": "小米牛逼！！！",
+            "source": {"kind": "accepted_timeline", "editSessionId": "edit_1"},
+        },
+        "currentCoverVersionId": "cover_v002",
+        "coverVersions": [{
+            "id": "cover_v002", "titleText": "小米牛逼！！！",
+            "titleLines": ["小米牛逼！！！"], "evidenceRefs": ["match_1"],
+        }],
+        "lastAgentSocialPreviewFilename": social_filename,
+        "lastAgentCoverIntroPreviewFilename": final_filename,
+        "agentPreviewOutputs": [{
+            "filename": social_filename, "duration": 10.0,
+            "previewOnly": True, "outputKind": "social_reframe_preview",
+        }, {
+            "filename": final_filename, "duration": 11.5,
+            "previewOnly": True, "outputKind": "cover_intro_review_preview",
+            "coverIntro": {"enabled": True, "coverVersionId": "cover_v002"},
+        }],
+    }
+    monkeypatch.setitem(main.jobs, job_id, job)
+    monkeypatch.setattr(main, "analyze_rendered_media", lambda *_args, **_kwargs: {
+        "passed": True, "issues": [],
+        "media": {"duration": 11.5, "width": 540, "height": 960},
+    })
+
+    def submit(worker: Any) -> Future[dict[str, Any]]:
+        future: Future[dict[str, Any]] = Future()
+        future.set_result(worker())
+        return future
+
+    monkeypatch.setattr(main.output_preview_executor, "submit", submit)
+    queued = main.dispatch_agent_tool({"jobId": job_id}, "run_delivery_qc", {
+        "strict": True,
+        "expectedAspect": "9:16",
+        "requireCover": True,
+        "requireCoverIntro": True,
+        "expectedCoverTitle": "小米牛逼！！！",
+    })
+    artifact = queued["future"].result()["artifact"]
+    report = artifact["reports"][0]
+
+    assert artifact["passed"] is True
+    assert report["filename"] == final_filename
+    assert report["deliverables"]["cover"]["passed"] is True
+    assert report["deliverables"]["coverIntro"]["passed"] is True
 
 
 def test_background_content_search_no_candidates_finishes_as_no_result() -> None:
@@ -1856,7 +2090,7 @@ def test_propose_timeline_tool_generates_the_review_draft_it_requires(
 
     assert result["actionRequired"] is True
     assert result["proposalId"] == "proposal_agent_1"
-    assert "Agent 已生成待审核时间线草案" in result["message"]
+    assert "我已生成待审核时间线草案" in result["message"]
     session = job["editSessions"][0]
     assert session["pendingProposal"]["id"] == "proposal_agent_1"
     assert session["agentTimelineRequest"]["instruction"] == "删除重复表达并保留完整观点"
@@ -2541,17 +2775,14 @@ def test_autonomous_timeline_rejects_model_proposal_that_deletes_every_clip(
 
     monkeypatch.setattr(main, "create_edit_session_proposal", unsafe_proposal)
     workspace = {"jobId": job_id, "executionMode": "autonomous_review"}
-    proposed = main.dispatch_agent_tool(workspace, "propose_timeline_edit", {
-        "instruction": "剪成高潮；目标 20 秒，允许浮动 ±2 秒", "variantCount": 1,
-    })
-
-    assert proposed["proposalId"] != "proposal_delete_all"
-    session = main.find_edit_session(job, proposed["sessionId"])
-    assert session["pendingProposal"]["title"] == "Agent 安全时间线草案"
-    applied = main.dispatch_agent_tool(workspace, "confirm_timeline_edit", {})
-    assert applied["artifact"]["kind"] == "applied_timeline_batch"
+    with pytest.raises(RuntimeError, match="未自动应用"):
+        main.dispatch_agent_tool(workspace, "propose_timeline_edit", {
+            "instruction": "剪成高潮；目标 20 秒，允许浮动 ±2 秒", "variantCount": 1,
+        })
+    session = main.find_edit_session(job, job["activeEditSessionId"])
+    assert session["revision"] == 0
     assert len(session["clips"]) == 1
-    assert 18 <= session["duration"] <= 22
+    assert not job.get("agentTimelineBatch")
 
 
 def test_autonomous_content_assembly_balances_parallel_predicates_and_ignores_stale_session(
@@ -3049,7 +3280,7 @@ def test_propose_timeline_tool_builds_draft_directly_from_highlight_candidates(
     )
 
     assert result["proposalId"] == "proposal_highlight_1"
-    assert "Agent 已生成待审核时间线草案" in result["message"]
+    assert "我已生成待审核时间线草案" in result["message"]
     assert "请先在精剪时间线生成" not in result["message"]
     session = job["editSessions"][0]
     assert session["sourceCandidateIds"] == ["1", "0"]
@@ -3851,7 +4082,12 @@ def test_failed_empty_candidate_chain_retries_from_search_without_repeating_insp
         assert recovered["steps"][1]["status"] == "completed"
 
 
-def test_qc_failed_preview_can_rebuild_from_evidence_without_repeating_search() -> None:
+@pytest.mark.parametrize("issue_code,expected_calls", [
+    (None, ["review_content_evidence", "propose_timeline_edit", "render_review_preview", "run_delivery_qc"]),
+    ("content_goal_mismatch", ["search_content", "review_content_evidence", "propose_timeline_edit", "render_review_preview", "run_delivery_qc"]),
+    ("content_render_sample_uncertain", ["run_delivery_qc"]),
+])
+def test_qc_failed_preview_can_rebuild_from_evidence_without_repeating_search(issue_code, expected_calls) -> None:
     with tempfile.TemporaryDirectory() as directory:
         platform = platform_at(Path(directory))
         calls: list[str] = []
@@ -3901,14 +4137,16 @@ def test_qc_failed_preview_can_rebuild_from_evidence_without_repeating_search() 
                 "result": {"artifact": {"kind": "delivery_qc_report", "passed": False}},
             },
         ]
+        if issue_code:
+            plan["brief"] = {}
+            plan["steps"][-1]["result"]["artifact"]["reports"] = [{"issues": [{"code": issue_code}]}]
         platform.store.save("plans", plan)
 
         recovered = platform.retry_action(plan["id"])
 
         assert recovered["status"] == "preview_ready"
-        assert calls == [
-            "review_content_evidence", "propose_timeline_edit", "render_review_preview", "run_delivery_qc",
-        ]
+        assert calls == expected_calls
+        assert len(recovered["qualityRepairHistory"]) == 1
         assert recovered["steps"][0]["status"] == "completed"
         assert recovered["steps"][1]["status"] == "completed"
 
@@ -4308,11 +4546,11 @@ workflow-profile: social-reframe
         assert plan["steps"][6]["arguments"]["aspect"] == "9:16"
         assert plan["steps"][6]["arguments"]["fit"] == "blur"
         assert plan["steps"][7]["arguments"] == {
-            "strict": True, "targetSeconds": 60.0, "toleranceSeconds": 6.0,
+            "strict": True, "targetSeconds": 60.0, "toleranceSeconds": 6.0, "expectedAspect": "9:16",
         }
         evidence_step = plan["steps"][2]
         assert evidence_step["title"] == "自动筛选用于组合的候选片段"
-        assert evidence_step["expectedOutput"] == "Agent 自动选定的候选片段及其排列范围"
+        assert evidence_step["expectedOutput"] == "自动选定的候选片段及其排列范围"
         assert "随后自动生成 9:16 社媒审核预览并质检" in plan["summary"]
         assert "确认时间线后" not in plan["summary"]
 
@@ -4510,6 +4748,16 @@ workflow-profile: caption-layout
             by_tool["render_social_preview"]["id"],
         ]
         assert by_tool["run_delivery_qc"]["dependencies"] == [by_tool["compose_cover_intro"]["id"]]
+        assert by_tool["run_delivery_qc"]["arguments"]["expectedAspect"] == "9:16"
+        product_workspace = platform.create_workspace(job_id="job_product_vertical_cover")
+        product_plan = platform.create_plan(
+            workspace_id=product_workspace["id"], skill_id="cliptalk-content-extractor",
+            goal="找出产品新老替换和核心卖点画面，合成竖屏产品宣传短片，并生成审核样片。并找到一个具有冲击力的画面做封面，封面上写：小米厉害！！",
+        )
+        product_steps = {step["tool"]: step for step in product_plan["steps"]}
+        assert product_steps["render_social_preview"]["arguments"]["aspect"] == "9:16"
+        assert product_steps["run_delivery_qc"]["arguments"]["expectedAspect"] == "9:16"
+        assert product_steps["render_cover_variants"]["arguments"]["titleText"] == "小米厉害！！"
 
 
 @pytest.mark.parametrize(
@@ -4587,7 +4835,7 @@ workflow-profile: person
 
         tools = [step["tool"] for step in plan["steps"]]
         assert tools[:3] == ["inspect_workspace", "discover_people", "select_people"]
-        assert plan["steps"][2]["title"] == "Agent 核定目标人物"
+        assert plan["steps"][2]["title"] == "核定目标人物"
         assert plan["executionMode"] == "autonomous_review"
 
 

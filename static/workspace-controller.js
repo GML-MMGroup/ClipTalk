@@ -230,9 +230,6 @@
     const usesContextualDeck = ["person_edit", "speaker_edit", "highlight"].includes(String(workflowKind));
     if (!usesContextualDeck) {
       reviewView?.classList.remove("lower-panel-deck", "workbench-visible", "workbench-output-mode", "workbench-contextual");
-      if (reviewView?.dataset.lowerPanelMode && reviewView.dataset.lowerPanelMode !== "review") {
-        reviewView.dataset.lowerPanelMode = "review";
-      }
     }
   }
 
@@ -251,6 +248,11 @@
   function setCompactWorkspaceView(view, { persist = false, focus = false } = {}) {
     const next = ["assistant", "preview", "review"].includes(view) ? view : "preview";
     if (body.dataset.ctCompactView !== next) body.dataset.ctCompactView = next;
+    const compact = window.innerWidth < 1280 && !$("#workspace")?.classList.contains("home-mode");
+    for (const [name, selector] of [["assistant", "#assistantPanel"], ["preview", "#workspace > .review-panel"], ["review", "#reviewRail"]]) {
+      const panel = $(selector);
+      if (panel) panel.inert = compact && name !== next;
+    }
     $$("#ctCompactWorkspaceNav [data-ct-compact-view]").forEach((button) => {
       const active = button.dataset.ctCompactView === next;
       button.setAttribute("aria-selected", String(active));
@@ -339,6 +341,37 @@
     return bar;
   }
 
+  function placeProjectTools(active) {
+    const bar = $("#ctV4Topbar");
+    if (!bar) return;
+    const project = $(".ct-v4-project");
+    const notifications = $("#ctV4Notifications");
+    const heading = $("#reviewView .review-header .asset-heading > div");
+    const utility = $("#appSidebar .app-sidebar-utility");
+    const creating = $("#workspace")?.classList.contains("new-task-workbench");
+    const emptyProject = Boolean(active && window.innerWidth >= 1280 && creating);
+    const merged = Boolean(active && window.innerWidth >= 1280 && heading && utility
+      && !creating);
+    body.toggleAttribute("data-ct-empty-project", emptyProject);
+    body.toggleAttribute("data-ct-inline-project", merged);
+    const reviewTitle = $("#reviewTitle");
+    body.toggleAttribute("data-ct-project-source", merged && reviewTitle?.textContent.trim() === projectTitle());
+    if (reviewTitle) reviewTitle.title = reviewTitle.textContent.trim();
+    if (merged) {
+      if (project.parentElement !== heading) heading.prepend(project);
+      if (notifications.parentElement !== utility) utility.prepend(notifications);
+    } else {
+      if (project.parentElement !== bar) bar.insertBefore(project, bar.querySelector(".ct-v4-global-state"));
+      const globalState = bar.querySelector(".ct-v4-global-state");
+      if (notifications.parentElement !== globalState) globalState.append(notifications);
+    }
+    if (notifications.classList.contains("app-sidebar-action") !== merged) {
+      notifications.classList.toggle("app-sidebar-action", merged);
+    }
+    bar.inert = !active || merged || emptyProject;
+    bar.setAttribute("aria-hidden", String(bar.inert));
+  }
+
   function ensureRailTabs() {
     const rail = $("#reviewRail");
     if (!rail) return;
@@ -381,7 +414,7 @@
     const evidence = $("#evidencePanel");
     if (!evidence || evidence.classList.contains("evidence-placeholder")) return false;
     syncPropertiesPanel();
-    setReviewRailExpanded(true, { persist: true });
+    setReviewRailExpanded(true);
     body.dataset.ctV4EvidenceReturnTab = body.dataset.ctV4RailTab || "materials";
     setRailTab("properties");
     body.dataset.ctV4EvidenceOpen = "true";
@@ -449,7 +482,7 @@
   }
 
   function reviewRailStorageKey() {
-    return `cliptalk-review-rail-expanded:v1:${currentJobId() || "new-task"}`;
+    return `cliptalk-review-rail-expanded:v2:${currentJobId() || "new-task"}`;
   }
 
   function storedReviewRailPreference() {
@@ -498,10 +531,14 @@
     toggle.classList.toggle("has-activity", hasActivity);
   }
 
-  function setReviewRailExpanded(expanded, { persist = false, coordinate = true } = {}) {
+  function setReviewRailExpanded(expanded, { persist = false, coordinate = true, userInitiated = false } = {}) {
     const workspace = $("#workspace");
     if (!workspace) return;
     const open = Boolean(expanded);
+    // A deliberate collapse silences auto-reveal for the rest of this job's
+    // session; the default collapsed state on load must not (or auto-reveal
+    // would never fire). Switching jobs resets it via resetRailDeliveryBaseline.
+    if (userInitiated && !open) railDeliveryBaseline = Number.POSITIVE_INFINITY;
     const wasOpen = !workspace.classList.contains("review-rail-collapsed");
     workspace.classList.toggle("review-rail-collapsed", !open);
     if (persist) {
@@ -547,6 +584,31 @@
     setCompactWorkspaceView("review");
   }
 
+  function revealPreview() {
+    if (window.innerWidth < 1280) setCompactWorkspaceView("preview");
+  }
+
+  function openTaskDestination(item = {}) {
+    const job = window.ClipTalkCurrentJobSnapshot?.();
+    const key = item.actionKey || "";
+    if (["export_formal", "review_preview", "download", "view_outputs", "view_results", "review_content"].includes(key)) {
+      openReviewRail("materials");
+      window.showToast?.(key === "export_formal" ? "请先检查样片，再点击“导出成片”" : "已打开素材与结果");
+      return;
+    }
+    if (["focus_composer", "revise_instruction", "restart"].includes(key)) {
+      window.ClipTalkWorkspacePanels?.setAssistantExpanded?.(true);
+      setCompactWorkspaceView("assistant");
+      $("#chatInput")?.focus({ preventScroll: true });
+      return;
+    }
+    const section = key === "review_quality" ? "quality" : key === "retry" ? "failure"
+      : key === "view_activity" ? "activity" : key === "review_action" ? "action" : key === "confirm_plan" ? "confirmation" : "plan";
+    const open = window.ClipTalkAgentWorkspace?.openDetails;
+    if (open) open({ jobId: job?.id, section });
+    else window.showToast?.("详情入口尚未就绪，请刷新页面后重试");
+  }
+
   function ensureReviewRailToggle(rail) {
     let toggle = $("#ctV4ReviewRailToggle");
     if (!toggle) {
@@ -558,7 +620,7 @@
       rail.prepend(toggle);
       toggle.addEventListener("click", () => {
         const workspace = $("#workspace");
-        setReviewRailExpanded(workspace?.classList.contains("review-rail-collapsed"), { persist: true });
+        setReviewRailExpanded(workspace?.classList.contains("review-rail-collapsed"), { persist: true, userInitiated: true });
       });
     }
     const workspace = $("#workspace");
@@ -566,7 +628,11 @@
     if (workspace && workspace.dataset.ctV4ReviewRailJob !== jobKey) {
       workspace.dataset.ctV4ReviewRailJob = jobKey;
       const stored = storedReviewRailPreference();
-      setReviewRailExpanded(stored ?? window.innerWidth >= 1600);
+      // Contextual rail: collapsed by default so the player keeps the width.
+      // resetRailDeliveryBaseline() snapshots the current delivery count, which is
+      // what autoRevealRailOnDelivery compares against to detect fresh output.
+      resetRailDeliveryBaseline();
+      setReviewRailExpanded(stored ?? false);
     } else {
       syncReviewRailToggle();
     }
@@ -623,7 +689,7 @@
         <header><span>3</span><strong>当前交付</strong><small id="ctV4VersionState">尚未生成</small></header>
         <div class="ct-v4-version-body"><figure class="ct-v4-version-preview is-placeholder"><img alt=""><span>${assistantModeIcons.sparkle}<em>尚无成片</em></span></figure><div><strong id="ctV4VersionName">等待生成版本</strong><small id="ctV4VersionMeta">确认候选后会保留可审看版本</small></div></div>
         <div id="ctV4DeliveryChecks" class="ct-v4-delivery-checks hidden" aria-label="当前版本交付检查"></div>
-        <div class="ct-v4-version-secondary-actions"><button id="ctV4GenerateAspect" class="hidden" type="button">生成画幅审核版本</button><button type="button" data-ct-version-edit>编辑此版本</button></div>
+        <div class="ct-v4-version-secondary-actions"><button id="ctV4GenerateAspect" class="hidden" type="button">生成新比例版本</button><button type="button" data-ct-version-edit>编辑此版本</button></div>
         <footer><button type="button" data-ct-v4-preview-version>${icons.play}<span>播放</span></button><button type="button" data-ct-v4-open-versions aria-label="查看全部版本">全部版本</button></footer>
       </article>
       <section id="ctV4VersionList" hidden aria-label="版本列表"><header><button type="button" data-ct-versions-back>返回概览</button><strong>全部版本</strong></header><div data-ct-versions-host></div></section>`;
@@ -702,6 +768,52 @@
     const versionActions = $(".ct-v4-version-secondary-actions", section);
     const coverIntroAction = $("#coverIntroButton");
     if (versionActions && coverIntroAction) versionActions.append(coverIntroAction);
+    // The source card duplicates the media header (name / duration / resolution).
+    // Keep its only unique control by moving it into the header's "更多" menu.
+    const replaceSource = section.querySelector("[data-ct-v4-replace]");
+    const moreActionsHost = $("#reviewMoreActions > div");
+    if (replaceSource && moreActionsHost && replaceSource.parentElement !== moreActionsHost) {
+      replaceSource.classList.add("download-button");
+      replaceSource.hidden = false;
+      replaceSource.addEventListener("click", () => {
+        const more = $("#reviewMoreActions");
+        if (more) more.open = false;
+      });
+      moreActionsHost.append(replaceSource);
+    }
+  }
+
+  let railDeliveryBaseline = -1;
+  let railDeliveryBaselineJobId = "";
+
+  function currentDeliveryCount() {
+    const job = window.ClipTalkCurrentJobSnapshot?.();
+    return (window.ClipTalkOrderedJobOutputs?.(job) || []).length;
+  }
+
+  // Record how many deliveries the job already had when we opened it. A finished
+  // job should NOT pop the rail open on every visit — only freshly generated
+  // output deserves the surprise.
+  function resetRailDeliveryBaseline() {
+    const jobId = String(window.ClipTalkCurrentJobSnapshot?.()?.id || "");
+    if (railDeliveryBaselineJobId === jobId) return;
+    railDeliveryBaselineJobId = jobId;
+    railDeliveryBaseline = currentDeliveryCount();
+  }
+
+  // Reveal the rail once when the delivery count grows past the recorded baseline.
+  // Never persists: a manual collapse must survive future syncs.
+  function autoRevealRailOnDelivery(job, versionCount) {
+    const jobId = String(job?.id || "");
+    if (!jobId) return;
+    if (railDeliveryBaselineJobId !== jobId) resetRailDeliveryBaseline();
+    if (railDeliveryBaseline < 0) return;
+    if (!versionCount || versionCount <= railDeliveryBaseline) return;
+    railDeliveryBaseline = versionCount;
+    const workspace = $("#workspace");
+    if (!workspace || !workspace.classList.contains("review-rail-collapsed")) return;
+    setRailTab("materials");
+    setReviewRailExpanded(true);
   }
 
   function ensureProjectPanel(rail) {
@@ -711,10 +823,10 @@
     panel.className = "ct-v4-project-panel";
     panel.setAttribute("role", "tabpanel");
     panel.innerHTML = `
-      <header><small>当前任务</small><strong>项目设置</strong><p>设置任务标识与后续生成采用的成片画幅。</p></header>
+      <header><small>当前任务</small><strong>项目设置</strong></header>
       <section class="ct-v4-project-identity"><strong>任务信息</strong><p>本机显示名称只用于区分任务，不会修改源文件名。</p><label><span>本机显示名称</span><input id="ctV4ProjectDisplayName" type="text" maxlength="80" placeholder="输入任务显示名称"></label><dl><div><dt>源文件</dt><dd id="ctV4ProjectSourceName">尚未载入</dd></div><div><dt>媒体信息</dt><dd id="ctV4ProjectSourceMeta">等待读取</dd></div></dl></section>
-      <section class="ct-v4-output-aspect"><strong>成片画幅</strong><p>用于后续生成与导出，不改变当前工作区的横向或竖向布局。</p><div class="ct-v4-segmented ct-v4-aspect-options" role="group" aria-label="成片画幅"><button type="button" data-ct-v4-output-aspect="source">跟随源片</button><button type="button" data-ct-v4-output-aspect="16:9">横屏 16:9</button><button type="button" data-ct-v4-output-aspect="9:16">竖屏 9:16</button></div><small id="ctV4OutputAspectStatus" class="ct-v4-setting-status">后续生成将保持源视频画幅。</small></section>`;
-    panel.insertAdjacentHTML("beforeend", '<section class="ct-v4-reframe-fit"><label for="ctV4ReframeFit"><span>画幅适配方式</span><select id="ctV4ReframeFit"><option value="blur">完整保留画面 · 虚化背景补边</option><option value="crop">居中裁切填满 · 会裁去边缘</option></select></label><p>生成前会再次确认所选版本与处理方式。</p></section>');
+      <section class="ct-v4-output-aspect"><strong>默认成片比例</strong><p>用于新生成的视频，已有版本不变。</p><div class="ct-v4-segmented ct-v4-aspect-options" role="group" aria-label="默认成片比例"><button type="button" data-ct-v4-output-aspect="source">保持原比例</button><button type="button" data-ct-v4-output-aspect="16:9">横屏 16:9</button><button type="button" data-ct-v4-output-aspect="9:16">竖屏 9:16</button></div><small id="ctV4OutputAspectStatus" class="ct-v4-setting-status hidden"></small></section>`;
+    panel.insertAdjacentHTML("beforeend", '<section class="ct-v4-reframe-fit hidden"><label for="ctV4ReframeFit"><span>画面适配方式</span><select id="ctV4ReframeFit"><option value="blur">保留完整画面，虚化补边</option><option value="crop">居中裁切，会裁去边缘</option></select></label></section>');
     rail.append(panel);
     panel.addEventListener("click", async (event) => {
       const aspectButton = event.target.closest("[data-ct-v4-output-aspect]");
@@ -724,7 +836,7 @@
         try {
           await window.ClipTalkUpdateProjectSettings?.({ outputAspect: aspectButton.dataset.ctV4OutputAspect });
         } catch (error) {
-          window.showToast?.(error?.message || "成片画幅保存失败");
+          window.showToast?.(error?.message || "默认成片比例保存失败");
         } finally {
           buttons.forEach((button) => { button.disabled = false; });
           syncProjectControls();
@@ -791,6 +903,51 @@
     } else {
       welcome?.remove();
     }
+    const preparing = $("#workspace")?.classList.contains("new-task-workbench");
+    assistant.toggleAttribute("data-agent-entry", preparing);
+    for (const selector of ["#ctAgentWelcome", "#ctAgentEntryPrompts"]) {
+      const node = $(selector);
+      if (node) node.hidden = !preparing;
+    }
+    syncAgentContext(messages);
+  }
+
+  // Use public task presentation, never infer completed analysis from an upload.
+  function agentPreparation(job) {
+    const key = job?.presentation?.key;
+    if (job && key !== "waiting_instruction" && (key || !job.agentDraft || job.instructionSubmitted)) return null;
+    return { title: job ? "等待剪辑要求" : "等待素材" };
+  }
+
+  function syncAgentContext(messages) {
+    const creating = $("#workspace")?.classList.contains("new-task-workbench");
+    const job = creating ? null : window.ClipTalkCurrentJobSnapshot?.();
+    const presentation = job?.presentation || {};
+    const key = presentation.key || (job ? "syncing" : "empty");
+    const preparation = agentPreparation(job);
+    const hasCards = Boolean(messages.querySelector(".cs-card, .agent-plan-result-head, .auto-compose-result-card, .content-match-card"));
+    const messageCount = messages.querySelectorAll(":scope > .chat-message").length;
+    // Once the conversation owns a real task/result card, don't duplicate it.
+    const visible = !creating && !preparation && !hasCards && messageCount <= 2;
+    let panel = $("#ctAgentContext", messages);
+    if (!visible) { panel?.remove(); return; }
+    if (!panel) {
+      panel = document.createElement("section");
+      panel.id = "ctAgentContext";
+      panel.className = "ct-agent-context";
+      panel.setAttribute("aria-label", "助手当前状态");
+      panel.innerHTML = '<div class="ct-agent-context-copy" role="status" aria-live="polite" aria-atomic="true"><strong></strong><p></p></div>';
+      messages.append(panel);
+    }
+    const state = presentation.running ? "running" : ["failed", "cancelled", "no_result"].includes(key) ? "error" : "waiting";
+    const title = presentation.label || "正在同步任务状态";
+    const detail = presentation.executionProgress?.currentStepTitle || presentation.detail || "读取任务状态后，这里会显示当前进展。";
+    const signature = JSON.stringify([job?.id, state, title, detail]);
+    if (panel.dataset.signature === signature) return;
+    panel.dataset.signature = signature;
+    panel.dataset.state = state;
+    setText(panel.querySelector("strong"), title);
+    setText(panel.querySelector("p"), detail);
   }
 
   function setRailTab(tab) {
@@ -812,6 +969,7 @@
 
   function syncTopbar() {
     setText($("#ctV4ProjectName"), projectTitle());
+    if ($("#ctV4ProjectName")) $("#ctV4ProjectName").title = projectTitle();
     const projectButton = $("#ctV4ProjectButton");
     const creating = $("#workspace")?.classList.contains("new-task-workbench");
     if (projectButton) {
@@ -821,13 +979,29 @@
     const state = $("#ctV4SaveState");
     const editorVisible = $("#secondaryEditor") && !$("#secondaryEditor").classList.contains("hidden");
     const source = editorVisible ? $("#secondaryEditorSaveState")?.dataset.state : "saved";
-    let label = editorVisible ? "精剪已保存" : "项目已载入";
+    let label = editorVisible ? "剪辑草稿已保存" : "项目已载入";
     let tone = "saved";
     if (creating) { label = "草稿"; tone = "draft"; }
     else if (source === "error") { label = "保存失败"; tone = "error"; }
     else if (source === "saving") { label = "正在保存"; tone = "saving"; }
     else if (source === "draft") { label = "有未保存修改"; tone = "dirty"; }
-    if (state) state.dataset.tone = tone;
+    if (state) {
+      state.dataset.tone = tone;
+      // uxpolish-v1: "项目已载入"属于一次性事实，短暂提示后自动淡出，避免常驻噪音。
+      const jobId = String(window.ClipTalkCurrentJobId?.() || "");
+      if (state.dataset.transientJob !== jobId) {
+        state.dataset.transientJob = jobId;
+        state.classList.remove("is-transient", "is-transient-faded");
+        if (state._transientTimer) { clearTimeout(state._transientTimer); state._transientTimer = null; }
+      }
+      if (label !== "项目已载入") {
+        state.classList.remove("is-transient", "is-transient-faded");
+        if (state._transientTimer) { clearTimeout(state._transientTimer); state._transientTimer = null; }
+      } else if (!state.classList.contains("is-transient")) {
+        state.classList.add("is-transient");
+        state._transientTimer = setTimeout(() => state.classList.add("is-transient-faded"), 3200);
+      }
+    }
     setText(state?.querySelector("b"), label);
     const attention = taskAttentionItems().length > 0;
     const notifications = $("#ctV4Notifications");
@@ -858,6 +1032,7 @@
     heading.textContent = "待处理事项";
     dialog.append(heading);
     const items = taskAttentionItems();
+    const taskId = window.ClipTalkCurrentJobSnapshot?.()?.id;
     if (!items.length) {
       const empty = document.createElement("p");
       empty.textContent = "当前没有待处理事项";
@@ -869,13 +1044,11 @@
       button.textContent = item.label;
       button.onclick = () => {
         dialog.close();
-        if (item.tab) openReviewRail(item.tab);
-        else {
-          const target = $(item.target) || $("#assistantPanel");
-          target?.scrollIntoView({ block: "center", behavior: "smooth" });
-          target?.setAttribute("tabindex", "-1");
-          target?.focus({ preventScroll: true });
+        if (taskId !== window.ClipTalkCurrentJobSnapshot?.()?.id) {
+          window.showToast?.("任务已切换，请重新打开待处理事项");
+          return;
         }
+        openTaskDestination(item);
       };
       dialog.append(button);
     }
@@ -945,8 +1118,20 @@
   }
 
   function syncTaskJourney() {
-    const job = window.ClipTalkCurrentJobSnapshot?.();
-    const presentation = job?.presentation || {};
+    const job = $("#workspace")?.classList.contains("new-task-workbench") ? null : window.ClipTalkCurrentJobSnapshot?.();
+    let presentation = job?.presentation || {};
+    // A streamed plan can arrive before the next job-status poll. Use that
+    // confirmed snapshot during this gap, rather than still claiming planning.
+    const confirmation = window.ClipTalkAgentWorkspace?.confirmationState?.();
+    if (confirmation?.jobId === job?.id && ["plan_planning", "plan_confirmation"].includes(presentation.key)) {
+      presentation = { ...presentation, key: "plan_confirmation", journeyStage: 1,
+        label: confirmation.starting ? "正在启动…" : "等待确认计划", running: confirmation.starting };
+    }
+    const executionView = window.ClipTalkAgentWorkspace?.progressOwner?.()?.execution;
+    if (executionView && executionView.jobId === job?.id && (!job?.agent?.planId || job.agent.planId === executionView.planId)) {
+      presentation = { ...presentation, key: "running", journeyStage: executionView.journeyStage,
+        label: executionView.stopping ? "正在停止任务" : executionView.stage, running: true };
+    }
     const key = presentation.key || "home";
     const draftCapability = window.ClipTalkDraftCapabilitySnapshot?.() || {};
     const coverDraft = Boolean(draftCapability.active && draftCapability.optionId === "cover");
@@ -967,12 +1152,31 @@
       nav.setAttribute("aria-label", "剪辑流程");
       ($("#assistantPanel > .panel-header") || $("#assistantPanel"))?.append(nav);
     }
-    const signature = `${job?.id || ""}:${job?.status || ""}:${key}:${activeIndex}:${hasOutput}:${draftCapability.optionId || ""}:${presentation.journeyDetail || ""}`;
+    const executionProgress = presentation.executionProgress || {};
+    if ($("#workspace")?.classList.contains("new-task-workbench")) {
+      if (nav.childNodes.length) nav.replaceChildren();
+      delete nav.dataset.signature;
+      return;
+    }
+    const preparation = coverDraft ? null : agentPreparation(job);
+    nav.toggleAttribute("data-executing", Boolean(presentation.running));
+    const signature = JSON.stringify([job?.id, job?.status, key, activeIndex, hasOutput, draftCapability.optionId,
+      presentation.journeyDetail, presentation.label, presentation.running, executionProgress, preparation?.title]);
     if (nav.dataset.signature === signature) return;
     const expanded = nav.dataset.expanded === "true";
     nav.dataset.signature = signature;
     nav.replaceChildren();
     nav.classList.toggle("is-new-task", !job);
+
+    if (preparation) {
+      nav.dataset.expanded = "false";
+      const status = document.createElement("p");
+      status.className = "ct-agent-preparation-status";
+      status.textContent = preparation.title;
+      status.setAttribute("role", "status");
+      nav.append(status);
+      return;
+    }
 
     const summary = document.createElement("button");
     summary.type = "button";
@@ -984,7 +1188,8 @@
     const summaryStep = document.createElement("small");
     summaryStep.textContent = `${activeIndex + 1} / ${stages.length}`;
     const summaryTitle = document.createElement("strong");
-    summaryTitle.textContent = visibleStages[activeIndex];
+    summaryTitle.textContent = presentation.key === "plan_confirmation" ? presentation.label || "等待确认计划"
+      : presentation.running ? presentation.label || visibleStages[activeIndex] : visibleStages[activeIndex];
     summaryCopy.append(summaryStep, summaryTitle);
     const progress = document.createElement("progress");
     progress.max = stages.length;
@@ -1009,10 +1214,13 @@
       button.dataset.state = index < activeIndex ? "complete" : index === activeIndex ? "current" : "upcoming";
       if (index === activeIndex) button.setAttribute("aria-current", "step");
       button.onclick = () => {
-        if (!job || index === 0) $("#chatForm")?.scrollIntoView({ block: "center", behavior: "smooth" });
+        if (!job || index === 0) {
+          if (window.innerWidth < 1280) setCompactWorkspaceView("assistant");
+          $("#chatInput")?.focus({ preventScroll: true });
+        }
         else if (index >= 3) openReviewRail("materials");
         else {
-          $("#agentPlanDock")?.scrollIntoView({ block: "center", behavior: "smooth" });
+          window.ClipTalkAgentWorkspace?.openDetails?.({ section: index === 1 ? "confirmation" : "plan" });
         }
         nav.dataset.expanded = "false";
         summary.setAttribute("aria-expanded", "false");
@@ -1028,6 +1236,28 @@
         ? "视频已添加，等待剪辑要求"
         : presentation.journeyDetail || "正在同步任务流程";
     details.append(list, status);
+    if (job && (executionProgress.currentStepTitle || executionProgress.total > 0)) {
+      const rows = document.createElement("div");
+      rows.className = "ct-agent-task-rows";
+      if (executionProgress.currentStepTitle) {
+        const current = document.createElement("p");
+        current.textContent = `${presentation.running ? "正在处理" : "当前步骤"} · ${executionProgress.currentStepTitle}`;
+        rows.append(current);
+      }
+      if (executionProgress.total > 0) {
+        const counts = document.createElement("small");
+        counts.textContent = `已完成 ${executionProgress.successful || 0} / ${executionProgress.total} 项${executionProgress.skipped ? ` · 跳过 ${executionProgress.skipped} 项` : ""}`;
+        rows.append(counts);
+      }
+      const activity = document.createElement("button");
+      activity.type = "button";
+      activity.textContent = "查看执行记录 →";
+      activity.onclick = () => {
+        if (job.id === currentJobId()) window.ClipTalkAgentWorkspace?.openDetails?.({ jobId: job.id, section: "activity" });
+      };
+      rows.append(activity);
+      details.append(rows);
+    }
     const setExpanded = (next) => {
       nav.dataset.expanded = String(next);
       summary.setAttribute("aria-expanded", String(next));
@@ -1115,6 +1345,7 @@
     summary?.classList.toggle("cover-draft", coverDraft);
     const domVersionCount = $("#clipStrip")?.children.length || Math.max(0, ($("#clipVersionPicker")?.children.length || 1) - 1);
     const versionCount = orderedOutputs.length || domVersionCount;
+    autoRevealRailOnDelivery(job, versionCount);
     const previewOnly = Boolean(
       outputSnapshot.isReviewSample
       || selectedOutput?.previewOnly
@@ -1223,11 +1454,16 @@
       compactDuration(selectedOutput?.duration),
       selectedOutput?.clipCount ? `${selectedOutput.clipCount} 个镜头` : "",
       selectedOutput?.width && selectedOutput?.height ? `${selectedOutput.width}×${selectedOutput.height}` : "",
-      previewOnly ? "审核样片 · 可生成成片" : "",
+      previewOnly ? "审核样片 · 非导出" : "",
     ].filter(Boolean).join(" · ");
     setText($("#ctV4VersionMeta"), versionCount
       ? outputMeta || $("#clipSummary")?.textContent?.trim() || "点击播放或进入版本列表查看"
       : coverDraft ? "生成后可选择并保存为当前封面" : "确认候选后会保留可审看版本");
+    // 「非导出」是审核样片不变的界面事实：一次性做成徽标，不再逐条消息重复说明。
+    const versionMetaNode = $("#ctV4VersionMeta");
+    if (versionMetaNode) {
+      versionMetaNode.title = previewOnly ? "审核样片用于确认剪辑与画面；正式导出需要单独确认" : "";
+    }
     const deliveryChecks = $("#ctV4DeliveryChecks");
     if (deliveryChecks) {
       const playing = window.ClipTalkCurrentOutputSnapshot?.();
@@ -1242,6 +1478,13 @@
         || selectedOutput?.introIncluded
         || selectedOutput?.coverIntro?.enabled
         || selectedOutput?.coverVersionId
+      );
+      const coverLockedForExport = previewOnly
+        && String(selectedOutput?.coverBindingStatus || "") === "locked_for_export";
+      const coverIncludedAsIntro = Boolean(
+        selectedOutput?.coverIncluded
+        || selectedOutput?.introIncluded
+        || selectedOutput?.coverIntro?.enabled
       );
       const overlayVerification = selectedOutput?.overlayVerification || {};
       const subtitleReady = Boolean(
@@ -1279,7 +1522,14 @@
       if (subtitleRequested) checks.push({ label: "字幕", value: subtitleReady ? "已烧录" : "待烧录", ok: subtitleReady });
       if (coverRequested) checks.push({
         label: "封面",
-        value: coverReady ? "已合入" : job?.coverNeedsRegeneration ? "需更新" : "待合入",
+        value: job?.coverNeedsRegeneration
+          ? "需更新"
+          : coverIncludedAsIntro
+            ? "已合入片头"
+            : coverLockedForExport
+              ? "已锁定，导出时绑定"
+              : selectedOutput?.coverVersionId ? "已关联此版本"
+                : coverReady ? "封面图片可用" : "待关联",
         ok: coverReady,
       });
       if (previewOnly && ["passed", "warning", "failed"].includes(qualityStatus)) {
@@ -1322,7 +1572,7 @@
     const editAction = $("[data-ct-version-edit]");
     if (editAction) {
       editAction.disabled = !selectedVersion?.id || !selectedOutput?.segments?.length || selectedOutput.capabilities?.canEdit === false;
-      editAction.hidden = outputSnapshot.mediaKind === "output" && !$("#secondaryEditCurrentButton")?.classList.contains("hidden");
+      editAction.hidden = !versionCount || (outputSnapshot.mediaKind === "output" && !$("#secondaryEditCurrentButton")?.classList.contains("hidden"));
     }
     if (librarySaveAction && selectedOutput?.filename) {
       librarySaveAction.classList.toggle("hidden", previewOnly);
@@ -1331,13 +1581,17 @@
       setText(librarySaveAction, selectedOutput.kept ? "已长期保留" : "长期保留");
       librarySaveAction.onclick = () => window.ClipTalkVersionAction?.(selectedOutput.filename, "keep");
     }
-    setText(previewAction?.querySelector("span"), previewOnly ? "播放样片" : "播放成片");
+    setText(previewAction?.querySelector("span"), previewOnly ? "播放审核样片" : "播放当前成片");
     if (previewAction) {
       previewAction.title = previewOnly ? "在播放器中预览当前审核样片" : "播放当前正式成片";
       previewAction.setAttribute("aria-label", previewAction.title);
     }
+    const versionFooter = $("#ctV4MaterialsSummary .ct-v4-version-card > footer");
+    if (versionFooter) versionFooter.hidden = !versionCount;
     [previewAction, $("[data-ct-v4-open-versions]", $("#ctV4MaterialsSummary"))].forEach((button) => {
-      if (button) button.disabled = !versionCount;
+      if (!button) return;
+      button.disabled = !versionCount;
+      button.hidden = !versionCount;
     });
     syncReviewRailToggle();
   }
@@ -1356,7 +1610,7 @@
     if (fit) {
       fit.value = job.projectSettings?.outputFit === "crop" ? "crop" : "blur";
       fit.disabled = outputAspect === "source";
-      fit.title = outputAspect === "source" ? "跟随源片时无需适配画幅" : "后续新建剪辑使用此方式；不改变已有版本";
+      fit.closest(".ct-v4-reframe-fit")?.classList.toggle("hidden", outputAspect === "source");
     }
     if (displayName && document.activeElement !== displayName) displayName.value = projectPreferences().displayName || "";
     setText($("#ctV4ProjectSourceName"), cleanDisplayText(job?.filename, "尚未载入"));
@@ -1378,19 +1632,15 @@
     });
     const aspectStatus = $("#ctV4OutputAspectStatus");
     const generateAspect = $("#ctV4GenerateAspect");
-    if (outputAspect === "source") {
-      setText(aspectStatus, "后续生成将保持源视频画幅，不执行裁切或补边。");
-    } else if (aspectExists) {
-      setText(aspectStatus, `当前所选版本已是 ${outputAspect} 画幅，可在素材与结果中播放。`);
-    } else if (orderedOutputs.length) {
-      setText(aspectStatus, `设置已保存；现有成片不会自动修改。可在“素材与结果”的当前版本中生成 ${outputAspect} 审核版本。`);
-    } else {
-      setText(aspectStatus, `设置已保存，将在下一次生成成片时应用 ${outputAspect} 画幅。`);
-    }
+    const orientation = outputAspect === "9:16" ? "竖屏" : "横屏";
+    const canGenerateAspect = outputAspect !== "source" && !aspectExists && orderedOutputs.length > 0;
+    aspectStatus?.classList.toggle("hidden", !canGenerateAspect);
+    setText(aspectStatus, canGenerateAspect ? `要转换已有视频，请在“素材与结果”中点击“生成${orientation}版”。` : "");
     if (generateAspect) {
-      generateAspect.classList.toggle("hidden", outputAspect === "source" || aspectExists || !orderedOutputs.length);
-      generateAspect.disabled = outputAspect === "source" || aspectExists || !orderedOutputs.length;
-      setText(generateAspect, `生成 ${outputAspect} 审核版本`);
+      generateAspect.classList.toggle("hidden", !canGenerateAspect);
+      generateAspect.disabled = !canGenerateAspect;
+      setText(generateAspect, `生成${orientation}版`);
+      generateAspect.title = `基于当前所选版本生成 ${outputAspect} 新版本，原版本不变`;
     }
   }
 
@@ -1472,6 +1722,7 @@
     const active = body.dataset.shellView === "workspace" && workspace && !workspace.classList.contains("home-mode");
     body.classList.toggle("ct-workbench-v4", Boolean(active));
     if (!active) {
+      placeProjectTools(false);
       delete body.dataset.ctWorkflowKind;
       $("#ctV4Topbar")?.setAttribute("aria-hidden", "true");
       const nav = $("#ctCompactWorkspaceNav");
@@ -1493,6 +1744,7 @@
     const sidebar = $("#appSidebar");
     const assistant = $("#assistantPanel");
     if (sidebar && workspace && sidebar.parentElement !== document.body) document.body.insertBefore(sidebar, workspace);
+    placeProjectTools(true);
     ensureAssistantLayout();
     ensureRailTabs();
     syncPortraitPanels();
@@ -1524,6 +1776,7 @@
     attributeFilter: ["class", "src", "data-shell-view", "data-workspace-state", "data-review-layout"],
   });
   window.addEventListener("resize", schedule, { passive: true });
+  $("#chatInput")?.addEventListener("input", schedule);
   const publicController = {
     ...(window.ClipTalkWorkspaceController || {}),
     syncMaterialsSummary,
@@ -1532,6 +1785,8 @@
     setRailExpanded: setReviewRailExpanded,
     syncPortraitPanels,
     openRail: openReviewRail,
+    revealPreview,
+    openTaskDestination,
     openEvidence: openEvidenceDetails,
     closeEvidence: closeEvidenceDetails,
     mount: mountWorkbench,

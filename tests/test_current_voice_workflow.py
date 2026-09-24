@@ -308,7 +308,7 @@ def test_voice_discovery_start_exposes_live_progress_before_completion(monkeypat
         assert job["voiceDiscovery"]["status"] == "running"
         assert job["stageProgress"] is None
         assert job["progressMode"] == "indeterminate"
-        assert notices[0] == ("user", "识别当前视频中的说话人")
+        assert notices[0] == ("user", "识别当前视频中的说话人。")
         assert "已开始分析语音" in notices[1][1]
         assert not any("已从当前视频识别出" in text for _role, text in notices)
         assert main.public_job_status(job)["voiceDiscovery"]["status"] == "running"

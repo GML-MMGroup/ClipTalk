@@ -489,7 +489,7 @@ body[data-shell-mode="workspace"] .agent-plan-dock > footer .agent-plan-text-act
 .agent-qc-summary strong { color: #e1b16f; font-size: 11px; }
 .agent-qc-summary ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .agent-qc-summary li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; }
-.agent-qc-summary span { color: #bda88c; font: 10px/1.55 var(--font-reading, sans-serif); }
+.agent-qc-summary span { color: #bda88c; font: 13px/1.6 var(--font-reading, sans-serif); }
 .agent-qc-summary time { color: #e0b36f; font: 600 9px/1.3 var(--font-data, monospace); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .agent-plan-step-list, .agent-activity-list { margin: 0; padding: 0; list-style: none; }
 .agent-plan-step-list li { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; padding: 9px 0 12px; }
@@ -647,7 +647,7 @@ body[data-shell-mode="workspace"] .agent-plan-dock > footer .agent-plan-text-act
 .agent-skill-menu > button { justify-self: start; color: #c6a16d; }
 .chat-panel.agent-plan-active #directorTaskSummary,
 .chat-panel.agent-plan-active #directorStageNav { display: none !important; }
-html body #assistantPanel.agent-plan-active #ctTaskJourney { display: none !important; }
+html body #assistantPanel.agent-plan-active #ctTaskJourney:not([data-executing]) { display: none !important; }
 .chat-panel.agent-plan-active .panel-header { min-height: 58px; height: 58px; }
 .chat-panel.agent-plan-active .chat-message:has(> .bubble) { width: 100%; min-width: 0; }
 .chat-panel.agent-plan-active .chat-message > .bubble {
@@ -664,9 +664,13 @@ html body #assistantPanel.agent-plan-active #ctTaskJourney { display: none !impo
 .agent-goal-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .agent-goal-tags span { padding: 3px 6px; border: 0; border-radius: 4px; color: #9daab0; background: #243139; font: 9px/1.2 var(--font-data, sans-serif); }
 
+@media (max-width: 1279px) {
+  /* Compact workspaces have no adjacent column to anchor a side drawer to. */
+  #agentPlanDrawer.agent-plan-drawer { inset: 8px; width: auto; height: auto; border-radius: 12px; transform: translateY(14px); }
+  #agentPlanDrawer.agent-plan-drawer.open { transform: translateY(0); }
+}
+
 @media (max-width: 760px) {
-  .agent-plan-drawer { inset: 8px; width: auto; height: auto; border-radius: 12px; transform: translateY(14px); }
-  .agent-plan-drawer.open { transform: translateY(0); }
   .agent-plan-dock > footer { flex-wrap: wrap; }
   .agent-planning-flow { gap: 0; }
   .agent-planning-flow li { font-size: 10px; }
@@ -900,6 +904,70 @@ html body[data-shell-mode="workspace"] .agent-plan-dock > header > b {
   color: var(--ct-text-secondary);
   font: 600 9px/1.3 var(--font-data, sans-serif);
 }
+.agent-understanding-card {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--ct-control-border, #2d3f42) 78%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ct-raised, #102826) 88%, transparent);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .08);
+}
+.agent-understanding-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.agent-understanding-card header strong {
+  color: var(--ct-text);
+  font: 800 12px/1.3 var(--font-ui, sans-serif);
+}
+.agent-understanding-card header span,
+.agent-understanding-card small {
+  color: var(--ct-text-secondary);
+  font: 650 9px/1.35 var(--font-data, sans-serif);
+}
+.agent-understanding-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.agent-understanding-card div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 9px;
+  align-items: baseline;
+}
+.agent-understanding-card dt {
+  color: var(--ct-text-secondary);
+  font: 650 10px/1.35 var(--font-ui, sans-serif);
+}
+.agent-understanding-card dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ct-text);
+  font: 650 11.5px/1.45 var(--font-reading, sans-serif);
+  overflow-wrap: anywhere;
+}
+.agent-understanding-card button {
+  justify-self: start;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--ct-control-border);
+  border-radius: 8px;
+  color: var(--ct-text);
+  background: var(--ct-panel);
+}
+.agent-understanding-card button:hover,
+.agent-understanding-card button:focus-visible {
+  color: var(--ct-text);
+  background: var(--ct-control-hover);
+}
+.agent-understanding-card.compact {
+  margin-top: 9px;
+}
 html body[data-shell-mode="workspace"] .agent-plan-dock[data-plan-surface="editor"] .agent-plan-control {
   border-color: var(--ct-control-border);
   background: var(--ct-raised);
@@ -956,4 +1024,192 @@ html body[data-shell-mode="workspace"] .agent-plan-dock > footer {
 html body[data-shell-mode="workspace"] .agent-plan-dock > footer > span {
   color: #788990 !important;
   font: 600 10px/1 var(--font-data, sans-serif) !important;
+}
+
+.agent-cover-status {
+  margin: 9px 0 2px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #35464a;
+  border-radius: 9px;
+  background: #111d1f;
+}
+.agent-cover-status[data-quality="missing"] { border-color: rgba(201, 126, 91, .56); background: #241d1b; }
+.agent-cover-status > button { width: 54px; height: 54px; min-height: 54px; padding: 0; overflow: hidden; border-radius: 6px; background: #0b1416; }
+.agent-cover-status > button img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.agent-cover-status-placeholder { width: 54px; height: 54px; display: grid; place-items: center; border: 1px dashed #647378; border-radius: 6px; color: #89989d; font: 600 9px/1 var(--font-ui, sans-serif); }
+.agent-cover-status > div { min-width: 0; display: grid; gap: 3px; }
+.agent-cover-status > div small { color: #d7a05f; font: 600 9px/1.3 var(--font-ui, sans-serif); }
+.agent-cover-status > div strong { color: #e5ecee; font: 600 10px/1.45 var(--font-reading, sans-serif); text-wrap: pretty; }
+.agent-cover-status > div span { overflow: hidden; color: #96a4a9; font: 9px/1.35 var(--font-reading, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
+.agent-cover-status[data-quality="missing"] > div small { color: #e0a080; }
+/* =========================================================================
+   统一对话流（chat-stream.js）
+   -------------------------------------------------------------------------
+   卡片复用 .chat-message 的既有外观（头像 + 气泡），只追加必要的骨架样式，
+   不引入新的视觉语言。颜色一律走 --ct-* token，主题切换自动跟随。
+   ========================================================================= */
+
+.cs-stream-host {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-2, 8px);
+  padding-top: var(--ct-space-1, 4px);
+}
+
+.cs-card {
+  border-left: 2px solid transparent;
+  border-radius: var(--ct-radius-card, 12px);
+  transition: border-color 160ms ease, opacity 160ms ease;
+}
+
+.cs-card .cs-card-body {
+  display: block;
+  min-width: 0;
+}
+
+/* 语义色调：只描边，不铺满，避免和气泡底色打架 */
+.cs-card[data-cs-tone="running"] { border-left-color: var(--ct-focus, #4f9876); }
+.cs-card[data-cs-tone="attention"] { border-left-color: var(--ct-warning, #c98a2b); }
+.cs-card[data-cs-tone="success"] { border-left-color: var(--ct-success, #3f8f5f); }
+.cs-card[data-cs-tone="error"],
+.cs-card[data-cs-tone="danger"] { border-left-color: var(--ct-danger, #c2553f); }
+
+/* 定稿卡片弱化，把注意力让给最新一条 */
+.cs-card[data-cs-final] { opacity: .92; }
+
+.agent-plan-history-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+}
+.agent-plan-history-row > span { display: grid; min-width: 0; gap: 2px; }
+.agent-plan-history-row small {
+  color: var(--ct-text-secondary, #87938d);
+  font: 500 10px/1.3 var(--font-ui, sans-serif);
+}
+.agent-plan-history-row strong {
+  overflow: hidden;
+  color: var(--ct-text, #e5ece8);
+  font: 600 12px/1.45 var(--font-reading, sans-serif);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-plan-history-row button {
+  flex: none;
+  min-height: 32px;
+  padding: 5px 9px;
+  border-color: var(--ct-control-border, #52615c);
+  color: var(--ct-text-secondary, #b9c4bf);
+  background: transparent;
+}
+
+/* 定位到卡片时的短暂高亮 */
+@keyframes csFlash {
+  0% { box-shadow: 0 0 0 0 rgba(79, 152, 118, 0); }
+  30% { box-shadow: 0 0 0 3px rgba(79, 152, 118, .28); }
+  100% { box-shadow: 0 0 0 0 rgba(79, 152, 118, 0); }
+}
+
+.cs-flash { animation: csFlash 1.4s ease-out 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-flash { animation: none; }
+  .cs-card { transition: none; }
+}
+
+/* ------------------------------------------------ 待处理条（输入框上方） */
+.cs-action-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-2, 8px);
+  flex: none;
+  margin: 0 var(--ct-space-3, 12px) var(--ct-space-2, 8px);
+  padding: 8px 10px;
+  border: 1px solid var(--ct-border, rgba(42, 47, 43, .16));
+  border-radius: var(--ct-radius-control, 10px);
+  background: var(--ct-panel, #fff);
+}
+
+.cs-action-bar .cs-action-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ct-warning, #c98a2b);
+}
+
+.cs-action-bar .cs-action-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cs-action-bar .cs-action-copy small {
+  color: var(--ct-text-muted, #707771);
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+
+.cs-action-bar .cs-action-copy strong {
+  overflow: hidden;
+  color: var(--ct-text, #242925);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs-action-bar button {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--ct-border, rgba(42, 47, 43, .16));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ct-text, #242925);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cs-action-bar button.primary {
+  border-color: var(--ct-focus, #4f9876);
+  background: var(--ct-focus, #4f9876);
+  color: #fff;
+}
+
+/* ------------------------------------------------------ 未读提示（回到底部） */
+.cs-unread-pill {
+  position: absolute;
+  right: 16px;
+  bottom: 96px;
+  z-index: 4;
+  padding: 6px 12px;
+  border: 1px solid var(--ct-border, rgba(42, 47, 43, .16));
+  border-radius: 999px;
+  background: var(--ct-panel, #fff);
+  color: var(--ct-text, #242925);
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+}
+
+/* ---------------------------------------------------------- 播报区（仅读屏） */
+.cs-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }

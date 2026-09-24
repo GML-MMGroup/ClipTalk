@@ -36,11 +36,139 @@ from app.content_search import (
     rank_predicate_units,
     rank_units,
     select_candidate_units,
+    select_top_content_matches,
     visual_units_from_page,
 )
 
 
 class ContentIntentTests(unittest.TestCase):
+    def test_explicit_interview_speech_boundary_prunes_visual_and_ocr_predicates(self) -> None:
+        from app import main as main_app
+
+        instruction = (
+            "仅根据对白检索：访谈中关于成长、工作和未来的回答及必要的口头提问上下文；"
+            "不使用画面或屏幕文字作为主题证据"
+        )
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all", "searchResultLimit": 12}, "videoInfo": {"duration": 700}},
+            instruction,
+            {
+                "capabilityProposal": {"capabilities": ["speech", "visual", "ocr"]},
+                "intent": {
+                    "action": "extract_content", "query": "成长、工作和未来",
+                    "modalities": ["speech", "visual", "ocr"],
+                    "predicates": [
+                        {"id": "speech", "kind": "speech.semantic", "value": "成长", "required": True},
+                        {"id": "visual", "kind": "visual.semantic", "value": "成长画面", "required": True},
+                        {"id": "screen", "kind": "screen_text.text", "value": "成长", "required": True},
+                    ],
+                    "logic": {"op": "any", "children": [
+                        {"op": "predicate", "predicateId": "speech"},
+                        {"op": "predicate", "predicateId": "visual"},
+                        {"op": "predicate", "predicateId": "screen"},
+                    ]},
+                    "relations": [],
+                },
+            },
+        )
+
+        self.assertEqual(intent["modalities"], ["speech"])
+        self.assertEqual(
+            [item["concepts"][0] for item in intent["predicates"]],
+            ["成长", "工作", "未来"],
+        )
+        self.assertEqual(intent["logic"]["op"], "any")
+        self.assertEqual(intent["queryPlan"]["requiredOperations"], ["speech.semantic_search"])
+
+    def test_interview_answer_themes_survive_when_model_returns_only_question_context(self) -> None:
+        from app import main as main_app
+
+        instruction = (
+            "仅根据对白分别检索以下回答主题：成长、工作和未来；"
+            "各主题作为独立候选，不要求同一片段同时命中；"
+            "口头提问仅作为回答的可选上下文补齐，不作为必选主题；"
+            "不使用画面或屏幕文字作为主题证据"
+        )
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all", "searchResultLimit": 12}, "videoInfo": {"duration": 700}},
+            instruction,
+            {
+                "capabilityProposal": {"capabilities": ["speech"]},
+                "intent": {
+                    "action": "extract_content", "query": "成长、工作和未来",
+                    "modalities": ["speech"],
+                    "predicates": [{
+                        "id": "question", "kind": "question.evidence",
+                        "value": "必要的口头提问上下文", "source": "spoken", "required": True,
+                    }],
+                    "logic": {"op": "predicate", "predicateId": "question"},
+                    "relations": [],
+                },
+            },
+        )
+
+        predicates = intent["predicates"]
+        answer_rows = [item for item in predicates if item["kind"] == "speech.semantic"]
+        question = next(item for item in predicates if item["kind"] == "question.evidence")
+        self.assertEqual([item["concepts"][0] for item in answer_rows], ["成长", "工作", "未来"])
+        self.assertFalse(question["required"])
+        self.assertEqual(intent["logic"]["op"], "any")
+        self.assertEqual(
+            {child["predicateId"] for child in intent["logic"]["children"]},
+            {item["id"] for item in answer_rows},
+        )
+
+    def test_compiler_recovery_clears_stale_missing_predicate_error(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {
+                "request": {"searchScopeKind": "all", "searchResultLimit": 12},
+                "videoInfo": {"duration": 700},
+            },
+            "入职、成长和未来",
+            {
+                "capabilityProposal": {"capabilities": ["speech"]},
+                "intent": {
+                    "action": "extract_content", "query": "入职、成长和未来",
+                    "modalities": ["speech"], "predicates": [],
+                    "_clarification": {
+                        "kind": "query_semantics", "question": "请补充这次想找的内容关系",
+                    },
+                    "validationErrors": [{
+                        "code": "missing_predicates", "message": "检索意图缺少 predicates。",
+                    }],
+                },
+            },
+            authorized_capabilities=["speech"],
+        )
+
+        self.assertEqual(intent["validationErrors"], [])
+        self.assertNotIn("_clarification", intent)
+        self.assertEqual(intent["queryPlan"]["predicates"][0]["kind"], "speech.semantic")
+        self.assertEqual(intent["queryPlan"]["predicates"][0]["value"], "入职、成长和未来")
+
+    def test_dialogue_relation_query_cannot_stop_before_final_join(self) -> None:
+        from app import main as main_app
+
+        simple = {
+            "predicates": [{"id": "p1", "kind": "speech.semantic"}],
+            "relations": [],
+        }
+        dialogue = {
+            "predicates": [
+                {
+                    "id": "p1", "kind": "speech.dialogue_role",
+                    "segmentUnit": "response_block", "requirePromptRelation": True,
+                },
+                {"id": "p2", "kind": "speech.semantic"},
+            ],
+            "relations": [{"left": "p2", "type": "during", "right": "p1"}],
+        }
+
+        self.assertTrue(main_app._content_semantic_early_stop_safe(simple))
+        self.assertFalse(main_app._content_semantic_early_stop_safe(dialogue))
+
     def test_instruction_count_overrides_default_search_limit(self) -> None:
         from app import main as main_app
 
@@ -65,6 +193,67 @@ class ContentIntentTests(unittest.TestCase):
         self.assertEqual(intent["resultMode"], "top_k")
         self.assertEqual(intent["requestedCount"], 3)
         self.assertEqual(intent["queryPlan"]["result"]["limit"], 3)
+
+    def test_parallel_category_top_k_reserves_one_result_per_branch(self) -> None:
+        matches = [
+            {"id": "fridge_best", "predicateId": "p1", "score": 92, "start": 10, "end": 20},
+            {"id": "fridge_second", "predicateId": "p1", "score": 88, "start": 30, "end": 40},
+            {"id": "washer", "predicateId": "p3", "score": 76, "start": 200, "end": 210},
+            {"id": "air_conditioner", "predicateId": "p2", "score": 65, "start": 460, "end": 498},
+        ]
+        intent = {"normalizationDiagnostics": [{
+            "code": "parallel_semantic_categories_normalized",
+            "predicateIds": ["p1", "p2", "p3"],
+        }]}
+
+        selected = select_top_content_matches(matches, intent, limit=3)
+
+        self.assertEqual(
+            {item["id"] for item in selected},
+            {"fridge_best", "air_conditioner", "washer"},
+        )
+        self.assertNotIn("fridge_second", {item["id"] for item in selected})
+
+    def test_per_category_one_clip_uses_branch_count_as_result_budget(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {
+                "request": {"searchScopeKind": "all", "searchResultLimit": 3},
+                "videoInfo": {"duration": 643},
+            },
+            "冰箱、空调、洗衣机三类互相独立，每类1段",
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "action": "extract_content",
+                    "query": "分别查找冰箱、空调、洗衣机，每类1段",
+                    "resultMode": "top_k",
+                    # The parser reads the literal per-category count as one.
+                    "requestedCount": 1,
+                    "includeRules": ["每类1段"],
+                    "predicates": [
+                        {"id": "p1", "kind": "visual.semantic", "value": "冰箱"},
+                        {"id": "p2", "kind": "visual.semantic", "value": "空调"},
+                        {"id": "p3", "kind": "visual.semantic", "value": "洗衣机"},
+                    ],
+                    "logic": {"op": "any", "children": [
+                        {"op": "predicate", "predicateId": "p1"},
+                        {"op": "predicate", "predicateId": "p2"},
+                        {"op": "predicate", "predicateId": "p3"},
+                    ]},
+                    "relations": [],
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        self.assertEqual(intent["requestedCount"], 3)
+        self.assertEqual(intent["queryPlan"]["result"]["limit"], 3)
+        self.assertTrue(any(
+            item.get("code") == "parallel_semantic_categories_normalized"
+            for item in intent.get("normalizationDiagnostics") or []
+        ))
 
     def test_full_source_scope_does_not_allow_model_to_force_exhaustive_scan(self) -> None:
         from app import main as main_app
@@ -93,6 +282,166 @@ class ContentIntentTests(unittest.TestCase):
         self.assertEqual(intent["searchScope"]["kind"], "all")
         self.assertEqual(intent["resultMode"], "top_k")
         self.assertEqual(intent["queryPlan"]["result"]["mode"], "top_k")
+
+    def test_explanatory_parallel_objects_expand_to_complete_multisource_intent(self) -> None:
+        from app import main as main_app
+
+        instruction = "讲解洗衣机和冰箱"
+        intent = main_app._content_intent_from_decision(
+            {
+                "request": {"searchScopeKind": "all", "searchResultLimit": 12},
+                "videoInfo": {"duration": 643},
+            },
+            instruction,
+            {"intent": {
+                "action": "extract_content",
+                "query": "讲解洗衣机和冰箱的片段",
+                "retrievalScope": "explicit_source",
+                "entities": [
+                    {"description": "洗衣机", "type": "object"},
+                    {"description": "冰箱", "type": "object"},
+                ],
+                "predicates": [{
+                    "id": "p1", "kind": "visual.semantic",
+                    "value": "内容围绕洗衣机进行讲解、展示或介绍",
+                    "subject": {"description": "洗衣机", "type": "object"},
+                }],
+                "logic": {"op": "predicate", "predicateId": "p1"},
+                "relations": [],
+                "validationErrors": [{
+                    "code": "broad_multisource_requires_union",
+                    "message": "宽泛相关性检索必须把画面、对白和屏幕文字作为并集执行。",
+                }],
+                "_clarification": {"kind": "query_semantics"},
+            }},
+        )
+
+        predicates = intent["queryPlan"]["predicates"]
+        self.assertEqual(len(predicates), 6)
+        self.assertEqual(
+            {item["subject"]["description"] for item in predicates},
+            {"洗衣机", "冰箱"},
+        )
+        self.assertEqual(
+            {item["kind"] for item in predicates},
+            {"speech.semantic", "visual.semantic", "screen_text.text"},
+        )
+        self.assertEqual(intent["queryPlan"]["logic"]["op"], "any")
+        self.assertEqual(set(intent["modalities"]), {"speech", "visual", "ocr"})
+        self.assertEqual(intent["retrievalScope"], "broad_multisource")
+        self.assertEqual(intent["validationErrors"], [])
+        self.assertNotIn("_clarification", intent)
+        self.assertTrue(any(
+            item.get("code") == "explanatory_entities_expanded_multisource"
+            for item in intent.get("normalizationDiagnostics") or []
+        ))
+
+    def test_explicit_visual_explanation_request_is_not_widened(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 90}},
+            "只保留画面中介绍冰箱功能的镜头",
+            {"intent": {
+                "action": "extract_content", "query": "介绍冰箱功能",
+                "entities": [{"description": "冰箱", "type": "object"}],
+                "predicates": [{
+                    "id": "fridge", "kind": "visual.semantic", "value": "介绍冰箱功能",
+                    "subject": {"description": "冰箱", "type": "object"},
+                }],
+                "logic": {"op": "predicate", "predicateId": "fridge"},
+                "relations": [],
+            }},
+        )
+
+        self.assertEqual(intent["modalities"], ["visual"])
+        self.assertEqual(len(intent["queryPlan"]["predicates"]), 1)
+        self.assertFalse(any(
+            item.get("code") == "explanatory_entities_expanded_multisource"
+            for item in intent.get("normalizationDiagnostics") or []
+        ))
+
+    def test_explanatory_assembly_accepts_equivalent_modalities_per_entity(self) -> None:
+        from app import main as main_app
+
+        predicates = []
+        for position, description in enumerate(("洗衣机", "冰箱"), 1):
+            for suffix, kind in (
+                ("speech", "speech.semantic"),
+                ("visual", "visual.semantic"),
+                ("screen", "screen_text.text"),
+            ):
+                predicates.append({
+                    "id": f"topic_{position}_{suffix}", "kind": kind,
+                    "value": f"{description}相关内容",
+                    "subject": {"description": description, "type": "object"},
+                })
+        search = {
+            "id": "search_test",
+            "intent": {
+                "targetSeconds": 30,
+                "predicates": predicates,
+                "normalizationDiagnostics": [{
+                    "code": "explanatory_entities_expanded_multisource",
+                    "entities": ["洗衣机", "冰箱"],
+                }],
+            },
+            "candidates": [{
+                "id": "washer_visual", "start": 150, "end": 158,
+                "confidenceTier": "reliable", "score": 90,
+                "predicateResults": [{
+                    "predicateId": "topic_1_visual", "satisfied": True,
+                }],
+            }, {
+                "id": "fridge_ocr", "start": 10, "end": 16,
+                "confidenceTier": "reliable", "score": 92,
+                "predicateResults": [{
+                    "predicateId": "topic_2_screen", "satisfied": True,
+                }],
+            }],
+        }
+
+        spec = main_app._content_assembly_spec(search)
+
+        self.assertEqual(spec["missingPredicates"], [])
+        self.assertEqual(set(spec["selectedMatchIds"]), {"washer_visual", "fridge_ocr"})
+        self.assertEqual(len(spec["predicateIds"]), 2)
+        self.assertEqual(
+            [set(item["memberPredicateIds"]) for item in spec["predicateGroups"]],
+            [
+                {"topic_1_speech", "topic_1_visual", "topic_1_screen"},
+                {"topic_2_speech", "topic_2_visual", "topic_2_screen"},
+            ],
+        )
+
+        session = {
+            "id": "edit_test", "clips": [{
+                "id": "clip_washer", "sourceRef": {"id": "washer_visual"},
+                "sourceStart": 150, "sourceEnd": 158, "playbackRate": 1,
+            }, {
+                "id": "clip_fridge", "sourceRef": {"id": "fridge_ocr"},
+                "sourceStart": 10, "sourceEnd": 16, "playbackRate": 1,
+            }],
+            "duration": 14.0,
+            "agentAssembly": {
+                "searchId": "search_test",
+                "selectedMatchIds": ["washer_visual", "fridge_ocr"],
+                "targetSeconds": 30.0,
+                "groups": [],
+            },
+        }
+        spec["searchId"] = "search_test"
+        self.assertTrue(main_app._content_session_needs_assembly_fit(session, spec))
+        fitted = main_app._fit_content_session_to_assembly(
+            {"videoInfo": {"duration": 643}}, session, search, spec,
+        )
+        self.assertEqual(fitted["duration"], 30.0)
+        self.assertEqual([item["duration"] for item in fitted["clips"]], [15.0, 15.0])
+        self.assertEqual(
+            [item["actualSeconds"] for item in fitted["agentAssembly"]["groups"]],
+            [15.0, 15.0],
+        )
+        self.assertFalse(main_app._content_session_needs_assembly_fit(fitted, spec))
 
     def test_contextual_visual_actor_does_not_require_person_target(self) -> None:
         from app import main as main_app
@@ -169,6 +518,118 @@ class ContentIntentTests(unittest.TestCase):
         normalized = main_app._normalize_unrequested_strict_relations(raw, "找同一事件里开门并入座")
         self.assertEqual(len(normalized["predicates"]), 2)
         self.assertEqual(normalized["relations"][0]["type"], "same_event")
+
+    def test_parallel_visual_categories_drop_invented_same_event_requirements(self) -> None:
+        from app import main as main_app
+
+        instruction = "冰箱、空调、洗衣机的新老替换"
+        predicates = [
+            {"id": "fridge", "kind": "visual.semantic", "value": "冰箱的新老替换", "subject": {"type": "object", "description": "冰箱"}},
+            {"id": "ac", "kind": "visual.semantic", "value": "空调的新老替换", "subject": {"type": "object", "description": "空调"}},
+            {"id": "washer", "kind": "visual.semantic", "value": "洗衣机的新老替换", "subject": {"type": "object", "description": "洗衣机"}},
+            {"id": "replace", "kind": "visual.semantic", "value": "新老替换", "subject": {"type": "topic", "description": "新老替换"}},
+        ]
+        branches = [
+            {"op": "all", "children": [
+                {"op": "predicate", "predicateId": identity},
+                {"op": "predicate", "predicateId": "replace"},
+            ]}
+            for identity in ("fridge", "ac", "washer")
+        ]
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 643}},
+            instruction,
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "action": "extract_content", "query": instruction,
+                    "predicates": predicates,
+                    "relations": [
+                        {"type": "same_event", "left": identity, "right": "replace"}
+                        for identity in ("fridge", "ac", "washer")
+                    ],
+                    "logic": {"op": "all", "children": [{"op": "any", "children": branches}]},
+                    "resultMode": "top_k", "requestedCount": 12,
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        self.assertEqual(intent["queryPlan"]["relations"], [])
+        self.assertNotIn("timeline.event_boundary", intent["queryPlan"]["requiredOperations"])
+        self.assertNotIn("_clarification", intent)
+
+    def test_persisted_parallel_intent_is_upgraded_without_another_model_call(self) -> None:
+        from app import main as main_app
+        from app.content_search import CONTENT_INTENT_PARSER_VERSION
+
+        instruction = "冰箱、空调、洗衣机的新老替换"
+        prepared = {
+            "parserVersion": CONTENT_INTENT_PARSER_VERSION,
+            "query": instruction,
+            "predicates": [
+                {"id": "fridge", "kind": "visual.semantic", "value": "冰箱的新老替换", "subject": {"type": "object"}},
+                {"id": "replace", "kind": "visual.semantic", "value": "新老替换", "subject": {"type": "topic"}},
+            ],
+            "relations": [{"type": "same_event", "left": "fridge", "right": "replace"}],
+            "logic": {"op": "all", "children": [
+                {"op": "predicate", "predicateId": "fridge"},
+                {"op": "predicate", "predicateId": "replace"},
+            ]},
+            "modalities": ["visual"],
+            "_clarification": {"kind": "relation_index_unavailable", "relation": "same_event"},
+        }
+        job = {
+            "request": {
+                "searchScopeKind": "all",
+                "pendingContentIntent": {
+                    "instructionId": main_app._content_instruction_id(instruction),
+                    "intent": prepared,
+                },
+            },
+            "videoInfo": {"duration": 643},
+        }
+
+        intent = main_app._parse_content_instruction(job, instruction)
+
+        self.assertEqual(intent["queryPlan"]["relations"], [])
+        self.assertNotIn("timeline.event_boundary", intent["queryPlan"]["requiredOperations"])
+        self.assertNotIn("_clarification", intent)
+        self.assertEqual(intent["_parserMode"], "persisted_intent_upgrade")
+        self.assertEqual(intent["_parserLlmCalls"], 0)
+
+    def test_parallel_categories_are_normalized_from_all_to_any(self) -> None:
+        from app import main as main_app
+
+        intent = main_app._content_intent_from_decision(
+            {"request": {"searchScopeKind": "all"}, "videoInfo": {"duration": 643}},
+            "分别查找冰箱、空调、洗衣机的新老替换，各类片段作为并列候选",
+            {
+                "capabilityProposal": {"capabilities": ["visual"]},
+                "intent": {
+                    "query": "查找冰箱、空调、洗衣机三类产品各自的新老替换片段，每类约20秒",
+                    "predicates": [
+                        {"id": identity, "kind": "visual.semantic", "value": value}
+                        for identity, value in (
+                            ("fridge", "冰箱的新老替换"),
+                            ("ac", "空调的新老替换"),
+                            ("washer", "洗衣机的新老替换"),
+                        )
+                    ],
+                    "relations": [],
+                    "logic": {"op": "all", "children": [
+                        {"op": "predicate", "predicateId": identity}
+                        for identity in ("fridge", "ac", "washer")
+                    ]},
+                },
+            },
+            authorized_capabilities=["visual"],
+        )
+
+        self.assertEqual(intent["queryPlan"]["logic"]["op"], "any")
+        self.assertEqual(len(intent["queryPlan"]["branches"]), 3)
+        self.assertEqual(intent["validationErrors"], [])
+        self.assertNotIn("_clarification", intent)
 
     def test_coverage_snapshot_uses_verified_units_not_evaluated_total(self) -> None:
         from app import main as main_app
@@ -870,7 +1331,9 @@ class ContentRankingTests(unittest.TestCase):
         ]}])
         self.assertEqual([item["unit"]["id"] for item in ranked], ["speech_1"])
 
-    def _run_adaptive_top_k_search(self, *, return_all_batch_matches: bool):
+    def _run_adaptive_top_k_search(
+        self, *, return_all_batch_matches: bool, historical_evidence_count: int = 0,
+    ):
         from app import main as main_app
 
         units = [{
@@ -923,6 +1386,7 @@ class ContentRankingTests(unittest.TestCase):
             "action": "extract_content", "query": "做家务",
             "modalities": ["speech"], "resultMode": "top_k",
             "requestedCount": 12,
+            "requestedCountExplicit": True,
             "predicates": [{
                 "id": "p1", "kind": "speech.semantic",
                 "value": "做家务", "required": True,
@@ -931,8 +1395,15 @@ class ContentRankingTests(unittest.TestCase):
             "boundaryMode": "complete",
         }
         recalled = [{"unit": unit, "score": 80, "lexicalScore": 0} for unit in units]
+        historical = [{
+            "id": f"source_{index}", "modality": "speech",
+            "start": index % 240, "end": index % 240 + .5,
+            "text": f"历史证据 {index}", "sourceEvidence": True,
+        } for index in range(historical_evidence_count)]
         with patch.object(main_app, "_content_progress"), patch.object(
-            main_app, "read_source_evidence", return_value=[],
+            main_app, "read_source_evidence", return_value=historical,
+        ), patch.object(
+            main_app, "query_source_evidence_vectors", return_value=([], False, None),
         ), patch.object(
             main_app, "_read_content_query_cache", return_value=None,
         ), patch.object(main_app, "_write_content_query_cache"), patch.object(
@@ -948,6 +1419,15 @@ class ContentRankingTests(unittest.TestCase):
                 "adaptive_top_k", job, index, "做家务", intent, threading.Event(),
             )
         return result, client.calls
+
+    def test_historical_evidence_does_not_expand_the_semantic_universe(self) -> None:
+        result, _calls = self._run_adaptive_top_k_search(
+            return_all_batch_matches=True, historical_evidence_count=1000,
+        )
+        stats = result["retrievalStats"]
+        self.assertEqual(stats["unitTotal"], 80)
+        self.assertEqual(stats["availableReusableEvidenceCount"], 1000)
+        self.assertEqual(stats["semanticPoolUnitCount"], 80)
 
     def test_adaptive_top_k_expands_when_first_wave_is_under_target(self) -> None:
         result, calls = self._run_adaptive_top_k_search(return_all_batch_matches=False)
@@ -1018,6 +1498,29 @@ class ContentRankingTests(unittest.TestCase):
         }]}])
         self.assertEqual(ranked["p1"][0]["confidenceTier"], "possible")
         self.assertTrue(ranked["p1"][0]["requiresReview"])
+
+    def test_wemm_vector_hit_enters_candidate_set_but_remains_reviewable(self) -> None:
+        plan = {"result": {"mode": "exhaustive"}, "predicates": [
+            {"id": "p1", "kind": "visual.action", "value": "空中翻转", "required": True},
+        ]}
+        ranked = rank_predicate_units(plan, self.units, vector_results={"p1": [{
+            "id": "visual_1", "score": .42, "embeddingBackend": "wemm",
+            "evidenceStatus": "embedding_recalled", "threshold": .18,
+        }]})
+        self.assertEqual([item["unit"]["id"] for item in ranked["p1"]], ["visual_1"])
+        self.assertEqual(ranked["p1"][0]["groundingStatus"], "embedding_recalled")
+        self.assertEqual(ranked["p1"][0]["confidenceTier"], "possible")
+        self.assertTrue(ranked["p1"][0]["requiresReview"])
+
+    def test_non_wemm_vector_hit_is_not_treated_as_visual_proof(self) -> None:
+        plan = {"result": {"mode": "exhaustive"}, "predicates": [
+            {"id": "p1", "kind": "visual.action", "value": "空中翻转", "required": True},
+        ]}
+        ranked = rank_predicate_units(plan, self.units, vector_results={"p1": [{
+            "id": "visual_1", "score": .9, "embeddingBackend": "siglip",
+            "evidenceStatus": "recall_only", "threshold": -1,
+        }]})
+        self.assertEqual(ranked["p1"], [])
 
     def test_low_scoring_grounded_match_is_preserved_for_exhaustive_review(self) -> None:
         plan = {"result": {"mode": "exhaustive"}, "predicates": [
@@ -1106,11 +1609,11 @@ class ContentRankingTests(unittest.TestCase):
         different = merge_content_matches([
             {"id": "a", "start": 2, "end": 5, "score": 80, "evidenceType": "speech", "speakerRef": "Speaker 1"},
             {"id": "b", "start": 5.4, "end": 8, "score": 82, "evidenceType": "speech", "speakerRef": "Speaker 2"},
-        ], maximum_gap=1.5, algorithm_version="editing-algorithm-v2")
+        ], maximum_gap=1.5)
         same = merge_content_matches([
             {"id": "a", "start": 2, "end": 5, "score": 80, "evidenceType": "speech", "speakerRef": "Speaker 1"},
             {"id": "b", "start": 5.4, "end": 8, "score": 82, "evidenceType": "speech", "speakerRef": "Speaker 1"},
-        ], maximum_gap=1.5, algorithm_version="editing-algorithm-v2")
+        ], maximum_gap=1.5)
         self.assertEqual(len(different), 2)
         self.assertEqual(len(same), 1)
 
@@ -1118,7 +1621,7 @@ class ContentRankingTests(unittest.TestCase):
         merged = merge_content_matches([
             {"id": "speech", "start": 2, "end": 7, "score": 68, "evidenceType": "speech", "matchedModalities": ["speech"], "confidenceTier": "possible", "groundingStatus": "contextual", "evidenceItems": [{"type": "speech", "id": "s1"}]},
             {"id": "visual", "start": 6, "end": 9, "score": 72, "evidenceType": "visual", "matchedModalities": ["visual"], "confidenceTier": "possible", "groundingStatus": "contextual", "evidenceItems": [{"type": "visual", "id": "v1"}]},
-        ], algorithm_version="editing-algorithm-v2")
+        ])
         self.assertEqual(merged[0]["confidenceTier"], "possible")
         self.assertTrue(merged[0]["requiresReview"])
 
@@ -1129,7 +1632,7 @@ class ContentRankingTests(unittest.TestCase):
         ], maximum_gap=1.5)
         self.assertEqual(len(merged), 2)
 
-    def test_two_grounded_modalities_form_one_reliable_content_segment(self) -> None:
+    def test_contextual_modalities_still_require_review(self) -> None:
         merged = merge_content_matches([
             {
                 "id": "speech", "start": 2, "end": 7, "score": 68,
@@ -1145,8 +1648,8 @@ class ContentRankingTests(unittest.TestCase):
             },
         ])
         self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["confidenceTier"], "reliable")
-        self.assertFalse(merged[0]["requiresReview"])
+        self.assertEqual(merged[0]["confidenceTier"], "possible")
+        self.assertTrue(merged[0]["requiresReview"])
         self.assertEqual({item["type"] for item in merged[0]["evidenceItems"]}, {"speech", "visual"})
 
     def test_confirmed_matches_become_safe_render_segments(self) -> None:
@@ -1250,43 +1753,23 @@ class ContentRankingTests(unittest.TestCase):
 
 
 class ContentConfirmationTests(unittest.TestCase):
-    def test_person_index_loader_keeps_previous_continuity_index_readable(self) -> None:
+    def test_person_index_loader_accepts_only_current_index(self) -> None:
         from app import main as main_app
 
         job = {
-            "id": "previous-person-index", "recognitionSchemaVersion": 7,
-            "contentIndex": {"cacheKey": "previous-person-cache"},
+            "id": "current-person-index", "recognitionSchemaVersion": 7,
+            "contentIndex": {"cacheKey": "current-person-cache"},
         }
         seen_versions: list[str] = []
 
         def read_index(_path: Path, *, expected_version: str, **_kwargs):
             seen_versions.append(expected_version)
-            if expected_version == main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION:
-                return {"schemaVersion": expected_version, "status": "ready", "persons": []}
-            return None
+            return {"schemaVersion": expected_version, "status": "ready", "persons": []}
 
         with patch.object(main_app, "_read_content_index", side_effect=read_index):
             loaded = main_app._load_content_person_index(job)
-        self.assertEqual(loaded["schemaVersion"], main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION)
-        self.assertIn(main_app.MULTIMODAL_INDEX_VERSION, seen_versions)
-        self.assertIn(main_app.PREVIOUS_MULTIMODAL_INDEX_VERSION, seen_versions)
-
-    def test_person_index_loader_keeps_v8_continuity_index_readable(self) -> None:
-        from app import main as main_app
-
-        job = {
-            "id": "v8-person-index", "recognitionSchemaVersion": 6,
-            "contentIndex": {"cacheKey": "v8-person-cache"},
-        }
-
-        def read_index(_path: Path, *, expected_version: str, **_kwargs):
-            if expected_version == main_app.CONTINUITY_MULTIMODAL_INDEX_VERSION:
-                return {"schemaVersion": expected_version, "status": "ready", "persons": []}
-            return None
-
-        with patch.object(main_app, "_read_content_index", side_effect=read_index):
-            loaded = main_app._load_content_person_index(job)
-        self.assertEqual(loaded["schemaVersion"], main_app.CONTINUITY_MULTIMODAL_INDEX_VERSION)
+        self.assertEqual(loaded["schemaVersion"], main_app.MULTIMODAL_INDEX_VERSION)
+        self.assertEqual(seen_versions, [main_app.MULTIMODAL_INDEX_VERSION])
 
     def test_reanalyze_cancelled_content_job_uses_content_worker_signature(self) -> None:
         from app import main as main_app
@@ -2203,7 +2686,10 @@ class ContentConfirmationTests(unittest.TestCase):
         self.assertEqual(action["subjectPersonRef"], "戴眼镜穿蓝色衬衫的人")
         self.assertEqual(action["subjectPersonPredicateId"], "person")
 
-    def test_unconfirmed_described_speaker_pauses_for_person_target(self) -> None:
+    @patch("app.main.append_message")
+    def test_unconfirmed_described_speaker_pauses_for_person_target(self, _append_message) -> None:
+        # This in-memory clarification fixture has no persisted job. Optional
+        # hardware warnings must not make the test write into the real job store.
         from app import main as main_app
 
         search = main_app._search_content_index(
@@ -3308,6 +3794,7 @@ class ContentConfirmationTests(unittest.TestCase):
         main_app.jobs[job_id] = job
         request = main_app.ContentSearchConfirmRequest(
             searchId="search_test", matchIds=["match_1"], outputMode="single_reel",
+            acknowledgeUnverified=True,
         )
         try:
             with patch.object(main_app, "save_job"), patch.object(main_app, "append_message"), patch.object(main_app, "submit_render_task") as submit:
@@ -3353,6 +3840,7 @@ class ContentConfirmationTests(unittest.TestCase):
         main_app.jobs[job_id] = job
         request = main_app.ContentSearchConfirmRequest(
             searchId="search_person", matchIds=["person_match"], outputMode="single_reel",
+            acknowledgeUnverified=True,
         )
         try:
             with patch.object(main_app, "save_job"), \
@@ -3365,7 +3853,7 @@ class ContentConfirmationTests(unittest.TestCase):
             messages = [call.args[2] for call in append.call_args_list]
             self.assertIn("已确认 1 个出镜片段，开始合成人物出镜视频。", messages)
             self.assertTrue(any("合成阶段不会再增删片段" in message for message in messages))
-            self.assertEqual(submit.call_args.args[13]["displayName"], "人物剪辑")
+            self.assertEqual(submit.call_args.args[13]["displayName"], "人物聚焦成片")
         finally:
             main_app.jobs.pop(job_id, None)
             main_app.cancel_events.pop(job_id, None)
@@ -3411,6 +3899,7 @@ class ContentConfirmationTests(unittest.TestCase):
                         patch.object(main_app, "submit_render_task") as submit:
                     with self.assertRaises(HTTPException) as blocked:
                         main_app.confirm_content_search(job_id, main_app.ContentSearchConfirmRequest(
+                            acknowledgeUnverified=True,
                             searchId="search_duplicate", matchIds=["match_1"], outputMode="single_reel",
                         ))
                 self.assertEqual(blocked.exception.status_code, 409)
@@ -3481,6 +3970,7 @@ class ContentConfirmationTests(unittest.TestCase):
                     patch.object(main_app, "submit_render_task"):
                 response = main_app.confirm_content_search(job_id, main_app.ContentSearchConfirmRequest(
                     searchId="search_incomplete", matchIds=["match_1"], acknowledgeIncomplete=True,
+                    acknowledgeUnverified=True,
                 ))
             self.assertTrue(response["job"]["contentSearch"]["incompleteCoverageAcknowledged"])
             self.assertEqual(response["job"]["status"], "running")
@@ -3550,6 +4040,7 @@ class ContentConfirmationTests(unittest.TestCase):
         request = main_app.ContentSearchConfirmRequest(
             searchId="search_ai_plan", matchIds=["match_2", "match_1"], outputMode="single_reel",
             orderMode="ai_plan", orderReason="先起因后结果",
+            acknowledgeUnverified=True,
         )
         try:
             with patch.object(main_app, "save_job"), patch.object(main_app, "append_message"), patch.object(main_app, "submit_render_task") as submit:

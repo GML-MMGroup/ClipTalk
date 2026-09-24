@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -33,3 +34,22 @@ def test_upload_session_rejects_stale_offsets(tmp_path) -> None:
     with pytest.raises(HTTPException) as error:
         store.append(created["id"], 0, b"def")
     assert error.value.status_code == 409
+
+
+def test_upload_session_resume_offset_uses_part_file_size_when_metadata_lags(tmp_path) -> None:
+    store = UploadSessionStore(tmp_path / "sessions", maximum_bytes=32)
+    created = store.create("clip.mp4", 6)
+    assert store.append(created["id"], 0, b"abc")["offset"] == 3
+
+    metadata_path = tmp_path / "sessions" / f"{created['id']}.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["offset"] = 0
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    resumed = UploadSessionStore(tmp_path / "sessions", maximum_bytes=32)
+    assert resumed.get(created["id"])["offset"] == 3
+    with pytest.raises(HTTPException) as error:
+        resumed.append(created["id"], 0, b"abc")
+    assert error.value.status_code == 409
+    assert "3 字节" in str(error.value.detail)
+    assert resumed.append(created["id"], 3, b"def")["offset"] == 6

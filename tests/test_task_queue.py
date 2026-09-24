@@ -54,6 +54,9 @@ def test_running_task_is_recovered_after_simulated_restart() -> None:
         store = DurableTaskStore(Path(directory) / "tasks.sqlite3")
         task = store.enqueue(job_id="job_1", kind="record", args=("job_1", "retry"))
         assert store.claim(task["id"])
+        # Simulate a dead worker whose lease expired, not a second live worker.
+        with store._connect() as connection:
+            connection.execute("UPDATE tasks SET lease_until=0 WHERE id=?", (task["id"],))
         calls: list[tuple[str, str]] = []
 
         def record(job_id: str, action: str) -> None:

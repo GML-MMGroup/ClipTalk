@@ -133,7 +133,7 @@ test("journey and delivery keep actions bound to the displayed version", async (
       await page.screenshot({ path: `/tmp/cliptalk-delivery-${theme}.png` });
     }
     assert.equal(await page.locator("[data-ct-v4-export]").count(), 0);
-    assert.deepEqual(await card.locator("footer button").allTextContents(), ["播放成片", "全部版本"]);
+    assert.deepEqual(await card.locator("footer button").allTextContents(), ["播放当前成片", "全部版本"]);
     await page.locator("#saveToLibraryButton").click();
     await page.evaluate(() => window.ClipTalkWorkspaceController.syncMaterialsSummary());
     assert.match(await card.textContent(), /已长期保留/);
@@ -772,7 +772,7 @@ test("portrait output preview switches between focused review and precision layo
 });
 
 function fixture() {
-  return `<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0}${css}</style>
+  return `<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0}.hidden{display:none!important}${css}</style>
     <body data-shell-view="workspace" data-shell-mode="workspace" data-workspace-state="awaiting_instruction">
       <main id="workspace" class="studio" style="--ct-user-left-pane:340px;--ct-user-right-pane:410px">
         <aside id="appSidebar" class="app-sidebar"><header class="app-sidebar-brand"></header><nav class="app-sidebar-primary"></nav></aside>
@@ -860,6 +860,40 @@ test("portrait workspace preserves conversation through completion and respects 
   }
 });
 
+test("readable type keeps desktop panes in bounds and leaves media text styling untouched", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(fixture().replace(css, productionCss));
+    await page.evaluate(() => {
+      document.querySelector("#workspace").style.setProperty("--ct-user-left-pane", "520px");
+      document.querySelector("#workspace").style.setProperty("--ct-user-right-pane", "500px");
+      const mediaText = document.createElement("span");
+      mediaText.id = "secondaryEditorSubtitlePreview";
+      mediaText.style.cssText = 'font: 400 31px/1.2 serif';
+      mediaText.textContent = "视频内字幕不跟随界面字号改变";
+      document.querySelector("#mediaFrame").append(mediaText);
+    });
+    for (const width of [1280, 1366, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      const audit = await page.evaluate(() => {
+        const rail = document.querySelector("#reviewRail").getBoundingClientRect();
+        const center = document.querySelector(".review-panel").getBoundingClientRect();
+        const subtitle = getComputedStyle(document.querySelector("#secondaryEditorSubtitlePreview"));
+        return { railRight: rail.right, railLeft: rail.left, centerRight: center.right,
+          centerWidth: center.width, subtitleSize: subtitle.fontSize, subtitleFamily: subtitle.fontFamily };
+      });
+      assert.ok(audit.railRight <= width + 1, JSON.stringify({ width, audit }));
+      assert.ok(audit.centerWidth >= 500);
+      assert.ok(audit.centerRight <= audit.railLeft);
+      assert.equal(audit.subtitleSize, "31px");
+      assert.equal(audit.subtitleFamily, "serif");
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
 test("v4 workbench owns the reference layout and contextual rail", async () => {
   assert.match(html, /workbench\.css\?v=\d{8}-[\w-]+/);
   assert.match(html, /workspace-controller\.js\?v=\d{8}-[\w-]+/);
@@ -942,7 +976,8 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
     assert.deepEqual(collapsed.assistant, { x: 84, width: 54, display: "block" });
     assert.equal(collapsed.handle.display, "none");
     assert.equal(collapsed.center.x, 138);
-    assert.equal(collapsed.center.width, 1044);
+    // Right rail now defaults to collapsed (52px handle): 1600-84-54-52=1410.
+    assert.equal(collapsed.center.width, 1410);
     await page.locator("#workspace").evaluate((node) => node.classList.remove("assistant-collapsed"));
 
     assert.equal(await page.locator("#evidencePanel").evaluate((node) => node.parentElement.id), "reviewRail");
@@ -962,6 +997,8 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
       document.body.dataset.shellMode = "workspace";
     });
     assert.equal(await page.locator("#evidencePanel").evaluate((node) => getComputedStyle(node).display), "none");
+    // Rail defaults to collapsed now; expand it so its tab panels are measurable.
+    await page.locator("#workspace").evaluate((node) => node.classList.remove("review-rail-collapsed"));
     assert.equal(await page.locator("#ctV4MaterialsSummary").evaluate((node) => getComputedStyle(node).display), "grid");
     const lightProperties = await page.evaluate(() => ({
       selection: getComputedStyle(document.querySelector("#ctV4PropertiesPanel .ct-v4-property-selection")).backgroundColor,
@@ -1018,6 +1055,16 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
 
     await page.locator('[data-ct-v4-rail="project"]').click();
     assert.equal(await page.locator("#ctV4ProjectPanel").evaluate((node) => getComputedStyle(node).display), "block");
+    assert.equal(await page.locator('.ct-v4-output-aspect > strong').textContent(), "默认成片比例");
+    assert.equal(await page.locator('.ct-v4-output-aspect > p').textContent(), "用于新生成的视频，已有版本不变。");
+    assert.equal(await page.locator('[data-ct-v4-output-aspect="source"]').textContent(), "保持原比例");
+    assert.equal(await page.locator("#ctV4OutputAspectStatus").isVisible(), false);
+    assert.equal(await page.locator("#ctV4ReframeFit").isVisible(), false);
+    await page.evaluate(() => {
+      window.ClipTalkCurrentJobSnapshot = () => ({ projectSettings: { outputAspect: "9:16" } });
+      window.ClipTalkWorkspaceController.syncProjectControls();
+    });
+    assert.equal(await page.locator("#ctV4ReframeFit").isVisible(), true);
     const lightProjectSettings = await page.evaluate(() => ({
       section: getComputedStyle(document.querySelector("#ctV4ProjectPanel > section")).backgroundColor,
       input: getComputedStyle(document.querySelector("#ctV4ProjectDisplayName")).backgroundColor,
@@ -1053,7 +1100,7 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
       window.ClipTalkWorkspaceController.syncProjectControls();
     });
     assert.equal(await page.locator('[data-ct-v4-output-aspect="9:16"]').getAttribute("aria-pressed"), "true");
-    assert.match(await page.locator("#ctV4OutputAspectStatus").textContent(), /下一次生成成片时应用 9:16/);
+    assert.equal(await page.locator("#ctV4OutputAspectStatus").isVisible(), false);
     await page.locator('[data-ct-v4-output-aspect="16:9"]').click();
     assert.equal(await page.evaluate(() => window.__savedOutputAspect), "16:9");
 
@@ -1076,7 +1123,9 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
     }));
     assert.equal(aspectActionState.visible, true, JSON.stringify(aspectActionState));
     assert.equal(await page.locator("#ctV4GenerateAspect").evaluate((node) => node.closest(".ct-v4-version-card") !== null), true);
-    assert.match(await page.locator("#ctV4GenerateAspect").textContent(), /生成 9:16 审核版本/);
+    assert.equal(await page.locator("#ctV4GenerateAspect").textContent(), "生成竖屏版");
+    assert.match(await page.locator("#ctV4GenerateAspect").getAttribute("title"), /9:16 新版本，原版本不变/);
+    assert.match(await page.locator("#ctV4OutputAspectStatus").textContent(), /素材与结果.*生成竖屏版/);
 
     await page.evaluate(() => {
       document.querySelector('#ctV4MaterialsSummary').dataset.outputFilename = 'selected.mp4';
@@ -1089,6 +1138,20 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
       window.ClipTalkWorkspaceController.syncProjectControls();
     });
     assert.equal(await page.locator("#ctV4GenerateAspect").isVisible(), false);
+    await page.evaluate(() => {
+      window.ClipTalkCurrentJobSnapshot = () => ({ projectSettings: { outputAspect: "16:9" } });
+      window.ClipTalkWorkspaceController.syncProjectControls();
+    });
+    assert.equal(await page.locator("#ctV4GenerateAspect").textContent(), "生成横屏版");
+    assert.equal(await page.locator("#ctV4GenerateAspect").isVisible(), true);
+    await page.evaluate(() => {
+      window.ClipTalkCurrentJobSnapshot = () => ({ projectSettings: { outputAspect: "source" } });
+      window.ClipTalkWorkspaceController.syncProjectControls();
+    });
+    assert.equal(await page.locator("#ctV4GenerateAspect").isVisible(), false);
+    await page.locator('[data-ct-v4-rail="project"]').click();
+    assert.equal(await page.locator("#ctV4OutputAspectStatus").isVisible(), false);
+    assert.equal(await page.locator("#ctV4ReframeFit").isVisible(), false);
   } finally {
     await browser.close();
   }
@@ -1122,7 +1185,7 @@ test("delivery checks trust rendered overlays and nested cover intro state", asy
     assert.match(validText, /封面已合入/);
     assert.match(validText, /字幕已烧录/);
     assert.equal(await page.locator("#ctV4VersionState").textContent(), "1 个审核样片");
-    assert.match(await page.locator("[data-ct-v4-preview-version]").textContent(), /播放样片/);
+    assert.match(await page.locator("[data-ct-v4-preview-version]").textContent(), /播放审核样片/);
     assert.equal(await page.locator("[data-ct-v4-export]").count(), 0);
     assert.equal(await page.locator(".ct-v4-version-card > footer button").count(), 2);
 
@@ -1141,6 +1204,23 @@ test("delivery checks trust rendered overlays and nested cover intro state", asy
     const staleText = await page.locator("#ctV4DeliveryChecks").textContent();
     assert.match(staleText, /封面需更新/);
     assert.match(staleText, /字幕待烧录/);
+
+    await page.evaluate(() => {
+      const output = {
+        filename: "locked-review.mp4", previewOnly: true, width: 540, height: 960,
+        coverVersionId: "cover_v002", coverBindingStatus: "locked_for_export",
+      };
+      window.ClipTalkCurrentJobSnapshot = () => ({
+        id: "job_current", filename: "source.mp4", coverNeedsRegeneration: false,
+        currentCoverVersionId: "cover_v002",
+      });
+      window.ClipTalkCurrentOutputSnapshot = () => ({ output, isReviewSample: true });
+      window.ClipTalkOrderedJobOutputs = () => [{ item: output, version: { previewOnly: true } }];
+      window.ClipTalkWorkspaceController.syncMaterialsSummary();
+    });
+    const lockedText = await page.locator("#ctV4DeliveryChecks").textContent();
+    assert.match(lockedText, /封面已锁定，导出时绑定/);
+    assert.doesNotMatch(lockedText, /封面已合入片头/);
 
     await page.evaluate(() => {
       const formalOne = { filename: "formal-one.mp4", width: 1920, height: 1080, duration: 48 };
@@ -1169,7 +1249,7 @@ test("delivery checks trust rendered overlays and nested cover intro state", asy
       window.ClipTalkCurrentJobSnapshot = () => ({ ...current, storageMode: "one_off" });
       window.ClipTalkWorkspaceController.syncMaterialsSummary();
     });
-    assert.deepEqual(await page.locator(".ct-v4-version-card > footer button").allTextContents(), ["播放成片", "全部版本"]);
+    assert.deepEqual(await page.locator(".ct-v4-version-card > footer button").allTextContents(), ["播放当前成片", "全部版本"]);
   } finally {
     await browser.close();
   }
@@ -1224,90 +1304,26 @@ test("current material card shows an explicit generating state until its thumbna
   }
 });
 
-test("new task assistant and upload stage share one continuous surface", async () => {
+test("new tasks retain separate assistant and source panes for preview-first editing", async () => {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
   try {
-    await page.setContent(`<style>html,body{margin:0}${css}</style>
-      <body class="ct-workbench-v4" data-shell-view="workspace" data-shell-mode="workspace">
-        <main id="workspace" class="studio director-merged new-task-workbench">
-          <aside id="appSidebar" class="app-sidebar"></aside>
-          <aside id="assistantPanel" class="chat-panel"></aside>
-          <div class="panel-resizer-left"></div>
-          <section id="reviewView" class="review-panel glass-panel">
-            <div id="uploadView" class="upload-view new-task-upload"></div>
-          </section>
-        </main>
-      </body>`);
-    const palette = await page.evaluate(() => {
-      const style = (selector) => getComputedStyle(document.querySelector(selector));
-      return {
-        workspaceBackground: style("#workspace").background,
-        assistantBackground: style("#assistantPanel").background,
-        reviewBackground: style("#reviewView").background,
-        uploadBackground: style("#uploadView").background,
-        dividerBackground: style(".panel-resizer-left").backgroundColor,
-        dividerWidth: style(".panel-resizer-left").width,
-        dividerCursor: style(".panel-resizer-left").cursor,
-        dividerGrip: getComputedStyle(document.querySelector(".panel-resizer-left"), "::before").backgroundColor,
-      };
-    });
-    assert.match(palette.workspaceBackground, /rgb\(242, 241, 234\)/);
-    assert.match(palette.assistantBackground, /rgb\(32, 41, 41\)/);
-    assert.match(palette.reviewBackground, /rgb\(242, 241, 234\)/);
-    assert.match(palette.uploadBackground, /rgba\(0, 0, 0, 0\)/);
-    assert.equal(palette.dividerBackground, "rgba(0, 0, 0, 0)");
-    assert.equal(palette.dividerWidth, "8px");
-    assert.equal(palette.dividerCursor, "col-resize");
-    assert.equal(palette.dividerGrip, "rgba(157, 190, 174, 0.2)");
-  } finally {
-    await browser.close();
-  }
+    await page.setContent('<html data-theme="light"><style>html,body{margin:0}' + productionCss + '</style><body class="ct-workbench-v4" data-shell-view="workspace" data-shell-mode="workspace"><main id="workspace" class="studio new-task-workbench"><aside id="assistantPanel" class="chat-panel" data-agent-entry><header class="panel-header"></header><section id="ctAgentWelcome"><h2>想怎么剪这段视频？</h2></section><form id="chatForm"><textarea id="chatInput"></textarea></form><nav id="ctAgentEntryPrompts"></nav></aside><div class="panel-resizer-left"></div><section class="review-panel glass-panel"><div id="uploadView" class="upload-view new-task-upload"><div class="intro"><h1>添加视频</h1></div><form id="uploadForm" class="upload-card"><label id="dropZone" class="drop-zone">选择视频</label></form></div></section></main></body></html>');
+    assert.equal(await page.locator('#assistantPanel').isVisible(), true);
+    assert.equal(await page.locator('#uploadView').isVisible(), true);
+    const source = await page.locator('.review-panel').boundingBox();
+    const assistant = await page.locator('#assistantPanel').boundingBox();
+    assert.ok(source.x >= assistant.x + assistant.width);
+    assert.equal(await page.locator('#chatForm').isVisible(), true);
+    assert.doesNotMatch(html, /id="newTaskEntry"|id="creationStart"/);
+  } finally { await browser.close(); }
 });
 
-test("uploading a new source uses one progress surface and hides the premature local player", async () => {
-  assert.match(html, /id="uploadProgress"[^>]*aria-label="视频上传进度"/);
+test("upload progress is real and the premature local player stays hidden", () => {
+  assert.match(html, /id="uploadProgress"[^>]*hidden aria-label="视频上传进度"/);
+  assert.match(html, /id="uploadRetry"[^>]*hidden/);
   assert.match(html, /id="localPreviewPanel" class="media-metadata-probe hidden" hidden aria-hidden="true"/);
-  assert.doesNotMatch(html, /<strong>源视频已就绪<\/strong>/);
-  assert.doesNotMatch(html, /id="replaceVideoButton"|本地文件预览/);
-  assert.doesNotMatch(appSource, /autoplayLocalPreview|replaceVideoButton/);
-  assert.doesNotMatch(runtime, /replaceVideoButton/);
-  assert.match(appSource, /#localPreviewPanel"\)\?\.classList\.add\("hidden"\)/);
-
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-  try {
-    await page.setContent(`<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0}${css}</style>
-      <body class="ct-workbench-v4" data-shell-view="workspace" data-shell-mode="workspace">
-        <main id="workspace" class="studio new-task-workbench">
-          <section class="review-panel">
-            <div id="uploadView" class="upload-view new-task-upload is-uploading">
-              <div class="intro"><h1>上传素材</h1><span>先完成上传，再进入剪辑。</span></div>
-              <form id="uploadForm" class="upload-card">
-                <label id="dropZone" class="drop-zone has-file" data-upload-state="uploading">
-                  <span class="drop-zone-add"></span><strong>产品宣传.mp4 · 上传 25%</strong><small>正在上传并创建任务，完成后自动进入工作区</small>
-                  <progress id="uploadProgress" class="upload-progress" max="100" value="25"></progress>
-                </label>
-                <div id="localPreviewPanel" class="media-metadata-probe"><video></video></div>
-              </form>
-            </div>
-          </section>
-        </main>
-      </body>`);
-
-    const audit = await page.evaluate(() => ({
-      previewDisplay: getComputedStyle(document.querySelector("#localPreviewPanel")).display,
-      progressDisplay: getComputedStyle(document.querySelector("#uploadProgress")).display,
-      progressValue: document.querySelector("#uploadProgress").value,
-      dropMinHeight: getComputedStyle(document.querySelector("#dropZone")).minHeight,
-      cursor: getComputedStyle(document.querySelector("#dropZone")).cursor,
-    }));
-    assert.equal(audit.previewDisplay, "none");
-    assert.equal(audit.progressDisplay, "block");
-    assert.equal(audit.progressValue, 25);
-    assert.equal(audit.dropMinHeight, "180px");
-    assert.equal(audit.cursor, "progress");
-  } finally {
-    await browser.close();
-  }
+  assert.match(appSource, /uploadProgress.value = percent/);
+  assert.match(appSource, /uploadProgress.removeAttribute\("value"\)/);
+  assert.doesNotMatch(appSource, /ClipTalkStartPreparedTask/);
 });

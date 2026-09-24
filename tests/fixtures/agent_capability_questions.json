@@ -1,0 +1,562 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "executionMode": "autonomous_review",
+    "phaseTimeoutSeconds": 1800,
+    "stallSeconds": 180,
+    "pollIntervalSeconds": 2,
+    "durationToleranceRatio": 0.1
+  },
+  "scenarios": [
+    {
+      "id": "product-fridge-vertical-cover-subtitle",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "normal",
+      "prompt": "找出所有关于冰箱的画面，合成一个竖屏视频，顶部加对应字幕，开头加一个具有冲击力的封面，封面文字：小米牛逼！",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["冰箱", "竖屏", "字幕", "封面"],
+      "expectedAspect": "9:16",
+      "expectedCoverIntro": true
+    },
+    {
+      "id": "xiaomi-car-all-vertical",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "normal",
+      "prompt": "找出所有关于汽车的画面，按源视频时间顺序合成竖屏视频；原视频是横屏，要最大化保留原始画面信息，不要裁掉关键画面。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-highlight-director", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["汽车", "源视频时间顺序", "竖屏", "保留原始画面"],
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "dialogue-growth-future-interview",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "normal",
+      "prompt": "把不同人物关于成长、工作和未来的回答整理成 90 秒访谈精华，保留必要问题上下文并添加字幕。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor"],
+      "expectedTerms": ["成长", "工作", "未来", "字幕"],
+      "targetDuration": {"minimum": 81, "maximum": 99}
+    },
+    {
+      "id": "singing-complete-phrases-climax",
+      "video": "cest-video/唱歌.mp4",
+      "kind": "normal",
+      "prompt": "剪一条 45 秒演唱高潮，保留完整乐句，不要空镜和长停顿。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["演唱", "高潮", "完整乐句"],
+      "targetDuration": {"minimum": 40.5, "maximum": 49.5}
+    },
+    {
+      "id": "product-ac-only-search-no-fit",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "找出视频里所有空调新老替换的画面，只做内容检索，不要为了凑时长自动加入不相关片段。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["空调", "新老替换", "内容检索"]
+    },
+    {
+      "id": "dialogue-speaker-b-all-lines",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "constraint",
+      "prompt": "识别视频中的说话人，只保留说话人 B 的所有发言，生成审核样片。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-speaker-editor", "cliptalk-interview-editor"],
+      "expectedTerms": ["说话人 B", "发言"]
+    },
+    {
+      "id": "dialogue-black-shirt-person",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "cross_modal",
+      "prompt": "识别画面中的人物，只保留穿黑色上衣的人出现的片段。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-person-editor", "cliptalk-content-extractor"],
+      "expectedTerms": ["黑色上衣", "人物"]
+    },
+    {
+      "id": "xiaomi-shortform-hook-cover",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "normal",
+      "prompt": "剪一条短视频，高光开头要有冲击力，正文保留最完整的信息链路，最后生成封面候选。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director"],
+      "expectedTerms": ["高光", "信息链路", "封面"],
+      "forbidImplicitDuration": true
+    },
+    {
+      "id": "product-three-appliances-square-60",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "从视频中提取冰箱、空调、洗衣机三个新老替换片段，每段约 20 秒，合成 1:1 方屏，总时长 60 秒左右。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-multi-topic-assembler"],
+      "expectedTerms": ["冰箱", "空调", "洗衣机", "1:1"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "1:1"
+    },
+    {
+      "id": "product-horizontal-to-vertical-preserve-frame",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "做成 9:16 竖屏，但原视频是横屏，要最大化保留原始画面，空白区域用虚化背景补齐。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["9:16", "竖屏", "保留原始画面", "虚化背景"],
+      "expectedAspect": "9:16",
+      "forbidImplicitDuration": true
+    },
+    {
+      "id": "live-pk-square-readable",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "constraint",
+      "prompt": "输出 1:1 方屏，左右两边的重要人物和字幕都不能被裁掉。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["1:1", "人物", "字幕"],
+      "expectedAspect": "1:1",
+      "forbidImplicitDuration": true
+    },
+    {
+      "id": "xiaomi-car-all-no-duration-limit",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "constraint",
+      "prompt": "找出所有关于汽车的画面，不限制总时长，有多少用多少，不要因为默认 30 秒目标丢片段。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["汽车", "不限制总时长", "所有"],
+      "forbidImplicitDuration": true
+    },
+    {
+      "id": "product-impossible-phone-chip-score",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "no_match",
+      "prompt": "只保留视频中讲手机芯片跑分参数的片段，剪成 30 秒样片。",
+      "expectedOutcome": "graceful_no_match",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["手机芯片", "跑分"],
+      "targetDuration": {"minimum": 27, "maximum": 33}
+    },
+    {
+      "id": "singing-impossible-host-talk-no-singing",
+      "video": "cest-video/唱歌.mp4",
+      "kind": "no_match",
+      "prompt": "只保留主持人与歌手交谈的内容，不要演唱。",
+      "expectedOutcome": "graceful_no_match",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-speaker-editor", "cliptalk-interview-editor"],
+      "expectedTerms": ["主持人", "歌手", "交谈"]
+    },
+    {
+      "id": "product-fridge-out-of-range-500-600",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "no_match",
+      "prompt": "找出所有关于冰箱的内容，但只允许使用 500–600 秒范围内的素材。",
+      "expectedOutcome": "graceful_no_match",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["冰箱", "500", "600"]
+    },
+    {
+      "id": "product-vertical-cover-current-task-only",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "做一个约 30 秒的竖屏成片，最开头加封面；封面必须来自本次任务的视频，不能复用其他任务封面。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["竖屏", "封面", "本次任务"],
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "xiaomi-car-vertical-cover-subtitle",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "normal",
+      "prompt": "帮我找出所有关于汽车的画面，合成一个竖屏视频，并在顶部增加对应字幕；最开头放一个有冲击力的封面，封面文字：小米牛逼！",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["汽车", "竖屏", "字幕", "封面"],
+      "expectedAspect": "9:16",
+      "expectedCoverIntro": true
+    },
+    {
+      "id": "live-pk-vertical-climax-30",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "normal",
+      "prompt": "剪成约 30 秒竖屏 PK 高潮，保留冲突、情绪变化和结果，删除静默与重复内容。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director"],
+      "expectedTerms": ["PK", "高潮", "结果"],
+      "targetDuration": {"minimum": 27, "maximum": 33},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "student-interview-vertical-subtitle-60",
+      "video": "cest-video/访谈.mp4",
+      "kind": "normal",
+      "prompt": "剪成约 60 秒学生访谈，删除片头片尾，保留问题与完整回答，添加字幕并保持竖屏。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor"],
+      "expectedTerms": ["学生", "问题", "回答", "字幕"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "xiaomi-car-launch-60-horizontal",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "normal",
+      "prompt": "剪一条约 60 秒的小米汽车发布会精华：先用赛道镜头开场，再呈现关键性能参数和成绩，保持横屏。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["赛道", "性能参数", "成绩"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "16:9"
+    },
+    {
+      "id": "product-fridge-all-full-source-range",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "使用这个视频的全片范围，找出所有关于冰箱的画面并按源视频顺序整理；不要把全片自动改成 0–96.5 秒或其他默认范围，有多少相关内容就保留多少。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["全片", "冰箱", "源视频顺序", "有多少相关内容就保留多少"]
+    },
+    {
+      "id": "xiaomi-car-no-duration-no-default-target",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "constraint",
+      "prompt": "找出全片所有关于汽车的画面并合成视频；我没有指定成片时长，不要自动套用 30 秒或 60 秒目标，也不要丢掉超出默认时长的命中片段。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["全片", "汽车", "没有指定成片时长", "不要自动套用"],
+      "forbidImplicitDuration": true
+    },
+    {
+      "id": "product-ac-vertical-preserve-with-blur",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "找出所有空调相关画面，输出竖屏成片；源素材是横屏，画面主体完整居中保留，左右或上下空白用同画面的虚化背景填充，禁止直接裁掉原始画面。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["空调", "竖屏", "横屏", "虚化背景", "禁止直接裁掉"],
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "product-washer-top-subtitle-cover-text",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "normal",
+      "prompt": "找出所有关于洗衣机的画面，合成竖屏审核样片；每段顶部叠加对应字幕，开头使用本次任务从源视频生成的封面，封面文字写‘小米牛逼！’，不能复用其他任务封面。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["洗衣机", "竖屏", "顶部", "字幕", "本次任务", "封面文字"],
+      "expectedAspect": "9:16",
+      "expectedCoverIntro": true
+    },
+    {
+      "id": "product-three-appliances-no-filler",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "分别找出冰箱、空调、洗衣机的新旧替换画面并拼接；如果某一类没有足够证据就明确提示，不要用其他家电、空镜或无关片段凑齐 60 秒。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-multi-topic-assembler"],
+      "expectedTerms": ["冰箱", "空调", "洗衣机", "没有足够证据", "无关片段"]
+    },
+    {
+      "id": "dialogue-speaker-select-then-render",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "constraint",
+      "prompt": "先识别并展示匿名说话人代表片段；自动试听证据后选择说话人 B，提取他在全片的完整发言，直接生成审核样片，不要停留在‘开始识别说话人’按钮。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-speaker-editor"],
+      "expectedTerms": ["匿名说话人", "说话人 B", "全片", "完整发言", "审核样片"]
+    },
+    {
+      "id": "dialogue-interview-context-subtitles",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "normal",
+      "prompt": "整理一条访谈精华：保留每个回答前必要的问题上下文，去掉重复和长停顿，字幕清晰可读并与对应发言同步，最后生成可审核样片。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor"],
+      "expectedTerms": ["访谈", "问题上下文", "重复", "长停顿", "字幕"]
+    },
+    {
+      "id": "square-safe-area-no-crop",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "constraint",
+      "prompt": "输出 1:1 方屏审核样片；尽量完整保留横屏两侧人物、画面文字和字幕，使用安全区或背景填充，不要为了铺满画面直接裁掉边缘信息。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["1:1", "两侧人物", "字幕", "安全区", "不要为了铺满画面直接裁掉"],
+      "expectedAspect": "1:1"
+    },
+    {
+      "id": "same-source-new-task-isolation",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "isolation",
+      "prompt": "这是同一源视频上的新任务：只查找冰箱内容。请创建独立任务并从本次指令重新规划，不能沿用上一个任务的时间范围、封面、字幕、候选片段或执行进度。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "forbiddenTools": ["propose_cover_candidates", "render_cover_variants", "confirm_cover"],
+      "expectedTerms": ["新任务", "独立任务", "冰箱", "重新规划", "不能沿用上一个任务"]
+    },
+    {
+      "id": "content-search-only-no-render",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "prompt": "只检索并列出所有关于冰箱的候选片段和源视频时间，不要创建成片、封面或审核样片；等我确认候选后再进入时间线。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "forbiddenTools": ["analyze_highlights", "propose_timeline_edit", "render_review_preview", "propose_cover_candidates", "render_cover_variants", "confirm_cover"],
+      "expectedTerms": ["只检索", "候选片段", "源视频时间", "等我确认"]
+    },
+    {
+      "id": "smart-reframe-existing-cut-guard",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-smart-reframe",
+      "prompt": "把当前已经确认的成片转换为 9:16 竖屏，完整保留画面并用同画面虚化背景补齐；如果当前任务还没有已确认成片，必须明确提示前置条件，不能拿源视频或其他任务输出代替。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-smart-reframe"],
+      "expectedTerms": ["9:16", "完整保留画面", "虚化背景", "前置条件", "其他任务"]
+    },
+    {
+      "id": "subtitle-revision-existing-cut-guard",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-subtitle-editor",
+      "prompt": "修改当前已确认成片的字幕：将字幕放在顶部安全区、保持与对白同步并生成审核预览；如果当前任务没有已确认时间线，必须明确提示前置条件，不要重新分析源视频或复用其他任务字幕。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-subtitle-editor"],
+      "expectedTerms": ["已确认成片", "顶部安全区", "对白同步", "前置条件", "其他任务字幕"]
+    },
+    {
+      "id": "provenance-same-video-no-old-state",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-source-provenance-guard",
+      "prompt": "同一源视频再次上传创建新任务时，先核查本次任务是否误用了旧任务的时间范围、封面、对话、输出版本或执行进度。",
+      "expectedOutcome": "artifact_ready",
+      "expectedArtifactKind": "task_provenance_report",
+      "expectedSkillAnyOf": ["cliptalk-source-provenance-guard"],
+      "expectedTerms": ["同一源视频", "新任务", "旧任务", "时间范围", "封面"]
+    },
+    {
+      "id": "multi-topic-three-appliances-balanced",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "normal",
+      "skillId": "cliptalk-multi-topic-assembler",
+      "prompt": "分别提取冰箱、空调、洗衣机的新老替换片段，每类约 20 秒，按冰箱、空调、洗衣机顺序拼成约 60 秒 1:1 方屏审核片；缺少类别时要明确说明。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-multi-topic-assembler"],
+      "expectedTerms": ["冰箱", "空调", "洗衣机", "每类", "1:1"],
+      "expectedAspect": "1:1",
+      "targetDuration": {"minimum": 54, "maximum": 66}
+    },
+    {
+      "id": "cover-intro-current-cover-only",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-cover-intro-composer",
+      "prompt": "为本次任务当前成片选择封面，并把已确认封面作为 1 秒片头合入成片；不能复用其他任务封面或旧封面截图。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-cover-intro-composer"],
+      "expectedTerms": ["本次任务", "当前成片", "封面", "1 秒片头", "不能复用"]
+    },
+    {
+      "id": "dynamic-reframe-vertical-blur-preserve",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-dynamic-reframe-director",
+      "prompt": "把当前已生成成片改为竖屏版本，横屏原画必须完整保留，用同帧虚化背景补齐上下空白，不要中心裁切。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-dynamic-reframe-director"],
+      "expectedTerms": ["竖屏", "完整保留", "虚化背景", "不要中心裁切"],
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "caption-layout-top-safe-zone",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-caption-layout-director",
+      "prompt": "调整当前时间线字幕布局：字幕固定在顶部安全区，不能遮挡人物脸和画面主标题，保持对白同步并生成审核预览。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-caption-layout-director"],
+      "expectedTerms": ["当前时间线", "顶部安全区", "不能遮挡", "对白同步"]
+    },
+    {
+      "id": "audio-polish-voice-noise-loudness",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-audio-polish-mixer",
+      "prompt": "对当前成片进行音频优化：降低环境噪声，增强人声清晰度，统一响度，避免爆音，生成可试听审核版本。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-audio-polish-mixer"],
+      "expectedTerms": ["音频优化", "环境噪声", "人声", "响度", "爆音"]
+    },
+    {
+      "id": "broll-overlay-car-cutaways",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-broll-overlay-editor",
+      "prompt": "保留当前主线音频，在提到汽车外观、价格和配置时穿插对应汽车产品画面作为 B-roll，不要打断原对白。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-broll-overlay-editor"],
+      "expectedTerms": ["主线音频", "汽车", "B-roll", "不要打断原对白"]
+    },
+    {
+      "id": "graphics-package-price-labels",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-graphics-packager",
+      "prompt": "给当前时间线增加图文包装：顶部参数卡、价格标签、重点关键词高亮和 Logo 水印，生成审核预览。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-graphics-packager"],
+      "expectedTerms": ["图文包装", "参数卡", "价格标签", "关键词高亮", "Logo"]
+    },
+    {
+      "id": "platform-delivery-explicit-export",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-platform-delivery-exporter",
+      "prompt": "在我明确确认后，把当前审核通过版本导出为高清正式交付文件；导出前必须确认不是低码率审核样片。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-platform-delivery-exporter"],
+      "expectedTerms": ["明确确认", "高清正式交付", "审核通过", "不是低码率审核样片"]
+    },
+    {
+      "id": "edit-diagnostics-no-final-output",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-edit-diagnostics",
+      "prompt": "诊断为什么当前任务计划完成了但没有最终成片、没有竖屏版本或封面没合入片头，列出失败步骤和可恢复动作。",
+      "expectedOutcome": "artifact_ready",
+      "expectedArtifactKind": "edit_diagnostics",
+      "expectedSkillAnyOf": ["cliptalk-edit-diagnostics"],
+      "expectedTerms": ["诊断", "最终成片", "竖屏版本", "封面", "失败步骤"]
+    },
+    {
+      "id": "multi-topic-missing-category-no-filler",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "constraint",
+      "skillId": "cliptalk-multi-topic-assembler",
+      "prompt": "分别找出冰箱、空调、洗衣机、电视四类新旧替换镜头，每类至少 10 秒；如果电视没有证据，不允许用冰箱或空镜补齐。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-multi-topic-assembler"],
+      "expectedTerms": ["四类", "电视", "没有证据", "不允许", "补齐"]
+    },
+    {
+      "id": "dynamic-reframe-square-safe-area",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-dynamic-reframe-director",
+      "prompt": "把当前成片做成 1:1 方屏，完整保留两侧人物、字幕和贴纸信息，不能直接裁成正方形。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-dynamic-reframe-director"],
+      "expectedTerms": ["1:1", "两侧人物", "字幕", "贴纸", "不能直接裁"],
+      "expectedAspect": "1:1"
+    },
+    {
+      "id": "cover-intro-no-output-guard",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-cover-intro-composer",
+      "prompt": "还没有生成成片时尝试保存封面片头，系统必须提示缺少当前成片前置条件，不要拿源视频第一帧直接当最终片头。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-cover-intro-composer"],
+      "expectedTerms": ["还没有生成成片", "前置条件", "不要拿源视频", "最终片头"]
+    },
+    {
+      "id": "caption-layout-bilingual-bottom",
+      "video": "cest-video/访谈.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-caption-layout-director",
+      "prompt": "把当前成片字幕改为双语字幕：中文主字幕、英文小字，放在底部安全区并避免遮挡姓名条。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-caption-layout-director"],
+      "expectedTerms": ["双语字幕", "中文", "英文", "底部安全区", "姓名条"]
+    },
+    {
+      "id": "audio-polish-missing-audio-clear-error",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-audio-polish-mixer",
+      "prompt": "如果当前成片没有可处理音轨，请明确说明音频优化无法执行；不要把静音视频伪装成已降噪结果。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-audio-polish-mixer"],
+      "expectedTerms": ["没有可处理音轨", "无法执行", "不要", "已降噪结果"]
+    },
+    {
+      "id": "broll-overlay-no-timeline-guard",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-broll-overlay-editor",
+      "prompt": "如果当前没有已确认时间线，请提示先生成主线成片，再做产品画面穿插；不要重新创建一个无音频的素材拼接。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-broll-overlay-editor"],
+      "expectedTerms": ["没有已确认时间线", "先生成主线", "产品画面穿插", "不要重新创建"]
+    },
+    {
+      "id": "graphics-package-current-task-only",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-graphics-packager",
+      "prompt": "给当前任务成片加品牌水印和标题条，但必须只作用于当前任务版本，不能修改其他任务或历史版本。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-graphics-packager"],
+      "expectedTerms": ["当前任务", "品牌水印", "标题条", "不能修改其他任务", "历史版本"]
+    },
+    {
+      "id": "delivery-export-not-implicit-preview",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-platform-delivery-exporter",
+      "prompt": "只生成审核样片，不要正式导出；如果流程里出现高清导出步骤，必须等待我单独确认。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-platform-delivery-exporter"],
+      "expectedTerms": ["只生成审核样片", "不要正式导出", "高清导出", "单独确认"]
+    },
+    {
+      "id": "diagnostics-stuck-running-step",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-edit-diagnostics",
+      "prompt": "排查当前 Agent 为什么一直显示检索中或后台处理中，判断是模型仍在跑、渲染任务卡住、前端展示错误还是步骤状态没有落库。",
+      "expectedOutcome": "artifact_ready",
+      "expectedArtifactKind": "edit_diagnostics",
+      "expectedSkillAnyOf": ["cliptalk-edit-diagnostics"],
+      "expectedTerms": ["排查", "检索中", "后台处理中", "前端展示错误", "状态"]
+    },
+    {
+      "id": "local-motion-title-card-no-api",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-local-motion-renderer",
+      "prompt": "用本地 Remotion/HyperFrames 类似能力生成一个 9:16 动态标题卡，标题是“小米汽车高光”，副标题是“本地渲染，不调用外部 API”。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-local-motion-renderer"],
+      "expectedTerms": ["本地", "动态标题卡", "9:16", "不调用外部 API"],
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "local-draft-export-bridge",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-local-draft-exporter",
+      "prompt": "把当前任务导出为本地剪辑草稿包，供后续剪映桥接使用；不要直接写入剪映目录，也不要复用其他任务时间线。",
+      "expectedOutcome": "artifact_ready",
+      "expectedArtifactKind": "editing_draft_package",
+      "expectedSkillAnyOf": ["cliptalk-local-draft-exporter"],
+      "expectedTerms": ["本地剪辑草稿包", "剪映桥接", "不要直接写入", "当前任务"]
+    },
+    {
+      "id": "local-motion-compose-current-output",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "capability_guard",
+      "skillId": "cliptalk-local-motion-renderer",
+      "prompt": "给当前成片合入一个 1.5 秒动态图文片头，标题是“小米汽车高光”，生成新版本；不要覆盖原成片，不调用外部 API。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-local-motion-renderer"],
+      "forbiddenTools": ["render_motion_graphics", "compose_motion_intro"],
+      "expectedTerms": ["当前成片", "动态图文片头", "新版本", "不要覆盖", "不调用外部 API"]
+    }
+  ]
+}

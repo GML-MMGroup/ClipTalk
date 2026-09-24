@@ -1,0 +1,552 @@
+/* Interface-only type roles. Legacy sheets contain high-specificity !important
+   sizes; a named important layer gives these roles ownership without repeating
+   IDs. Do not target video captions, cover artwork or text-layer canvases here.
+   Colours and base geometry remain in component stylesheets; the few wrapping
+   guards below make room for the larger text. */
+@layer interface-type {
+  :is(.home-heading h1, .home-section-heading h2, .director strong,
+      #reviewTitle, #settingsTitle, .app-page-heading h1,
+      .secondary-editor-heading strong, .secondary-inspector-section header strong) {
+    font-family: var(--font-display) !important;
+    font-weight: 700 !important;
+    font-style: normal !important;
+    letter-spacing: 0 !important;
+    line-height: 1.4 !important;
+  }
+
+  .director strong { font-size: 20px !important; }
+  :is(#reviewTitle, .secondary-editor-heading strong,
+      .secondary-inspector-section header strong) { font-size: var(--text-title) !important; }
+
+  /* Long reading uses a regular sans face; emphasis remains real 600/700. */
+  #chatMessages .chat-message .bubble :is(p, li) {
+    font-family: var(--font-reading) !important;
+    font-size: var(--text-body) !important;
+    font-weight: 400 !important;
+    line-height: 1.75 !important;
+    overflow-wrap: anywhere;
+  }
+
+  :is(#chatInput, #secondaryEditorAiInput) {
+    font-family: var(--font-reading) !important;
+    font-size: var(--text-body) !important;
+    line-height: 1.7 !important;
+  }
+
+  :is(#chatMessages .bubble small, .chat-composer > small,
+      .chat-composer-hint, #reviewKicker, .ct-journey-summary-copy small,
+      .ct-v4-version-card small, .ct-v4-candidates-card small,
+      .shell-task-open small, .secondary-editor-heading small) {
+    font-size: var(--text-meta) !important;
+    line-height: 1.5 !important;
+    letter-spacing: 0 !important;
+  }
+
+  /* Labels/actions use the same neutral face as the menus, not the data face.
+     Player icons and the editor's zoom controls retain their own sizes. */
+  :is(.review-header .download-button, .review-header .video-view-select,
+      #portraitPrecisionToggle, .timeline-toolbar button,
+      .ct-v4-rail-tabs button, .ct-v4-version-card button,
+      .ct-v4-candidates-card > header button,
+      .secondary-editor-header button, .secondary-editor-view-switch button,
+      .secondary-editor-core-actions button, .secondary-editor-action-overflow summary,
+      .secondary-inspector-tabs button,
+      .secondary-inspector-section button, .secondary-editor-library-tabs button,
+      #settingsPanel button:not(.icon-button):not([aria-label^="关闭"]),
+      .app-sidebar-filters button) {
+    font-family: var(--font-ui) !important;
+    font-size: var(--text-control) !important;
+    font-weight: 500 !important;
+    line-height: 1.4 !important;
+  }
+
+  :is(.review-header .download-button, #portraitPrecisionToggle,
+      .timeline-toolbar button, .secondary-editor-header button,
+      .secondary-editor-view-switch button, .secondary-inspector-tabs button) {
+    min-height: 32px !important;
+  }
+
+  :is(#agentSkillMenuButton > span, #agentSkillMenu label,
+      .secondary-inspector-section label, .secondary-inspector-fieldset legend,
+      #settingsPanel label) {
+    font-family: var(--font-ui) !important;
+    font-size: var(--text-control) !important;
+    line-height: 1.5 !important;
+  }
+  #agentSkillMenuButton > small {
+    font-size: var(--text-meta) !important;
+    line-height: 1.5 !important;
+  }
+  #agentSkillMenu > header strong {
+    font-family: var(--font-display) !important;
+    font-size: var(--text-title) !important;
+    font-weight: 700 !important;
+  }
+
+  :where(.secondary-inspector-section, #settingsPanel, #agentSkillMenu)
+      :is(select, textarea, input:not([type="range"]):not([type="checkbox"]):not([type="radio"])) {
+    font-family: var(--font-ui) !important;
+    font-size: 14px !important;
+    line-height: 1.5 !important;
+  }
+
+  :is(.secondary-inspector-section p, .secondary-inspector-section > small,
+      .secondary-proposal-warning span, .secondary-editor-library-context,
+      #settingsPanel p, #settingsPanel small, .ct-v4-candidates-card > p,
+      .ct-v4-version-card > p) {
+    font-size: var(--text-support) !important;
+    line-height: 1.65 !important;
+    overflow-wrap: anywhere;
+  }
+
+  :is(#timelineTitle, .ct-journey-summary-copy strong,
+      .ct-v4-version-card header strong, .ct-v4-candidates-card header strong) {
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    line-height: 1.4 !important;
+  }
+
+  /* Fixed-height data lanes remain compact; don't globally enlarge every span. */
+  :is(#playerClock, #playerRate, #timelineCurrent, #timelineDuration, #timelineZoomLevel,
+      #secondaryEditorClock, #secondaryEditorMediaClock,
+      .secondary-editor-media-controls > span) {
+    font-family: var(--font-data) !important;
+    font-size: var(--text-meta) !important;
+    font-style: normal !important;
+    font-variant-numeric: tabular-nums !important;
+    letter-spacing: 0 !important;
+    white-space: nowrap;
+  }
+  :is(.timeline-label, .timeline-label strong, .timeline-label b,
+      .timeline-shot-marker strong, .timeline-shot-marker b,
+      .secondary-timeline-clip strong, .secondary-timeline-clip small,
+      .secondary-editor-ruler-tick b, .timeline-tick) {
+    font-size: var(--text-micro) !important;
+    line-height: 1.4 !important;
+  }
+  :is(.home-summary b, .analysis-score, .quality-score, .score-value,
+      .progress-percent, .progress-metric strong) {
+    font-family: var(--font-data) !important;
+    font-style: normal !important;
+    font-variant-numeric: tabular-nums !important;
+  }
+
+  /* Allow longer, readable actions to wrap, never shrink them to 9px. */
+  .review-header { flex-wrap: wrap !important; row-gap: 8px; }
+  .review-header .asset-heading { min-width: 0; }
+  .secondary-inspector-tabs button { padding-inline: 8px !important; }
+
+  body:not(.person-workspace-open):not(.voice-workspace-open) #timelinePanel > header {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px 12px !important;
+    height: auto !important;
+  }
+  #timelinePrecisionContext { min-width: 0 !important; flex: 1 1 180px; }
+  #timelinePanel .timeline-review-controls {
+    min-width: 0 !important;
+    flex-wrap: wrap !important;
+    margin-left: auto;
+    gap: 8px !important;
+  }
+  #timelinePanel .timeline-review-controls > b { white-space: nowrap; }
+  body:not(.person-workspace-open):not(.voice-workspace-open)
+      #reviewView:not([data-review-layout="portrait"]) #timelinePanel .timeline-toolbar:not(.hidden) {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    height: auto !important;
+  }
+
+  @media (min-width: 1280px) and (max-width: 1599px) {
+    /* Leave room for readable controls even with old saved, oversized panes. */
+    body[data-shell-mode="workspace"] #workspace:not(.new-task-workbench):not(.home-mode):not(.review-rail-collapsed):not(.assistant-collapsed) {
+      --ct4-left: min(var(--ct-user-left-pane, 432px), 26vw) !important;
+      --ct4-right: min(var(--ct-user-right-pane, 390px), 24vw) !important;
+    }
+
+    /* Three open panes leave a narrow player. Give seeking its own row so the
+       previous/next buttons cannot shrink underneath the larger timecode.
+       Keep volume, speed and fullscreen available instead of hiding actions. */
+    #workspace:not(.assistant-collapsed):not(.review-rail-collapsed)
+        #reviewView:not([data-review-layout="portrait"]) #viewerShell:not(:fullscreen) > .player-controls {
+      height: 72px !important;
+      min-height: 72px !important;
+      grid-template-columns: max-content minmax(0, 1fr) auto auto !important;
+      grid-template-rows: 32px 18px !important;
+      gap: 4px 8px !important;
+      padding-block: 7px !important;
+    }
+    #workspace:not(.assistant-collapsed):not(.review-rail-collapsed)
+        #reviewView:not([data-review-layout="portrait"]) #viewerShell:not(:fullscreen) .player-progress-group {
+      grid-column: 1 / -1 !important;
+      grid-row: 2 !important;
+      min-width: 0 !important;
+    }
+    #workspace:not(.assistant-collapsed):not(.review-rail-collapsed)
+        #reviewView:not([data-review-layout="portrait"]) #viewerShell:not(:fullscreen) .player-sound-group {
+      justify-self: end;
+    }
+    #viewerShell .player-segment-group { flex-shrink: 0 !important; }
+  }
+
+  @media (max-width: 600px) {
+    .director strong { font-size: 18px !important; }
+    :is(#chatInput, #secondaryEditorAiInput,
+        #settingsPanel input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+        #settingsPanel select, #settingsPanel textarea, #agentSkillMenu select,
+        .secondary-inspector-section input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+        .secondary-inspector-section select, .secondary-inspector-section textarea) {
+      font-size: 16px !important;
+    }
+  }
+}
+
+@layer interface-type {
+  /* Route pages use the same information density as the editor. */
+  body[data-shell-view="home"] .home-view {
+    padding-top: clamp(28px, 4vh, 48px) !important;
+  }
+
+  body[data-shell-view="home"] .home-heading h1 {
+    font-size: clamp(38px, 4.2vw, 52px) !important;
+    line-height: 1.08 !important;
+    letter-spacing: -.035em !important;
+  }
+
+  body[data-shell-view="home"] .home-create-surface {
+    margin-bottom: 32px !important;
+  }
+
+  body[data-shell-view="home"] .home-section {
+    margin-top: 32px !important;
+  }
+
+  body[data-shell-view="library"] #libraryView,
+  body[data-shell-view="settings"] #settingsPanel {
+    padding-top: 36px !important;
+  }
+
+  body[data-shell-view="library"] #libraryView > header h1,
+  body[data-shell-view="settings"] #settingsPanel > header strong {
+    font-size: clamp(36px, 3.6vw, 48px) !important;
+    letter-spacing: -.035em !important;
+  }
+
+  body[data-shell-view="library"] #libraryView .app-library-item {
+    min-height: 164px !important;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) !important;
+    gap: 16px !important;
+  }
+
+  body[data-shell-view="library"] #libraryView .app-library-media {
+    min-height: 144px !important;
+  }
+
+  body[data-shell-view="library"] #libraryView .app-library-copy {
+    align-content: start !important;
+    padding-top: 8px !important;
+  }
+
+  body[data-shell-view="settings"] #settingsPanel .setup-readiness {
+    padding: 18px 24px !important;
+  }
+
+  body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps {
+    gap: 8px !important;
+  }
+
+  @media (max-width: 720px) {
+    body[data-shell-view="home"] .home-heading h1,
+    body[data-shell-view="library"] #libraryView > header h1,
+    body[data-shell-view="settings"] #settingsPanel > header strong {
+      font-size: 32px !important;
+    }
+
+    body[data-shell-view="library"] #libraryView .app-library-item {
+      grid-template-columns: minmax(0, 1fr) !important;
+    }
+  }
+}
+
+/* Workspace ergonomics ---------------------------------------------------
+   This final ownership layer is intentionally small: it fixes interaction
+   size, time-domain clarity and responsive density without adding another
+   component skin. */
+@layer interface-type {
+  #timelinePanel .timeline-coordinate-hint {
+    margin: 3px 0 0 !important;
+    color: var(--ct-text-secondary, #52645b) !important;
+    font: 500 12px/1.45 var(--font-ui) !important;
+    text-wrap: pretty;
+  }
+
+  #timelinePanel .timeline-coordinate-hint::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin-right: 7px;
+    display: inline-block;
+    border-radius: 50%;
+    background: var(--ct-primary, #355d48);
+    vertical-align: 1px;
+  }
+
+  #timelinePanel[data-time-domain="output"] .timeline-coordinate-hint::before {
+    background: #a46422;
+  }
+
+  body:is(.person-workspace-open, .voice-workspace-open) #timelineCoordinateHint {
+    display: none !important;
+  }
+
+  body:is(.person-workspace-open, .voice-workspace-open) #timelinePanel > .timeline-toolbar {
+    display: none !important;
+  }
+
+  body:is(.person-workspace-open, .voice-workspace-open)[data-timeline-expanded="true"] #timelineOverview {
+    display: none !important;
+  }
+
+  #timelinePanel > .timeline-toolbar {
+    position: relative !important;
+    grid-template-columns: max-content minmax(220px, max-content) max-content minmax(0, 1fr) !important;
+  }
+
+  #timelinePanel .timeline-toolbar-more {
+    position: relative;
+    min-width: max-content;
+  }
+
+  #timelinePanel .timeline-toolbar-more > summary {
+    min-height: 34px !important;
+    padding: 0 11px !important;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid var(--ct-control-border, #ccd4cf);
+    border-radius: 7px;
+    color: var(--ct-text, #24362d);
+    background: var(--ct-panel, #f7f7f4);
+    font: 500 var(--text-control, 12px)/1.4 var(--font-ui);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  #timelinePanel .timeline-toolbar-more > summary::-webkit-details-marker { display: none; }
+  #timelinePanel .timeline-toolbar-more > summary::after { content: "⌄"; font-size: 11px; }
+  #timelinePanel .timeline-toolbar-more[open] > summary::after { transform: rotate(180deg); }
+
+  #timelinePanel .timeline-toolbar-menu {
+    position: absolute;
+    z-index: 60;
+    top: calc(100% + 7px);
+    right: 0;
+    min-width: 176px;
+    padding: 7px;
+    display: grid;
+    gap: 4px;
+    border: 1px solid var(--ct-control-border, #ccd4cf);
+    border-radius: 9px;
+    background: var(--ct-panel, #f7f7f4);
+    box-shadow: 0 14px 34px rgba(35, 52, 44, .14);
+  }
+
+  #timelinePanel .timeline-toolbar-menu .timeline-tool-group {
+    width: 100%;
+    padding: 0 !important;
+    background: transparent !important;
+  }
+
+  #timelinePanel .timeline-toolbar-menu button {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  html:not([data-theme="light"]) body.ct-workbench-v4 #reviewMoreActions > div :is(button, a) {
+    border-color: #547066 !important;
+    color: #edf5f0 !important;
+    background: #203c37 !important;
+  }
+
+  html[data-theme="light"] body.ct-workbench-v4 #reviewMoreActions > div :is(button, a) {
+    border-color: #c2ccc6 !important;
+    color: #294438 !important;
+    background: #f4f6f3 !important;
+  }
+
+  html[data-theme="light"] body.ct-workbench-v4 #timelinePanel #timelineExpandToggle {
+    border-color: #bdc9c1 !important;
+    color: #294438 !important;
+    background: #f2f5f1 !important;
+  }
+
+  html[data-theme="light"] body.ct-workbench-v4 #timelinePanel :is(#timelineClockLabel, #timelineCurrent, #timelineDuration, #timelineZoomLevel) {
+    color: #4c6257 !important;
+  }
+
+  #timelinePanel #timelineOverview.timeline-overview {
+    min-height: 12px !important;
+    height: 12px !important;
+    cursor: ew-resize;
+  }
+
+  #timelinePanel #timelineOverview.timeline-overview::after {
+    content: "全片概览";
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    color: #4e6559;
+    font: 600 9px/1 var(--font-ui);
+    opacity: .72;
+    pointer-events: none;
+    transform: translateY(-50%);
+  }
+
+  :is(#sendButton, #playerPlay, #playerMute, #playerFullscreen,
+      #timelineZoomOut, #timelineZoomIn, #closeEvidenceButton,
+      #assistantPanelToggle, #ctV4ReviewRailToggle) {
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
+
+  /* A true 9:16 frame can become narrower than its desktop transport. Give
+     it a usable control footprint while the video remains object-fit: contain,
+     then simplify controls based on the actual player width. */
+  #viewerShell.viewer-shell.portrait:not(:fullscreen) {
+    container-type: inline-size;
+    min-width: min(180px, calc(100% - 20px)) !important;
+  }
+
+  @container (max-width: 240px) {
+    #viewerShell.viewer-shell.portrait:not(:fullscreen) > .player-controls.player-controls {
+      grid-template-columns: 40px minmax(0, 1fr) 40px !important;
+      column-gap: 6px !important;
+      padding-inline: 8px !important;
+    }
+
+    #viewerShell.viewer-shell.portrait:not(:fullscreen) > .player-controls.player-controls > .player-transport-group {
+      grid-column: 1 / 3 !important;
+      min-width: 0 !important;
+      gap: 5px !important;
+    }
+
+    #viewerShell.viewer-shell.portrait:not(:fullscreen) > .player-controls.player-controls #playerClock.player-clock {
+      min-width: 0 !important;
+      overflow: hidden;
+      font-size: 10px !important;
+      text-overflow: clip;
+    }
+
+    #viewerShell.viewer-shell.portrait:not(:fullscreen) > .player-controls.player-controls > #playerRate {
+      display: none !important;
+    }
+
+    #viewerShell.viewer-shell.portrait:not(:fullscreen) > .player-controls.player-controls > #playerFullscreen {
+      grid-column: 3 !important;
+      grid-row: 2 !important;
+    }
+  }
+
+  #reviewTimelineResizer {
+    min-height: 12px !important;
+    height: 12px !important;
+    margin-block: -2px;
+  }
+
+  #reviewTimelineResizer::before {
+    inset-block: 5px !important;
+  }
+
+  @media (min-width: 1280px) {
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed:not(.home-mode) {
+      grid-template-columns:
+        84px
+        var(--ct4-left, var(--ct-user-left-pane, 320px))
+        8px
+        minmax(640px, 1fr)
+        0
+        0 !important;
+    }
+
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed.assistant-collapsed:not(.home-mode) {
+      grid-template-columns: 84px 54px 0 minmax(640px, 1fr) 0 0 !important;
+    }
+
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed:not(.home-mode) > #reviewRail {
+      width: 0 !important;
+      min-width: 0 !important;
+      max-width: 0 !important;
+      overflow: visible !important;
+      border: 0 !important;
+      background: transparent !important;
+    }
+
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed #ctV4ReviewRailToggle {
+      top: 64px !important;
+      right: 10px !important;
+      width: 40px !important;
+      height: 40px !important;
+      padding: 0 !important;
+      border: 1px solid var(--ct-control-border, #ccd4cf) !important;
+      border-radius: 9px !important;
+      background: var(--ct-panel, #f7f7f4) !important;
+      box-shadow: 0 6px 18px rgba(35, 52, 44, .1) !important;
+      transform: translateX(-48px);
+    }
+
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed #ctV4ReviewRailToggle > span {
+      width: 38px !important;
+      height: 38px !important;
+      border: 0 !important;
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+
+    body.ct-workbench-v4[data-shell-mode="workspace"] #workspace.review-rail-collapsed #ctV4ReviewRailToggle > b {
+      display: none !important;
+    }
+  }
+
+  @media (max-width: 900px) {
+    #reviewView > .review-header .asset-actions :is(button, a, select, summary) {
+      min-height: 40px !important;
+    }
+
+    #timelinePanel > .timeline-toolbar {
+      min-height: 52px !important;
+      padding: 6px 10px !important;
+      display: flex !important;
+      flex-wrap: nowrap !important;
+      align-items: center !important;
+      gap: 6px !important;
+      overflow-x: auto !important;
+      overflow-y: hidden !important;
+      scrollbar-width: thin;
+    }
+
+    #timelinePanel > .timeline-toolbar > * {
+      flex: 0 0 auto !important;
+    }
+
+    #timelinePanel .timeline-toolbar-more > summary,
+    #timelinePanel .timeline-toolbar button,
+    #timelinePanel .timeline-review-controls button {
+      min-height: 44px !important;
+    }
+
+    #timelinePanel .timeline-toolbar-menu {
+      position: fixed;
+      right: 12px;
+      bottom: calc(var(--ct-compact-bottom, 0px) + 68px);
+      top: auto;
+      width: min(260px, calc(100vw - 24px));
+    }
+  }
+
+  @media (min-width: 901px) and (max-height: 650px) {
+    body.ct-workbench-v4[data-shell-mode="workspace"]
+      #reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden) {
+      grid-template-rows: 54px minmax(119px, 1fr) 8px 250px !important;
+    }
+  }
+}

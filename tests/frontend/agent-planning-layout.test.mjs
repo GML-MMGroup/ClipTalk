@@ -7,7 +7,8 @@ const productionCss = [...readFileSync(new URL("../../static/index.html", import
 
 const css = readFileSync(new URL("../../static/agent-workspace.css", import.meta.url), "utf8");
 const tokensCss = readFileSync(new URL("../../static/cliptalk-tokens.css", import.meta.url), "utf8");
-const referenceV3Css = readFileSync(new URL("../../static/workspace-components.css", import.meta.url), "utf8");
+// Workspace component rules are consolidated into the workbench owner.
+const referenceV3Css = readFileSync(new URL("../../static/workbench.css", import.meta.url), "utf8");
 const workbenchV4Css = readFileSync(new URL("../../static/workbench.css", import.meta.url), "utf8");
 const workbenchV4Source = readFileSync(new URL("../../static/workspace-controller.js", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../../static/app.js", import.meta.url), "utf8");
@@ -50,6 +51,125 @@ test("submitting an Agent goal clears the composer while planning is in progress
     assert.equal(await page.locator('#chatInput').inputValue(), '');
     assert.equal(await page.locator('#chatInput').isDisabled(), true);
     assert.match(await page.locator('#chatMessages').textContent(), /生成一条 60 秒高光视频/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("a new instruction folds the previous result, clears its action and lets planning own the bottom", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
+  try {
+    await page.setContent(`<style>${css}.hidden{display:none!important}.chat-panel{height:880px}#chatMessages{height:650px;overflow:auto}</style>
+      <aside class="chat-panel"><section id="agentPlanDock" class="agent-plan-dock hidden"></section>
+      <section id="chatMessages"></section><form id="chatForm"><textarea id="chatInput"></textarea><button id="sendButton">发送</button></form>
+      <button id="agentPlanDrawerScrim" class="hidden"></button>
+      <aside id="agentPlanDrawer" class="agent-plan-drawer hidden" aria-hidden="true">
+        <header><small id="agentPlanDrawerKicker"></small><strong id="agentPlanDrawerTitle"></strong><button id="agentPlanDrawerClose">关闭</button></header>
+        <nav><button data-agent-drawer-tab="plan">方案</button><button data-agent-drawer-tab="activity">活动</button></nav>
+        <section id="agentPlanDrawerPlan" data-agent-drawer-panel="plan"></section>
+        <section id="agentPlanDrawerActivity" data-agent-drawer-panel="activity"></section>
+        <footer id="agentPlanDrawerFooter"></footer>
+      </aside></aside>`);
+    await page.evaluate(() => {
+      const previous = { id: 'plan_previous', workspaceId: 'ws_handoff', status: 'preview_ready',
+        skillId: 'cliptalk-content-extractor', goal: '生成汽车竖屏视频', summary: '上一版审核样片', steps: [
+          { id: 'preview', tool: 'render_social_preview', title: '生成竖屏样片', status: 'completed', result: { artifact: {
+            kind: 'social_reframe_preview', output: { filename: 'old.mp4', previewUrl: '/old.mp4', reframe: { aspect: '9:16' } },
+          } } },
+        ] };
+      window.__nextPlan = { id: 'plan_next', workspaceId: 'ws_handoff', status: 'awaiting_confirmation',
+        skillId: 'cliptalk-cover-director', goal: '为成片增加封面', summary: '生成封面并更新审核样片',
+        steps: [{ id: 'cover', tool: 'review_cover_variants', title: '生成封面候选', status: 'pending' }] };
+      window.__detail = { workspace: { id: 'ws_handoff', jobId: 'job_handoff', status: 'preview_ready', activePlanId: previous.id }, plans: [previous] };
+      window.__job = { id: 'job_handoff', revision: 1, presentation: { key: 'preview_review' }, agent: { workspaceId: 'ws_handoff', planId: previous.id, status: 'preview_ready' } };
+      window.ClipTalkCurrentJobId = () => 'job_handoff';
+      window.ClipTalkCurrentJobSnapshot = () => window.__job;
+      window.ClipTalkRefreshCurrentJob = () => {};
+      window.showToast = () => {};
+      window.EventSource = class { addEventListener() {} close() {} };
+      window.__stream = new TransformStream();
+      window.__writer = window.__stream.writable.getWriter();
+      window.ClipTalkApi = {
+        requestJson: async () => window.__detail,
+        requestResponse: async () => new Response(window.__stream.readable, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+      };
+      window.ClipTalkRenderAssistantHistory = () => {
+        const root = document.querySelector('#chatMessages');
+        const host = window.ClipTalkChatStream?.hostElement?.();
+        root.querySelectorAll(':scope > :not(#csStreamHost)').forEach(node => node.remove());
+        if (host && host.parentElement !== root) root.append(host);
+      };
+    });
+    await page.addScriptTag({ path: new URL('../../static/chat-stream.js', import.meta.url).pathname });
+    await page.addScriptTag({ content: agent });
+    await page.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+    await page.evaluate(() => window.ClipTalkAgentWorkspace.resumeForJob(window.__job));
+    assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').isVisible(), true);
+
+    await page.evaluate(() => { window.__submission = window.ClipTalkAgentWorkspace.submitGoal('为成片增加封面'); });
+    await page.waitForFunction(() => document.querySelector('[data-cs-id="planning:ws_handoff"]'));
+    assert.equal(await page.locator('#csActionBar').isVisible(), false);
+    assert.equal(await page.locator('#csStreamHost .agent-plan-history-row').count(), 1);
+    assert.match(await page.locator('.agent-plan-history-row').innerText(), /上次结果.*审核样片/s);
+    const cardOrder = await page.locator('#csStreamHost > [data-cs-id]').evaluateAll(nodes => nodes.map(node => node.dataset.csId));
+    assert.deepEqual(cardOrder, ['plan:plan_previous', 'planning:ws_handoff']);
+
+    await page.evaluate(async () => {
+      window.__detail = {
+        workspace: {
+          id: 'ws_handoff', jobId: 'job_handoff', status: 'planning', activePlanId: 'plan_previous',
+          planningRequestId: 'request_next', planningStartedAt: new Date().toISOString(),
+          planningProgress: { phase: 'decomposing_goal', title: '正在整理新要求', detail: '正在生成新的可确认方案。' },
+        },
+        plans: window.__detail.plans,
+      };
+      window.__job = {
+        ...window.__job,
+        revision: 2,
+        stage: 'agent_plan_generating',
+        agent: { ...window.__job.agent, workspaceStatus: 'planning' },
+      };
+      await window.ClipTalkAgentWorkspace.resumeForJob(window.__job);
+    });
+    assert.equal(await page.locator('#csActionBar').isVisible(), false);
+    assert.equal(await page.locator('#csStreamHost .agent-plan-history-row').count(), 1);
+    assert.equal(await page.locator('[data-cs-id="planning:ws_handoff"]').count(), 1);
+
+    await page.locator('.agent-plan-history-row [data-agent-plan-open]').click();
+    assert.equal(await page.locator('#agentPlanDrawer').getAttribute('data-read-only'), 'true');
+    await page.keyboard.press('Escape');
+
+    await page.evaluate(async () => {
+      window.__detail = { workspace: { id: 'ws_handoff', jobId: 'job_handoff', status: 'awaiting_plan_confirmation', activePlanId: window.__nextPlan.id }, plans: [window.__nextPlan] };
+      window.__job.agent.planId = window.__nextPlan.id;
+      const payload = JSON.stringify({ action: 'plan_confirmation', plan: window.__nextPlan });
+      await window.__writer.write(new TextEncoder().encode(`event: plan\ndata: ${payload}\n\n`));
+      await window.__writer.close();
+      await window.__submission;
+    });
+    assert.equal(await page.locator('[data-cs-id="planning:ws_handoff"]').count(), 0);
+    assert.equal(await page.locator('#csStreamHost .agent-plan-history-row').count(), 1);
+    assert.equal(await page.locator('#csStreamHost > [data-cs-id="plan:plan_next"]').count(), 1);
+    assert.equal(await page.locator('#csActionBar [data-cs-action-summary]').textContent(), '方案待确认');
+    assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').textContent(), '确认并开始');
+
+    await page.evaluate(() => {
+      window.__stream = new TransformStream();
+      window.__writer = window.__stream.writable.getWriter();
+      window.__failedSubmission = window.ClipTalkAgentWorkspace.submitGoal('把封面文字改短一些');
+    });
+    await page.waitForFunction(() => document.querySelector('[data-cs-id="planning:ws_handoff"]'));
+    assert.equal(await page.locator('#csActionBar').isVisible(), false);
+    await page.evaluate(async () => {
+      await window.__writer.write(new TextEncoder().encode('event: error\ndata: {"message":"暂时无法生成修改方案"}\n\n'));
+      await window.__writer.close();
+      await window.__failedSubmission;
+    });
+    assert.equal(await page.locator('[data-cs-id="planning:ws_handoff"]').count(), 0);
+    assert.equal(await page.locator('#csStreamHost > [data-cs-id="plan:plan_next"] .agent-plan-history-row').count(), 0);
+    assert.equal(await page.locator('#csActionBar [data-cs-action-summary]').textContent(), '方案待确认');
+    assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').textContent(), '确认并开始');
   } finally {
     await browser.close();
   }
@@ -287,13 +407,13 @@ test("portrait sample controls stay attached to the true rendered video frame", 
 
   try {
     await page.setContent(`
-      <style>*,*::before,*::after{box-sizing:border-box}${workbenchV4Css}</style>
+      <style>*,*::before,*::after{box-sizing:border-box}body[data-shell-mode="workspace"] #viewerShell #playerSeek{background-image:linear-gradient(red,red)!important}${workbenchV4Css}</style>
       <style>
         html body.ct-workbench-v4 #reviewView #reviewStage { width: 718px !important; height: 540px !important; padding: 0 !important; }
-        html body.ct-workbench-v4 #reviewView #reviewStage #viewerShell { position: relative !important; display: grid !important; grid-template-rows: 484px 56px !important; --media-rendered-width: 272px; }
-        html body.ct-workbench-v4 #reviewView #reviewStage #mediaFrame { width: 272px !important; height: 484px !important; place-self: center !important; }
+        html body.ct-workbench-v4 #reviewView #reviewStage #viewerShell { position: relative !important; display: grid !important; grid-template-rows: 476px 64px !important; --media-rendered-width: 272px; }
+        html body.ct-workbench-v4 #reviewView #reviewStage #mediaFrame { width: 272px !important; height: 476px !important; place-self: center !important; }
         html body.ct-workbench-v4 #reviewView #reviewStage #mainVideo { display: block !important; width: 100% !important; height: 100% !important; }
-        html body.ct-workbench-v4 #reviewView #reviewStage .player-controls { position: relative !important; width: 272px !important; height: 56px !important; display: grid !important; }
+        html body.ct-workbench-v4 #reviewView #reviewStage .player-controls { position: relative !important; width: 272px !important; display: grid !important; }
       </style>
       <body class="ct-workbench-v4" data-shell-mode="workspace">
         <section id="reviewView" data-review-layout="portrait" style="--portrait-shell-width:272px;--portrait-shell-height:540px">
@@ -301,10 +421,9 @@ test("portrait sample controls stay attached to the true rendered video frame", 
             <div id="viewerShell" class="viewer-shell portrait">
               <div id="mediaFrame"><video id="mainVideo"></video></div>
               <div class="player-controls">
-                <div class="player-transport-group"><button id="playerPlay"></button></div>
+                <div class="player-transport-group"><button id="playerPlay"></button><span id="playerClock">00:10 / 00:20</span></div>
                 <div class="player-progress-group">
-                  <input id="playerSeek" type="range" min="0" max="1000" value="500">
-                  <span id="playerClock">00:10 / 00:20</span>
+                  <input id="playerSeek" class="player-seek" type="range" min="0" max="1000" value="500">
                 </div>
                 <button id="playerRate">1.0×</button>
                 <button id="playerFullscreen">全屏</button>
@@ -316,12 +435,18 @@ test("portrait sample controls stay attached to the true rendered video frame", 
 
     const geometry = await page.evaluate(() => {
       const frame = document.querySelector('#mediaFrame').getBoundingClientRect();
+      const controls = document.querySelector('.player-controls').getBoundingClientRect();
       const seek = document.querySelector('#playerSeek').getBoundingClientRect();
+      const clock = document.querySelector('#playerClock').getBoundingClientRect();
       const shell = document.querySelector('#viewerShell').getBoundingClientRect();
       return {
         shell: { left: shell.left, right: shell.right, width: shell.width },
         frame: { left: frame.left, right: frame.right, width: frame.width },
+        controls: { top: controls.top, bottom: controls.bottom, height: controls.height },
         seek: { left: seek.left, right: seek.right, width: seek.width },
+        seekBackgroundImage: getComputedStyle(document.querySelector('#playerSeek')).backgroundImage,
+        seekTop: seek.top,
+        clockTop: clock.top,
       };
     });
 
@@ -329,6 +454,10 @@ test("portrait sample controls stay attached to the true rendered video frame", 
     assert.ok(Math.abs(geometry.shell.width - geometry.frame.width) <= 2, JSON.stringify(geometry));
     assert.ok(geometry.seek.left >= geometry.frame.left, JSON.stringify(geometry));
     assert.ok(geometry.seek.right <= geometry.frame.right, JSON.stringify(geometry));
+    assert.equal(geometry.seekBackgroundImage, 'none', JSON.stringify(geometry));
+    assert.equal(geometry.controls.height, 64, JSON.stringify(geometry));
+    assert.ok(geometry.seekTop > geometry.controls.top, JSON.stringify(geometry));
+    assert.ok(geometry.clockTop > geometry.seekTop, JSON.stringify(geometry));
   } finally {
     await browser.close();
   }
@@ -378,7 +507,7 @@ test("content-search overview uses one clip colour and only shows range when zoo
   }
 });
 
-test("content-search timeline removes the empty toolbar row until a toolbar exists", async () => {
+test("content-search timeline reserves only the resize handle until a toolbar exists", async () => {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
 
@@ -397,8 +526,8 @@ test("content-search timeline removes the empty toolbar row until a toolbar exis
       rows: getComputedStyle(document.querySelector('#reviewView')).gridTemplateRows.split(' ').length,
       timelineRow: getComputedStyle(document.querySelector('#timelinePanel')).gridRowStart,
     }));
-    assert.equal(compact.rows, 3);
-    assert.equal(compact.timelineRow, '3');
+    assert.equal(compact.rows, 4);
+    assert.equal(compact.timelineRow, '4');
 
     await page.locator('#reviewView').evaluate((review) => {
       const toolbar = document.createElement('nav');
@@ -1057,7 +1186,7 @@ test("completed social preview is visible and opens from Agent review results", 
           { id: "cover", title: "生成可选封面", status: "skipped" },
           { id: "qc", tool: "run_delivery_qc", title: "检查社媒预览质量", status: "completed", result: { artifact: {
             kind: "delivery_qc_report", passed: false,
-            reports: [{ issues: [{
+            reports: [{ filename: "agent-social-9x16-test.mp4", issues: [{
               severity: "error", code: "target_duration_mismatch",
               message: "成片时长不在目标范围内。",
               evidence: { ranges: [{ start: 8, end: 13, duration: 5 }] },
@@ -1078,9 +1207,9 @@ test("completed social preview is visible and opens from Agent review results", 
     const results = page.locator("#agentPlanDrawerPlan .agent-review-results button");
     assert.equal(await results.count(), 3);
     assert.match(await page.locator("#agentPlanDock").textContent(), /审核样片待修正/);
-    assert.match(await page.locator("#agentPlanDock").textContent(), /质检未通过/);
-    assert.match(await page.locator("#agentPlanDock").textContent(), /播放问题片段 00:08–00:13/);
-    assert.match(await page.locator("#agentPlanDock").textContent(), /修正并重新质检/);
+    assert.match(await page.locator("#agentPlanDock").textContent(), /1 项需要修改/);
+    assert.match(await page.locator("#agentPlanDock").textContent(), /检查 00:08–00:13/);
+    assert.match(await page.locator("#agentPlanDock").textContent(), /修正时长并重新质检/);
     assert.match(await page.locator("#agentPlanDock").textContent(), /执行 4\/4 · 跳过 1/);
     assert.equal(await page.locator("#agentPlanDock [data-qc-start]").getAttribute("data-qc-start"), "8");
     assert.equal(await page.locator("#agentPlanDock .assistant-plan-summary").count(), 1, "Compact summary is collapsible; execution details stay in the drawer");
@@ -1307,10 +1436,10 @@ test("completed composite plan opens final cover-intro vertical preview before c
     });
 
     const dockText = await page.locator("#agentPlanDock").textContent();
-    assert.match(dockText, /播放带封面片头的9:16样片/);
-    assert.match(dockText, /生成成片/);
+    assert.match(dockText, /播放带封面片头的9:16预览视频/);
+    assert.match(dockText, /导出成片/);
     assert.match(dockText, /待确认/);
-    assert.match(dockText, /样片已生成，确认无误后即可生成成片/);
+    assert.match(dockText, /预览成片效果。确认无误后即可导出/);
     assert.doesNotMatch(dockText, /审核样片待确认生成成片/);
     assert.match(dockText, /查看封面/);
     assert.doesNotMatch(dockText, /打开封面时间轴/);
@@ -1337,6 +1466,202 @@ test("completed composite plan opens final cover-intro vertical preview before c
       kind: "cover_intro_review_preview",
       aspect: "9:16",
     });
+  } finally {
+    await browser.close();
+  }
+});
+
+test("unfinished cover intro is not presented as a ready final preview", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 900, height: 720 } });
+  try {
+    await page.setContent(`<style>${css}.hidden{display:none!important}</style><aside class="chat-panel">
+      <section id="agentPlanDock" class="agent-plan-dock hidden"></section>
+      <section id="chatMessages"></section><form id="chatForm"></form>
+      <button id="agentPlanDrawerScrim" class="hidden"></button>
+      <aside id="agentPlanDrawer" class="agent-plan-drawer hidden" aria-hidden="true">
+        <header><small id="agentPlanDrawerKicker"></small><strong id="agentPlanDrawerTitle"></strong><button id="agentPlanDrawerClose">关闭</button></header>
+        <nav><button data-agent-drawer-tab="plan">方案</button><button data-agent-drawer-tab="activity">活动</button></nav>
+        <section id="agentPlanDrawerPlan" data-agent-drawer-panel="plan"></section>
+        <section id="agentPlanDrawerActivity" data-agent-drawer-panel="activity"></section>
+        <footer id="agentPlanDrawerFooter"></footer>
+      </aside></aside>`);
+    await page.evaluate(() => {
+      window.__currentAgentJob = {
+        id: 'job_intro_pending', outputs: [], outputVersions: [],
+        currentCoverVersionId: 'cover_current',
+        coverVersions: [{
+          id: 'cover_current', previewUrl: '/cover.jpg', titleText: '小米牛逼！！！',
+          titleLines: ['小米牛逼！！！'], provenance: { kind: 'source_frame_composite' },
+        }],
+        agentPreviewOutputs: [{
+          planId: 'plan_intro_pending', filename: 'social.mp4', previewUrl: '/social.mp4',
+          outputKind: 'social_reframe_preview', reframe: { aspect: '9:16', fit: 'blur' },
+        }],
+      };
+      window.ClipTalkApi = { requestJson: async (path) => path.includes('/api/agent/skills') ? { skills: [] } : window.__agentDetail };
+      window.ClipTalkCurrentJobId = () => 'job_intro_pending';
+      window.ClipTalkCurrentJobSnapshot = () => window.__currentAgentJob;
+      window.ClipTalkRefreshCurrentJob = () => {};
+      window.showToast = () => {};
+      window.EventSource = class { addEventListener() {} close() {} };
+    });
+    await page.addScriptTag({ path: new URL('../../static/chat-stream.js', import.meta.url).pathname });
+    await page.addScriptTag({ content: agent });
+    await page.evaluate(async () => {
+      const plan = {
+        id: 'plan_intro_pending', workspaceId: 'ws_intro_pending', status: 'preview_ready',
+        skillId: 'cliptalk-cover-intro-composer', summary: '生成封面并合入成片开头。',
+        brief: {
+          coverRequested: true, coverIntroRequested: true,
+          coverTitle: '小米牛逼！！！', coverAspect: '9:16',
+        },
+        steps: [
+          { id: 'cover', tool: 'confirm_cover', title: '保存封面', status: 'completed' },
+          { id: 'intro', tool: 'compose_cover_intro', title: '合成封面片头', status: 'completed' },
+        ],
+      };
+      window.__agentDetail = {
+        workspace: { id: 'ws_intro_pending', jobId: 'job_intro_pending', activePlanId: plan.id },
+        plans: [plan],
+      };
+      await window.ClipTalkAgentWorkspace.resumeForJob({
+        id: 'job_intro_pending', revision: 1,
+        agent: { workspaceId: 'ws_intro_pending', planId: plan.id },
+      });
+    });
+    assert.match(await page.locator('#csActionBar').innerText(), /封面片头待生成/);
+    assert.doesNotMatch(await page.locator('#csActionBar').innerText(), /预览已就绪/);
+    assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').innerText(), '修改封面要求');
+  } finally {
+    await browser.close();
+  }
+});
+
+test("action-bar details opens the plan, removes only duplicate entries, and restores focus without scrolling", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.setContent(`<style>${css}
+      .hidden { display: none !important; }
+      .chat-panel { width: 420px; height: 700px; }
+      #chatMessages { height: 500px; overflow: auto; }
+    </style><aside class="chat-panel">
+      <section id="agentPlanDock" class="agent-plan-dock hidden"></section>
+      <section id="chatMessages"></section><form id="chatForm"></form>
+      <button id="agentPlanDrawerScrim" class="hidden"></button>
+      <aside id="agentPlanDrawer" class="agent-plan-drawer hidden" aria-hidden="true">
+        <header><small id="agentPlanDrawerKicker"></small><strong id="agentPlanDrawerTitle"></strong><button id="agentPlanDrawerClose">关闭</button></header>
+        <nav><button data-agent-drawer-tab="plan">方案</button><button data-agent-drawer-tab="activity">活动</button></nav>
+        <section id="agentPlanDrawerPlan" data-agent-drawer-panel="plan"></section>
+        <section id="agentPlanDrawerActivity" data-agent-drawer-panel="activity"></section>
+        <footer id="agentPlanDrawerFooter"></footer>
+      </aside></aside>`);
+    await page.evaluate(() => {
+      window.__requests = [];
+      window.ClipTalkApi = { requestJson: async (path, options) => {
+        window.__requests.push({ path, method: options?.method || "GET" });
+        return path.includes('/api/agent/skills') ? { skills: [] } : window.__agentDetail;
+      } };
+      window.ClipTalkCurrentJobId = () => 'job_details';
+      window.ClipTalkCurrentJobSnapshot = () => ({ id: 'job_details', outputs: [], outputVersions: [] });
+      window.ClipTalkRefreshCurrentJob = () => {};
+      window.ClipTalkOpenAgentPreview = preview => { window.__openedPreview = preview; };
+      window.showToast = () => {};
+      window.EventSource = class { addEventListener() {} close() {} };
+    });
+    await page.addScriptTag({ path: new URL('../../static/chat-stream.js', import.meta.url).pathname });
+    await page.addScriptTag({ content: agent });
+    await page.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+    for (const [index, status] of ['awaiting_confirmation', 'action_required', 'preview_ready', 'failed', 'running', 'completed'].entries()) {
+      await page.evaluate(async ({ status, index }) => {
+        window.__agentDetail = {
+          workspace: { id: 'ws_details', jobId: 'job_details', activePlanId: 'plan_details' },
+          plans: [{ id: 'plan_details', workspaceId: 'ws_details', status,
+            skillId: 'cliptalk-content-extractor', summary: '核对这次剪辑的处理步骤',
+            steps: [{ id: 'step_details', tool: status === 'preview_ready' ? 'render_social_preview' : 'propose_timeline_edit',
+              title: '整理时间线', status: status === 'action_required' ? status : 'completed',
+              result: status === 'preview_ready' ? { artifact: { kind: 'social_reframe_preview', output: {
+                filename: 'portrait.mp4', previewUrl: '/portrait.mp4', reframe: { aspect: '9:16' },
+              } } } : undefined }],
+          }],
+        };
+        await window.ClipTalkAgentWorkspace.resumeForJob({ id: 'job_details', revision: index + 1, agent: { workspaceId: 'ws_details', planId: 'plan_details' } });
+      }, { status, index });
+      const card = page.locator('#csStreamHost [data-agent-plan-open]');
+      if (index > 2) {
+        assert.equal(await card.count(), 1, `${status}: retain the only details entry`);
+        assert.equal(await page.locator('#csActionBar').isVisible(), false);
+        continue;
+      }
+      assert.equal(await card.count(), 0, `${status}: no duplicate details entry`);
+      if (status === 'preview_ready') {
+        const resultCard = page.locator('#csStreamHost [data-cs-id="plan:plan_details"]');
+        assert.equal(await resultCard.locator('footer button.primary').getAttribute('hidden'), '', 'Card keeps no visible duplicate preview action');
+        assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').isVisible(), true);
+        assert.match(await page.locator('#csActionBar [data-cs-action="primary"]').innerText(), /播放.*9:16.*预览视频/);
+        await page.locator('#csActionBar [data-cs-action="primary"]').click();
+        assert.equal(await page.evaluate(() => window.__openedPreview.filename), 'portrait.mp4');
+      }
+      const button = page.locator('#csActionBar [data-cs-action="view"]');
+      if (status === 'awaiting_confirmation') {
+        assert.equal(await button.isVisible(), false, 'Expanded confirmation needs no duplicate details action');
+        continue;
+      }
+      const before = await page.evaluate(() => ({ y: scrollY, chat: document.querySelector('#chatMessages').scrollTop }));
+      const requestsBefore = await page.evaluate(() => window.__requests.length);
+      await button.click();
+      await page.locator('#agentPlanDrawer.open').waitFor();
+      assert.match(await page.locator('#agentPlanDrawerPlan').innerText(), /核对这次剪辑的处理步骤/);
+      assert.equal(await page.locator('[data-agent-drawer-tab="plan"]').getAttribute('aria-selected'), 'true');
+      for (const width of [390, 1024, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.waitForTimeout(220);
+        const bounds = await page.locator('#agentPlanDrawer').boundingBox();
+        assert.ok(bounds && bounds.width > 300 && bounds.x >= 0 && bounds.x + bounds.width <= width,
+          `${width}px: details must remain visible and inside the viewport`);
+      }
+      await page.locator('[data-agent-drawer-tab="activity"]').click();
+      await page.keyboard.press('Escape');
+      await page.locator('#agentPlanDrawer').waitFor({ state: 'hidden' });
+      assert.equal(await button.evaluate(node => node === document.activeElement), true);
+      assert.deepEqual(await page.evaluate(() => ({ y: scrollY, chat: document.querySelector('#chatMessages').scrollTop })), before);
+      assert.equal(await page.evaluate(() => window.__requests.length), requestsBefore, 'viewing must not run a task');
+    }
+    // Retain the first card while a new plan becomes active.
+    await page.evaluate(async () => {
+      window.__agentDetail.plans = [{ id: 'plan_new', workspaceId: 'ws_details', status: 'preview_ready',
+        summary: '新的汽车方案', steps: [] }];
+      window.__agentDetail.workspace.activePlanId = 'plan_new';
+      await window.ClipTalkAgentWorkspace.resumeForJob({ id: 'job_details', revision: 10,
+        agent: { workspaceId: 'ws_details', planId: 'plan_new' } });
+    });
+    assert.match(await page.locator('#csActionBar').innerText(), /预览暂不可用/);
+    assert.equal(await page.locator('#csActionBar [data-cs-action="primary"]').isVisible(), false);
+    assert.equal(await page.locator('#csMobileActionBar [data-mobile-primary]').getAttribute('hidden'), '');
+    const old = page.locator('#csStreamHost [data-agent-plan-open]').first();
+    assert.equal(await old.innerText(), '查看记录');
+    await old.click();
+    await page.locator('#agentPlanDrawer.open').waitFor();
+    assert.equal(await page.locator('#agentPlanDrawer').getAttribute('data-read-only'), 'true');
+    assert.match(await page.locator('#agentPlanDrawerPlan').innerText(), /核对这次剪辑的处理步骤/);
+    assert.doesNotMatch(await page.locator('#agentPlanDrawerPlan').innerText(), /新的汽车方案/);
+    assert.equal(await page.locator('#agentPlanDrawerFooter button').count(), 0);
+    assert.equal(await page.locator('[data-agent-drawer-tab="activity"]').isDisabled(), true);
+    await page.evaluate(async () => {
+      window.__agentDetail.plans[0].summary = '后台更新的新方案';
+      await window.ClipTalkAgentWorkspace.resumeForJob({ id: 'job_details', revision: 11,
+        agent: { workspaceId: 'ws_details', planId: 'plan_new' } });
+    });
+    assert.match(await page.locator('#agentPlanDrawerPlan').innerText(), /核对这次剪辑的处理步骤/);
+    await page.keyboard.press('Escape');
+    await page.locator('#agentPlanDrawer').waitFor({ state: 'hidden' });
+    await page.locator('#csActionBar [data-cs-action="view"]').click();
+    assert.match(await page.locator('#agentPlanDrawerPlan').innerText(), /后台更新的新方案/);
+    assert.equal(await page.locator('#agentPlanDrawer').getAttribute('data-read-only'), 'false');
+    const writes = await page.evaluate(() => window.__requests.filter(item => item.method !== 'GET'));
+    assert.deepEqual(writes, [], 'history and missing-preview details must stay read-only');
+    assert.equal(await page.evaluate(() => window.ClipTalkAgentWorkspace.openDetails({ jobId: 'other_job', planId: 'plan_details' })), false);
   } finally {
     await browser.close();
   }
@@ -1590,7 +1915,7 @@ test("autonomous subtitle layout recovery explains the missing draft and retries
 
     const dockText = await page.locator('#agentPlanDock').textContent();
     assert.match(dockText, /自动恢复中/);
-    assert.match(dockText, /Agent 将重新生成字幕草稿并应用顶部排版，无需手动确认/);
+    assert.match(dockText, /将重新生成字幕草稿并应用顶部排版，无需手动确认/);
     assert.doesNotMatch(dockText, /确认并继续/);
     const recovery = page.locator('#agentPlanDock [data-agent-action-retry]');
     assert.equal(await recovery.isDisabled(), true);

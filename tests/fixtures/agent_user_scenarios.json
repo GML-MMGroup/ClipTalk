@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "executionMode": "autonomous_review",
+    "phaseTimeoutSeconds": 1800,
+    "stallSeconds": 180,
+    "pollIntervalSeconds": 2,
+    "durationToleranceRatio": 0.1
+  },
+  "scenarios": [
+    {
+      "id": "product-appliance-replacement",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "normal",
+      "prompt": "分别找出冰箱、空调、洗衣机的新旧更换过程，每类约 20 秒，组合成 60±6 秒视频；生成 9:16 审核预览并质检，正式导出另行确认。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["冰箱", "空调", "洗衣机"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "product-impossible-phone-chip",
+      "video": "cest-video/产品宣传.mp4",
+      "kind": "no_match",
+      "prompt": "只保留讲解手机芯片型号和跑分参数的片段，剪成约 30 秒审核样片。",
+      "expectedOutcome": "graceful_no_match",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor"],
+      "expectedTerms": ["手机芯片", "跑分"],
+      "targetDuration": {"minimum": 27, "maximum": 33}
+    },
+    {
+      "id": "dialogue-employee-growth-interview",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "normal",
+      "prompt": "把不同员工关于入职、成长和未来的回答组织成约 90 秒访谈精华，保留必要问题上下文并添加字幕。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor"],
+      "expectedTerms": ["入职", "成长", "未来"],
+      "targetDuration": {"minimum": 81, "maximum": 99}
+    },
+    {
+      "id": "dialogue-black-shirt-ai",
+      "video": "cest-video/人物对话.mp4",
+      "kind": "cross_modal",
+      "prompt": "只保留穿黑色上衣的男士提到 AI 的完整回答，其他人不要，控制在 30–45 秒。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-person-editor", "cliptalk-speaker-editor", "cliptalk-interview-editor", "cliptalk-content-extractor"],
+      "expectedTerms": ["黑色上衣", "AI"],
+      "targetDuration": {"minimum": 30, "maximum": 45}
+    },
+    {
+      "id": "singing-climax",
+      "video": "cest-video/唱歌.mp4",
+      "kind": "normal",
+      "prompt": "剪一条约 45 秒的演唱高潮，保留完整乐句，去掉空镜和长停顿，保持 9:16，不加字幕。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director"],
+      "expectedTerms": ["演唱", "高潮"],
+      "targetDuration": {"minimum": 40.5, "maximum": 49.5},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "singing-impossible-host-dialogue",
+      "video": "cest-video/唱歌.mp4",
+      "kind": "no_match",
+      "prompt": "只保留主持人与歌手交谈的内容，不要演唱，整理成约 30 秒审核样片。",
+      "expectedOutcome": "graceful_no_match",
+      "expectedSkillAnyOf": ["cliptalk-content-extractor", "cliptalk-speaker-editor", "cliptalk-interview-editor"],
+      "expectedTerms": ["主持人", "交谈"],
+      "targetDuration": {"minimum": 27, "maximum": 33}
+    },
+    {
+      "id": "xiaomi-car-launch-highlight",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "normal",
+      "prompt": "剪一条约 60 秒的小米汽车发布会精华：先用赛道镜头开场，再呈现关键性能参数和成绩，保持 16:9。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["赛道", "性能参数", "成绩"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "16:9"
+    },
+    {
+      "id": "xiaomi-speaker-and-slides-vertical",
+      "video": "cest-video/小米产品.mp4",
+      "kind": "constraint",
+      "prompt": "制作 45 秒 9:16 社媒审核版，演讲人保持居中，同时确保 PPT 中的关键参数不被裁掉。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-highlight-director", "cliptalk-shortform-hook-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["演讲人", "PPT", "参数"],
+      "targetDuration": {"minimum": 40.5, "maximum": 49.5},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "live-pk-climax",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "normal",
+      "prompt": "剪成约 30 秒竖屏 PK 高潮，保留冲突、情绪变化和结果，删除静默与重复内容。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director"],
+      "expectedTerms": ["PK", "高潮", "结果"],
+      "targetDuration": {"minimum": 27, "maximum": 33},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "live-pk-square-readable-chat",
+      "video": "cest-video/直播pk_V004_手动合成-情绪集中版_·_正式导出_01.mp4",
+      "kind": "constraint",
+      "prompt": "输出约 20 秒 1:1 审核预览，左右主播都要完整可见，弹幕文字仍可辨认。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-shortform-hook-director", "cliptalk-highlight-director", "cliptalk-content-extractor"],
+      "expectedTerms": ["主播", "弹幕"],
+      "targetDuration": {"minimum": 18, "maximum": 22},
+      "expectedAspect": "1:1"
+    },
+    {
+      "id": "student-interview-complete-answers",
+      "video": "cest-video/访谈.mp4",
+      "kind": "normal",
+      "prompt": "剪成约 60 秒学生访谈，删除片头片尾，保留问题与完整回答，添加字幕并保持 9:16。",
+      "expectedOutcome": "preview_ready",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor"],
+      "expectedTerms": ["学生", "问题", "回答"],
+      "targetDuration": {"minimum": 54, "maximum": 66},
+      "expectedAspect": "9:16"
+    },
+    {
+      "id": "student-answer-without-host-audio",
+      "video": "cest-video/访谈.mp4",
+      "kind": "constraint",
+      "prompt": "只保留学生回答并删除主持人声音，但每段仍要让观众清楚问题是什么，控制在约 45 秒。",
+      "expectedOutcome": "preview_or_clear_limitation",
+      "expectedSkillAnyOf": ["cliptalk-interview-editor", "cliptalk-speaker-editor"],
+      "expectedTerms": ["学生回答", "主持人", "问题"],
+      "targetDuration": {"minimum": 40.5, "maximum": 49.5}
+    }
+  ]
+}

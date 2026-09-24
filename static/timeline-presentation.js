@@ -124,7 +124,7 @@
     const normalization = Math.max(.04, Number(data?.normalizationPeak) || 1);
     const center = height / 2;
     const amplitude = Math.max(2, center - 3);
-    context.strokeStyle = "rgba(171, 214, 151, .88)";
+    context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--ct-primary").trim() || "#cbe7aa";
     context.lineWidth = 1;
     context.beginPath();
     for (let x = 0; x < width; x += 1) {
@@ -328,6 +328,7 @@
   }
 
   window.addEventListener("resize", sync, { passive: true });
+  window.addEventListener("cliptalk:themechange", sync);
   window.ClipTalkTimelinePresentation = Object.freeze({ sync });
   sync();
 })();

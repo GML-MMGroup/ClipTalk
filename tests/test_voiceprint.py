@@ -126,3 +126,22 @@ def test_split_wav_keeps_tail_with_previous_chunk(tmp_path: Path) -> None:
     assert len(chunks) == 2
     with wave.open(str(chunks[-1]), "rb") as reader:
         assert reader.getnframes() / reader.getframerate() == pytest.approx(7.0, abs=.01)
+def test_embedding_samples_exclude_overlap_unknown_voice_and_padding():
+    from app.voiceprint import clean_voice_sample_ranges
+    rows = [{"start": 1, "end": 20, "speaker": "A"},
+            {"start": 6, "end": 8, "speaker": "B"},
+            {"start": 14, "end": 16, "speaker": ""}]
+    result = clean_voice_sample_ranges(rows, "A")
+    assert result
+    assert min(r["start"] for r in result) == 1
+    assert max(r["end"] for r in result) == 20
+    for r in result:
+        assert 2 <= r["end"] - r["start"] <= 6
+        assert not any(max(r["start"], a) < min(r["end"], b) for a, b in [(6, 8), (14, 16)])
+
+
+def test_voice_merge_accepts_generator_and_never_regresses_nested_end():
+    from app.voiceprint import merge_target_speech_segments
+    rows = [{"start": 1, "end": 10, "speaker": "A"}, {"start": 3, "end": 4, "speaker": "A"}]
+    result = merge_target_speech_segments(iter(rows), "A")
+    assert result[0]["end"] == 10.2

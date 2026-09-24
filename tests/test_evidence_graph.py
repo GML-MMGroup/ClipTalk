@@ -77,24 +77,14 @@ def test_feedback_router_avoids_full_reanalysis_for_editorial_changes() -> None:
     assert feedback_route("重新通看全片", graph)["route"] == "full_reanalysis"
 
 
-def test_refinement_budget_is_duration_aware_and_bounded() -> None:
-    values = [
-        refinement_candidate_limit(discovery_only=True, total_target_seconds=60, target_seconds=8, count=6, video_duration=120),
-        refinement_candidate_limit(discovery_only=True, total_target_seconds=60, target_seconds=8, count=6, video_duration=600),
-        refinement_candidate_limit(discovery_only=True, total_target_seconds=60, target_seconds=8, count=6, video_duration=1800),
-        refinement_candidate_limit(discovery_only=True, total_target_seconds=60, target_seconds=8, count=6, video_duration=7200),
-    ]
-    assert values == [2, 4, 5, 6]
-
-
-def test_v2_refinement_budget_uses_half_of_adaptive_recall_pool() -> None:
+def test_refinement_budget_uses_half_of_adaptive_recall_pool() -> None:
     assert refinement_candidate_limit(
         discovery_only=True, total_target_seconds=60, target_seconds=8,
-        count=6, video_duration=7200, algorithm_version="editing-algorithm-v2",
+        count=6, video_duration=7200,
     ) == 20
     assert refinement_candidate_limit(
         discovery_only=True, total_target_seconds=600, target_seconds=8,
-        count=6, video_duration=120, algorithm_version="editing-algorithm-v2",
+        count=6, video_duration=120,
     ) == 24
 
 

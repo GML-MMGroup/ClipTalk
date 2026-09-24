@@ -27,7 +27,8 @@
     "build:beam": "vite build --config vite.beam.config.js",
     "build:icons": "vite build --config vite.icons.config.js",
     "build:ui-runtime": "npm run build:orbs && npm run build:loaders && npm run build:beam && npm run build:icons",
-    "audit:css": "node tools/audit_css_cascade.mjs --check"
+    "audit:css": "node tools/audit_css_cascade.mjs --check",
+    "check:light-contrast": "node tools/check_light_theme_contrast.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

@@ -1,15 +1,12 @@
 from app.algorithm_contract import (
-    ALGORITHM_V1,
-    ALGORITHM_V2,
+    CURRENT_ALGORITHM_VERSION,
     CostController,
     attach_candidate_quality,
-    algorithm_version,
 )
 
 
-def test_missing_algorithm_snapshot_is_always_v1() -> None:
-    assert algorithm_version({}) == ALGORITHM_V1
-    assert algorithm_version({"algorithmVersion": ALGORITHM_V2}) == ALGORITHM_V2
+def test_single_algorithm_version_is_current() -> None:
+    assert CURRENT_ALGORITHM_VERSION == "editing-algorithm-v2"
 
 
 def test_low_confidence_candidate_remains_visible_but_unselected() -> None:

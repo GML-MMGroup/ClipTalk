@@ -10,6 +10,7 @@ def test_media_router_owns_all_delivery_routes() -> None:
     router = build_media_router(
         source_media=handler,
         job_thumbnail=handler,
+        cover_artifact_media=handler,
         retry_job_thumbnail=handler,
         preview_media=handler,
         preview_media_status=handler,
@@ -26,11 +27,15 @@ def test_media_router_owns_all_delivery_routes() -> None:
         output_media=handler,
         output_preview_media=handler,
         output_browser_preview_media=handler,
+        output_cover_media=handler,
+        output_release_package=handler,
+        draft_export_media=handler,
     )
     paths = {route.path for route in router.routes}
     assert paths == {
         "/api/jobs/{job_id}/source",
         "/api/jobs/{job_id}/thumbnail",
+        "/api/jobs/{job_id}/cover-artifacts/{artifact_id}",
         "/api/jobs/{job_id}/thumbnail/retry",
         "/api/jobs/{job_id}/preview",
         "/api/jobs/{job_id}/preview-status",
@@ -47,6 +52,9 @@ def test_media_router_owns_all_delivery_routes() -> None:
         "/api/jobs/{job_id}/outputs/{filename}",
         "/api/jobs/{job_id}/outputs/{filename}/preview",
         "/api/jobs/{job_id}/outputs/{filename}/browser-preview",
+        "/api/jobs/{job_id}/outputs/{filename}/cover",
+        "/api/jobs/{job_id}/outputs/{filename}/package",
+        "/api/jobs/{job_id}/draft-exports/{filename}",
     }
     methods = {route.path: route.methods for route in router.routes}
     assert methods["/api/jobs/{job_id}/thumbnail/retry"] == {"POST"}

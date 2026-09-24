@@ -1772,10 +1772,6 @@ body[data-shell-mode="workspace"] #viewerShell:fullscreen .player-sound-group { 
 }
 #subtitleReview .subtitle-review-panel {
   border-left-color: #d4dce0 !important;
-  color: #344148 !important;
-  background:
-    radial-gradient(ellipse 58% 24% at 100% 0%, rgba(255, 241, 232, .7), transparent 76%),
-    linear-gradient(118deg, #f4f7f8, #fff 72%) !important;
   box-shadow: -26px 0 70px rgba(56, 68, 76, .19) !important;
 }
 #subtitleReview :is(.subtitle-review-header, .subtitle-review-footer) {
@@ -1784,7 +1780,6 @@ body[data-shell-mode="workspace"] #viewerShell:fullscreen .player-sound-group { 
   backdrop-filter: blur(18px) saturate(.9);
 }
 #subtitleReview .subtitle-review-header small { color: #c96635 !important; }
-#subtitleReview .subtitle-review-header h2 { color: #20292f !important; }
 #subtitleReview .subtitle-review-header p { color: #6f7c83 !important; }
 #subtitleReview .subtitle-review-close {
   border-color: #d4dde1 !important;
@@ -1883,11 +1878,6 @@ body[data-shell-mode="workspace"] #viewerShell:fullscreen .player-sound-group { 
   border-color: #d4dde1 !important;
   color: #4b5960 !important;
   background: #fff !important;
-}
-#subtitleReview .subtitle-review-footer > button.primary {
-  border-color: #ed986e !important;
-  color: #fff !important;
-  background: #ea9167 !important;
 }
 
 /* Secondary-editor presentation is owned by secondary-editor-focus.css. */

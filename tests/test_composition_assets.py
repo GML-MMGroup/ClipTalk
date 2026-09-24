@@ -60,6 +60,20 @@ def test_composition_hash_tracks_effective_subtitle_configuration() -> None:
     )
 
 
+def test_composition_hash_tracks_delivery_reframe() -> None:
+    kwargs = {
+        "source_hash": "source_1", "output_mode": "single_reel",
+        "subtitle_mode": "none", "subtitle_style": "clean",
+        "variant_mode": "complete", "variant_label": "完整事件版",
+    }
+    landscape = composition_edl_hash([selection()], **kwargs)
+    portrait = composition_edl_hash(
+        [selection()], **kwargs,
+        reframe={"aspect": "9:16", "fit": "blur", "focusX": .5, "focusY": .5},
+    )
+    assert portrait != landscape
+
+
 def test_preview_path_sanitizes_group_identity(tmp_path: Path) -> None:
     job = {"workDirectory": str(tmp_path)}
     group = {**selection(), "id": "../../unsafe event"}

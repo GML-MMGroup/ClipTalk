@@ -53,8 +53,8 @@ test("workflow copy uses one four-mode terminology contract", () => {
   assert.equal(copy.WORKFLOWS.content_search.output, "内容视频");
   assert.equal(copy.WORKFLOWS.person_edit.timeline, "人物出镜时间线");
   assert.equal(copy.WORKFLOWS.speaker_edit.candidate, "发言片段");
-  assert.equal(copy.ACTIONS.preview, "生成剪辑预览");
-  assert.equal(copy.ACTIONS.exportVersion, "生成成片");
+  assert.equal(copy.ACTIONS.preview, "生成预览");
+  assert.equal(copy.ACTIONS.exportVersion, "导出成片");
 });
 
 test("workspace state prefers canonical presentation and execution facts", () => {
@@ -233,7 +233,10 @@ test("output delivery exposes cover, package, and optional intro controls", () =
   assert.match(html, /id="coverDownloadButton"/);
   assert.match(html, /id="packageDownloadButton"/);
   assert.match(html, /id="coverIntroButton"/);
+  assert.match(html, /id="adjustCoverButton"/);
   assert.match(app, /createCoverIntroOutput/);
+  assert.match(app, /ClipTalkOpenCoverTimeline/);
+  assert.match(app, /已关联此版本/);
   assert.match(app, /output\.coverUrl/);
   assert.match(app, /output\.packageUrl/);
 });
@@ -253,10 +256,10 @@ test("completed cover plans show the generated image instead of only step progre
   assert.match(app, /function renderTimelineCoverTrack/);
   assert.match(app, /data-cover-timeline-duration/);
   assert.match(app, /cover-timeline\/activate/);
-  assert.match(workspace, /选择一个封面后保存为最终封面；生成成片或导出时作为片头合入/);
-  assert.match(workspace, /样片已生成，确认无误后即可生成成片/);
+  assert.match(workspace, /只有明确要求片头时才合入视频/);
+  assert.match(workspace, /预览视频已生成，确认无误后即可导出成片/);
   assert.match(workspace, /return "待确认"/);
-  assert.match(workspace, /"播放样片"/);
+  assert.match(workspace, /"预览视频"/);
   assert.doesNotMatch(workspace, /审核样片待确认生成成片/);
   assert.match(app, /setRailTitle\("版本与交付"\)/);
   assert.match(css, /\.timeline-cover-track/);
@@ -363,8 +366,8 @@ test("workspace composer keeps Agent and send controls in a second input row", (
   const html = read("static/index.html");
 
   assert.match(css, /Canonical composer layout: text first, controls second/);
-  assert.match(css, /grid-template-rows:\s*minmax\(38px, auto\) 30px !important/);
-  assert.match(css, /#agentSkillMenuButton#agentSkillMenuButton\s*\{[\s\S]*?min-height:\s*28px !important/);
+  assert.match(css, /grid-template-rows:\s*minmax\(38px, auto\) 36px !important/);
+  assert.match(css, /#agentSkillMenuButton#agentSkillMenuButton\s*\{[\s\S]*?min-height:\s*36px !important/);
   assert.match(css, /\.chat-input-shell\.chat-input-shell #sendButton#sendButton\s*\{\s*position:\s*static !important/);
   assert.doesNotMatch(html, /id="composerAttachButton"/);
   assert.doesNotMatch(css, /#composerAttachButton/);
@@ -392,7 +395,7 @@ test("v4 output preview suppresses legacy result panels and evidence strip", () 
   assert.match(app, /title: cleanDisplayText\(item\.title, fallback\)/);
   assert.match(app, /displayTitle: cleanDisplayText\(item\.displayTitle, cleanDisplayText\(item\.title, fallback\)\)/);
   assert.match(app, /const displayTitle = cleanDisplayText\(output\.displayTitle\)/);
-  assert.match(app, /viewerMediaKind === "source" && sourceDuration > 0/);
+  assert.match(app, /if \(sourceDuration > 0\) return true/);
   assert.match(app, /viewerMediaKind === "output" && currentOutput && timelineOutputDurationValue\(currentOutput\) > 0/);
   assert.match(app, /Completed content-search tasks should still show their matched source/);
   assert.match(app, /function timelineOutputAxisActive\(\)[\s\S]*return timelineHasOutputComparison\(\)/);
@@ -400,7 +403,7 @@ test("v4 output preview suppresses legacy result panels and evidence strip", () 
   // Output/source axis behavior is exercised by workspace-smoke; avoid
   // constraining the implementation to one exact conditional expression.
   assert.match(app, /const reviewSample = reviewingOutput && currentOutputIsReviewSample\(currentOutput\)/);
-  assert.match(app, /const outputTitle = reviewSample \? "审核样片时间轴" : "成片版本时间轴"/);
+  assert.match(app, /const outputTitle = reviewSample \? "审核时间轴" : "成片时间轴"/);
   assert.match(app, /审核样片 \$\{index \+ 1\}/);
   assert.match(app, /reviewSample \? "审核样片预览"/);
   assert.doesNotMatch(timeline, /new MutationObserver/);

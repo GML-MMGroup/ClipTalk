@@ -27,8 +27,8 @@
   --pw-danger: var(--ct-danger);
   --pw-playhead: var(--ct-playhead);
   --pw-shadow: rgba(0, 0, 0, .28);
-  --pw-font-ui: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --pw-font-display: "Noto Sans SC", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --pw-font-ui: var(--font-ui);
+  --pw-font-display: var(--font-display);
   --pw-radius-control: 6px;
   --pw-radius-panel: 10px;
   --pw-radius-feature: 12px;
@@ -1313,7 +1313,6 @@ html body[data-shell-view="settings"] #settingsPanel.app-settings-page,
 html body[data-shell-view="library"] #libraryView.app-library-page {
   padding: 54px clamp(34px, 5vw, 72px) 76px !important;
   color: var(--pw-body) !important;
-  background: var(--pw-canvas) !important;
   background-image: none !important;
   box-shadow: none !important;
   scrollbar-color: var(--pw-line-strong) transparent !important;
@@ -1389,7 +1388,6 @@ html body[data-shell-view="library"] #libraryView > header > button {
 }
 
 html body[data-shell-view="settings"] #settingsPanel .model-role-tabs {
-  width: min(100%, 1120px) !important;
   margin: 0 !important;
   padding: 0 !important;
   border: 0 !important;
@@ -1398,7 +1396,6 @@ html body[data-shell-view="settings"] #settingsPanel .model-role-tabs {
   background: transparent !important;
 }
 html body[data-shell-view="settings"] #settingsPanel .model-role-tabs button {
-  min-height: 62px !important;
   border: 0 !important;
   border-bottom: 2px solid transparent !important;
   border-radius: 0 !important;
@@ -1416,15 +1413,9 @@ html body[data-shell-view="settings"] #settingsPanel .model-role-tabs button sma
 
 html body[data-shell-view="settings"] #settingsPanel .model-settings-view,
 html body[data-shell-view="settings"] #settingsPanel .agent-model-settings {
-  width: min(100%, 1120px) !important;
-  margin-top: 16px !important;
-  padding: 28px 32px 0 !important;
   border: 1px solid var(--pw-line) !important;
-  border-radius: var(--pw-radius-panel) !important;
   color: var(--pw-body) !important;
-  background: var(--pw-surface-1) !important;
   background-image: none !important;
-  box-shadow: none !important;
   backdrop-filter: none !important;
 }
 html body[data-shell-view="settings"] #settingsPanel .model-settings-view > section,
@@ -1548,7 +1539,6 @@ html body[data-shell-view="settings"] #settingsPanel :is(#testEffectiveAgent, .a
   outline-offset: 3px;
 }
 html body[data-shell-view="settings"] #settingsPanel .local-capabilities {
-  width: min(100%, 1120px);
   padding: 20px;
   border: 1px solid var(--ct-border);
   border-radius: var(--pw-radius-panel);
@@ -1566,7 +1556,6 @@ html body #settingsPanel .local-capabilities :is(button, summary):focus-visible 
 html body #settingsPanel .local-capabilities summary { cursor: pointer; }
 html body #settingsPanel .local-capabilities code { display: block; overflow-wrap: anywhere; padding: 8px; color: var(--ct-text); background: var(--ct-raised); }
 html body[data-shell-view="settings"] #settingsPanel .runtime-settings-summary {
-  width: min(100%, 1120px) !important;
   border-color: var(--pw-line) !important;
   border-radius: var(--pw-radius-panel) !important;
   color: var(--pw-body) !important;
@@ -1576,7 +1565,6 @@ html body[data-shell-view="settings"] #settingsPanel .runtime-settings-summary {
 }
 
 html body[data-shell-view="library"] #libraryView .app-library-toolbar {
-  margin-bottom: 16px !important;
   color: var(--pw-body) !important;
 }
 html body[data-shell-view="library"] #libraryView .app-library-toolbar :is(label, select) {
@@ -1591,28 +1579,19 @@ html body[data-shell-view="library"] #libraryView .app-library-toolbar input { c
 html body[data-shell-view="library"] #libraryView .app-library-list {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) !important;
-  gap: 8px !important;
 }
 html body[data-shell-view="library"] #libraryView .app-library-item {
   width: 100% !important;
-  min-height: 188px !important;
-  padding: 10px !important;
   display: grid !important;
-  grid-template-columns: 280px minmax(0, 1fr) !important;
-  gap: 18px !important;
   border: 1px solid var(--pw-line) !important;
   border-radius: 8px !important;
   color: var(--pw-body) !important;
-  background: var(--pw-surface-1) !important;
-  box-shadow: none !important;
 }
 html body[data-shell-view="library"] #libraryView .app-library-media {
-  min-height: 166px !important;
-  border-radius: 5px !important;
   background: var(--pw-canvas-deep) !important;
 }
 html body[data-shell-view="library"] #libraryView .app-library-copy { padding: 8px 8px 6px 0 !important; }
-html body[data-shell-view="library"] #libraryView .app-library-copy strong { color: var(--pw-text) !important; font-size: 16px !important; }
+html body[data-shell-view="library"] #libraryView .app-library-copy strong { color: var(--pw-text) !important; }
 html body[data-shell-view="library"] #libraryView .app-library-copy :is(small, p, span) { color: var(--pw-muted) !important; font-size: 12px !important; }
 html body[data-shell-view="library"] #libraryView .app-library-actions { border-top-color: var(--pw-line) !important; }
 html body[data-shell-view="library"] #libraryView .app-library-actions :is(button, a) {
@@ -2714,10 +2693,10 @@ html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #viewerShell#viewerShell .player-controls.player-controls .player-segment-group.player-segment-group #playerNext#playerNext,
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #viewerShell#viewerShell .player-controls.player-controls .player-segment-group.player-segment-group .player-segment-nav.player-segment-nav {
   border: 0 !important;
-  color: rgba(199, 208, 212, .62) !important;
+  color: var(--ct-text-secondary) !important;
   background: transparent !important;
   box-shadow: none !important;
-  opacity: .62 !important;
+  opacity: 1 !important;
 }
 
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #viewerShell#viewerShell .player-controls.player-controls .player-segment-group.player-segment-group #playerPrevious#playerPrevious {
@@ -2730,7 +2709,7 @@ html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-
 
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #viewerShell#viewerShell .player-controls.player-controls .player-segment-group.player-segment-group .player-segment-nav.player-segment-nav:hover:not(:disabled),
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #viewerShell#viewerShell .player-controls.player-controls .player-segment-group.player-segment-group .player-segment-nav.player-segment-nav:focus-visible {
-  color: var(--pw-text) !important;
+  color: var(--ct-text) !important;
   background: rgba(199, 212, 218, .105) !important;
   opacity: 1 !important;
 }
@@ -2781,14 +2760,23 @@ html body[data-shell-mode="workspace"] :where(
   background: #1a2a31 !important;
   border-color: rgba(147, 181, 165, .22) !important;
 }
-html body[data-shell-mode="workspace"] :where(
+html[data-theme="light"] body[data-shell-mode="workspace"] :where(
+  #downloadButton.review-sample-download,
+  .output-version-download,
+  .clip-version-download
+) {
+  color: var(--ct-theme-text, #1d2924) !important;
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
+html[data-theme="light"] body[data-shell-mode="workspace"] :where(
   #downloadButton.review-sample-download:hover,
   .output-version-download:hover,
   .clip-version-download:hover
 ) {
-  color: #e2eee9 !important;
-  background: #24383f !important;
-  border-color: rgba(147, 181, 165, .45) !important;
+  color: var(--ct-theme-primary, #355d48) !important;
+  background: var(--ct-theme-hover, #eceeea) !important;
+  border-color: var(--ct-theme-primary, #355d48) !important;
 }
 html body[data-shell-mode="workspace"] :where(.task-mode-badge.highlight, .clip-version-button > span > em) {
   color: #a9cabc !important;
@@ -2800,10 +2788,20 @@ html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-
   background: #1a2a31 !important;
   border-color: rgba(147, 181, 165, .22) !important;
 }
+html[data-theme="light"] body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #downloadButton#downloadButton.review-sample-download {
+  color: var(--ct-theme-text, #1d2924) !important;
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) .review-header.review-header .asset-actions.asset-actions #downloadButton#downloadButton.download-button.review-sample-download {
   color: #c8d5d5 !important;
   background: #1a2a31 !important;
   border-color: rgba(147, 181, 165, .22) !important;
+}
+html[data-theme="light"] body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) .review-header.review-header .asset-actions.asset-actions #downloadButton#downloadButton.download-button.review-sample-download {
+  color: var(--ct-theme-text, #1d2924) !important;
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
 }
 html body[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) #directorTaskSummary .task-mode-badge.highlight {
   color: #a9cabc !important;
@@ -3963,4 +3961,764 @@ html[data-theme="light"] body .brief-capability-options > button > b {
 }
 html[data-theme="light"] body .brief-capability-options > button:disabled > b {
   color: #966741 !important;
+}
+
+/* Settings route polish ----------------------------------------------------
+   Keep the existing settings DOM and behavior, but give the route a clearer
+   page rhythm and more deliberate status hierarchy across desktop/mobile. */
+html body[data-shell-view="settings"] {
+  background:
+    radial-gradient(900px 520px at 88% -12%, rgba(53, 93, 72, .105), transparent 62%),
+    linear-gradient(180deg, #f4f5f1 0%, #eff1ed 100%) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel.app-settings-page {
+  position: fixed !important;
+  inset: 0 0 0 var(--app-shell-offset) !important;
+  width: auto !important;
+  height: 100dvh !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 52px clamp(28px, 5vw, 76px) 80px !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1120px) !important;
+  justify-content: center !important;
+  align-content: start !important;
+  gap: 16px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+  scrollbar-gutter: stable !important;
+  background: transparent !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel > header {
+  width: 100% !important;
+  min-height: 128px !important;
+  margin: 0 0 10px !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: start !important;
+  gap: 24px !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel > header strong {
+  display: block !important;
+  font-size: clamp(44px, 5.2vw, 64px) !important;
+  letter-spacing: 0 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel > header p {
+  max-width: 60ch !important;
+  font-size: 15px !important;
+  line-height: 1.75 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel > header > button {
+  min-width: 68px !important;
+  background: rgba(255, 255, 255, .68) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel > header > button:hover {
+  border-color: rgba(53, 93, 72, .28) !important;
+  color: var(--pw-text) !important;
+  background: #fff !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness {
+  width: 100% !important;
+  padding: 22px 24px 18px !important;
+  border: 1px solid rgba(45, 62, 54, .12) !important;
+  border-radius: 14px !important;
+  color: var(--pw-body) !important;
+  background:
+    radial-gradient(760px 180px at 84% 0%, rgba(53, 93, 72, .08), transparent 56%),
+    rgba(255, 255, 255, .82) !important;
+  box-shadow: 0 18px 46px rgba(48, 58, 53, .08) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness > header {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: start !important;
+  gap: 18px !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness > header small {
+  color: var(--pw-accent) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness > header strong {
+  display: block !important;
+  margin-top: 5px !important;
+  color: var(--pw-text) !important;
+  font-size: 18px !important;
+  font-weight: 680 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness > header p {
+  margin: 5px 0 0 !important;
+  color: var(--pw-muted) !important;
+  font-size: 12px !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness :is(#refreshSetupReadiness, #probeEffectiveAgent) {
+  min-height: 36px !important;
+  padding: 0 13px !important;
+  border: 1px solid rgba(53, 93, 72, .25) !important;
+  border-radius: 8px !important;
+  color: var(--pw-text) !important;
+  background: #f9fbf8 !important;
+  font-weight: 560 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps {
+  margin: 20px 0 0 !important;
+  padding: 0 !important;
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+  list-style: none !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li,
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps button {
+  min-width: 0 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li {
+  border: 1px solid rgba(53, 93, 72, .18) !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, .64) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="ready"] {
+  border-color: rgba(53, 117, 76, .44) !important;
+  background: #e7f0e7 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="required"],
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="blocked"],
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="warning"] {
+  border-color: rgba(154, 102, 31, .42) !important;
+  background: #fff8ea !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps button {
+  width: 100% !important;
+  min-height: 74px !important;
+  padding: 12px 12px !important;
+  display: grid !important;
+  align-content: start !important;
+  gap: 6px !important;
+  border: 0 !important;
+  border-radius: 9px !important;
+  color: var(--pw-body) !important;
+  background: transparent !important;
+  text-align: left !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps button:hover {
+  background: rgba(255, 255, 255, .38) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps strong,
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps b {
+  color: var(--pw-text) !important;
+  font-size: 12px !important;
+  font-weight: 680 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps :is(small, span) {
+  color: var(--pw-muted) !important;
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .setup-readiness > footer {
+  margin-top: 14px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 14px !important;
+  color: var(--pw-muted) !important;
+  font-size: 12px !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .model-role-tabs {
+  width: 100% !important;
+  min-height: 70px !important;
+  margin-top: 0 !important;
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  overflow: visible !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .model-role-tabs button {
+  min-height: 70px !important;
+  padding: 13px 22px !important;
+  text-align: left !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .model-settings-view,
+html body[data-shell-view="settings"] #settingsPanel .agent-model-settings {
+  width: 100% !important;
+  margin-top: 0 !important;
+  padding: 30px 32px 4px !important;
+  border-color: rgba(45, 62, 54, .11) !important;
+  border-radius: 14px !important;
+  background: rgba(255, 255, 255, .74) !important;
+  box-shadow: 0 18px 46px rgba(48, 58, 53, .06) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel :where(.vision-provider-list, .llm-mode-options) button,
+html body[data-shell-view="settings"] #settingsPanel :is(.vision-field input, .vision-field select, .vision-advanced-settings select, .vision-field textarea),
+html body[data-shell-view="settings"] #settingsPanel :is(.vision-secret-input button, .vision-connect-button, .vision-manual-toggle) {
+  background-color: rgba(255, 255, 255, .8) !important;
+}
+
+html body[data-shell-view="settings"] #settingsPanel .settings-capabilities-view,
+html body[data-shell-view="settings"] #settingsPanel .local-capabilities,
+html body[data-shell-view="settings"] #settingsPanel .runtime-settings-summary {
+  width: 100% !important;
+}
+
+@media (max-width: 920px) {
+  html body[data-shell-view="settings"] #settingsPanel.app-settings-page {
+    padding: 44px 26px 72px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-role-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 760px) {
+  html body[data-shell-view="settings"] {
+    background: #f4f5f1 !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel.app-settings-page {
+    inset: 0 !important;
+    padding: 54px 34px 72px !important;
+    display: block !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel > header {
+    min-height: 0 !important;
+    margin-bottom: 18px !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 16px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel > header strong {
+    font-size: 44px !important;
+    line-height: 1 !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel > header p {
+    max-width: 28ch !important;
+    font-size: 14px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .setup-readiness {
+    margin-top: 16px !important;
+    padding: 20px 22px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .setup-readiness > header {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .setup-readiness #refreshSetupReadiness {
+    width: max-content !important;
+    grid-row: 2 !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 9px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps button {
+    min-height: 60px !important;
+    padding: 11px 12px !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .setup-readiness > footer {
+    display: grid !important;
+    justify-items: start !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-role-tabs {
+    margin-top: 18px !important;
+    display: flex !important;
+    gap: 8px !important;
+    overflow-x: auto !important;
+    padding-bottom: 8px !important;
+    border-bottom: 0 !important;
+    scrollbar-width: none !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-role-tabs::-webkit-scrollbar {
+    display: none !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-role-tabs button {
+    flex: 0 0 168px !important;
+    min-height: 66px !important;
+    padding: 12px 14px !important;
+    border: 1px solid rgba(45, 62, 54, .12) !important;
+    border-radius: 10px !important;
+    background: rgba(255, 255, 255, .68) !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-role-tabs button.active {
+    border-color: rgba(53, 93, 72, .3) !important;
+    box-shadow: inset 0 -2px var(--pw-accent) !important;
+  }
+
+  html body[data-shell-view="settings"] #settingsPanel .model-settings-view,
+  html body[data-shell-view="settings"] #settingsPanel .agent-model-settings {
+    margin-top: 10px !important;
+    padding: 22px 22px 2px !important;
+  }
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] {
+  background:
+    radial-gradient(900px 520px at 88% -12%, rgba(197, 226, 165, .09), transparent 62%),
+    linear-gradient(180deg, #0f1c1b 0%, #10211f 100%) !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .setup-readiness,
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .model-settings-view,
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .agent-model-settings {
+  border-color: rgba(193, 207, 213, .1) !important;
+  color: var(--pw-body) !important;
+  background:
+    radial-gradient(760px 180px at 84% 0%, rgba(197, 226, 165, .055), transparent 56%),
+    #142321 !important;
+  box-shadow: 0 18px 46px rgba(2, 8, 12, .22) !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li {
+  border-color: rgba(193, 207, 213, .12) !important;
+  background: #1b2b28 !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="ready"] {
+  border-color: rgba(148, 207, 160, .38) !important;
+  background: #1b3129 !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="required"],
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="blocked"],
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps li[data-status="warning"] {
+  border-color: rgba(226, 192, 128, .42) !important;
+  background: #322a1e !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel #setupReadinessSteps button:hover {
+  background: rgba(255, 255, 255, .045) !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel :where(.vision-provider-list, .llm-mode-options) button,
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel :is(.vision-field input, .vision-field select, .vision-advanced-settings select, .vision-field textarea),
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel :is(.vision-secret-input button, .vision-connect-button, .vision-manual-toggle),
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel > header > button,
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .setup-readiness :is(#refreshSetupReadiness, #probeEffectiveAgent) {
+  color: var(--pw-body) !important;
+  background-color: #1b2b28 !important;
+}
+
+html body[data-shell-view="library"] #appSidebar#appSidebar :where(#themeToggle, #settingsButton),
+html body[data-shell-view="settings"] #appSidebar#appSidebar :where(#themeToggle, #settingsButton) {
+  width: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  margin-inline: auto !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: 10px !important;
+}
+
+html body[data-shell-view="library"] #appSidebar#appSidebar :where(#themeToggle, #settingsButton) > span,
+html body[data-shell-view="settings"] #appSidebar#appSidebar :where(#themeToggle, #settingsButton) > span {
+  display: none !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .model-role-tabs button {
+  background: transparent !important;
+}
+
+@media (max-width: 760px) {
+  html[data-theme="dark"] body[data-shell-view="settings"] #settingsPanel .model-role-tabs button {
+    border-color: rgba(193, 207, 213, .12) !important;
+    background: #142321 !important;
+  }
+}
+
+/* Overall route polish ----------------------------------------------------
+   Tighten the main page rhythm after the route-level redesign: task rows get
+   stable columns, output cards read as assets, and mobile avoids truncation
+   collisions between titles, badges, status text, and timestamps. */
+html body[data-shell-view="home"] .home-view {
+  width: min(1040px, calc(100vw - 152px)) !important;
+}
+
+html body[data-shell-view="home"] .home-heading {
+  margin-bottom: 28px !important;
+}
+
+html body[data-shell-view="home"] .home-create-surface {
+  max-width: 760px !important;
+  margin-bottom: 44px !important;
+  background:
+    radial-gradient(520px 170px at 100% 0%, rgba(53, 93, 72, .055), transparent 62%),
+    rgba(255, 255, 255, .72) !important;
+  box-shadow: 0 18px 44px rgba(43, 52, 48, .08) !important;
+}
+
+html body[data-shell-view="home"] .home-create-surface > button {
+  grid-template-columns: 52px minmax(0, 1fr) 38px !important;
+}
+
+html body[data-shell-view="home"] .home-section {
+  max-width: 760px !important;
+  margin-inline: auto !important;
+}
+
+html body[data-shell-view="home"] .home-section-heading {
+  display: flex !important;
+  align-items: end !important;
+  justify-content: space-between !important;
+  gap: 18px !important;
+}
+
+html body[data-shell-view="home"] .home-task-section {
+  display: grid !important;
+  gap: 12px !important;
+}
+
+html body[data-shell-view="home"] .home-task-section + .home-task-section {
+  margin-top: 24px !important;
+}
+
+html body[data-shell-view="home"] .home-task-section > header {
+  min-height: 26px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  color: var(--pw-text) !important;
+}
+
+html body[data-shell-view="home"] .home-task-section > header strong {
+  font-size: 13px !important;
+  font-weight: 680 !important;
+}
+
+html body[data-shell-view="home"] .home-task-section > header span {
+  min-width: 24px !important;
+  height: 24px !important;
+  display: inline-grid !important;
+  place-items: center !important;
+  border: 1px solid rgba(53, 93, 72, .18) !important;
+  border-radius: 999px !important;
+  color: var(--pw-accent) !important;
+  background: rgba(53, 93, 72, .065) !important;
+  font-size: 12px !important;
+  font-weight: 720 !important;
+}
+
+html body[data-shell-view="home"] .home-task-section > div {
+  border-top: 1px solid rgba(45, 62, 54, .12) !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-open {
+  min-height: 92px !important;
+  padding: 14px 10px 14px 12px !important;
+  grid-template-columns: 88px minmax(150px, 1fr) minmax(150px, .86fr) minmax(150px, .88fr) 76px !important;
+  gap: 14px !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-media {
+  width: 88px !important;
+  height: 52px !important;
+  margin: 0 !important;
+  border-radius: 7px !important;
+  overflow: hidden !important;
+  background: var(--pw-canvas-deep) !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-media img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-heading {
+  align-self: center !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-heading strong,
+html body[data-shell-view="home"] .home-view .shell-task-open > small,
+html body[data-shell-view="home"] .home-view .shell-task-detail {
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-foot {
+  justify-self: end !important;
+  display: grid !important;
+  justify-items: end !important;
+  gap: 5px !important;
+}
+
+html body[data-shell-view="home"] .home-view .shell-task-menu {
+  top: 12px !important;
+  right: 8px !important;
+}
+
+html body[data-shell-view="library"] #libraryView.app-library-page {
+  background:
+    radial-gradient(780px 360px at 88% -12%, rgba(53, 93, 72, .09), transparent 62%),
+    #f4f5f1 !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-toolbar {
+  margin-bottom: 18px !important;
+  padding: 0 !important;
+  border-radius: 9px !important;
+  box-shadow: 0 14px 34px rgba(43, 52, 48, .055) !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-list {
+  gap: 10px !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-item {
+  min-height: 202px !important;
+  padding: 10px !important;
+  grid-template-columns: 340px minmax(0, 1fr) !important;
+  gap: 20px !important;
+  border-color: rgba(45, 62, 54, .12) !important;
+  background: rgba(255, 255, 255, .76) !important;
+  box-shadow: 0 10px 28px rgba(43, 52, 48, .045) !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-item.featured {
+  border-color: rgba(53, 93, 72, .22) !important;
+  box-shadow: 0 18px 42px rgba(43, 52, 48, .075) !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-media {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-height: 180px !important;
+  border-radius: 7px !important;
+  overflow: hidden !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-media video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-copy {
+  min-width: 0 !important;
+  display: grid !important;
+  align-content: center !important;
+  gap: 8px !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-copy strong {
+  font-size: 18px !important;
+  line-height: 1.35 !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-meta {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px 14px !important;
+}
+
+html body[data-shell-view="library"] #libraryView .app-library-actions {
+  margin-top: 6px !important;
+  padding-top: 12px !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="home"] .home-create-surface,
+html[data-theme="dark"] body[data-shell-view="library"] #libraryView .app-library-item {
+  background: var(--pw-surface-1) !important;
+}
+
+html[data-theme="dark"] body[data-shell-view="library"] #libraryView.app-library-page {
+  background:
+    radial-gradient(780px 360px at 88% -12%, rgba(197, 226, 165, .08), transparent 62%),
+    var(--pw-canvas) !important;
+}
+
+@media (max-width: 920px) {
+  html body[data-shell-view="home"] .home-view {
+    width: min(760px, calc(100vw - 116px)) !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-open {
+    grid-template-columns: 82px minmax(0, 1fr) auto !important;
+    gap: 10px 12px !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-open > small,
+  html body[data-shell-view="home"] .home-view .shell-task-detail {
+    grid-column: 2 / 4 !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-foot {
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-item {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-media {
+    aspect-ratio: 16 / 9 !important;
+    min-height: 0 !important;
+  }
+}
+
+@media (max-width: 760px) {
+  html body[data-shell-view="home"] .home-view {
+    width: 100% !important;
+    padding: 34px 22px 54px !important;
+  }
+
+  html body[data-shell-view="home"] .home-create-surface,
+  html body[data-shell-view="home"] .home-section {
+    max-width: none !important;
+  }
+
+  html body[data-shell-view="home"] .home-create-surface {
+    margin-bottom: 40px !important;
+  }
+
+  html body[data-shell-view="home"] .home-create-surface > button {
+    min-height: 140px !important;
+    grid-template-columns: 52px minmax(0, 1fr) !important;
+  }
+
+  html body[data-shell-view="home"] .home-create-surface > button > b {
+    display: none !important;
+  }
+
+  html body[data-shell-view="home"] .home-section-heading {
+    align-items: center !important;
+    text-align: left !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-open {
+    min-height: 96px !important;
+    padding: 13px 0 !important;
+    padding-right: 0 !important;
+    padding-left: 0 !important;
+    grid-template-columns: 72px minmax(0, 1fr) !important;
+    justify-content: stretch !important;
+    justify-items: stretch !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-media {
+    width: 72px !important;
+    height: 54px !important;
+    grid-column: 1 !important;
+    grid-row: 1 / 5 !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-heading {
+    grid-column: 2 !important;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 5px !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-heading strong {
+    max-width: none !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-state {
+    font-size: 11px !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-detail {
+    grid-column: 2 !important;
+    white-space: normal !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-open > small {
+    grid-column: 2 !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-foot {
+    grid-column: 2 !important;
+    grid-row: auto !important;
+    justify-self: start !important;
+    justify-items: start !important;
+  }
+
+  html body[data-shell-view="home"] .home-view .shell-task-foot time {
+    white-space: normal !important;
+    text-align: left !important;
+    line-height: 1.2 !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView.app-library-page {
+    padding: 54px 34px 64px !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView > header {
+    margin-bottom: 28px !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-toolbar {
+    gap: 0 !important;
+    overflow: hidden !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-toolbar :is(label, select) {
+    border-radius: 0 !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-toolbar label {
+    border-radius: 8px 8px 0 0 !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-toolbar select {
+    border-top: 0 !important;
+    border-radius: 0 0 8px 8px !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-item {
+    padding: 10px !important;
+    border-radius: 9px !important;
+  }
+
+  html body[data-shell-view="library"] #libraryView .app-library-copy {
+    padding: 8px 2px 6px !important;
+  }
 }

@@ -59,6 +59,27 @@ class SourceEvidenceStoreTests(unittest.TestCase):
             )
             self.assertEqual([item["text"] for item in loaded], ["冰箱"])
 
+    def test_source_store_limit_preserves_timeline_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            promote_source_evidence(root, "video", [
+                {
+                    "modality": "visual", "start": second, "end": second + .5,
+                    "evidenceTime": second + .2,
+                    "observation": f"第 {second} 秒画面观察 {variant}",
+                    "model": f"vision-{variant}", "confidence": .9 - variant * .01,
+                }
+                for second in range(20)
+                for variant in range(8)
+            ])
+            loaded = read_source_evidence(
+                root, "video", modalities={"visual"}, start=0, end=20, limit=20,
+            )
+            self.assertEqual(len(loaded), 20)
+            self.assertEqual(
+                {int(float(item["evidenceTime"])) for item in loaded}, set(range(20)),
+            )
+
     def test_predicate_cache_requires_complete_covering_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

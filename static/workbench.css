@@ -1,4 +1,169 @@
 /*
+ * ClipTalk workspace component styles
+ * Structural source: a_clean_modern_dark_and_beige_ui_mockup_of_a_vide.png
+ * Reusable timeline, conversation and review components. The workbench layout
+ * itself is owned by workbench.css.
+ */
+
+/* Usability pass: keep the visual separator quiet while making its actual
+   drag target large enough to discover and grab. */
+
+/* New task is a normal workbench state, not a modal upload canvas. The left
+   assistant, resize handle, and task navigation must stay available before a
+   file is chosen. */
+
+@media (min-width: 1121px) {
+  html body[data-shell-view="home"] {
+    --app-shell-offset: 84px;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  html body[data-shell-view="home"] main#workspace#workspace.studio.home-mode {
+    position: fixed !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    place-items: center !important;
+    background:
+      radial-gradient(circle at 70% 30%, rgba(197, 226, 165, .055), transparent 28rem),
+      #0b1b1a !important;
+  }
+
+  html body[data-shell-view="home"] #homeView.home-view {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    width: min(1040px, calc(100vw - 148px)) !important;
+    min-height: auto !important;
+    margin: 0 !important;
+    padding: 0 24px !important;
+    color: #eef5ef !important;
+    transform: translateY(-2vh);
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading {
+    margin-bottom: 24px !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading h1 {
+    color: #f4f7ef !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-heading p,
+  html body[data-shell-view="home"] #homeView .home-section-heading span,
+  html body[data-shell-view="home"] #homeView .home-current-empty span {
+    color: #9dafaa !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface {
+    max-width: 760px !important;
+    border: 1px solid rgba(210, 232, 220, .1) !important;
+    background: rgba(16, 38, 36, .72) !important;
+    box-shadow: 0 22px 60px rgba(2, 12, 11, .22) !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface > button {
+    min-height: 84px !important;
+    border-color: rgba(197, 226, 165, .22) !important;
+    color: #f3f8f2 !important;
+    background: rgba(255, 255, 255, .025) !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-create-surface small {
+    color: #9dafaa !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-section {
+    max-width: 760px !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-section-heading h2,
+  html body[data-shell-view="home"] #homeView .home-current-empty strong {
+    color: #f3f8f2 !important;
+  }
+
+  html body[data-shell-view="home"] #homeView .home-current-empty {
+    border-color: rgba(210, 232, 220, .14) !important;
+    color: #9dafaa !important;
+  }
+}
+
+
+/* Creation is a focused canvas, never a stale three-column task workspace.
+   This structural guard also neutralizes earlier theme layers. */
+
+/* Left assistant — one calm product column, not a nested task dashboard. */
+
+/* Full-width conversation rows do not render an avatar. The legacy chat grid
+   still reserves its 26px avatar column, so these rows must explicitly own a
+   single column or their entire contents collapse into a vertical word stack. */
+
+/* Before the first instruction, the source title already confirms upload in
+   the center toolbar. Keep the assistant column focused on the four starts. */
+
+/* Center — real project toolbar, preview, edit tools and persistent timeline. */
+
+/* Empty timeline uses real capability lanes without inventing content. */
+
+/* Populated source timeline replaces the placeholder at the same visual weight. */
+
+/* The old review mode hid the real tracks until an explicit "expand" action.
+   In the reference workstation, the timeline is a permanent primary surface. */
+
+/* Keep cover candidates editable without allowing the legacy full editor to
+   consume the entire timeline. Each candidate remains independently clickable. */
+
+/* Right rail — visual review cards and real contextual details. */
+
+/* The fine timeline is permanently visible in the center workbench in v3;
+   repeating it as a right-rail tab caused the labels to wrap and waste space. */
+
+/* Conversation density and responsive integrity -------------------------
+   The assistant is a working conversation, so persisted setup notices,
+   status controls and the composer must not squeeze the message stream into
+   a narrow strip. These rules intentionally live last: legacy workspace
+   styles use long selectors and otherwise reintroduce fixed heights. */
+
+/* The review-card content is mounted inside #reviewWorkbench at runtime.
+   Older workstation rules therefore gain an extra ID in their selector; repeat the
+   semantic preview-card palette at the actual mounted depth so cream cards do
+   not inherit white-on-light typography or a washed-out primary action. */
+
+/* Desktop navigation rail -------------------------------------------------
+   Keep global destinations separate from the conversation.  The former
+   horizontal tool row becomes a persistent, quiet side rail while the Agent
+   column keeps the remaining width for task context and messages. */
+
+/*
  * ClipTalk canonical workbench
  * Layout reference: 7857f94e-9d3f-4be1-8f39-4d3295682701.png
  * This is the single final presentation layer for the primary workbench.
@@ -613,9 +778,6 @@ html body.ct-workbench-v4 #workspace:not(.home-mode) > #assistantPanel > :where(
 html body.ct-workbench-v4 #assistantPanel > .panel-header {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) auto !important;
-  gap: 5px 10px !important;
-  min-height: 98px !important;
-  padding: 16px 14px 12px !important;
   border: 0 !important;
   border-bottom: 1px solid var(--ct4-line) !important;
   background: transparent !important;
@@ -774,18 +936,12 @@ html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message {
 
 html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .avatar {
   display: grid !important;
-  width: 28px !important;
-  height: 28px !important;
   place-items: center !important;
-  border-radius: 8px !important;
-  color: var(--ct4-on-primary) !important;
-  background: #d9e9d5 !important;
-  font-size: 10px !important;
 }
 
 html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .bubble {
   max-width: calc(100% - 38px) !important;
-  padding: 10px 12px !important;
+  padding: 7px 11px !important;
   border: 0 !important;
   border-radius: 4px 12px 12px 12px !important;
   color: var(--ct-text) !important;
@@ -988,6 +1144,17 @@ html body.ct-workbench-v4 #reviewView .asset-actions :where(button, a, select, s
   color: var(--ct4-body) !important;
   background: rgba(33, 61, 58, .64) !important;
   font-size: 10px !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4 #reviewView .asset-actions :where(button, a, select, summary) {
+  color: var(--ct-theme-text, #1d2924) !important;
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4 #reviewView .asset-actions :where(button, a, select, summary):hover {
+  background: var(--ct-theme-hover, #eceeea) !important;
+  color: var(--ct-theme-primary, #355d48) !important;
 }
 
 html body.ct-workbench-v4 #reviewView .asset-actions :where(button, a, select, summary):hover {
@@ -2593,7 +2760,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewWorkbench :where(
   .content-review-diagnostics,
   .content-completeness
 ) :where(p, span, small, em, li) {
-  color: #b7c8c0 !important;
+  color: var(--ct-theme-text-secondary, #b7c8c0) !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewWorkbench .content-search-review > header :where(p, .content-search-stats, .content-search-scope), html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #chatMessages .content-search-review > header :where(p, .content-search-stats, .content-search-scope) {
@@ -2876,7 +3043,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewWorkbench :where(.
   html body.ct-workbench-v4 #ctV4ProjectButton { max-width: 100%; padding: 6px !important; }
   html body.ct-workbench-v4 #ctV4Topbar .ct-v4-global-state { gap: 2px; }
   html body.ct-workbench-v4 .ct-v4-save-state { padding: 0 6px; border: 0; font-size: 10px; }
-  html body.ct-workbench-v4 #reviewView .asset-actions > :not(#reviewMoreActions):not(#videoViewSelect):not(#downloadButton):not(#finalizePreviewButton):not(#finalizeOneOffButton) { display: none !important; }
+  html body.ct-workbench-v4 #reviewView .asset-actions > :not(#reviewMoreActions):not(#videoViewSelect):not(#downloadButton):not(#finalizePreviewButton):not(#finalizeOneOffButton):not(#portraitPrecisionToggle) { display: none !important; }
   html body.ct-workbench-v4 #reviewView #reviewTitle { max-width: 42vw !important; }
   html body.ct-workbench-v4 #ctEditorToolbar button span { display: none !important; }
   html body.ct-workbench-v4 #ctEditorToolbar button { min-width: 34px !important; justify-content: center !important; }
@@ -2901,8 +3068,8 @@ html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > asid
 
 html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > aside#assistantPanel.chat-panel > .panel-header {
   grid-row: 1 !important;
-  min-height: 106px !important;
-  padding: 17px 14px 12px !important;
+  min-height: 0 !important;
+  padding: 10px 14px 9px !important;
   border-bottom: 0 !important;
 }
 
@@ -2965,7 +3132,7 @@ html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > asid
 html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > aside#assistantPanel.chat-panel > #chatMessages {
   grid-row: 3 !important;
   padding: 4px 14px 10px !important;
-  gap: 11px !important;
+  gap: 6px !important;
 }
 
 html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > aside#assistantPanel.chat-panel > #autoCompositionDock {
@@ -4611,7 +4778,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"]:not([data-shell-view="hom
     84px
     var(--ct4-left, var(--ct-user-left-pane, clamp(320px, 20.625vw, 340px)))
     8px
-    minmax(640px, 1fr)
+    minmax(0, 1fr)
     8px
     var(--ct4-right, var(--ct-user-right-pane, clamp(390px, 26.75vw, 430px))) !important;
 }
@@ -5186,7 +5353,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer > .chat-input-shell.chat-input-shell {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) !important;
-  grid-template-rows: minmax(38px, auto) 30px !important;
+  grid-template-rows: minmax(38px, auto) 36px !important;
   width: 100% !important;
   min-height: 82px !important;
   height: auto !important;
@@ -5205,11 +5372,13 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer .chat-input-shell.chat-input-shell > .composer-toolbar.composer-toolbar {
   position: static !important;
   display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
   grid-row: 2 !important;
   width: 100% !important;
   min-width: 0 !important;
-  height: 30px !important;
-  min-height: 30px !important;
+  height: 36px !important;
+  min-height: 36px !important;
   align-items: center !important;
   justify-content: space-between !important;
   margin: 1px 0 0 !important;
@@ -5222,8 +5391,8 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   display: flex !important;
   width: auto !important;
   min-width: 0 !important;
-  height: 30px !important;
-  min-height: 30px !important;
+  height: 36px !important;
+  min-height: 36px !important;
   align-items: center !important;
   gap: 4px !important;
   margin: 0 !important;
@@ -5234,12 +5403,14 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   display: inline-flex !important;
   width: auto !important;
   min-width: 112px !important;
-  min-height: 28px !important;
-  height: 28px !important;
+  min-height: 36px !important;
+  height: 36px !important;
   align-items: center !important;
   justify-content: center !important;
-  padding: 4px 9px !important;
-  gap: 7px !important;
+  padding: 6px 11px !important;
+  gap: 9px !important;
+  font-family: var(--font-ui) !important;
+  line-height: 1.4 !important;
   border: 1px solid #8ca599 !important;
   border-radius: 8px !important;
   color: var(--ct-text) !important;
@@ -5252,17 +5423,19 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   flex: 0 0 auto !important;
   overflow: visible !important;
   color: var(--ct-text) !important;
-  font-size: 11px !important;
-  font-weight: 720 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer #agentSkillMenuButton#agentSkillMenuButton small {
   flex: 0 0 auto !important;
-  padding-left: 7px !important;
-  border-left: 1px solid #9aafa5 !important;
+  padding: 2px 6px !important;
+  border-left: 0 !important;
+  border-radius: 4px !important;
+  background: var(--ct-hover);
   color: var(--ct-text-secondary) !important;
-  font-size: 10px !important;
-  font-weight: 680 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer #agentSkillMenuButton#agentSkillMenuButton::after {
@@ -5299,6 +5472,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer #agentSkillMenuButton#agentSkillMenuButton[aria-expanded="true"] :is(span, small) {
   border-left-color: rgba(255, 255, 255, .3) !important;
   color: var(--ct-on-primary) !important;
+  background: transparent;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > #chatForm#chatForm.chat-composer #chatLegacyModeButton#chatLegacyModeButton {
@@ -5500,7 +5674,6 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePa
 html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineViewport#timelineViewport.timeline-viewport {
   display: block !important;
   visibility: visible !important;
-  flex: 1 1 auto !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineViewport#timelineViewport.timeline-viewport > #timelineTrackContent.timeline-track-content,
@@ -5849,11 +6022,6 @@ html body.ct-workbench-v4 #assistantPanel #chatMessages > .ct-v4-welcome-message
 html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .bubble p {
   font-size: 13.5px !important;
   line-height: 1.66 !important;
-}
-
-html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .bubble small {
-  color: var(--ct-text-secondary) !important;
-  font-size: 11.5px !important;
 }
 
 html body.ct-workbench-v4 #assistantPanel #chatMessages .workflow-entry-card,
@@ -6593,7 +6761,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #chatMess
   html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio:not(.home-mode) > section.review-panel.glass-panel,
   html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio:not(.home-mode) > aside#reviewRail#reviewRail.review-rail {
     position: absolute !important;
-    inset: 42px 0 0 !important;
+    inset: var(--ct-compact-top, 42px) 0 var(--ct-compact-bottom, 0px) !important;
     display: none !important;
     box-sizing: border-box !important;
     width: 100% !important;
@@ -6692,17 +6860,20 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] :where(#assistantPanel #c
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls {
   position: relative !important;
   grid-template-columns: auto minmax(0, 1fr) auto auto !important;
+  grid-template-rows: 20px 34px !important;
+  column-gap: 8px !important;
+  row-gap: 0 !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls > .player-progress-group {
-  position: absolute !important;
-  top: 0 !important;
-  right: 8px !important;
-  left: 8px !important;
-  width: auto !important;
+  position: static !important;
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+  width: 100% !important;
   min-width: 0 !important;
-  height: 18px !important;
-  display: block !important;
+  height: 20px !important;
+  display: flex !important;
+  align-items: center !important;
   transform: none !important;
 }
 
@@ -6715,25 +6886,28 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls #playerClock#playerClock {
-  position: absolute !important;
-  top: 22px !important;
-  left: 50% !important;
+  position: static !important;
+  top: auto !important;
+  left: auto !important;
   width: max-content !important;
   min-width: 0 !important;
-  transform: translateX(-50%) !important;
-  text-align: center !important;
+  transform: none !important;
+  text-align: left !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls > .player-transport-group {
-  grid-column: 1 !important;
+  grid-column: 1 / 3 !important;
+  grid-row: 2 !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls > #playerRate {
   grid-column: 3 !important;
+  grid-row: 2 !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait > .player-controls.player-controls > #playerFullscreen {
   grid-column: 4 !important;
+  grid-row: 2 !important;
 }
 
 /* Content-search overview: one quiet map, not four competing status lines. */
@@ -6775,17 +6949,20 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
 }
 
 /* Content-search stage compaction ----------------------------------------
-   v4 does not mount the legacy editor toolbar, so its old 44px grid row must
-   not survive as an empty band between the player and the ready timeline.
-   The :has() guard makes the row return automatically if a real toolbar is
-   mounted later. */
+   v4 does not mount the legacy editor toolbar. Keep the compact 8px resize
+   handle between the player and timeline instead of restoring the retired
+   44px toolbar row. The :has() guard lets a real toolbar reclaim its row. */
 html body.ct-workbench-v4[data-shell-mode="workspace"][data-ct-timeline-ready="true"]:not(.ct-agent-preview-mode) #reviewView#reviewView[data-workbench-kind="content_search"]:not(.timeline-hidden):not(:has(> #ctEditorToolbar)) {
-  grid-template-rows: 54px minmax(250px, 1fr) minmax(205px, 31vh) !important;
+  grid-template-rows:
+    54px
+    minmax(240px, 1fr)
+    8px
+    minmax(250px, var(--review-timeline-height, clamp(320px, 36%, 380px))) !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"][data-ct-timeline-ready="true"]:not(.ct-agent-preview-mode) #reviewView#reviewView[data-workbench-kind="content_search"]:not(:has(> #ctEditorToolbar)) > #ctTimelinePlaceholder#ctTimelinePlaceholder,
 html body.ct-workbench-v4[data-shell-mode="workspace"][data-ct-timeline-ready="true"]:not(.ct-agent-preview-mode) #reviewView#reviewView[data-workbench-kind="content_search"]:not(:has(> #ctEditorToolbar)) > #timelinePanel#timelinePanel.timeline-panel {
-  grid-row: 3 !important;
+  grid-row: 4 !important;
 }
 
 /* Selection details on demand --------------------------------------------
@@ -7717,7 +7894,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   position: relative !important;
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) !important;
-  grid-template-rows: minmax(34px, auto) 28px !important;
+  grid-template-rows: minmax(34px, auto) 36px !important;
   width: 100% !important;
   min-height: 86px !important;
   height: auto !important;
@@ -7781,8 +7958,8 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
   display: inline-flex !important;
   width: auto !important;
   min-width: 104px !important;
-  height: 28px !important;
-  min-height: 28px !important;
+  height: 36px !important;
+  min-height: 36px !important;
   padding: 0 10px !important;
   align-items: center !important;
   justify-content: flex-start !important;
@@ -9780,6 +9957,68 @@ html body.ct-workbench-v4 #reviewRail #ctV4MaterialsSummary.cover-draft .ct-v4-v
   }
 }
 
+/* Execution settings use the top layer to escape composer clipping. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm #agentSkillMenu {
+  position: fixed !important;
+  inset: auto !important;
+  top: var(--skill-menu-top, 12px) !important;
+  left: var(--skill-menu-left, 12px) !important;
+  width: var(--skill-menu-width, min(320px, calc(100vw - 24px))) !important;
+  max-height: var(--skill-menu-max-height, calc(100dvh - 24px));
+  box-sizing: border-box;
+  overflow: auto;
+  margin: 0 !important;
+  padding: 16px !important;
+  gap: 16px;
+  color: var(--ct-text);
+  background: var(--ct-panel) !important;
+  font-family: var(--font-ui) !important;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+html body.ct-workbench-v4 #agentSkillMenu > header {
+  display: grid;
+  gap: 3px;
+}
+
+html body.ct-workbench-v4 #agentSkillMenu > header strong { font-size: 14px; font-weight: 600; }
+html body.ct-workbench-v4 #agentSkillMenu > header small { font-size: 12px; color: var(--ct-text-secondary); }
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm #agentSkillMenu label {
+  display: grid;
+  gap: 7px;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--ct-text-secondary) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm #agentSkillMenu select {
+  min-height: 40px;
+  padding: 8px 30px 8px 10px;
+  border: 1px solid var(--ct-control-border);
+  color: var(--ct-text) !important;
+  background: var(--ct-raised) !important;
+  font: 500 14px/1.5 var(--font-ui) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm #agentSkillMenu > button {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid var(--ct-control-border);
+  border-radius: 7px;
+  color: var(--ct-text) !important;
+  background: var(--ct-raised) !important;
+  font: 500 13px/1.5 var(--font-ui) !important;
+  text-align: left;
+}
+
+html body.ct-workbench-v4 #agentSkillMenu :is(select, button):focus-visible {
+  outline: 2px solid var(--ct-primary);
+  outline-offset: 2px;
+}
+
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm .agent-skill-menu.agent-skill-menu {
   border-color: rgba(38, 63, 50, .18) !important;
   color: #43534b !important;
@@ -10500,7 +10739,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
   gap: 6px !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden) {
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden) {
   display: inline-flex !important;
   min-height: 32px !important;
   align-items: center !important;
@@ -10510,31 +10749,31 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
   transition: color .18s ease, background-color .18s ease, border-color .18s ease, transform .18s ease !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden):hover {
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden):hover {
   border-color: rgba(201, 229, 173, .44) !important;
   color: #f4f8f5 !important;
   background: rgba(219, 238, 225, .14) !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle[aria-pressed="true"] {
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle[aria-pressed="true"] {
   border-color: #cbe7ad !important;
   color: #18241d !important;
   background: #cbe7ad !important;
 }
 
-html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden) {
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden) {
   border-color: #b9cbbf !important;
   color: #294638 !important;
   background: #e7ede8 !important;
 }
 
-html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden):hover {
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle:not(.hidden):hover {
   border-color: #799b88 !important;
   color: #203a2e !important;
   background: #dce8df !important;
 }
 
-html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle.portrait-precision-toggle[aria-pressed="true"] {
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle.portrait-precision-toggle[aria-pressed="true"] {
   border-color: #355d48 !important;
   color: #ffffff !important;
   background: #355d48 !important;
@@ -10553,12 +10792,12 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #revi
   background: #355d48 !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle:focus-visible {
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle:focus-visible {
   outline: 2px solid var(--ct4-primary) !important;
   outline-offset: 2px !important;
 }
 
-html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] #portraitPrecisionToggle:active {
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout] #portraitPrecisionToggle:active {
   transform: translateY(1px) scale(.985) !important;
 }
 
@@ -10727,6 +10966,16 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
   }
 
   html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"] > :where(#ctEditorToolbar, #ctTimelinePlaceholder, #portraitVideoResizer) {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1439px) {
+  /* The player and playhead already expose time. Removing this duplicate clock
+     keeps the sample selector, quality state and collapse action from colliding
+     in the narrower center column. */
+  html body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+    #timelinePanel#timelinePanel .timeline-review-controls > b {
     display: none !important;
   }
 }
@@ -11086,6 +11335,116 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
   }
 }
 
+/* A visible source timeline is not the same as precision editing. In compact
+   portrait review the player stays above the source tracks; the side-by-side
+   workbench and resize handle only appear after the explicit precision action. */
+@media (min-width: 901px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden) {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows:
+      54px
+      minmax(280px, 1fr)
+      8px
+      minmax(250px, var(--review-timeline-height, clamp(280px, 34vh, 360px))) !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden) > #reviewStage#reviewStage#reviewStage.review-stage {
+    display: grid !important;
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    padding: 10px 14px 12px !important;
+    place-items: center !important;
+    overflow: hidden !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden)
+    #reviewStage#reviewStage#reviewStage > #viewerShell#viewerShell#viewerShell.viewer-shell {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    align-self: center !important;
+    justify-self: center !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden) > #timelinePanel#timelinePanel.timeline-panel:not(.hidden) {
+    position: relative !important;
+    z-index: 5 !important;
+    display: flex !important;
+    grid-column: 1 !important;
+    grid-row: 4 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 260px !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #reviewTimelineResizer#reviewTimelineResizer.review-timeline-resizer {
+    position: relative !important;
+    z-index: 8 !important;
+    display: block !important;
+    grid-column: 1 !important;
+    grid-row: 3 !important;
+    width: 100% !important;
+    height: 8px !important;
+    cursor: row-resize !important;
+    touch-action: none !important;
+    background: var(--ct4-surface, #f3f3f0) !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #reviewTimelineResizer#reviewTimelineResizer.review-timeline-resizer::before {
+    content: "";
+    position: absolute;
+    inset: 3px clamp(18px, 8%, 88px);
+    border-radius: 2px;
+    background: #c8cfca;
+    transition: background-color .18s ease, transform .18s ease;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #reviewTimelineResizer#reviewTimelineResizer.review-timeline-resizer:is(:hover, :focus-visible, .dragging)::before {
+    background: var(--ct4-primary, #355d48);
+    transform: scaleY(2);
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #reviewTimelineResizer#reviewTimelineResizer.review-timeline-resizer:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--ct4-primary, #355d48) 42%, transparent);
+    outline-offset: -2px;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #portraitPrecisionWorkbench#portraitPrecisionWorkbench.portrait-precision-workbench,
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden)
+    > #portraitVideoResizer#portraitVideoResizer.portrait-video-resizer {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
+    #reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden) #timelineExpandToggle {
+    display: inline-flex !important;
+  }
+}
+
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[data-review-layout="portrait"]:not(.timeline-hidden) > #portraitPrecisionWorkbench#portraitPrecisionWorkbench.portrait-precision-workbench {
   border-color: #d7ddd8 !important;
   color: #263d32 !important;
@@ -11275,7 +11634,7 @@ html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > asid
 }
 html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) #assistantPanel > .panel-header:has(#ctTaskJourney) {
   height: auto !important;
-  min-height: 106px !important;
+  min-height: 0 !important;
   grid-template-rows: auto auto !important;
 }
 
@@ -11526,7 +11885,7 @@ html body[data-shell-view="home"] main#workspace#workspace.studio.home-mode > #h
   html body.ct-workbench-v4 > #appSidebar#appSidebar.app-sidebar { display: none !important; }
   html body.ct-workbench-v4[data-mobile-nav-open="true"] > #appSidebar#appSidebar.app-sidebar { display: flex !important; top: 44px !important; height: calc(100dvh - 44px) !important; }
   html body.ct-workbench-v4 > #ctV4Topbar.ct-v4-topbar { padding-left: 80px !important; }
-  html body.ct-workbench-v4 > #mobileNavigationToggle { z-index: var(--ct-z-menu); }
+  html body.ct-workbench-v4 > #mobileNavigationToggle { z-index: var(--ct-z-menu, 100); }
   html body.ct-workbench-v4.secondary-editor-open > #mobileNavigationToggle { display: none; }
 }
 
@@ -11768,7 +12127,8 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] :is(#
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] :is(#assistantPanel #chatMessages, #reviewWorkbench) .content-search-history-summary.content-search-history-summary :is(small, .content-retained-search-copy > span) {
-  color: #687970 !important;
+  color: #536358 !important;
+  font-size: 12px !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] :is(#assistantPanel #chatMessages, #reviewWorkbench) .content-search-history-summary.content-search-history-summary :is(strong, b) {
@@ -11880,7 +12240,6 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView.re
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineViewport#timelineViewport.timeline-viewport {
-  min-height: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
@@ -13155,6 +13514,15 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistant
   border-top-color: rgba(143, 166, 162, .12) !important;
 }
 
+/* Explicit grid placement: DOM insertion before the composer alone lets the
+   auto-placement algorithm put this action into a free row at the top. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel > #csActionBar {
+  grid-column: 1;
+  grid-row: 4;
+  min-width: 0;
+  align-self: end;
+}
+
 html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel > #capabilityDrawerScrim.capability-drawer-scrim {
   position: absolute !important;
   z-index: 40 !important;
@@ -13414,6 +13782,69 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace#
   html body.ct-workbench-v4 #ctV4AssistantQuickStart.capability-drawer { animation: none !important; }
 }
 
+/* Desktop tasks use inline project tools; new tasks need no project topbar.
+   Compact views retain navigation. Clip only the shell, not its scrolling panes. */
+@media (min-width: 1280px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio:not(.home-mode):not(.new-task-workbench) {
+    overflow: clip !important;
+  }
+  html body.ct-workbench-v4:is([data-ct-inline-project], [data-ct-empty-project])[data-shell-mode="workspace"] main#workspace#workspace.studio:not(.home-mode) {
+    inset: 0 !important;
+    height: 100dvh !important;
+  }
+  html body.ct-workbench-v4:is([data-ct-inline-project], [data-ct-empty-project]) > #ctV4Topbar.ct-v4-topbar {
+    display: none !important;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #reviewView > .review-header .file-icon,
+  html body.ct-workbench-v4[data-ct-inline-project]:not([data-ct-project-source]) #reviewView > .review-header #reviewKicker,
+  html body.ct-workbench-v4[data-ct-inline-project][data-ct-project-source] #reviewView > .review-header #reviewTitle {
+    display: none !important;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #reviewView .ct-v4-project {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] .ct-v4-project > i { display: none; }
+  html body.ct-workbench-v4[data-ct-inline-project] .ct-v4-project-icon {
+    display: flex;
+    flex: 0 0 18px;
+    color: var(--ct-text-secondary);
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] :is(.ct-v4-project-icon, #ctV4Notifications) svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.65;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #reviewView#reviewView .review-header #ctV4ProjectButton {
+    min-height: 28px;
+    padding: 2px 4px !important;
+    color: var(--ct-text) !important;
+    background: transparent !important;
+    border-color: transparent !important;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #ctV4ProjectName {
+    color: var(--ct-text) !important;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #reviewView#reviewView .review-header #ctV4ProjectButton:is(:hover, :focus-visible) {
+    background: var(--ct-raised) !important;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] :is(#reviewTitle, #reviewKicker) {
+    --text-title: 12px;
+    padding-left: 28px;
+  }
+  html body.ct-workbench-v4[data-ct-inline-project] #appSidebar #ctV4Notifications {
+    width: 42px;
+    height: 42px;
+    color: var(--ct-text-secondary) !important;
+  }
+}
+
 /* Final workspace consolidation -----------------------------------------
    Keep the existing DOM and event bindings, but present the desktop editor as
    three clear regions: assistant, editing stage, and context tray. */
@@ -13503,7 +13934,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] {
     grid-area: 1 / 6 / 2 / 7 !important;
     align-self: stretch !important;
     height: auto !important;
-    margin-top: clamp(44px, 7vh, 80px) !important;
+    margin-top: 0 !important;
     border: 0 !important;
     border-radius: 20px !important;
     color: var(--ct-text) !important;
@@ -13686,7 +14117,7 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel > .panel-header:has(#ctTaskJourney) {
-  min-height: 106px !important;
+  min-height: 0 !important;
   padding-inline: 16px !important;
 }
 
@@ -13751,7 +14182,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistant
   display: flex !important;
   flex-wrap: wrap !important;
   align-items: center !important;
-  gap: 8px 14px !important;
+  gap: 8px !important;
   color: #9caf9f !important;
   font-size: 12px !important;
   line-height: 1.4 !important;
@@ -13762,6 +14193,8 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assi
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel .empty-chat-prompts button {
+  white-space: nowrap;
+  flex: 0 0 auto;
   padding: 0 !important;
   border: 0 !important;
   color: #b9cbbc !important;
@@ -13806,33 +14239,6 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel #chatInput#chatInput {
   min-height: 34px !important;
   font-size: 13px !important;
-}
-
-html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel #agentSkillMenuButton#agentSkillMenuButton {
-  min-width: 104px !important;
-  font-size: 0 !important;
-}
-
-html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel #agentSkillMenuButton#agentSkillMenuButton > :where(span, small) {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  overflow: hidden !important;
-  clip: rect(0 0 0 0) !important;
-}
-
-html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel #agentSkillMenuButton#agentSkillMenuButton::before {
-  content: "自动模式";
-  color: #c5d5cc;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) #assistantPanel#assistantPanel #agentSkillMenuButton#agentSkillMenuButton::after {
-  content: "⌄";
-  margin-left: 6px;
-  color: #8fa29a;
-  font-size: 11px;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.new-task-workbench:not(.home-mode) > section.review-panel.glass-panel {
@@ -14154,5 +14560,2399 @@ html[data-theme="light"] body[data-shell-view="home"] #homeTaskGrid .shell-task-
     left: 12px;
     width: 72px;
     height: 46px;
+  }
+}
+/* =========================================================================
+   浅色主题补漏 + 左面板头部压缩（2026-09-17 实测修复）
+   依据：Playwright 真实渲染探测清单，每条对应实测发黑元素
+   ========================================================================= */
+
+/* ---- A1 封面状态卡：原 light 覆盖只写了 #agentPlanDock 路径，
+        对话流改造后卡片在新位置失去覆盖，这里按类名全局补 ---- */
+html[data-theme="light"] body .agent-cover-status {
+  background: var(--ct-theme-raised, #f7f7f4) !important;
+  border-color: var(--ct-theme-border, #d7dad6) !important;
+}
+html[data-theme="light"] body .agent-cover-status[data-quality="missing"] {
+  background: #fdf3ec !important;
+  border-color: rgba(169, 78, 69, .38) !important;
+}
+html[data-theme="light"] body .agent-cover-status > button {
+  background: var(--ct-theme-hover, #eceeea) !important;
+}
+html[data-theme="light"] body .agent-cover-status > div small {
+  color: var(--ct-theme-warning, #9a661f) !important;
+}
+html[data-theme="light"] body .agent-cover-status > div strong {
+  color: var(--ct-theme-text, #1d2924) !important;
+}
+html[data-theme="light"] body .agent-cover-status > div span {
+  color: var(--ct-theme-text-muted, #596b61) !important;
+}
+html[data-theme="light"] body .agent-cover-status-placeholder {
+  border-color: var(--ct-theme-text-disabled, #98a49d) !important;
+  color: var(--ct-theme-text-muted, #596b61) !important;
+}
+
+/* ---- A2 版本缩略图占位（对比差 8 的"缩略图暂不可用"） ---- */
+html[data-theme="light"] body.ct-workbench-v4 #reviewRail .ct-v4-version-preview {
+  background: var(--ct-theme-hover, #eceeea) !important;
+  border: 1px solid var(--ct-theme-border, #d7dad6) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 #reviewRail .ct-v4-version-preview > span {
+  color: var(--ct-theme-text-muted, #596b61) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 #reviewRail .ct-v4-version-preview > span svg {
+  color: var(--ct-theme-text-muted, #596b61) !important;
+}
+
+/* ---- A3 下载按钮（styles.css:6837 的 !important 深色版被浅色覆盖） ---- */
+html[data-theme="light"] body .download-button {
+  background: var(--ct-theme-panel, #fff) !important;
+  color: var(--ct-theme-text, #1d2924) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
+html[data-theme="light"] body .download-button:hover {
+  background: var(--ct-theme-hover, #eceeea) !important;
+  color: var(--ct-theme-primary, #355d48) !important;
+  border-color: var(--ct-theme-primary, #355d48) !important;
+}
+
+/* A3b 同区域的状态徽章 / 筛选下拉（styles.css:6833-6836 同批深色） */
+html[data-theme="light"] body :where(.review-status) {
+  background: var(--ct-theme-raised, #f7f7f4) !important;
+  color: var(--ct-theme-text-muted, #596b61) !important;
+  border-color: var(--ct-theme-border, #d7dad6) !important;
+}
+html[data-theme="light"] body .review-status.active {
+  background: #fdf6e9 !important;
+  color: var(--ct-theme-warning, #9a661f) !important;
+  border-color: rgba(154, 102, 31, .35) !important;
+}
+html[data-theme="light"] body .review-status.complete {
+  background: #eef6f0 !important;
+  color: var(--ct-theme-success, #34764d) !important;
+  border-color: rgba(52, 118, 77, .32) !important;
+}
+html[data-theme="light"] body :where(.asset-chip, .video-view-select) {
+  background: var(--ct-theme-panel, #fff) !important;
+  color: var(--ct-theme-text, #1d2924) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
+
+/* ---- A4 上传卡（v4 + 非 v4 两条路径）与项目设置输入组 ---- */
+html[data-theme="light"] body.ct-workbench-v4 #uploadView .upload-card {
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-border, #d7dad6) !important;
+  box-shadow: 0 14px 34px rgba(44, 49, 46, .08) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 #workspace:not(.new-task-workbench) #uploadView .drop-zone {
+  background: var(--ct-theme-raised, #f7f7f4) !important;
+  border-color: var(--ct-theme-control-border, #bcc4bd) !important;
+}
+html[data-theme="light"] body:not(.ct-workbench-v4) .upload-card {
+  background: var(--ct-theme-panel, #fff) !important;
+  border-color: var(--ct-theme-border, #d7dad6) !important;
+  box-shadow: 0 14px 34px rgba(44, 49, 46, .08) !important;
+}
+html[data-theme="light"] body:not(.ct-workbench-v4) .intro h1 {
+  color: var(--ct-theme-text, #1d2924) !important;
+}
+html[data-theme="light"] body:not(.ct-workbench-v4) .intro > span {
+  color: var(--ct-theme-text-secondary, #43534b) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 #ctV4ProjectPanel :where(input, select, textarea) {
+  background: var(--ct-theme-panel, #fff) !important;
+  color: var(--ct-theme-text, #1d2924) !important;
+}
+
+/* ---- A6 播放器固定黑底，提示文字固定浅字（不随主题） ---- */
+#playerNotice strong { color: #eef4ef !important; }
+#playerNotice p { color: #b8c6c2 !important; }
+#playerNotice button {
+  background: rgba(255, 255, 255, .12) !important;
+  color: #eef4ef !important;
+  border-color: rgba(255, 255, 255, .35) !important;
+}
+
+/* =========================================================================
+   左面板头部压缩：stageNav 隐藏后 min-height:98px 成为纯空白
+   （workbench.css:613 为四阶段导航预留，导航已退役，回归内容自适应）
+   ========================================================================= */
+html body.ct-workbench-v4 #assistantPanel > .panel-header {
+  min-height: 0 !important;
+  padding: 10px 14px 9px !important;
+  gap: 4px 10px !important;
+}
+/* 头部只保留单行标题 + 收起钮，视觉再收一档 */
+html body.ct-workbench-v4 #assistantPanel .panel-header .director strong {
+  font-size: 15px !important;
+}
+
+/* ---- 右侧面板瘦身 (2026-09-17) ------------------------------------------
+   源素材卡（文件名 / 时长 / 分辨率）与中间 review-header 的信息完全重复，
+   隐藏该卡；其唯一独有控件「更换素材」已由 workspace-controller.js 移入
+   顶部「更多」菜单，功能不丢失。整个 #ctV4MaterialsSummary 仍保持 grid
+   布局（候选镜头卡 + 当前交付卡），不影响既有布局断言。
+   ------------------------------------------------------------------------ */
+html body.ct-workbench-v4 #reviewRail .ct-v4-materials-summary > .ct-v4-source-card {
+  display: none !important;
+}
+
+
+/* ---- 浅色模式：审核样片提示条（深色胶囊的 light 分支，2026-09-17） --------
+   深色版在 ~2480 行：.content-search-review / .content-search-results /
+   .auto-compose-result-card 的 ::after 写死深绿渐变 + 浅字，此前无 light 覆盖。 */
+html[data-theme="light"] body.ct-workbench-v4.ct-agent-preview-mode #assistantPanel #chatMessages > article.chat-message .content-search-review::after,
+html[data-theme="light"] body.ct-workbench-v4.ct-agent-preview-mode #assistantPanel #chatMessages > article.chat-message .content-search-results::after,
+html[data-theme="light"] body.ct-workbench-v4.ct-agent-preview-mode #assistantPanel #chatMessages > article.chat-message .auto-compose-result-card::after {
+  color: var(--ct-theme-text, #1d2924) !important;
+  background: var(--ct-theme-panel, #f4f7f5) !important;
+  border: 1px solid var(--ct-theme-line, #dbe4de) !important;
+  box-shadow: none !important;
+}
+
+/* ==== 交付操作可见性（P1-1：无版本时隐藏「播放/全部版本」，不再 disabled 占位） ==== */
+html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer[hidden],
+html body.ct-workbench-v4 #reviewRail #ctV4MaterialsSummary .ct-v4-version-card > footer[hidden],
+html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer button[hidden],
+html body.ct-workbench-v4 #reviewRail #ctV4MaterialsSummary .ct-v4-version-card > footer button[hidden] {
+  display: none !important;
+}
+
+
+/* ==== 浅色主题：工作区输入控件（theme.css 2469 深底 !important 特异性 (0,4,2)，
+   既有浅色规则 W8554 同为 !important 但特异性 (0,3,2) 输了，复选框等仍为黑底。
+   此处按同特异性 + 更晚加载压过深色规则。 marker: light-input-overrides-v2 ==== */
+html[data-theme="light"] body[data-shell-mode="workspace"] .studio.director-merged:not(.home-mode) :where(input, textarea, select, .candidate-drawer-search) {
+  border: 0 !important;
+  background: #f7f9f6 !important;
+  color: var(--pw-text, #1d2924) !important;
+  box-shadow: inset 0 0 0 1px #cfd9d2 !important;
+}
+html[data-theme="light"] body[data-shell-mode="workspace"] .studio.director-merged:not(.home-mode) :where(input[type="checkbox"], input[type="radio"]) {
+  box-shadow: inset 0 0 0 1px #b9c6bd !important;
+  accent-color: #3e6b54;
+}
+
+/* =========================================================================
+   浅色主题调色板统一入口（marker: light-palette-vars-v1, 2026-09-18）
+
+   typography.css:30 的 :root 只定义了一套深色值（--canvas / --surface-1~3 /
+   --text-* / --line-* / --status-* 等），大量组件通过 compatibility alias
+   （--panel / --bg / --work-* …）引用它们。此前浅色是靠 workbench.css 里逐
+   选择器补丁实现的，凡是选择器覆盖不到（例如外壳不处于 v4 工作区模式时打开的
+   声音/人物校正面板、以及尚未补到的部件）就会露出深底黑卡。
+
+   这里在 light 主题下整体重定义基础变量：所有走变量的元素自动获得浅色配色，
+   其余已经写死具体值的浅色规则不受影响（它们本来就是浅色）。
+   特异性 (0,1,1) 高于 :root (0,1,0)，且 workbench.css 最后加载。
+   ========================================================================= */
+html[data-theme="light"] {
+  --canvas: #f3f3f0;
+  --surface-1: #ffffff;
+  --surface-2: #f7f7f4;
+  --surface-3: #eceeea;
+  --surface-hover: #e4e9e4;
+  --text-primary: #1d2924;
+  --text-secondary: #596b61;
+  --text-tertiary: #7c8b83;
+  --accent-hover: #5d7d38;
+  --accent-ink: #ffffff;
+  --line-subtle: rgba(38, 63, 50, .10);
+  --line-structural: rgba(38, 63, 50, .16);
+  --line-ruler: rgba(38, 63, 50, .24);
+  --status-info: #3c7a72;
+  --status-success: #3d7a4e;
+  --status-warning: #8a6a1f;
+  --status-danger: #a7493f;
+  --playhead: #c1503f;
+  --focus-ring: rgba(62, 107, 84, .42);
+}
+
+/* =========================================================================
+   浅色模式补漏：写死深色的组件（marker: light-hardcoded-surfaces-v1, 2026-09-18）
+
+   体检发现以下部件背景是写死的深色十六进制值，不走 --surface-* 变量，
+   浅色主题下仍呈黑卡/黑条；其中「已选 N 段」汇总条深底配深字，对比度仅 1.4。
+   这里按现有浅色调色板补齐。
+   ========================================================================= */
+html[data-theme="light"] :where(
+  .content-candidate-event,
+  .content-candidate-event > summary,
+  .content-candidate-event-segments,
+  .content-match-row,
+  .content-review-diagnostics,
+  .content-review-diagnostics > div > div,
+  .content-completeness,
+  .content-generation-settings
+) {
+  border-color: #d7dad6 !important;
+  color: #263a30 !important;
+  background: #f2f4f2 !important;
+}
+html[data-theme="light"] .content-selection-summary {
+  border-color: #cbd3ce !important;
+  color: #43534b !important;
+  background: #eef1ed !important;
+}
+html[data-theme="light"] .content-selection-summary strong,
+html[data-theme="light"] .content-selection-summary b {
+  color: #1d2924 !important;
+}
+html[data-theme="light"] :where(
+  .content-candidate-event > summary span small,
+  .content-candidate-event > summary span em,
+  .content-exhaustive-controls span,
+  .content-generation-settings summary,
+  .content-generation-settings label span,
+  .content-generation-settings small,
+  .content-search-actions small
+) {
+  color: #596b61 !important;
+}
+
+/* 侧栏任务卡：状态标签与元信息在浅色下太浅（对比度 1.47 / 2.92） */
+html[data-theme="light"] .shell-task-state {
+  color: #7a5f2a !important;
+}
+html[data-theme="light"] .shell-task-card button.shell-task-open > small {
+  color: #596b61 !important;
+}
+
+/* 精细时间线：轨道视口与底部操作条在浅色下仍是深底 */
+html[data-theme="light"] #timelineViewport#timelineViewport {
+  background: #f7f7f4 !important;
+}
+html[data-theme="light"] .review-action-controls > label,
+html[data-theme="light"] .review-action-controls > label > select {
+  border-color: #cbd3ce !important;
+  color: #1d2924 !important;
+  background: #ffffff !important;
+}
+html[data-theme="light"] #reviewActionDock#reviewActionDock :where(.review-action-settings, .review-action-edit) {
+  border-color: #cbd3ce !important;
+  color: #344b3f !important;
+  background: #eceeea !important;
+}
+html[data-theme="light"] #timelinePanel#timelinePanel .timeline-speaker-row-label > button,
+html[data-theme="light"] #timelinePanel#timelinePanel .timeline-person-row-label > button {
+  border-color: #d7dad6 !important;
+  color: #263a30 !important;
+  background: #ffffff !important;
+}
+html[data-theme="light"] .timeline-speaker-row-label > button :where(strong, small),
+html[data-theme="light"] .timeline-person-row-label > button :where(strong, small) {
+  color: #43534b !important;
+}
+
+/* =========================================================================
+   浅色模式：内容检索卡内次要文字对比度（marker: light-content-card-text-v1）
+
+   内容卡正文随主题变化；以下保留浅色次要说明的层级色，避免历史
+   控件规则覆盖。新增提示直接沿用正文的主题颜色。
+   ========================================================================= */
+html[data-theme="light"] body.ct-workbench-v4 #assistantPanel#assistantPanel #chatMessages#chatMessages .content-search-review :where(
+  summary span small,
+  summary span em,
+  .content-exhaustive-controls span,
+  .content-selection-summary span,
+  .content-output-controls label span,
+  .content-output-controls small,
+  .content-subtitle-toggle small,
+  .content-search-actions small
+) {
+  color: #596b61 !important;
+}
+
+/* =========================================================================
+   浅色主题：写死浅色文字 + 变量背景的控件（marker: light-control-text-v1）
+
+   typography.css 里几组控件把文字写成了浅灰绿（#c5cec6 / #d9e1da / #c8d0c9），
+   背景走 --surface-* 变量。变量调色板在浅色下翻转后，这些字会变成浅底浅字
+   （对比度 ~1.5，测试 audit-regressions 44/46 已复现）。这里补深色文字。
+   ========================================================================= */
+html[data-theme="light"] :where(
+  .top-button, .home-button, .engine, .download-button, .icon-button,
+  .assistant-panel-toggle, .video-view-select,
+  .asset-chip, .review-panel-switch button, .candidate-drawer button,
+  .settings-panel button, .action-confirm-card button,
+  .workflow-routing-options button
+) {
+  color: #344b3f !important;
+}
+html[data-theme="light"] :where(
+  .timeline-clip,
+  .timeline-label,
+  .timeline-shot-marker,
+  .timeline-person-segment,
+  .timeline-speaker-segment
+) {
+  color: #263a30 !important;
+}
+html[data-theme="light"] .secondary-editor button {
+  color: #344b3f !important;
+}
+html[data-theme="light"] :where(.timeline-speaker-row-label, .timeline-person-row-label):is(:hover, :focus-visible, .focused) {
+  color: #1d2924 !important;
+}
+
+/* ===== uxpolish-v1: 待确认导出可点入口 + 项目已载入短暂提示 ===== */
+span#reviewStatus.action-entry { cursor: pointer; }
+span#reviewStatus.action-entry:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ct-v4-save-state.is-transient { transition: opacity 0.6s ease 0.15s; }
+.ct-v4-save-state.is-transient.is-transient-faded { opacity: 0; pointer-events: none; }
+/* ===== uxpolish-v1 end ===== */
+
+/* ===== ux13: 对话区重设计 v1 ===== */
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message.user.user-compact {
+  justify-content: flex-end;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message.user.user-compact > .avatar {
+  display: none !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) #assistantPanel #chatMessages .chat-message.user.user-compact > .bubble {
+  max-width: min(80%, 560px) !important;
+  margin-left: auto !important;
+  padding: 7px 12px !important;
+  border: 1px solid rgba(46, 125, 91, .24) !important;
+  border-radius: 14px 14px 4px 14px !important;
+  background: #e6f1ea !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message.user.user-compact > .bubble p {
+  color: #23453a !important;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .you-prefix {
+  color: #2e7d5b !important;
+  font-weight: 700 !important;
+  margin-right: 3px;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .you-prefix::after {
+  content: "：";
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .message-meta-inline {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10.5px !important;
+  font-style: normal;
+  color: #4e6a60 !important;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .message-inline-tag {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px !important;
+  font-style: normal;
+  color: #4c6b5e !important;
+  background: rgba(46, 125, 91, .12) !important;
+  vertical-align: 1px;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .bubble small {
+  font-size: 10.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: .02em;
+  color: #4a5f57 !important;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .avatar {
+  width: 26px !important;
+  height: 26px !important;
+  flex: 0 0 26px !important;
+  border: 0 !important;
+  border-radius: 9px !important;
+  font-size: 9.5px !important;
+  font-weight: 700 !important;
+  color: #f2f8f4 !important;
+  background: linear-gradient(135deg, #2e7d5b, #47a37a) !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message.assistant > .bubble {
+  border: 1px solid rgba(31, 58, 45, .1) !important;
+  border-radius: 4px 14px 14px 14px !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) #assistantPanel #chatMessages .chat-message.user.user-compact > .bubble {
+  background: rgba(71, 163, 122, .16) !important;
+  border-color: rgba(71, 163, 122, .3) !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) #assistantPanel #chatMessages .chat-message.user.user-compact > .bubble p {
+  color: #d9e9df !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .you-prefix {
+  color: #7cc9a2 !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .message-meta-inline {
+  color: #a3b8ae !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .message-inline-tag {
+  color: #9ec9b4 !important;
+  background: rgba(71, 163, 122, .16) !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message > .bubble small {
+  color: #a9beb3 !important;
+}
+html[data-theme="dark"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message.assistant > .bubble {
+  border-color: rgba(255, 255, 255, .08) !important;
+}
+/* ===== ux13 end ===== */
+
+/* ux16: 成片已生成结果卡重排：堆叠标题 + 呼吸间距，仅作用于结果态（data-tone=success） */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > header {
+  display: block !important;
+  border-bottom: none !important;
+  padding: 0 !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > header small {
+  display: block !important;
+  margin: 0 0 6px !important;
+  font-size: 11px !important;
+  letter-spacing: .06em !important;
+  color: var(--ct-text-secondary) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > header > b {
+  font-size: 15.5px !important;
+  font-weight: 760 !important;
+  line-height: 1.4 !important;
+  letter-spacing: 0 !important;
+  color: var(--ct-text) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer {
+  border-top: none !important;
+  justify-content: flex-start !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary {
+  line-height: 1.5 !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details[open] > summary {
+  margin-bottom: 6px;
+}
+
+/* ux16b: 结果态标题去徽章底色 */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > header > b {
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--ct-text, #243029) !important;
+}
+
+/* 浅色模式下检索结果操作区 */
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
+  :is(#assistantPanel#assistantPanel #chatMessages#chatMessages, #reviewWorkbench#reviewWorkbench)
+  :is(.content-search-scope, .content-match-full-title p, .content-match-full-title summary, .content-search-diagnostics) {
+  color: #405a4c !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
+  :is(#assistantPanel #chatMessages, #reviewWorkbench) :is(
+    .content-match-buttons,
+    .content-history-actions,
+    .content-exhaustive-controls-bottom
+  ) {
+  border-color: rgba(38, 63, 50, .12) !important;
+  color: #334b3f !important;
+  background: #eef1ed !important;
+  background-image: none !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
+  :is(#assistantPanel #chatMessages, #reviewWorkbench) .content-match-buttons button {
+  border-color: rgba(53, 93, 72, .25) !important;
+  color: #294c3b !important;
+  background: #ffffff !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
+  :is(#assistantPanel #chatMessages, #reviewWorkbench) .content-match-buttons button:hover,
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
+  :is(#assistantPanel #chatMessages, #reviewWorkbench) .content-match-buttons button:focus-visible {
+  border-color: #4d775f !important;
+  color: #203e30 !important;
+  background: #e4efe7 !important;
+}
+
+/* ux18: 移动端浅色主题的工作区切换栏 */
+@media (max-width: 1280px) {
+  html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode)
+    > #ctCompactWorkspaceNav.ct-compact-workspace-nav {
+    border-color: var(--ct-theme-border, #d7dad6) !important;
+    background: #f0f3ef !important;
+    box-shadow: 0 3px 12px rgba(37, 54, 45, .08) !important;
+  }
+  html[data-theme="light"] body.ct-workbench-v4 #workspace:not(.home-mode)
+    > #ctCompactWorkspaceNav button {
+    color: #53675c !important;
+  }
+  html[data-theme="light"] body.ct-workbench-v4 #workspace:not(.home-mode)
+    > #ctCompactWorkspaceNav button[aria-selected="true"] {
+    color: #f7fbf7 !important;
+    background: #355d48 !important;
+  }
+}
+
+/* ==========================================================================================
+   UX 补丁区维护索引（2026-09-18 建档）——新增补丁请追加到文件末尾并在此登记
+   ------------------------------------------------------------------------------------------
+   本文件尾部补丁块（按出现顺序）：
+     ux13   :14514  对话区重设计（用户消息单行胶囊 / AI 渐变头像 / 眉标与气泡质感）
+     ux16   :14607  成片已生成结果卡重排（仅 [data-tone=success]：堆叠标题+呼吸间距）
+     ux16b  :14665  结果态标题去徽章底色（双写 id 压过浅色主题 badge 规则）
+   ux19   :14728  结果卡整体重设计（成功色染面+对勾徽标+版本芯片+胶囊按钮+历史行箭头）
+   ux19b  :（同 ux19 块内替换）浅色卡面改 6-id 链 + 主按钮渐变
+   ux21   :15074  规划进度条浅色适配（对话流 cs-kind-planning 紧凑化 + 方案抽屉浅色卡）
+  ux23   :15137  任务进程卡分组（连续 notice/recommendation 收成一卡）+ 待确认状态卡四段分层 + 指令回填去重
+  ux24   :15246  审核样片结果卡统一为阶段结果语汇（对勾徽标+数量芯片+绿色染面+序号芯片+胶囊按钮）
+  ux25   :15449  方案确认卡重构为剪辑结果确认卡（✓标题+待确认chip+结论句+折叠详情+淡绿胶囊操作区）
+  ux26   :15573  时间轴可达性修复（封面复核轨限高内滚 + viewport 保底 232px + 面板可滚兜底）
+   规则：
+     1. 本文件旧规则特异性极高（4-id 前缀 + !important），新补丁需同级或更高特异性；
+     2. 不要移动既有规则的先后顺序——同特异性时后者胜，移动会引发级联回归；
+     3. index.html 的 ?v= 已由服务端按静态资源 mtime 自动改写（app/main.py _index_html_with_asset_stamp），
+        改完 css/js 无需手动 bump 版本串；
+     4. 改动后必须跑：npm run test:frontend + playwright 明暗双主题走查。
+   ========================================================================================== */
+
+/* ===== ux19: 结果卡（data-tone=success）整体重设计 =====
+   目标：解决"挤、方、糊"——成功色染卡面 + 对勾徽标 + 版本芯片 + 胶囊按钮
+   + 历史记录行自定义箭头。基础（暗色）2-id 前缀 + [data-tone]；
+   浅色覆盖用 4-id 双写前缀 + [data-tone]（压过 :where() 浅色按钮规则）。
+   依赖 agent-workspace.js 结果卡模板中的
+   .result-check / .result-ver / .result-sep / .result-title / .result-play。
+   注意：.assistant-result-summary 保持行内排版（测试断言 innerText 单行匹配）。 */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] {
+  padding: 16px 18px 14px !important;
+  border: 1px solid rgba(124, 201, 162, .22) !important;
+  background: linear-gradient(150deg, rgba(46, 125, 91, .16), rgba(46, 125, 91, .05) 58%, rgba(46, 125, 91, .03)) !important;
+  box-shadow: 0 14px 30px rgba(2, 8, 12, .24), inset 0 1px 0 rgba(198, 222, 207, .08) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > header > b {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > header > b .result-check {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 21px !important;
+  width: 21px !important;
+  height: 21px !important;
+  border-radius: 50% !important;
+  background: linear-gradient(135deg, #2b7355, #47a37a) !important;
+  color: #f2f8f4 !important;
+  font-size: 11.5px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 2px 6px rgba(43, 115, 85, .3) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] .assistant-result-summary {
+  margin: 10px 0 0 !important;
+  font-size: 12.5px !important;
+  line-height: 2 !important;
+  color: var(--ct-text-secondary) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] .assistant-result-summary .result-ver {
+  display: inline-block !important;
+  margin-right: 2px !important;
+  padding: 1px 9px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(124, 201, 162, .34) !important;
+  background: rgba(124, 201, 162, .13) !important;
+  color: #7cc9a2 !important;
+  font-size: 11px !important;
+  font-weight: 750 !important;
+  letter-spacing: .02em !important;
+  vertical-align: 1px !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] .assistant-result-summary .result-sep {
+  margin: 0 3px !important;
+  color: var(--ct-text-secondary) !important;
+  opacity: .55 !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer {
+  margin-top: 14px !important;
+  gap: 9px !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button {
+  min-height: 34px !important;
+  padding: 7px 18px !important;
+  border-radius: 999px !important;
+  border: 1px solid transparent !important;
+  font-size: 12.5px !important;
+  font-weight: 720 !important;
+  letter-spacing: .01em !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button .result-play {
+  margin-right: 6px !important;
+  font-size: 10px !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button.primary {
+  color: #f2f8f4 !important;
+  background: linear-gradient(135deg, #2b7355, #31805f) !important;
+  box-shadow: 0 6px 14px rgba(43, 115, 85, .32) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button.primary:is(:hover, :focus-visible) {
+  background: linear-gradient(135deg, #26674c, #2b7355) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button:not(.primary) {
+  color: #a9d8c0 !important;
+  background: rgba(124, 201, 162, .07) !important;
+  border-color: rgba(124, 201, 162, .32) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button:not(.primary):is(:hover, :focus-visible) {
+  color: #c4e6d4 !important;
+  background: rgba(124, 201, 162, .14) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > footer button:disabled {
+  opacity: .45 !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details {
+  margin-top: 12px !important;
+  border-top: 1px solid rgba(124, 201, 162, .18) !important;
+  padding-top: 9px !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  margin-left: -6px !important;
+  padding: 2px 6px !important;
+  border-radius: 7px !important;
+  list-style: none !important;
+  cursor: pointer !important;
+  font-size: 12px !important;
+  font-weight: 650 !important;
+  color: var(--ct-text-secondary) !important;
+  transition: color .15s ease, background-color .15s ease !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary::-webkit-details-marker {
+  display: none !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary::after {
+  content: "▸" !important;
+  font-size: 10px !important;
+  opacity: .8 !important;
+  transition: transform .15s ease !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details[open] > summary::after {
+  transform: rotate(90deg) !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel #agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary:is(:hover, :focus-visible) {
+  color: var(--ct-text) !important;
+  background: rgba(124, 201, 162, .08) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio:not(.home-mode) > aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock:not(.hidden)[data-tone="success"] {
+  border: 1px solid rgba(53, 93, 72, .22) !important;
+  border-left: 3px solid #355d48 !important;
+  background: linear-gradient(150deg, #eef6f0, #fbfdfb 60%, #ffffff) !important;
+  box-shadow: 0 12px 28px rgba(44, 49, 46, .08) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] .assistant-result-summary .result-ver {
+  border-color: rgba(53, 93, 72, .26) !important;
+  background: rgba(53, 93, 72, .08) !important;
+  color: #2f5341 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] .assistant-result-summary .result-sep {
+  color: #5d746b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > footer button.primary {
+  background: linear-gradient(135deg, #2b7355, #31805f) !important;
+  box-shadow: 0 6px 14px rgba(43, 115, 85, .26) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > footer button:not(.primary) {
+  color: #2f5341 !important;
+  background: rgba(53, 93, 72, .05) !important;
+  border-color: rgba(53, 93, 72, .34) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > footer button:not(.primary):is(:hover, :focus-visible) {
+  color: #24443a !important;
+  background: rgba(53, 93, 72, .1) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > details {
+  border-top-color: rgba(53, 93, 72, .16) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #agentPlanDock#agentPlanDock.agent-plan-dock[data-tone="success"] > details > summary:is(:hover, :focus-visible) {
+  background: rgba(53, 93, 72, .07) !important;
+}
+/* ===== ux19 end ===== */
+
+/* ===== ux20 begin: legacy non-workbench skins migrated from styles.css ===== */
+/* Moved verbatim so the ownership audit keeps every workbench token in this file. */
+body:not(.ct-workbench-v4) .review-panel { background: #0d151c !important; scrollbar-color: #344650 transparent !important; }
+body:not(.ct-workbench-v4) .intro > p { color: var(--work-gold) !important; }
+body:not(.ct-workbench-v4) .intro h1 { color: #edf2f4 !important; }
+body:not(.ct-workbench-v4) .intro h1 em { color: var(--work-gold-bright) !important; }
+body:not(.ct-workbench-v4) .intro > span { color: #8b999f !important; }
+body:not(.ct-workbench-v4) .upload-card { border-color: #2d3b45 !important; background: #101920 !important; box-shadow: 0 18px 40px rgba(0, 0, 0, .2) !important; }
+body:not(.ct-workbench-v4) .drop-zone { border-color: #53636b !important; background: #141e27 !important; }
+body:not(.ct-workbench-v4) .drop-zone:hover,
+body:not(.ct-workbench-v4) .drop-zone.dragging { border-color: var(--work-gold) !important; background: #1b2932 !important; box-shadow: inset 0 0 30px rgba(201, 151, 79, .05) !important; }
+body:not(.ct-workbench-v4) .drop-zone > span { border-color: #80643c !important; color: var(--work-gold-bright) !important; background: rgba(201, 151, 79, .14) !important; box-shadow: none !important; }
+body:not(.ct-workbench-v4) .intro > p { font-size: 10px !important; font-weight: 600 !important; letter-spacing: .12em; }
+body:not(.ct-workbench-v4) .intro h1 { font-size: clamp(30px, 3.1vw, 40px) !important; font-weight: 600 !important; line-height: 1.15 !important; letter-spacing: -.035em; text-wrap: balance; }
+body:not(.ct-workbench-v4) .intro h1 em { font-style: normal; }
+body:not(.ct-workbench-v4) .intro > span { max-width: 54ch; font-size: 13px !important; line-height: 1.7 !important; }
+body:not(.ct-workbench-v4) .drop-zone strong { font-size: 14px !important; font-weight: 600 !important; }
+body:not(.ct-workbench-v4) .drop-zone small { font-size: 11px !important; line-height: 1.45; }
+
+/* ===== ux20: panel-system.css merged here (it was the last stylesheet) ===== */
+/* Final panel contract. Keep panel visibility, stacking and compact layouts
+   authoritative here so legacy component skins cannot override interaction state. */
+:root {
+  --ct-panel-drawer-width: clamp(320px, 30vw, 430px);
+}
+
+/* Hidden is a state, never a presentation preference. These roots previously
+   lost to more-specific display:grid/flex declarations. */
+html body #homeView.hidden,
+html body #taskSetupView.hidden,
+html body #reviewView.hidden,
+html body #timelinePanel.hidden,
+html body #timelinePrecisionDrawer.hidden,
+html body #ctV4AssistantQuickStart.hidden,
+html body #agentPlanDrawer.hidden,
+html body #agentPlanDrawerScrim.hidden,
+html body #secondaryEditor.hidden,
+html body #secondaryEditorPanelScrim.hidden,
+html body #drawerBackdrop.hidden,
+html body #settingsBackdrop.hidden,
+html body #libraryView.hidden,
+html body #settingsPanel.hidden,
+html body #candidateDrawer.hidden,
+html body #voiceProfilePanel.hidden,
+html body #personProfilePanel.hidden,
+html body #subtitleReview.hidden,
+html body #coverImagePreview.hidden,
+html body #actionConfirm.hidden,
+html body #inputPrompt.hidden {
+  display: none !important;
+}
+html body.ct-workbench-v4 #reviewView#reviewView.hidden.hidden {
+  display: none !important;
+}
+
+/* One semantic layer scale for all page-level surfaces. */
+html body > #appSidebar,
+html body > #ctV4Topbar { z-index: var(--ct-z-navigation, 100) !important; }
+html body > #mobileNavigationToggle { z-index: calc(var(--ct-z-navigation, 100) + 1) !important; }
+html body > #appSidebarScrim,
+html body > #drawerBackdrop,
+html body > #agentPlanDrawerScrim { z-index: var(--ct-z-drawer-scrim, 400) !important; }
+html body > #sidebarHistoryDrawer,
+html body > #candidateDrawer,
+html body > #agentPlanDrawer { z-index: var(--ct-z-drawer, 410) !important; }
+html body > #secondaryEditor { z-index: var(--ct-z-modal, 510) !important; }
+html body > #subtitleReview { z-index: var(--ct-z-modal, 510) !important; }
+html body > #coverImagePreview { z-index: calc(var(--ct-z-modal, 510) + 1) !important; }
+html body > :is(#actionConfirm, #inputPrompt, #accessTokenDialog, #agentRegistryDialog) { z-index: var(--ct-z-system-dialog, 600) !important; }
+html body > #toastRegion,
+html body > .toast-region { z-index: var(--ct-z-notice, 700) !important; }
+
+/* Closed off-canvas panels must neither paint nor accept pointer input. */
+html body > #candidateDrawer {
+  width: min(var(--ct-panel-drawer-width), calc(100vw - 24px));
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(calc(100% + 32px));
+  transition: transform .22s cubic-bezier(.2, .75, .25, 1), opacity .16s ease, visibility 0s linear .22s;
+}
+html body > #candidateDrawer.open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateX(0);
+  transition-delay: 0s;
+}
+
+/* The timeline settings panel docks beside the tracks instead of covering them. */
+@media (min-width: 1280px) {
+  html body.timeline-precision-drawer-open #timelinePanel {
+    padding-right: 348px !important;
+  }
+  html body.timeline-precision-drawer-open #timelinePanel > #timelinePrecisionDrawer {
+    top: 7px;
+    right: 7px;
+    bottom: 7px;
+    width: 334px;
+  }
+}
+@media (max-width: 1279px) {
+  html body #timelinePrecisionDrawer:not(.hidden) {
+    position: fixed;
+    z-index: var(--ct-z-drawer, 410);
+    top: 72px;
+    right: 12px;
+    bottom: 12px;
+    width: min(390px, calc(100vw - 24px));
+  }
+}
+
+.secondary-editor-panel-scrim {
+  position: absolute;
+  z-index: 19;
+  inset: 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: rgba(5, 12, 14, .54) !important;
+  backdrop-filter: blur(2px);
+}
+@media (min-width: 781px) {
+  .secondary-editor-panel-scrim { display: none !important; }
+}
+
+/* A save action belongs to the form's scroll surface and must not cover the
+   final controls. */
+html body[data-shell-view="settings"] #settingsPanel form:has(.settings-save-bar:not(.hidden)) {
+  padding-bottom: 112px !important;
+}
+
+/* Library/settings are page routes, but the global rail controls must keep the
+   same hit boxes as the task workspace. Workbench styles load before this file
+   and may expand utility actions for page routes, so lock them here. */
+html body[data-shell-view="library"] > #appSidebar#appSidebar #themeToggle#themeToggle,
+html body[data-shell-view="library"] > #appSidebar#appSidebar #settingsButton#settingsButton,
+html body[data-shell-view="settings"] > #appSidebar#appSidebar #themeToggle#themeToggle,
+html body[data-shell-view="settings"] > #appSidebar#appSidebar #settingsButton#settingsButton {
+  width: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  margin-inline: auto !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: 10px !important;
+}
+
+html body[data-shell-view="library"] > #appSidebar#appSidebar .app-sidebar-utility,
+html body[data-shell-view="settings"] > #appSidebar#appSidebar .app-sidebar-utility {
+  gap: 14px !important;
+  padding-top: 14px !important;
+  padding-bottom: 22px !important;
+}
+
+html body > #appSidebar#appSidebar #sidebarNewTask#sidebarNewTask {
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+  height: 52px !important;
+  min-height: 52px !important;
+  max-height: 52px !important;
+}
+
+html body[data-shell-view="library"] > #appSidebar#appSidebar #themeToggle#themeToggle > span,
+html body[data-shell-view="library"] > #appSidebar#appSidebar #settingsButton#settingsButton > span,
+html body[data-shell-view="settings"] > #appSidebar#appSidebar #themeToggle#themeToggle > span,
+html body[data-shell-view="settings"] > #appSidebar#appSidebar #settingsButton#settingsButton > span {
+  display: none !important;
+}
+
+/* Workbench loads after theme.css and owns some historical mobile home-card
+   spacing. Keep the refreshed mobile task rows left-aligned and readable. */
+@media (max-width: 760px) {
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-open {
+    padding-right: 0 !important;
+    padding-left: 0 !important;
+    grid-template-columns: 72px minmax(0, 1fr) !important;
+    justify-content: stretch !important;
+    justify-items: stretch !important;
+  }
+
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-media {
+    grid-column: 1 !important;
+    grid-row: 1 / 5 !important;
+  }
+
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-heading,
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-open > small,
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-detail,
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-foot {
+    grid-column: 2 !important;
+  }
+
+  html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-foot {
+    grid-row: auto !important;
+    justify-self: start !important;
+    justify-items: start !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html body > #candidateDrawer { transition: none; }
+}
+/* ===== ux20 end ===== */
+
+/* ===== ux21 begin: 规划进度条浅色适配（对话流 + 方案抽屉） ===== */
+/* 对话流里的规划卡（cs-kind-planning）复用 dock 的 innerHTML，但 dock 的紧凑化与浅色
+   规则全部锁在 .agent-plan-dock 容器链上，对话流里吃到的仍是 agent-workspace.css 的
+   暗色底（rgba(20,33,40,.72)）。这里让对话流走 dock 同款紧凑化（浅色），方案抽屉的
+   展开版保留全部信息但改为浅色卡。暗色主题维持原设计不动。 */
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track {
+  margin: 10px 0 0 !important;
+  padding: 10px 0 0 !important;
+  border: 0 !important;
+  border-top: 1px solid #d7dad6 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: #43534b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track > header span,
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track > header b,
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track > p {
+  display: none !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track > header strong {
+  color: #344b3f !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track .agent-planning-live-bar {
+  height: 8px !important;
+  margin-top: 8px !important;
+  border: 1px solid #cbd3ce !important;
+  border-radius: 999px !important;
+  background: #e2e7e2 !important;
+  background-image: none !important;
+  box-shadow: inset 0 1px 2px rgba(37, 54, 45, .1) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .chat-message.assistant.cs-kind-planning .agent-planning-live-track .agent-planning-live-bar i {
+  background: #4e8b65 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track {
+  border-color: #d7dad6 !important;
+  background: rgba(53, 93, 72, .06) !important;
+  color: #43534b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track > header span {
+  color: #5d6f65 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track > header strong {
+  color: #2f463b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track > header b {
+  color: #8a6a34 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track > p {
+  color: #5d6f65 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track .agent-planning-live-bar {
+  border-color: #cbd3ce !important;
+  background: #dfe5df !important;
+  box-shadow: inset 0 1px 2px rgba(37, 54, 45, .08) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer#agentPlanDrawer.agent-plan-drawer .agent-planning-live-track .agent-planning-live-bar i {
+  background: #4e8b65 !important;
+}
+/* ===== ux21 end ===== */
+/* ===== ux23 begin —— 对话区任务进程卡 / 待确认状态卡四段分层 =====
+   ux23-a: 任务进程卡（一次执行只出现一个 AI 标记，过程按阶段一行，原文折叠）
+   ux23-b: 待确认状态卡（状态头 / 结论句 / 折叠区 / 操作区）
+   =================================================================== */
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run > .bubble {
+  padding: 9px 13px 10px !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run > .bubble > .message-role-label {
+  font-size: 11px;
+  color: #4e6a60;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run > .bubble > .message-role-label {
+  color: #a3b8ae;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-list {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-step {
+  position: relative;
+  padding: 0 0 8px 15px;
+  line-height: 1.5;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-step:last-child {
+  padding-bottom: 0;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-step::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 14px;
+  bottom: -2px;
+  width: 1px;
+  background: rgba(120, 138, 130, .28);
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-step:last-child::before {
+  display: none;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-dot {
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2e7d5b;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-dot {
+  background: #47a37a;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-line {
+  margin: 0;
+  font-size: 13px;
+  color: #33403b;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-line {
+  color: #dbe6e1;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-line > b {
+  display: inline-block;
+  min-width: 40px;
+  margin-right: 6px;
+  font-weight: 400;
+  color: #4e6a60;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-detail {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: #4e6a60;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-detail {
+  color: #a3b8ae;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages > article.chat-message.task-run .task-run-detail > summary {
+  cursor: pointer;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-status-head {
+  margin-bottom: 6px;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-status-head > small {
+  color: #4e6a60;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-status-head > small {
+  color: #a3b8ae;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > p.agent-plan-lead {
+  color: #dbe6e1;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > div.agent-plan-body > .assistant-plan-summary > p.agent-plan-progress-summary {
+  color: #4e6a60;
+}
+html[data-theme="dark"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > div.agent-plan-body > .assistant-plan-summary > p.agent-plan-progress-summary {
+  color: #a3b8ae;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock footer > button.agent-plan-view-action {
+  margin-right: 14px;
+}
+/* ===== ux23 end ===== */
+
+/* ===== ux24 begin —— 审核样片结果卡统一为「阶段结果」语汇 =====
+   ux24-a: 面板头部（对勾徽标 + 结论句 + 数量芯片）与 ux19 成片结果卡一致
+   ux24-b: 样片卡去橙色，改成功绿染面 + 序号芯片 + 胶囊按钮（主=导出成片，次=预览样片）
+   依赖 app.js agentReviewPanelMarkup / agentReviewPreviewMarkup 中的
+   .rail-result-card / .rail-result-head / .result-check / .result-ver / .rail-result-lead / .preview-index / .preview-main。
+   只作用于 v4 工作台（body.ct-workbench-v4），legacy 皮肤保持原样色。
+   =================================================================== */
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card {
+  display: grid !important;
+  gap: 11px !important;
+  padding: 14px 16px 15px !important;
+  border: 1px solid rgba(124, 201, 162, .22) !important;
+  border-radius: 14px !important;
+  background: linear-gradient(150deg, rgba(46, 125, 91, .16), rgba(46, 125, 91, .05) 58%, rgba(46, 125, 91, .03)) !important;
+  box-shadow: 0 14px 30px rgba(2, 8, 12, .24), inset 0 1px 0 rgba(198, 222, 207, .08) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin: 0 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head > .result-check {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 21px !important;
+  width: 21px !important;
+  height: 21px !important;
+  border-radius: 50% !important;
+  background: linear-gradient(135deg, #2b7355, #47a37a) !important;
+  color: #f2f8f4 !important;
+  font-size: 11.5px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 2px 6px rgba(43, 115, 85, .3) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head > b {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  font-size: 14.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: .01em !important;
+  color: #eaf2ec !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head > em.result-ver {
+  flex: 0 0 auto !important;
+  padding: 2px 9px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(124, 201, 162, .34) !important;
+  background: rgba(124, 201, 162, .13) !important;
+  color: #7cc9a2 !important;
+  font-size: 11px !important;
+  font-style: normal !important;
+  font-weight: 750 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > p.rail-result-lead {
+  margin: 0 !important;
+  font-size: 12.5px !important;
+  line-height: 1.6 !important;
+  color: var(--ct-text-secondary) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card .agent-review-preview-list {
+  display: grid !important;
+  gap: 8px !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card {
+  gap: 10px !important;
+  padding: 11px 12px !important;
+  border: 1px solid rgba(124, 201, 162, .3) !important;
+  border-radius: 11px !important;
+  background: linear-gradient(135deg, rgba(124, 201, 162, .1), rgba(19, 31, 36, .86)) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card:is(:hover, :focus-visible) {
+  border-color: #7cc9a2 !important;
+  background: linear-gradient(135deg, rgba(124, 201, 162, .17), rgba(24, 39, 45, .92)) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card > i.preview-index {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 22px !important;
+  width: 22px !important;
+  height: 22px !important;
+  border-radius: 7px !important;
+  border: 1px solid rgba(124, 201, 162, .32) !important;
+  background: rgba(124, 201, 162, .12) !important;
+  color: #a9d8c0 !important;
+  font-size: 11.5px !important;
+  font-style: normal !important;
+  font-weight: 750 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card > span.preview-main {
+  gap: 3px !important;
+  min-width: 0 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card > span.preview-main > strong {
+  font-size: 12.5px !important;
+  color: #f5f7f7 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card > span.preview-main > small {
+  font-size: 10.5px !important;
+  color: #92a2a8 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions {
+  display: flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button {
+  min-height: 30px !important;
+  padding: 5px 13px !important;
+  border-radius: 999px !important;
+  border: 1px solid transparent !important;
+  font-size: 11.5px !important;
+  font-weight: 720 !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button .result-play {
+  margin-right: 5px !important;
+  font-size: 9px !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button.primary {
+  color: #f2f8f4 !important;
+  background: linear-gradient(135deg, #2b7355, #31805f) !important;
+  box-shadow: 0 6px 14px rgba(43, 115, 85, .32) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button.primary:is(:hover, :focus-visible) {
+  background: linear-gradient(135deg, #26674c, #2b7355) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button:not(.primary) {
+  color: #a9d8c0 !important;
+  background: rgba(124, 201, 162, .07) !important;
+  border-color: rgba(124, 201, 162, .32) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button:not(.primary):is(:hover, :focus-visible) {
+  color: #c4e6d4 !important;
+  background: rgba(124, 201, 162, .14) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button:disabled {
+  opacity: .45 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card {
+  border: 1px solid rgba(53, 93, 72, .22) !important;
+  border-left: 3px solid #355d48 !important;
+  background: linear-gradient(150deg, #eef6f0, #fbfdfb 60%, #ffffff) !important;
+  box-shadow: 0 12px 28px rgba(44, 49, 46, .08) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head > b {
+  color: #23322a !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > header.rail-result-head > em.result-ver {
+  border-color: rgba(53, 93, 72, .26) !important;
+  background: rgba(53, 93, 72, .08) !important;
+  color: #2f5341 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-panel.rail-result-card > p.rail-result-lead {
+  color: #5d746b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card {
+  border-color: rgba(53, 93, 72, .22) !important;
+  background: linear-gradient(135deg, rgba(53, 93, 72, .06), #ffffff 72%) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card:is(:hover, :focus-visible) {
+  border-color: #355d48 !important;
+  background: linear-gradient(135deg, rgba(53, 93, 72, .11), #ffffff 72%) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card > i.preview-index {
+  border-color: rgba(53, 93, 72, .28) !important;
+  background: rgba(53, 93, 72, .08) !important;
+  color: #2f5341 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card > span.preview-main > strong {
+  color: #23322a !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card > span.preview-main > small {
+  color: #6b7d76 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button.primary {
+  background: linear-gradient(135deg, #2b7355, #31805f) !important;
+  box-shadow: 0 6px 14px rgba(43, 115, 85, .26) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button:not(.primary) {
+  color: #2f5341 !important;
+  background: rgba(53, 93, 72, .05) !important;
+  border-color: rgba(53, 93, 72, .34) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button:not(.primary):is(:hover, :focus-visible) {
+  color: #24443a !important;
+  background: rgba(53, 93, 72, .1) !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card {
+  flex-wrap: wrap !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions {
+  flex-wrap: wrap !important;
+  margin-left: 32px !important;
+}
+html body.ct-workbench-v4 .agent-review-preview-card .agent-review-preview-actions > button {
+  white-space: nowrap !important;
+}
+/* ===== ux24 end ===== */
+
+/* ===== ux25 begin —— 方案确认卡重构为「剪辑结果确认卡」 =====
+   仅作用于带 .agent-plan-result-head / .agent-plan-confirm-footer 的新结构卡
+   （待确认/结果态且非历史）：✓ 标题锚点 + 待确认 chip + 结论句 lead +
+   折叠过程详情 + 克制化操作区（主操作淡绿胶囊，不再是厚重绿底）。
+   绿色只用于状态徽标、chip 与当前操作；不影响 ux19 成片结果卡与历史卡。
+   ux25c：修正浅色覆盖的双 html 前缀，明暗两主题各显式声明。
+   =================================================================== */
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin: 2px 0 7px !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > b,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > b {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  font-size: 14.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: .01em !important;
+  color: #eaf2ec !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > b > .result-check,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > b > .result-check {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 19px !important;
+  width: 19px !important;
+  height: 19px !important;
+  border-radius: 50% !important;
+  border: 1px solid rgba(124, 201, 162, .38) !important;
+  background: rgba(124, 201, 162, .13) !important;
+  color: #a9d8c0 !important;
+  font-size: 10.5px !important;
+  font-weight: 800 !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > em.agent-plan-chip,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > em.agent-plan-chip {
+  flex: 0 0 auto !important;
+  margin-left: auto !important;
+  padding: 2px 9px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(124, 201, 162, .3) !important;
+  background: rgba(124, 201, 162, .1) !important;
+  color: #7cc9a2 !important;
+  font-size: 11px !important;
+  font-style: normal !important;
+  font-weight: 650 !important;
+  letter-spacing: .02em !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > p.agent-plan-lead,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > p.agent-plan-lead {
+  margin: 0 0 10px !important;
+  font-size: 13px !important;
+  line-height: 1.6 !important;
+  color: #dbe6e1 !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock:has(> header.agent-plan-result-head) details.assistant-plan-summary > summary,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message:has(header.agent-plan-result-head) details.assistant-plan-summary > summary {
+  font-size: 12px !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button {
+  min-height: 30px !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button.primary,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button.primary {
+  color: #a9d8c0 !important;
+  background: rgba(124, 201, 162, .13) !important;
+  border: 1px solid rgba(124, 201, 162, .32) !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button.primary:is(:hover, :focus-visible),
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button.primary:is(:hover, :focus-visible) {
+  color: #c4e6d4 !important;
+  background: rgba(124, 201, 162, .2) !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button.agent-plan-text-action,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button.agent-plan-text-action {
+  color: var(--ct-text-secondary) !important;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > small.agent-operation-impact,
+html body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > small.agent-operation-impact {
+  margin-top: 6px !important;
+  font-size: 11.5px !important;
+  opacity: .8 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > b,
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > b {
+  color: #23322a !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > b > .result-check,
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > b > .result-check {
+  border-color: rgba(53, 93, 72, .32) !important;
+  background: rgba(53, 93, 72, .08) !important;
+  color: #2f5341 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > header.agent-plan-result-head > em.agent-plan-chip,
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > header.agent-plan-result-head > em.agent-plan-chip {
+  border-color: rgba(53, 93, 72, .26) !important;
+  background: rgba(53, 93, 72, .07) !important;
+  color: #2f5341 !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > p.agent-plan-lead,
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > p.agent-plan-lead {
+  color: #33403b !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button.primary,
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button.primary {
+  color: #2f5341 !important;
+  background: rgba(53, 93, 72, .09) !important;
+  border-color: rgba(53, 93, 72, .3) !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#agentPlanDock#agentPlanDock.agent-plan-dock > footer.agent-plan-confirm-footer > button.primary:is(:hover, :focus-visible),
+html[data-theme="light"] body.ct-workbench-v4 main#workspace#workspace.studio aside#assistantPanel#assistantPanel.chat-panel > section#chatMessages#chatMessages article.chat-message > .bubble > footer.agent-plan-confirm-footer > button.primary:is(:hover, :focus-visible) {
+  color: #24443a !important;
+  background: rgba(53, 93, 72, .16) !important;
+}
+/* ===== ux25 end ===== */
+
+/* ===== ux26 begin: 时间轴可达性修复 =====
+   现象：#timelinePanel 在 v4 工作台是固定行高（约 430px）且 overflow:hidden，
+   封面复核轨 #timelineCoverTrack（约 560px）会把 #timelineViewport 压成 0 高度，
+   源片波形与缩略图时间轴完全不可见。
+   处理：封面轨限高 + 内部滚动；viewport 保底高度；面板允许整体滚动兜底。
+   选择器沿用双写 id 模式（与 5498 行规则同特异性，靠文件位置取胜）。 */
+html body.ct-workbench-v4[data-shell-mode="workspace"]:not([data-ct-cover-editor-open="true"]) #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineCoverTrack#timelineCoverTrack.timeline-cover-track:not(.hidden) {
+  flex: 0 0 auto !important;
+  max-height: 132px !important;
+  min-height: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+}
+
+/* 封面轨可见时源片时间轴至少保留一屏可读高度：低于这个高度波形区会被
+   挤成一条线，缩略图轨也看不见。上限保证小视口下面板仍不产生溢出。 */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineViewport#timelineViewport.timeline-viewport {
+  min-height: 0 !important;
+}
+
+/* 用户明确切到"时间线"视图时，封面复核退成一行摘要条：此时用户要看的是
+   源片波形与缩略图，封面候选仍可以从对话区的确认卡进入。面板总高固定，
+   不压缩封面区的话波形区会被挤到可视高度之外。 */
+html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineCoverTrack#timelineCoverTrack.timeline-cover-track:not(.hidden) {
+  max-height: 44px !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"] #timelinePanel#timelinePanel.timeline-panel:not(.hidden) > #timelineCoverTrack#timelineCoverTrack.timeline-cover-track:not(.hidden) > #timelineCoverVariants.timeline-cover-variants {
+  min-height: 0 !important;
+}
+
+
+/* ===== ux26 end ===== */
+
+/* Review controls own their layout in both themes. */
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #reviewView#reviewView #portraitPrecisionToggle#portraitPrecisionToggle,
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #reviewView#reviewView > #portraitPrecisionWorkbench#portraitPrecisionWorkbench#portraitPrecisionWorkbench,
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #reviewView#reviewView > #portraitVideoResizer#portraitVideoResizer#portraitVideoResizer,
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #timelinePanel#timelinePanel > #timelineViewport#timelineViewport#timelineViewport {
+  display: none !important;
+}
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #reviewView#reviewView#reviewView#reviewView {
+  grid-template-rows: auto minmax(0, 1fr) !important;
+}
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #reviewView#reviewView > #timelinePanel#timelinePanel#timelinePanel.timeline-panel {
+  grid-row: 2 !important;
+  height: 100% !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  display: block !important;
+}
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #timelineCoverTrack#timelineCoverTrack.timeline-cover-track {
+  max-height: none !important;
+  height: auto !important;
+  overflow: visible !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #timelineCoverVariants.timeline-cover-variants {
+  flex-shrink: 0;
+  min-height: min-content !important;
+}
+.timeline-cover-settings > footer { position: sticky; bottom: 0; background: var(--ct-panel); padding-block: 12px; }
+#coverReviewBack { min-height: 36px; }
+
+/* Keep media tracks readable even when toolbars wrap or the preview is tall. */
+html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #timelinePanel#timelinePanel.timeline-panel {
+  overflow-y: auto !important;
+}
+html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #timelinePanel#timelinePanel > #timelineViewport#timelineViewport {
+  flex: 1 0 220px !important;
+  min-height: 220px !important;
+}
+@media (min-width: 901px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]):not(.ct-output-preview-mode):not(.ct-agent-preview-mode) #reviewView#reviewView#reviewView#reviewView {
+    grid-template-rows: auto minmax(160px, 1fr) auto minmax(400px, 45%) !important;
+    overflow-y: auto !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]):not(.ct-output-preview-mode):not(.ct-agent-preview-mode) #reviewView#reviewView > #timelinePanel#timelinePanel#timelinePanel {
+    grid-row: 4 !important;
+  }
+}
+@media (max-width: 900px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #reviewView#reviewView#reviewView#reviewView {
+    grid-template-rows: auto minmax(260px, 30dvh) minmax(440px, 1fr) !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #reviewView#reviewView > #timelinePanel#timelinePanel#timelinePanel {
+    grid-row: 3 !important;
+    height: auto !important;
+    min-height: 440px !important;
+    max-height: none !important;
+  }
+}
+
+#subtitleReview { grid-template-columns: minmax(0, 1fr) min(1200px, 100vw) !important; }
+#subtitleReview .subtitle-review-panel {
+  width: min(1200px, 100vw) !important;
+  max-width: 100vw !important;
+  background: var(--ct-panel) !important;
+  color: var(--ct-text) !important;
+  grid-template-rows: auto minmax(0, 1fr) auto auto !important;
+  height: 100dvh !important;
+}
+#subtitleReview .subtitle-review-body {
+  display: grid;
+  grid-template-columns: minmax(280px, .85fr) minmax(340px, 1.15fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  overflow: auto;
+}
+#subtitleReview .subtitle-preview-card { grid-column: 1; grid-row: 1; min-width: 0; }
+#subtitleReview .subtitle-source-card { grid-column: 1; grid-row: 2; }
+#subtitleReview .subtitle-command-card { grid-column: 1; grid-row: 3; }
+#subtitleReview .subtitle-cues-section { grid-column: 2; grid-row: 1 / 4; min-width: 0; }
+#subtitleReview .subtitle-preview-stage { height: auto !important; max-height: 38vh; min-height: 150px; margin-inline: auto; }
+#subtitleReview .subtitle-preview-stage video { object-fit: contain !important; }
+#subtitleReview .subtitle-preview-text { pointer-events: none; }
+#subtitleReview .subtitle-safe-area { pointer-events: none; }
+#subtitleReview :is(.subtitle-playback-controls, .subtitle-ai-actions, .subtitle-quick-controls) { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#subtitleReview .subtitle-playback-controls { padding-top: 12px; }
+#subtitleReview :is(.subtitle-review-header, .subtitle-review-footer, .subtitle-preview-card, .subtitle-source-card, .subtitle-command-card, .subtitle-cue) {
+  background: var(--ct-panel) !important;
+  color: var(--ct-text) !important;
+  border-color: var(--ct-control-border) !important;
+}
+#subtitleReview :is(small, .subtitle-preview-meta, .subtitle-ai-notice, .subtitle-review-header p, .subtitle-section-heading small) {
+  font-size: 12px !important;
+  color: var(--ct-text-secondary) !important;
+}
+#subtitleReview .subtitle-review-header h2 { color: var(--ct-text) !important; }
+#subtitleReview .subtitle-review-footer > button.primary {
+  background: var(--ct-primary) !important;
+  color: var(--ct-on-primary, #fff) !important;
+  border-color: var(--ct-primary) !important;
+}
+#subtitleReview button { min-height: 36px; }
+#subtitleReview :is(.subtitle-playback-controls button, .subtitle-exit-choices button, #subtitleUndoButton, .subtitle-output-picker select) {
+  padding: 8px 10px; border: 1px solid var(--ct-control-border); border-radius: 6px;
+  background: var(--ct-panel); color: var(--ct-text);
+}
+#subtitleReview :is(#subtitleReviewError, #subtitleConfirmReason) { display: block; color: var(--ct-text-secondary) !important; }
+#subtitleReview #subtitleReviewError:empty { display: none; }
+.subtitle-exit-choices { padding: 16px; border-top: 1px solid var(--ct-control-border); background: var(--ct-raised); }
+.subtitle-exit-choices > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#subtitleReview.preview-expanded .subtitle-preview-card { grid-column: 1 / -1; }
+#subtitleReview.preview-expanded .subtitle-cues-section { grid-row: 2 / 4; }
+#subtitleReview.preview-expanded .subtitle-preview-stage { max-height: 65vh; }
+html body.secondary-editor-open #secondaryEditor :is(#secondaryEditorTimelineMeta, #secondaryEditorSubtitleSummary) {
+  color: var(--ct-text-secondary) !important; font-size: 12px !important;
+}
+html[data-theme="light"] body.ct-workbench-v4 #assistantPanel #chatMessages .chat-message .you-prefix { color: #286a4d !important; }
+html[data-theme="light"] body.ct-workbench-v4 #timelineCoverTrack #timelineCoverDraftState { color: #536358 !important; font-size: 12px !important; }
+html body.ct-workbench-v4 #csStreamHost .cs-card-body footer {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+html body.ct-workbench-v4 #csStreamHost .cs-card-body footer > small { flex-basis: 100%; margin: 0; }
+html body.ct-workbench-v4 #csStreamHost .cs-card-body footer button { min-height: 36px; padding: 6px 10px; }
+.home-task-section.is-empty { padding-block: 8px; }
+.cover-requirement-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--ct-control-border); border-radius: 12px; padding: 24px; background: var(--ct-panel); color: var(--ct-text); }
+.cover-requirement-dialog::backdrop { background: #0008; }
+.cover-requirement-dialog form { display: grid; gap: 14px; }
+.cover-requirement-dialog :is(h2, p) { margin: 0; }
+.cover-requirement-dialog label { display: grid; gap: 6px; }
+.cover-requirement-dialog :is(input, select, button) { min-height: 40px; padding: 8px; border: 1px solid var(--ct-control-border); border-radius: 6px; background: var(--ct-panel); color: var(--ct-text); }
+.cover-requirement-dialog footer { display: flex; gap: 8px; justify-content: flex-end; }
+.cover-requirement-dialog button.primary { background: var(--ct-primary); color: var(--ct-on-primary); }
+.cover-requirement-dialog [role="alert"]:empty { display: none; }
+#csMobileActionBar { display: none; }
+.delivery-checklist { display: grid; gap: 6px; margin: 10px 0; padding: 0; list-style: none; }
+.delivery-checklist li { display: flex; justify-content: space-between; gap: 12px; color: var(--ct-text-secondary); font-size: 12px; }
+.delivery-checklist strong { color: var(--ct-text); }
+
+@media (max-width: 800px) {
+  body.ct-workbench-v4 { --ct-compact-top: 62px; }
+  #subtitleReview { display: block; }
+  #subtitleReview .subtitle-review-body { display: flex; flex-direction: column; padding: 12px; }
+  #subtitleReview .subtitle-review-body > section { width: 100%; box-sizing: border-box; }
+  #subtitleReview .subtitle-preview-card { order: 0; }
+  #subtitleReview .subtitle-cues-section { order: 1; }
+  #subtitleReview .subtitle-source-card { order: 2; }
+  #subtitleReview .subtitle-command-card { order: 3; }
+  #subtitleReview .subtitle-review-header { padding: 12px 16px; }
+  #subtitleReview .subtitle-preview-stage { max-height: 28vh; }
+  #subtitleReview.preview-expanded .subtitle-preview-stage { max-height: 60vh; }
+  #subtitleReview button { min-height: 44px; }
+  #subtitleReview .subtitle-review-footer { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+  #subtitleReview .subtitle-review-footer > div { flex-basis: 100%; }
+  html body.ct-workbench-v4 #ctCompactWorkspaceNav button { min-height: 44px !important; }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace.studio.director-merged:not(.home-mode) { padding-top: 62px !important; }
+  html body.ct-workbench-v4 main#workspace#workspace.studio:not(.home-mode) > #ctCompactWorkspaceNav.ct-compact-workspace-nav { height: 52px !important; }
+  html body.ct-workbench-v4.ct-output-preview-mode[data-shell-mode="workspace"] #reviewView#reviewView#reviewView.review-view {
+    grid-template-rows: auto minmax(0, 1fr) !important;
+  }
+  html body.ct-workbench-v4.ct-output-preview-mode[data-shell-mode="workspace"] #reviewView#reviewView > .review-header {
+    height: auto !important; min-height: 76px !important; padding-block: 8px !important; overflow: visible !important;
+  }
+  html body.ct-workbench-v4[data-ct-cover-editor-open="true"] #timelineCoverTrack#timelineCoverTrack.timeline-cover-track { width: calc(100% - 24px) !important; margin: 12px !important; padding: 12px !important; }
+}
+@media (max-width: 1100px) {
+  body.ct-workbench-v4:not([data-ct-compact-view="assistant"]):has(#csMobileActionBar:not([hidden])) { --ct-compact-bottom: 88px; }
+  body.ct-workbench-v4[data-shell-mode="workspace"]:not([data-ct-compact-view="assistant"]):not(.secondary-editor-open):not(:has(#subtitleReview:not(.hidden))):not(:has(dialog[open])) #csMobileActionBar:not([hidden]) {
+    position: fixed; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    z-index: 80; inset: auto 8px 8px; padding: 10px;
+    background: var(--ct-panel); color: var(--ct-text); border: 1px solid var(--ct-control-border); border-radius: 10px;
+  }
+  #csMobileActionBar > span { flex: 1 1 120px; }
+  #csMobileActionBar small { display: block; font-size: 12px; color: var(--ct-text-secondary); }
+  #csMobileActionBar button { min-height: 44px; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--ct-control-border); background: var(--ct-panel); color: var(--ct-text); }
+  #csMobileActionBar button.primary { background: var(--ct-primary); color: var(--ct-on-primary); }
+  html body.ct-workbench-v4[data-shell-mode="workspace"]:not([data-ct-compact-view="assistant"]):has(#csMobileActionBar:not([hidden])) main#workspace#workspace.studio.director-merged:not(.home-mode) { padding-bottom: 108px !important; }
+}
+
+/* Timeline readability pass ------------------------------------------------
+   The timeline is a review surface first: each segment owns its real time
+   range, relationship lines appear on demand, and media layers are explicit
+   independent switches. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel > .timeline-toolbar {
+  min-height: 44px !important;
+  height: auto !important;
+  padding: 6px 10px !important;
+  display: grid !important;
+  grid-template-columns: max-content max-content max-content minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-tool-group {
+  min-height: 34px !important;
+  padding: 2px !important;
+  gap: 2px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-toolbar button {
+  min-width: 34px !important;
+  min-height: 30px !important;
+  height: 30px !important;
+  padding-inline: 9px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel :where(#timelineWaveMode, #timelineFrameMode, #timelineCutsToggle).active::before {
+  content: "✓";
+  margin-right: 4px;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel :where(
+  #timelineWaveMode.active,
+  #timelineFrameMode.active,
+  #timelineCutsToggle.active,
+  #timelineFit.active
+) {
+  border-color: #9db6a5 !important;
+  color: #254d38 !important;
+  background: #dfe9e1 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > output {
+  min-width: 44px;
+  padding-inline: 6px;
+  color: var(--ct4-muted, #a9bbb4);
+  font: 650 10px/1 var(--font-data, ui-monospace, monospace);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > #timelineZoomOut { order: 1; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > #timelineZoomLevel { order: 2; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > #timelineZoomIn { order: 3; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > #timelineFit { order: 4; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-zoom-controls > #timelineFocusReview { order: 5; }
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview {
+  height: 12px !important;
+  margin-top: 5px !important;
+  margin-bottom: 8px !important;
+  border-radius: 4px !important;
+  outline: none;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview:focus-visible {
+  box-shadow: 0 0 0 2px rgba(114, 180, 135, .42) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview .timeline-view-window {
+  border-width: 2px !important;
+  border-color: rgba(53, 93, 72, .72) !important;
+  border-radius: 4px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview.timeline-zoomed .timeline-view-window::before,
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview.timeline-zoomed .timeline-view-window::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: .72;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview.timeline-zoomed .timeline-view-window::before { left: 2px; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-overview.timeline-zoomed .timeline-view-window::after { right: 2px; }
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport.waveform-hidden #waveformCanvas {
+  display: none !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport.frames-hidden #timelineThumbnails {
+  display: none !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport #timelineTrackLabels#timelineTrackLabels span::before {
+  width: 3px !important;
+  height: 18px !important;
+  flex: 0 0 3px !important;
+  border: 0 !important;
+  border-radius: 2px !important;
+  opacity: .82;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-label,
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-shot-marker {
+  border-radius: 5px !important;
+  transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-label {
+  padding-inline: 7px !important;
+  gap: 5px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-label.narrow > em,
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-label.narrow > span {
+  max-width: 100%;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-shot-marker.comparison-output-shot {
+  box-shadow: inset 3px 0 rgba(114, 180, 135, .58), inset -2px 0 rgba(17, 39, 38, .72) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-shot-marker.micro {
+  justify-content: center !important;
+  padding-inline: 2px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-shot-marker.micro > em {
+  display: none !important;
+}
+
+/* Relationship lines are an inspection aid, not permanent decoration. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport :where(
+  .timeline-event-curve,
+  .timeline-connection-point,
+  .timeline-shot-centre-guide,
+  .timeline-shot-range-end
+) {
+  opacity: 0 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport :where(
+  .timeline-event-curve,
+  .timeline-connection-point,
+  .timeline-shot-centre-guide,
+  .timeline-shot-range-end
+):is(.relation-hover, .active, .playback-relation),
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport :where(
+  .timeline-shot-range.relation-hover,
+  .timeline-shot-range.active,
+  .timeline-shot-range.playback-relation
+) :where(.timeline-shot-centre-guide, .timeline-shot-range-end) {
+  opacity: 1 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-event-curve.playback-relation {
+  stroke: var(--ct4-playhead, #c27c2c) !important;
+  stroke-width: 1.5 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-event-band {
+  opacity: .28 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-event-band:is(.relation-hover, .active, .playback-relation) {
+  opacity: 1 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-playhead {
+  z-index: 40 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-playhead > #timelinePlayheadLabel {
+  position: absolute;
+  top: 3px;
+  left: 7px;
+  min-width: max-content;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: #9a6122;
+  box-shadow: 0 2px 6px rgba(70, 42, 12, .18);
+  font: 700 9px/1.2 var(--font-data, ui-monospace, monospace);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  transform: none;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport .timeline-playhead.near-right > #timelinePlayheadLabel {
+  right: 7px;
+  left: auto;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel #timelineViewport#timelineViewport #timelineTrackContent:has(.relation-hover) :where(.timeline-label, .timeline-shot-marker):not(.relation-hover) {
+  opacity: .42 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel.timeline-legend-reduced > footer > span:nth-child(-n + 2) {
+  display: none !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel > footer {
+  min-height: 28px;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  row-gap: 5px !important;
+}
+
+@media (max-width: 700px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel > .timeline-toolbar {
+    min-height: 50px !important;
+    height: 50px !important;
+    grid-template-columns: none !important;
+    grid-auto-flow: column !important;
+    grid-auto-columns: max-content !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    scrollbar-width: thin;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-tool-group {
+    min-width: max-content;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-toolbar-spacer {
+    display: none !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-toolbar button {
+    min-height: 36px !important;
+    height: 36px !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-view-switch button {
+    font-size: 10px !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel .timeline-playhead > #timelinePlayheadLabel {
+    top: 12px;
+  }
+}
+
+@media (min-width: 901px) and (max-height: 820px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"][data-timeline-expanded="true"]:not([data-ct-cover-editor-open="true"]) #timelinePanel#timelinePanel > #timelineViewport#timelineViewport {
+    flex-basis: 195px !important;
+    min-height: 195px !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel > .timeline-toolbar {
+    min-height: 40px !important;
+    padding-block: 3px !important;
+  }
+}
+
+/* Player and timeline split ------------------------------------------------
+   Media needs a calm viewing surface even in the light editor. The charcoal
+   is limited to the decoded-media stage; controls and the surrounding page
+   stay on the active theme. The timeline gets a user-adjustable share rather
+   than forcing the video into a small island inside a large pale panel. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewTimelineResizer.review-timeline-resizer {
+  display: none;
+}
+
+@media (min-width: 901px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden) {
+    grid-template-rows:
+      54px
+      minmax(240px, 1fr)
+      8px
+      minmax(250px, var(--review-timeline-height, clamp(320px, 36%, 380px))) !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #reviewStage#reviewStage.review-stage {
+    grid-row: 2 !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #reviewTimelineResizer.review-timeline-resizer {
+    grid-row: 3 !important;
+    grid-column: 1 / -1 !important;
+    display: block !important;
+    position: relative;
+    z-index: 8;
+    width: 100%;
+    height: 8px;
+    cursor: row-resize;
+    touch-action: none;
+    background: var(--ct4-surface, #f3f3f0);
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #reviewTimelineResizer.review-timeline-resizer::before {
+    content: "";
+    position: absolute;
+    inset: 3px clamp(18px, 8%, 88px);
+    border-radius: 2px;
+    background: #c8cfca;
+    transition: background-color .18s ease, transform .18s ease;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #reviewTimelineResizer.review-timeline-resizer:is(:hover, :focus-visible, .dragging)::before {
+    background: var(--ct4-primary, #355d48);
+    transform: scaleY(2);
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #reviewTimelineResizer.review-timeline-resizer:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--ct4-primary, #355d48) 42%, transparent);
+    outline-offset: -2px;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"]
+    #reviewView#reviewView#reviewView.review-view:not([data-review-layout="portrait"]):not(.timeline-hidden)
+    > #timelinePanel#timelinePanel.timeline-panel:not(.hidden) {
+    grid-row: 4 !important;
+    min-height: 250px !important;
+  }
+}
+
+html body.review-timeline-resizing,
+html body.review-timeline-resizing * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+html body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  #reviewView#reviewView:not([data-review-layout="portrait"])
+  > #reviewStage#reviewStage.review-stage {
+  padding: 10px 12px 8px !important;
+  background: #1c211f !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  main#workspace#workspace.studio:not(.home-mode)
+  #reviewView#reviewView.review-view:not([data-review-layout="portrait"])
+  > #reviewStage#reviewStage#reviewStage.review-stage {
+  border-color: #39423e !important;
+  background: #1c211f !important;
+}
+
+html body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  #reviewView#reviewView:not([data-review-layout="portrait"])
+  #viewerShell#viewerShell.viewer-shell:not(:fullscreen) {
+  border-color: #46504b !important;
+  border-radius: 10px !important;
+  background: #151a18 !important;
+  background-image: radial-gradient(circle at 50% 42%, #252c28 0%, #171c19 58%, #121613 100%) !important;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .045) !important;
+}
+
+html[data-theme="light"] body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  main#workspace#workspace.studio:not(.home-mode)
+  #reviewView#reviewView.review-view:not([data-review-layout="portrait"])
+  #viewerShell#viewerShell#viewerShell.viewer-shell:not(:fullscreen) {
+  border-color: #46504b !important;
+  background: #151a18 !important;
+  background-image: radial-gradient(circle at 50% 42%, #252c28 0%, #171c19 58%, #121613 100%) !important;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .045) !important;
+}
+
+html body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  #reviewView#reviewView:not([data-review-layout="portrait"])
+  #mediaFrame#mediaFrame.media-frame {
+  border-radius: 8px !important;
+  background: #101412 !important;
+  background-image: none !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .24) !important;
+}
+
+html body.ct-workbench-v4:is(.ct-agent-preview-mode, .ct-output-preview-mode)[data-shell-mode="workspace"]
+  #reviewView#reviewView:not([data-review-layout="portrait"])
+  #mainVideo#mainVideo {
+  background: #101412 !important;
+}
+
+/* The title and version already live directly above the player. */
+html body.ct-workbench-v4.ct-agent-preview-mode[data-shell-mode="workspace"] #viewerBadge#viewerBadge {
+  display: none !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell:not(:fullscreen)
+  > .player-controls.player-controls {
+  --player-control-height: 52px;
+  height: var(--player-control-height) !important;
+  min-height: var(--player-control-height) !important;
+  padding: 7px 12px !important;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto auto !important;
+  gap: 9px !important;
+}
+
+/* A portrait frame needs a real two-row transport. The progress rail owns the
+   first row; playback, time, rate and fullscreen stay in the second row. */
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen) {
+  --player-control-height: 64px;
+  grid-template-rows: minmax(0, 1fr) var(--player-control-height) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls {
+  --player-control-height: 64px;
+  height: var(--player-control-height) !important;
+  min-height: var(--player-control-height) !important;
+  padding: 4px 10px 6px !important;
+  grid-template-columns: auto minmax(0, 1fr) auto auto !important;
+  grid-template-rows: 20px 34px !important;
+  column-gap: 8px !important;
+  row-gap: 0 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls > .player-progress-group {
+  position: static !important;
+  inset: auto !important;
+  grid-column: 1 / -1 !important;
+  grid-row: 1 !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 20px !important;
+  display: flex !important;
+  align-items: center !important;
+  transform: none !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls > .player-transport-group {
+  grid-column: 1 / 3 !important;
+  grid-row: 2 !important;
+  min-width: 0 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls #playerClock#playerClock {
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  min-width: 72px !important;
+  transform: none !important;
+  text-align: left !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls > #playerRate {
+  grid-column: 3 !important;
+  grid-row: 2 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell.portrait:not(:fullscreen)
+  > .player-controls.player-controls > #playerFullscreen {
+  grid-column: 4 !important;
+  grid-row: 2 !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell .player-transport-group {
+  gap: 7px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerClock.player-clock {
+  min-width: 92px !important;
+  text-align: left !important;
+  font-size: 11px !important;
+  font-variant-numeric: tabular-nums;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell .player-progress-group {
+  min-width: 120px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerSeek.player-seek {
+  width: 100% !important;
+  height: 20px !important;
+  margin: 0 !important;
+  cursor: pointer;
+  /* The browser track owns the progress rendering. An older input background
+     painted the same progress a second time a few pixels lower, which looked
+     like an unexplained red warning line. */
+  background: transparent !important;
+  background-image: none !important;
+  background-size: auto !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerSeek.player-seek::-webkit-slider-runnable-track {
+  height: 4px !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: linear-gradient(
+    90deg,
+    var(--ct4-primary, #355d48) 0 var(--player-progress, 0%),
+    #c8d0cc var(--player-progress, 0%) 100%
+  ) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerSeek.player-seek::-moz-range-track {
+  height: 4px !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: #c8d0cc !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerSeek.player-seek::-moz-range-progress {
+  height: 4px !important;
+  border-radius: 4px !important;
+  background: var(--ct4-primary, #355d48) !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel
+  .timeline-review-controls > #portraitPrecisionToggle#portraitPrecisionToggle {
+  order: -2;
+  position: relative;
+  z-index: 24;
+  min-height: 32px !important;
+  height: 32px !important;
+  margin-right: 4px !important;
+  padding: 0 11px !important;
+  border: 1px solid var(--ct4-line, #d7dad6) !important;
+  border-radius: 7px !important;
+  color: var(--ct4-text, #26342d) !important;
+  background: transparent !important;
+  font-size: 11px !important;
+}
+
+html body.ct-workbench-v4[data-shell-mode="workspace"] #timelinePanel#timelinePanel
+  .timeline-review-controls > #portraitPrecisionToggle#portraitPrecisionToggle:hover {
+  border-color: color-mix(in srgb, var(--ct4-primary, #355d48) 42%, transparent) !important;
+  color: var(--ct4-primary, #355d48) !important;
+  background: color-mix(in srgb, var(--ct4-primary, #355d48) 8%, transparent) !important;
+}
+
+@media (max-width: 900px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewTimelineResizer.review-timeline-resizer {
+    display: none !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell.viewer-shell:not(:fullscreen)
+    > .player-controls.player-controls {
+    grid-template-columns: auto minmax(96px, 1fr) auto auto !important;
+    gap: 6px !important;
+    padding-inline: 8px !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell .player-sound-group {
+    display: none !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell #playerClock.player-clock {
+    min-width: 72px !important;
+    font-size: 10px !important;
+  }
+
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #viewerShell#viewerShell .player-segment-group {
+    display: none !important;
+  }
+}
+
+/* Contextual Agent state: content, not an illustration or a second result card. */
+html body.ct-workbench-v4 #assistantPanel #chatMessages > .ct-agent-context {
+  flex: 0 0 auto;
+  margin: 0 12px 0 51px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ct-control-border);
+  text-align: left;
+  color: var(--ct-text-secondary);
+}
+.ct-agent-context [hidden] { display: none !important; }
+.ct-agent-context-copy { max-width: 36ch; }
+.ct-agent-context-copy strong { color: var(--ct-text); font-size: 15px; font-weight: 600; }
+.ct-agent-context-copy p { margin: 8px 0 0; font-size: 13px; line-height: 1.7; text-wrap: pretty; }
+html body.ct-workbench-v4 #ctTaskJourney .ct-agent-preparation-status {
+  margin: 0; padding: 0; color: var(--ct-text-secondary); font-size: 13px; font-weight: 400;
+}
+html body.ct-workbench-v4 #ctTaskJourney .ct-agent-task-rows {
+  display: grid; gap: 8px; padding: 12px 0 0; border-top: 1px solid var(--ct-control-border);
+  color: var(--ct-text-secondary); font-size: 13px;
+}
+html body.ct-workbench-v4 #ctTaskJourney .ct-agent-task-rows p { margin: 0; color: var(--ct-text); }
+html body.ct-workbench-v4 #ctTaskJourney .ct-agent-task-rows button {
+  justify-self: start; background: transparent; border: 0; min-height: 32px;
+  color: var(--ct-text); padding: 4px 0; text-decoration: underline; text-underline-offset: 4px;
+}
+html body.ct-workbench-v4 #assistantPanel #chatMessages .empty-chat-prompts button + button::before {
+  content: "·"; margin-right: 6px; color: var(--ct-text-secondary);
+}
+/* A running Agent plan owns one flat progress surface, not a second console. */
+/* Batch selection belongs above the candidate list, not beside generation. */
+html body.ct-workbench-v4 .content-selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin: 12px 0 8px; padding: 4px 0; background: transparent; border: 0; }
+html body.ct-workbench-v4 .content-selection-toolbar .content-select-all { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; color: var(--ct-text); font-size: 13px; }
+html body.ct-workbench-v4 .content-select-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--ct-primary); cursor: pointer; }
+html body.ct-workbench-v4 .content-select-all input:focus-visible { outline: 2px solid var(--ct-primary); outline-offset: 3px; }
+html body.ct-workbench-v4 .content-selection-toolbar [data-content-select-count] { margin: 0 0 0 auto; font-size: 12px; color: var(--ct-text-secondary); }
+html body.ct-workbench-v4 .content-selection-toolbar > small { flex-basis: 100%; color: var(--ct-text-secondary); }
+
+/* Review controls express selection, evidence and the next action separately. */
+html body.ct-workbench-v4 :is(#agentPlanDock, #chatMessages, #agentPlanDrawer) .agent-qc-summary {
+  background: var(--ct-theme-panel, #193431) !important; border-color: var(--ct-theme-border, #34433f) !important;
+  box-shadow: none; min-width: 0; padding: 12px; gap: 10px;
+}
+html body.ct-workbench-v4 :is(#agentPlanDock, #chatMessages, #agentPlanDrawer) .agent-qc-summary :is(p, span, strong, b, summary) {
+  color: var(--ct-theme-text, #f5f7f4) !important; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere;
+}
+html body.ct-workbench-v4 :is(#agentPlanDock, #chatMessages, #agentPlanDrawer) .agent-qc-summary p {
+  margin: 4px 0; color: var(--ct-theme-text-secondary, #d2dcd7) !important;
+}
+html body.ct-workbench-v4 .agent-qc-summary li > div { min-width: 0; }
+html body.ct-workbench-v4 .agent-qc-summary > ul > li { grid-template-columns: minmax(0, 1fr); gap: 6px; padding-block: 6px; }
+html body.ct-workbench-v4 .agent-qc-summary li > div > b { display: block; }
+html body.ct-workbench-v4 .agent-qc-summary button { min-height: 32px; white-space: normal; justify-self: start; }
+html body.ct-workbench-v4 .agent-qc-summary details { margin-top: 6px; }
+html body.ct-workbench-v4 .agent-qc-summary details li { grid-template-columns: minmax(0, 1fr); }
+html body.ct-workbench-v4 .agent-qc-summary details.agent-qc-checks li { grid-template-columns: minmax(0, 1fr) auto; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--ct-theme-text-secondary, #d2dcd7) 24%, transparent);
+}
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary::-webkit-details-marker { display: none; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary > span { display: grid; gap: 1px; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary small {
+  color: var(--ct-theme-text-secondary, #d2dcd7);
+  font-size: 11px;
+  font-weight: 400;
+}
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary em {
+  flex: none;
+  color: var(--ct-theme-text-secondary, #d2dcd7);
+  font-size: 11px;
+  font-style: normal;
+}
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > summary em::after { content: "⌄"; margin-left: 5px; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain[open] > summary em::after { content: "⌃"; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > ul { margin-top: 8px; }
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > ul > li {
+  padding: 9px 0;
+  border-top: 1px solid color-mix(in srgb, var(--ct-theme-text-secondary, #d2dcd7) 18%, transparent);
+}
+html body.ct-workbench-v4 .agent-qc-summary .agent-qc-uncertain > ul > li > div > span { font-variant-numeric: tabular-nums; }
+html body.ct-workbench-v4 #chatMessages footer button[data-sticky-action-source][hidden] { display: none !important; }
+html body.ct-workbench-v4 .content-search-review { container-type: inline-size; }
+html body.ct-workbench-v4 .content-search-review [hidden],
+html body.ct-workbench-v4 #candidateDrawer [hidden],
+html body.ct-workbench-v4 [data-agent-evidence-open][hidden],
+html body.ct-workbench-v4 #csActionBar button[hidden] { display: none !important; }
+html body.ct-workbench-v4 .content-search-review .content-match-main { grid-template-columns: 18px 112px minmax(0, 1fr) !important; gap: 10px !important; }
+html body.ct-workbench-v4 .content-match-main > input[data-content-match] { grid-column: 1 !important; grid-row: 1 !important; width: 16px; height: 16px; margin: 4px 0 0 !important; accent-color: var(--ct-primary); }
+html body.ct-workbench-v4 .content-match-main > .content-match-thumb { grid-column: 2 !important; grid-row: 1 !important; }
+html body.ct-workbench-v4 .content-match-main > .content-match-copy { grid-column: 3 !important; grid-row: 1 !important; min-width: 0; }
+html body.ct-workbench-v4 .content-match-copy .content-match-title { flex-wrap: wrap; gap: 6px; }
+html body.ct-workbench-v4 .content-match-copy .content-match-title label { cursor: pointer; }
+html body.ct-workbench-v4 .content-match-copy [data-content-chosen] { display: block; font-size: 12px; font-style: normal; color: var(--ct-text-secondary); }
+html body.ct-workbench-v4 .content-subject-hint { font-size: 12px; line-height: 1.6; color: var(--ct-theme-text-secondary, #d2dcd7) !important; margin: 6px 0; }
+html body.ct-workbench-v4 .content-match-buttons { flex-wrap: wrap; gap: 8px; }
+html body.ct-workbench-v4 .content-match-buttons [data-content-feedback] { order: 3; margin-left: auto; }
+html body.ct-workbench-v4 .content-search-review [data-content-action-hint] { font-size: 13px; line-height: 1.6; color: var(--ct-theme-text-secondary, #d2dcd7); margin: 8px 0; }
+html body.ct-workbench-v4 [data-content-action-hint]:empty,
+html body.ct-workbench-v4 [data-boundary-error]:empty { display: none; }
+html body.ct-workbench-v4 [data-boundary-error] { color: var(--ct-theme-text, #f5f7f4); font-size: 13px; }
+html body.ct-workbench-v4 .content-search-review .content-search-submit-actions [data-confirm-content]:not(:disabled) { background: var(--ct-theme-primary, #cbe7aa) !important; color: var(--ct-theme-on-primary, #1c3028) !important; border-color: var(--ct-theme-primary, #cbe7aa) !important; opacity: 1; }
+html body.ct-workbench-v4 .content-search-review [data-confirm-content]:disabled { opacity: .65; cursor: not-allowed; }
+html body.ct-workbench-v4 .content-drawer-batch .content-select-all { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; color: var(--ct-text); }
+@media (max-width: 700px) {
+  html body.ct-workbench-v4 .content-search-review .content-match-main { grid-template-columns: 18px minmax(0, 1fr) !important; }
+  html body.ct-workbench-v4 .content-match-main > .content-match-copy { grid-column: 2 !important; grid-row: 2 !important; }
+  html body.ct-workbench-v4 .content-search-review .content-search-submit-actions { flex-wrap: wrap; }
+}
+@container (max-width: 380px) {
+  html body.ct-workbench-v4 .content-search-review .content-match-main { grid-template-columns: 18px minmax(0, 1fr) !important; }
+  html body.ct-workbench-v4 .content-match-main > .content-match-copy { grid-column: 2 !important; grid-row: 2 !important; }
+}
+
+html body.ct-workbench-v4 .agent-execution-progress { color: var(--ct-text); padding: 4px 0; }
+html body.ct-workbench-v4 .agent-execution-heading { display: flex; align-items: center; gap: 12px; animation: ct-execution-stage-in 180ms ease-out both; }
+html body.ct-workbench-v4 .agent-execution-heading > strong { font-size: 15px; line-height: 1.7; }
+html body.ct-workbench-v4 .agent-execution-loader { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; color: var(--ct-primary); }
+html body.ct-workbench-v4 .agent-execution-loader:empty::before { content: ""; width: 20px; height: 20px; border: 2px solid currentColor; border-radius: 5px; animation: ct-execution-frame 2.4s ease-in-out infinite; }
+html body.ct-workbench-v4 .agent-execution-track { height: 4px; margin-top: 14px; overflow: hidden; border-radius: 3px; background: var(--ct-control-border); }
+html body.ct-workbench-v4 .agent-execution-track > i { display: block; width: 100%; height: 100%; background: var(--ct-primary); transform-origin: left; transform: scaleX(var(--execution-fraction, 0)); transition: transform 350ms ease-out; }
+html body.ct-workbench-v4 .agent-execution-track[data-execution-mode="indeterminate"] > i { width: 28%; animation: ct-execution-scan 2.6s ease-in-out infinite alternate; transition: none; }
+html body.ct-workbench-v4 .agent-execution-progress:is([data-motion-state="stopping"], [data-motion-state="inactive"]) :is(.agent-execution-track > i, .agent-execution-loader::before) { animation-play-state: paused; opacity: .45; }
+@keyframes ct-execution-scan { from { transform: translateX(0); opacity: .45; } to { transform: translateX(257%); opacity: .85; } }
+@keyframes ct-execution-frame { 0%, 100% { transform: rotate(0) scale(.86); opacity: .55; } 50% { transform: rotate(90deg) scale(1); opacity: 1; } }
+@keyframes ct-execution-stage-in { from { opacity: .4; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  html body.ct-workbench-v4 :is(.agent-execution-heading, .agent-execution-loader::before, .agent-execution-track > i) { animation: none; transition: none; }
+  html body.ct-workbench-v4 .agent-execution-track[data-execution-mode="indeterminate"] > i { animation: none; transform: none; opacity: .55; }
+  html body.ct-workbench-v4 .agent-execution-loader :is(*, *::before, *::after) { animation: none !important; transition: none !important; }
+}
+html body.ct-workbench-v4 .agent-execution-progress > p { margin: 8px 0; font-size: 13px; color: var(--ct-text-secondary); }
+html body.ct-workbench-v4 .agent-execution-progress > small { display: block; margin-top: 10px; color: var(--ct-text-secondary); font-size: 13px; }
+html body.ct-workbench-v4 .agent-execution-progress > progress { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+html body.ct-workbench-v4 .agent-execution-progress [hidden] { display: none !important; }
+html body.ct-workbench-v4 .agent-execution-progress > footer { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+html body.ct-workbench-v4 .agent-execution-progress [data-agent-operation-message]:empty { display: none; }
+
+/* Preview-first creation: keep the original assistant and source workspace. */
+#ctAgentWelcome[hidden], #ctAgentEntryPrompts[hidden], #uploadRetry[hidden] { display: none !important; }
+html body.ct-workbench-v4[data-shell-mode="workspace"] main#workspace#workspace#workspace.studio.new-task-workbench:not(.home-mode) > aside#assistantPanel#assistantPanel[data-agent-entry]:not([inert]) {
+  display: flex !important; flex-direction: column !important; justify-content: flex-start !important;
+  gap: 0 !important; overflow-y: auto !important;
+}
+html body.ct-workbench-v4 #workspace.new-task-workbench :is(#ctTaskJourney, #newTaskDraftStatus) { display: none !important; }
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #chatMessages#chatMessages { display: none !important; }
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > .panel-header { flex: 0 0 auto !important; }
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #ctAgentWelcome {
+  flex: 0 0 auto; margin: auto 24px 0; padding-top: 24px; color: var(--ct-text);
+}
+#ctAgentWelcome h2 { margin: 0; font-size: 15px; line-height: 1.6; font-weight: 550; }
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #chatForm#chatForm {
+  position: static !important; flex: 0 0 auto !important; width: auto !important; height: auto !important;
+  min-height: 0 !important; max-height: none !important; margin: 0 !important; padding: 8px 12px 7px !important;
+  border: 0 !important; background: transparent !important; box-shadow: none !important;
+}
+/* Use the same input geometry and keyboard hint before and after upload. */
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #chatForm#chatForm#chatForm .chat-input-shell {
+  grid-template-rows: minmax(38px, auto) 36px !important;
+  padding: 8px 9px 7px !important;
+}
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #chatForm#chatForm#chatForm #chatInput {
+  min-height: 38px !important; padding: 2px 4px !important;
+}
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel#assistantPanel[data-agent-entry] > #chatForm#chatForm#chatForm > small {
+  display: block !important; height: 15px !important; min-height: 15px !important;
+  width: auto !important; overflow: visible !important;
+  margin: 4px 0 0 !important; padding: 0 !important; line-height: 15px !important;
+}
+html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #ctAgentEntryPrompts {
+  display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; margin: 4px 24px 0; gap: 4px 14px; color: var(--ct-text-secondary); font-size: 13px;
+}
+html body.ct-workbench-v4 #assistantPanel #ctAgentEntryPrompts button {
+  min-height: 36px; padding: 4px 0 !important; border: 0 !important; border-radius: 0;
+  background: transparent !important; color: var(--ct-text) !important; box-shadow: none !important;
+  font: inherit; white-space: nowrap; cursor: pointer;
+}
+#ctAgentEntryPrompts button:is(:hover, :focus-visible) { text-decoration: underline; text-underline-offset: 4px; }
+#ctAgentEntryPrompts button:focus-visible { outline: 2px solid var(--ct-primary); outline-offset: 3px; }
+html body.ct-workbench-v4 #uploadForm #uploadRetry { margin-top: 12px; min-height: 40px; padding: 8px 16px; border: 1px solid var(--ct-border); border-radius: 8px; color: var(--ct-text); background: var(--ct-panel); cursor: pointer; }
+@media (max-height: 600px) {
+  html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > #ctAgentWelcome { padding-top: 0; }
+  html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > .panel-header {
+    min-height: 44px !important; height: 44px !important; padding-block: 6px !important;
   }
 }

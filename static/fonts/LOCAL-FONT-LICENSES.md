@@ -3,6 +3,13 @@
 The `vp-*.woff2` files are web-optimized builds produced by
 `tools/build_webfonts.py` from the corresponding source files in `/fonts`.
 
+- **VP Interface Heading** is derived from the local `SourceHanSansSC-Bold.otf`
+  (Source Han Sans SC Bold). Embedded copyright: © 2014–2021 Adobe, with Reserved
+  Font Name 'Source'. Licensed under SIL Open Font License 1.1; embedded license
+  and copyright records are retained in the renamed WOFF2. Source and license:
+  <https://github.com/adobe-fonts/source-han-sans>. Rebuild with
+  `python3 tools/build_webfonts.py --ui-only`. Coverage matches the bundled
+  Noto Sans SC body subset; uncommon characters use the system fallback.
 - **VP Editorial Song** is derived from FandolSong Bold. Fandol is distributed
   under the GNU GPL with the font exception. Source and license:
   <https://ctan.org/pkg/fandol>.

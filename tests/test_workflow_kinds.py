@@ -211,6 +211,9 @@ def test_same_source_speaker_task_reuses_asset_and_keeps_parent_isolated(tmp_pat
         assert child["request"]["entryWorkflow"] == "voice_discovery"
         assert child["parentJobId"] == parent_id
         assert child["status"] == "awaiting_content_confirmation"
+        notice = next(message["text"] for message in child["messages"] if message.get("kind") == "notice")
+        assert "系统会复用可用的同源分析数据" in notice
+        assert "本次复用已有分析证据" not in notice
         assert result["handoff"]["fromJobId"] == parent_id
         assert main.jobs[parent_id]["status"] == "completed"
         assert main.jobs[parent_id]["activeChildJobId"] == child_id

@@ -115,6 +115,7 @@ def test_confirming_history_search_keeps_latest_search_state() -> None:
     try:
         request = main.ContentSearchConfirmRequest(
             searchId="old-search", matchIds=["old-match"], outputMode="single_reel", orderMode="source",
+            acknowledgeUnverified=True,
         )
         with patch.object(main, "save_job"), patch.object(main, "append_message"), patch.object(main, "submit_render_task"):
             response = main.confirm_content_search(job_id, request)

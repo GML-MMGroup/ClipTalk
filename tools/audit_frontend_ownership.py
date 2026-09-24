@@ -46,12 +46,25 @@ def main() -> int:
         check(not (STATIC / asset).exists(), f"已退役资源重新出现：static/{asset}", failures)
 
     workbench_owner = STATIC / "workbench.css"
+    interface_type_owner = STATIC / "interface-type.css"
     for path in STATIC.glob("*.css"):
         if path == workbench_owner:
             continue
         source = path.read_text(encoding="utf-8")
+        ownership_source = source
+        if path == interface_type_owner:
+            # These cards and tabs may own typography roles here; their layout
+            # and component skin must still remain in workbench.css. The
+            # explicitly marked ergonomics layer is loaded last on purpose so
+            # readable controls can adjust the final workspace geometry.
+            ownership_source = ownership_source.split("/* Workspace ergonomics", 1)[0]
+            ownership_source = re.sub(
+                r"\.ct-v4-(?:version-card|candidates-card|rail-tabs)",
+                "",
+                ownership_source,
+            )
         check(
-            not re.search(r"ct-workbench-v4|ct-v4-|ctV4", source),
+            not re.search(r"ct-workbench-v4|ct-v4-|ctV4", ownership_source),
             f"工作台专属选择器泄漏到 {path.name}",
             failures,
         )

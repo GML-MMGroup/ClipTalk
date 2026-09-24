@@ -1,4 +1,4 @@
-from app.algorithm_contract import ALGORITHM_V1
+from app.algorithm_contract import CURRENT_ALGORITHM_VERSION
 from app.job_schema import CURRENT_JOB_SCHEMA_VERSION, normalize_job_schema
 
 
@@ -10,13 +10,14 @@ def test_legacy_job_keeps_historical_variant_default() -> None:
     assert job["resolvedTaskKind"] == "content_extract"
     assert job["routingSource"] == "legacy_migration"
     assert job["request"]["autoVariantCount"] == 3
-    assert job["algorithmVersion"] == ALGORITHM_V1
+    assert job["algorithmVersion"] == CURRENT_ALGORITHM_VERSION
     assert normalize_job_schema(job) is False
 
 
 def test_current_job_keeps_single_primary_result() -> None:
     job = {
         "schemaVersion": CURRENT_JOB_SCHEMA_VERSION,
+        "algorithmVersion": CURRENT_ALGORITHM_VERSION,
         "taskMode": "highlight",
         "request": {"autoVariantCount": 1},
     }

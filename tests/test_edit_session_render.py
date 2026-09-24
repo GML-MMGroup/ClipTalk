@@ -37,6 +37,8 @@ def test_secondary_render_commits_a_child_version_and_preserves_parent(monkeypat
         "id": "edit_text_1", "text": "章节标题", "start": 1.0, "end": 3.5,
         "style": {"vertical": "middle", "fontSizeRatio": .05},
     }]
+    session["reframe"] = {"aspect": "9:16", "fit": "blur", "focusX": .5, "focusY": .5}
+    session["renderPlanFingerprint"] = main._edit_session_preview_fingerprint(job, session)
     messages: list[str] = []
     rendered_text_layers: list[dict] = []
 
@@ -66,6 +68,7 @@ def test_secondary_render_commits_a_child_version_and_preserves_parent(monkeypat
     assert session["status"] == "rendered"
     assert session["renderedVersionId"] == "version-2"
     assert rendered_text_layers[0]["text"] == "章节标题"
+    assert child["reframe"]["aspect"] == "9:16"
     assert messages and "原版本保持不变" in messages[-1]
 
 
@@ -97,6 +100,7 @@ def test_secondary_render_does_not_mistake_preserved_parent_for_success(monkeypa
     session, _created = create_or_resume_edit_session(
         job, version_id="version-1", output_filename="version-1.mp4",
     )
+    session["renderPlanFingerprint"] = main._edit_session_preview_fingerprint(job, session)
 
     def fake_failed_render(*_args) -> None:
         job["status"] = "completed"
@@ -145,4 +149,59 @@ def test_exact_preview_burns_independent_text_without_subtitle_draft(monkeypatch
 
     assert captured["subtitle_cues"][0]["text"] == "独立标题"
     assert captured["subtitle_cue_styles"]["edit_text_1"]["vertical"] == "middle"
+    assert captured["subtitle_path"] is not None
     assert session["previewStatus"] == "ready"
+    assert session["previewOverlayVerification"]["renderPipelineVersion"] == 3
+    assert session["previewOverlayVerification"]["textLayerCount"] == 1
+    assert session["previewOverlayVerification"]["subtitleCueCount"] == 0
+
+
+def test_exact_preview_reapplies_session_reframe(monkeypatch, tmp_path: Path) -> None:
+    job = _render_job()
+    job.update({"sourcePath": str(tmp_path / "source.mp4"), "workDirectory": str(tmp_path)})
+    session, _created = create_or_resume_edit_session(
+        job, version_id="version-1", output_filename="version-1.mp4",
+    )
+    session["reframe"] = {"aspect": "9:16", "fit": "blur", "focusX": .4, "focusY": .6}
+    fingerprint = main._edit_session_preview_fingerprint(job, session)
+    captured: dict = {}
+
+    def fake_render(_source, output, **_kwargs):
+        Path(output).write_bytes(b"sequence")
+        return 6.0
+
+    def fake_reframe(source, output, **kwargs):
+        captured.update({"source": Path(source), "output": Path(output), **kwargs})
+        Path(output).write_bytes(b"portrait")
+        return SimpleNamespace(duration=6.0, width=540, height=960)
+
+    monkeypatch.setattr(main, "jobs", {job["id"]: job})
+    monkeypatch.setattr(main, "save_job", lambda _job: None)
+    monkeypatch.setattr(main, "probe_video", lambda *_args: SimpleNamespace(has_audio=True, width=1280, height=720))
+    monkeypatch.setattr(main, "render_composition", fake_render)
+    monkeypatch.setattr(main, "create_social_reframe_preview", fake_reframe)
+    monkeypatch.setattr(main, "validate_rendered_clip", lambda *_args, **_kwargs: None)
+
+    main.run_edit_session_preview(job["id"], session["id"], session["revision"], fingerprint)
+
+    assert captured["aspect"] == "9:16"
+    assert captured["fit"] == "blur"
+    assert captured["source"] != captured["output"]
+    assert session["previewOverlayVerification"]["reframe"]["aspect"] == "9:16"
+    assert Path(session["previewPath"]).read_bytes() == b"portrait"
+
+
+def test_legacy_social_preview_restores_reframe_for_later_edits() -> None:
+    job = _render_job()
+    session, _created = create_or_resume_edit_session(
+        job, version_id="version-1", output_filename="version-1.mp4",
+    )
+    without_reframe = main._edit_session_preview_fingerprint(job, session)
+    job["agentPreviewOutputs"] = [{
+        "sourceEditSessionId": session["id"],
+        "socialReframe": True,
+        "reframe": {"aspect": "9:16", "fit": "pad", "focusX": .5, "focusY": .5},
+    }]
+
+    assert main._effective_edit_session_reframe(job, session)["aspect"] == "9:16"
+    assert main._edit_session_preview_fingerprint(job, session) != without_reframe

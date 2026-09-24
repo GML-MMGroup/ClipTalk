@@ -24,10 +24,86 @@ from app.recognition import (
     vector_recall,
     write_embedding_matrix,
 )
-from app.recognition_pipeline import enrich_multimodal_index, recognition_work_plan
+from app.recognition_pipeline import (
+    enrich_multimodal_index,
+    person_sampling_interval,
+    query_embedding_indexes,
+    recognition_work_plan,
+    visual_embedding_backend,
+    visual_video_spans,
+)
 
 
 class RecognitionContractTests(unittest.TestCase):
+    def test_v2_person_sampling_adapts_to_long_form_duration(self) -> None:
+        self.assertEqual(
+            person_sampling_interval(90),
+            .25,
+        )
+        self.assertEqual(
+            person_sampling_interval(699.84),
+            .75,
+        )
+        self.assertEqual(
+            person_sampling_interval(1800),
+            1.0,
+        )
+        self.assertEqual(
+            person_sampling_interval(1800),
+            1.0,
+        )
+
+    def test_wemm_backend_and_video_spans_are_versioned_and_scene_bounded(self) -> None:
+        settings = SimpleNamespace(
+            recognition_visual_backend="wemm",
+            recognition_wemm_model="tencent/WeMM-Embedding-2B",
+            recognition_wemm_dimension=256,
+        )
+        self.assertEqual(
+            visual_embedding_backend(settings),
+            ("wemm", "tencent/WeMM-Embedding-2B", 256),
+        )
+        spans = visual_video_spans([
+            {"id": "shot_1", "start": 0, "end": 130},
+            {"id": "shot_2", "start": 130, "end": 150},
+        ])
+        self.assertEqual(
+            [(round(start), round(end)) for _span_id, start, end in spans],
+            [(0, 64), (64, 128), (128, 130), (130, 150)],
+        )
+
+    def test_wemm_query_reads_frame_and_video_indexes_as_recall_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame_manifest = write_embedding_matrix(
+                root / "visual-embeddings.npy", ["frame_1"],
+                np.asarray([[1, 0]], dtype=np.float32), model="wemm-test",
+            )
+            video_manifest = write_embedding_matrix(
+                root / "visual-video-embeddings.npy", ["video_1"],
+                np.asarray([[.8, .6]], dtype=np.float32), model="wemm-test",
+            )
+            encoder = MagicMock()
+            encoder.encode_texts.return_value = np.asarray([[1, 0]], dtype=np.float32)
+            settings = SimpleNamespace(
+                recognition_visual_backend="wemm", recognition_wemm_model="wemm-test",
+                recognition_wemm_dimension=256, recognition_wemm_recall_threshold=.1,
+                recognition_worker_python="", recognition_model_cache=root,
+            )
+            with patch("app.recognition_models.WeMMEncoder", return_value=encoder):
+                rows, warnings = query_embedding_indexes(
+                    "目标动作", {
+                        "recognitionProfile": {"effective": "balanced"},
+                        "embeddingIndexes": {
+                            "visual": frame_manifest, "visualVideo": video_manifest,
+                        },
+                    }, root, settings, modalities={"visual"}, limit=4,
+                )
+        self.assertFalse(warnings)
+        self.assertEqual({row["id"] for row in rows}, {"frame_1", "video_1"})
+        self.assertTrue(all(row["evidenceStatus"] == "embedding_recalled" for row in rows))
+        self.assertEqual({row["indexKind"] for row in rows}, {"visual", "visualVideo"})
+
     def test_work_plan_only_enables_requested_expensive_models(self) -> None:
         speech = recognition_work_plan({"speech"}, recognition_profile="balanced")
         self.assertFalse(speech["needsFrames"])
@@ -165,6 +241,8 @@ class RecognitionContractTests(unittest.TestCase):
                 transcript_segments=[], speech_units=[], settings=SimpleNamespace(
                     recognition_yunet_model=Path(directory) / "yunet.onnx",
                     recognition_sface_model=Path(directory) / "sface.onnx",
+                    recognition_yolox_model=Path(directory) / "yolox.onnx",
+                    recognition_youtureid_model=Path(directory) / "youtureid.onnx",
                 ), recognition_profile="balanced", ffmpeg="ffmpeg",
                 requested_modalities={"person"}, speech_analysis_complete=False,
                 progress=lambda value, detail: progress.append((value, detail)),
@@ -174,8 +252,8 @@ class RecognitionContractTests(unittest.TestCase):
         self.assertIn("首批完成后显示进度", person_messages[0])
         self.assertNotRegex(person_messages[0], r"0/\d+")
         self.assertIn("正在准备解码分析帧", person_messages[0])
-        self.assertTrue(any("（4/21 帧）" in detail for detail in person_messages))
-        self.assertTrue(any("（21/21 帧）" in detail for detail in person_messages))
+        self.assertTrue(any("（4/41 帧）" in detail for detail in person_messages))
+        self.assertTrue(any("（41/41 帧）" in detail for detail in person_messages))
         self.assertTrue(any("人物识别 2/2 · 正在检测人物并关联轨迹" in detail for _value, detail in progress))
 
     def test_shots_and_sampling_are_bounded_and_deterministic(self) -> None:
@@ -256,7 +334,7 @@ class RecognitionContractTests(unittest.TestCase):
                 "embedding": [.72, .69], "faceEmbedding": [.999, .001], "trackletId": "shot_3",
             },
         ], similarity_threshold=.68, scene_cuts=[1.5, 2.5], maximum_gap=.8,
-            algorithm_version="editing-algorithm-v2")
+        )
         self.assertEqual(len(people), 2)
         self.assertEqual(people[0]["trackCount"], 2)
         self.assertEqual(people[1]["trackCount"], 1)
@@ -266,7 +344,7 @@ class RecognitionContractTests(unittest.TestCase):
         people = cluster_person_tracks([
             {"id": "a1", "start": 1, "end": 1, "embedding": [1, 0], "trackletId": "t1", "identityStatus": "face_confirmed"},
             {"id": "a2", "start": 1.25, "end": 1.25, "embedding": [.99, .01], "trackletId": "t1", "identityStatus": "body_tracked"},
-        ], similarity_threshold=.8, maximum_gap=.8, algorithm_version="editing-algorithm-v2")
+        ], similarity_threshold=.8, maximum_gap=.8)
         self.assertEqual(people[0]["rangeEvidence"][0]["status"], "face_confirmed")
         self.assertEqual(people[0]["confidenceCalibration"], "person-identity-v3-face-anchor")
         self.assertLess(people[0]["confidence"], 1)

@@ -5,14 +5,17 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.settings_api import build_settings_router
 from app.vision_settings import LlmConfigurationStore, VisionConfigurationStore
+from app.setup_readiness import agent_probe_ready, save_agent_probe
 
 
-def _client(directory: str, *, allow_private: bool = False) -> TestClient:
+def _client(directory: str, *, allow_private: bool = False, **options) -> TestClient:
     vision = VisionConfigurationStore(Path(directory) / "vision.json", {
         "provider": "openai_compatible", "apiKey": "", "model": "",
         "baseUrl": "", "thinkingType": "", "responseFormat": "json_object",
@@ -28,8 +31,46 @@ def _client(directory: str, *, allow_private: bool = False) -> TestClient:
         vision_store=vision,
         llm_store=llm,
         allow_private_model_endpoints=allow_private,
+        **options,
     ))
     return TestClient(app)
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "unavailable"])
+def test_effective_probe_reuses_model_and_failed_retest_invalidates_success(tmp_path, failure):
+    model = {"provider": "openai_compatible", "apiKey": "test-only-key", "model": "shared-model",
+             "baseUrl": "https://example.invalid/v1", "configSource": "llm_fallback"}
+    record = tmp_path / "probe.json"
+    calls = []
+    def probe(selected):
+        calls.append(selected.copy())
+        if len(calls) == 1:
+            return {"toolCalling": True, "piVersion": "test"}
+        if failure == "unavailable":
+            raise RuntimeError("test service unavailable")
+        return {"toolCalling": False}
+    client = _client(str(tmp_path), agent_store=object(), agent_probe=probe,
+                     effective_agent_model=lambda: model.copy(), agent_probe_record=record)
+    assert client.post("/api/settings/agent/probe-effective").status_code == 200
+    assert agent_probe_ready(record, model)
+    assert client.post("/api/settings/agent/probe-effective").status_code == 400
+    assert not agent_probe_ready(record, model)
+    assert calls == [model, model]
+    assert not (tmp_path / "llm.json").exists(), "Testing reuse must not save independent settings"
+    assert "test-only-key" not in record.read_text()
+
+
+def test_failed_probe_does_not_clear_another_models_record(tmp_path):
+    old = {"apiKey": "test-only", "model": "old", "baseUrl": "https://example.invalid/v1"}
+    current = {**old, "model": "current"}
+    record = tmp_path / "probe.json"
+    def probe(_):
+        save_agent_probe(record, current, {"toolCalling": True})
+        raise RuntimeError("old probe finished late")
+    client = _client(str(tmp_path), agent_store=object(), agent_probe=probe,
+                     effective_agent_model=lambda: old.copy(), agent_probe_record=record)
+    assert client.post("/api/settings/agent/probe-effective").status_code == 400
+    assert agent_probe_ready(record, current)
 
 
 def test_settings_router_keeps_existing_public_paths() -> None:

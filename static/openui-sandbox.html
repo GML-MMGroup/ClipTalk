@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ClipTalk OpenUI Sandbox</title>
+    <link rel="stylesheet" href="/static/vendor/openui/openui-styles.css?v=20260917-openui-1" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+      #openui-root {
+        padding: 2px;
+        font-family: inherit;
+      }
+      .openui-sandbox-fallback {
+        padding: 10px 12px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #596b61;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="openui-root"></div>
+    <script src="/static/vendor/openui/openui-bundle.min.js?v=20260917-openui-1"></script>
+    <script>
+      (function () {
+        "use strict";
+
+        var CHANNEL = "cliptalk-openui";
+        var root = document.getElementById("openui-root");
+
+        function send(message) {
+          message.channel = CHANNEL;
+          parent.postMessage(message, window.location.origin);
+        }
+
+        function fallback(text) {
+          if (root) root.innerHTML = '<div class="openui-sandbox-fallback">' + text + "</div>";
+          send({ type: "height", height: root ? root.scrollHeight : 0 });
+        }
+
+        var bundle = window.__OpenUI;
+        if (!bundle) {
+          fallback("OpenUI bundle 未加载");
+          return;
+        }
+
+        var React = bundle.React;
+        var createRoot = bundle.createRoot;
+        var Renderer = bundle.Renderer;
+        // openuiChatLibrary 本身就是 createLibrary() 的返回值（含 components/prompt/toJSONSchema），
+        // 并没有 .library / .schema 子属性 —— browser-bundle 的 README 写法与 0.1.4 实际不符。
+        var library = bundle.openuiChatLibrary;
+        var reactRoot = createRoot(root);
+
+        function applyTheme(tokens) {
+          var style = document.documentElement.style;
+          Object.keys(tokens || {}).forEach(function (name) {
+            var value = tokens[name];
+            if (value) style.setProperty(name, value);
+          });
+        }
+
+        // RendererProps 实测签名：{ response, library, isStreaming?, onAction?, onError?, ... }
+        // 字段名是 response 不是 code，这一点与官方 README 不一致。
+        function handleAction(event) {
+          var payload = null;
+          try {
+            payload = JSON.parse(JSON.stringify(event || {}));
+          } catch (error) {
+            payload = { raw: String(event) };
+          }
+          send({ type: "action", action: payload });
+        }
+
+        function handleError(errors) {
+          if (errors && errors.length) {
+            fallback("语法错误：" + String(errors[0] && errors[0].message ? errors[0].message : errors[0]));
+          }
+        }
+
+        window.addEventListener("message", function (event) {
+          if (event.origin !== window.location.origin) return;
+          var data = event.data || {};
+          if (data.channel !== CHANNEL) return;
+
+          if (data.type === "render") {
+            try {
+              reactRoot.render(
+                React.createElement(Renderer, {
+                  response: data.code,
+                  library: library,
+                  onAction: handleAction,
+                  onError: handleError,
+                })
+              );
+            } catch (error) {
+              fallback("渲染失败：" + String((error && error.message) || error));
+            }
+          } else if (data.type === "theme") {
+            applyTheme(data.tokens);
+          }
+        });
+
+        // 兜底：某些自定义组件可能不触发 onAction，仍暴露 DOM 级的 action 约定
+        document.addEventListener("click", function (event) {
+          var target = event.target;
+          var el = target && target.closest ? target.closest("[data-openui-action]") : null;
+          if (!el) return;
+          send({ type: "action", action: { name: el.getAttribute("data-openui-action") } });
+        });
+
+        // 高度自适应：内容变化后通知宿主调整 iframe 高度
+        if (typeof ResizeObserver === "function" && root) {
+          new ResizeObserver(function () {
+            send({ type: "height", height: root.scrollHeight });
+          }).observe(root);
+        }
+
+        send({ type: "ready" });
+      })();
+    </script>
+  </body>
+</html>

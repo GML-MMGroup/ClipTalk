@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from fontTools import subset
@@ -47,11 +48,15 @@ def save_full_woff2(source: Path, target: Path, family: str) -> None:
     font.save(target)
 
 
-def save_subset(source: Path, target: Path, family: str, text: str) -> None:
+def save_subset(source: Path, target: Path, family: str, text: str, *, interface: bool = False) -> None:
     options = subset.Options()
     options.flavor = "woff2"
     options.layout_features = ["*"]
-    options.name_IDs = [0, 1, 2, 3, 4, 5, 6, 16, 17]
+    if interface:
+        # Horizontal UI labels don't need vertical/ruby/alternate-width glyphs.
+        options.layout_features = ["ccmp", "locl", "kern"]
+        options.hinting = False
+    options.name_IDs = [0, 1, 2, 3, 4, 5, 6, 13, 14, 16, 17]
     options.name_languages = ["*"]
     options.notdef_glyph = True
     options.recommended_glyphs = True
@@ -59,12 +64,30 @@ def save_subset(source: Path, target: Path, family: str, text: str) -> None:
     subsetter = subset.Subsetter(options=options)
     subsetter.populate(text=text)
     subsetter.subset(font)
-    rename_font(font, family)
+    rename_font(font, family, "Bold" if interface else "Regular")
     subset.save_font(font, target, options)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ui-only", action="store_true", help="Build only the interface heading font")
+    args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    # Match the existing body font's general-purpose Chinese coverage, not just
+    # today's UI strings. Uncommon characters still use the CSS fallback stack.
+    with TTFont(OUTPUT / "noto-sans-sc-zh-400.woff2") as body_font:
+        ui_text = "".join(chr(codepoint) for codepoint in sorted(body_font.getBestCmap()))
+    save_subset(
+        SOURCE / "SourceHanSansSC-Bold.otf",
+        OUTPUT / "vp-interface-heading.woff2",
+        "VP Interface Heading",
+        ui_text,
+        interface=True,
+    )
+    if args.ui_only:
+        target = OUTPUT / "vp-interface-heading.woff2"
+        print(f"{target.relative_to(ROOT)}\t{target.stat().st_size:,} bytes")
+        return
     save_subset(
         SOURCE / "FandolSong-Bold.otf",
         OUTPUT / "vp-editorial-song.woff2",
