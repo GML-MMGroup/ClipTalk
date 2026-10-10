@@ -110,3 +110,12 @@ def test_job_catalog_rejects_invalid_cursor(monkeypatch) -> None:
         assert error.detail == "任务列表游标无效"
     else:
         raise AssertionError("invalid cursors must not silently restart pagination")
+
+
+def test_catalog_searches_current_goal_and_exposes_a_readable_objective(monkeypatch):
+    _catalog(monkeypatch)
+    job = main_module.jobs['job-completed']
+    job['contentSearch'] = {'instruction': '保留汽车外观展示，制作竖屏短片'}
+    result = main_module.list_jobs(q='汽车外观')
+    assert [item['id'] for item in result['jobs']] == [job['id']]
+    assert result['jobs'][0]['objective'] == job['contentSearch']['instruction']

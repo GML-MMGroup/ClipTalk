@@ -91,7 +91,7 @@ jobs:
           cache: npm
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-wqy-zenhei libgomp1 libsndfile1
 
       - name: Install Python dependencies
         run: |
@@ -102,12 +102,13 @@ jobs:
       - name: Install Node dependencies and Chromium
         run: |
           npm ci
+          npm ci --prefix agent-service
           npx playwright install --with-deps chromium
 
       - name: Check repository boundary
         run: python tools/check_repository.py
 
-      - name: Protect GitHub README and license
+      - name: Protect project license
         if: github.event_name == 'pull_request'
         run: python tools/check_repository.py --compare-ref "${{ github.event.pull_request.base.sha }}"
 

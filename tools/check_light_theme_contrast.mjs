@@ -2,6 +2,32 @@
 import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
 
+async function sampleBackground(page, element) {
+  // Hide text globally during this screenshot (live views can rerender), leaving gradients, videos and
+  // translucent surfaces intact. Sample the rendered background, not a guessed
+  // fallback colour. This is a sampled check, not a per-pixel WCAG guarantee.
+  const style = await page.addStyleTag({content: 'body *{-webkit-text-fill-color:transparent!important;text-shadow:none!important}'});
+  try {
+    await element.evaluate(node => node.getAnimations({subtree:true}).forEach(animation=>animation.pause()));
+    const clip = await element.boundingBox();
+    if (!clip) throw new Error("Element changed during measurement");
+    const png = await page.screenshot({animations:"disabled", clip, timeout:5000});
+    return await page.evaluate(async data => {
+      const img = new Image(); img.src = data; await img.decode();
+      const canvas = document.createElement("canvas"); canvas.width=img.width; canvas.height=img.height;
+      const context=canvas.getContext("2d"); context.drawImage(img,0,0);
+      const samples=[];
+      for(let y=1;y<8;y++) for(let x=1;x<8;x++) {
+        const pixel=context.getImageData(Math.min(img.width-1,Math.floor(img.width*x/8)),Math.min(img.height-1,Math.floor(img.height*y/8)),1,1).data;
+        samples.push({r:pixel[0],g:pixel[1],b:pixel[2],a:1});
+      }
+      return samples;
+    }, `data:image/png;base64,${png.toString("base64")}`);
+  } finally {
+    await style.evaluate(node=>node.remove());
+  }
+}
+
 function readArgs(argv) {
   const values = {};
   for (let index = 2; index < argv.length; index += 1) {
@@ -93,6 +119,7 @@ Options:
   --min NUMBER           Minimum contrast ratio. Default: 4.5
   --width NUMBER         Viewport width. Default: 1600
   --height NUMBER        Viewport height. Default: 950
+  --theme THEME          light (default) or dark.
   --selector SELECTOR    Elements to hover and audit.
   --no-workspace         Do not force the ClipTalk workspace state.
   --view VIEW            Read-only view: editor, cover, settings, library.
@@ -112,7 +139,7 @@ const minimum = Number.parseFloat(String(args.min || "4.5"));
 const width = Math.max(320, Number.parseInt(String(args.width || "1600"), 10));
 const height = Math.max(320, Number.parseInt(String(args.height || "950"), 10));
 const selector = String(args.selector || 'button,a,summary,select,input,textarea,p,small,label,h1,h2,h3,strong,span,[role="button"]');
-const theme = "light";
+const theme = args.theme === "dark" ? "dark" : "light";
 
 if (!Number.isFinite(minimum) || minimum <= 0) {
   console.error("--min must be a positive number.");
@@ -154,6 +181,7 @@ try {
   const checked = [];
   const failures = [];
   const unmeasured = [];
+  let sampled = 0;
   for (const element of elements) {
     const metadata = await element.evaluate((node, includeOffscreen) => {
       const rect = node.getBoundingClientRect();
@@ -193,6 +221,7 @@ try {
         const color = getComputedStyle(current).backgroundColor;
         if (getComputedStyle(current).backgroundImage !== 'none') imageBackground = true;
         if (color && color !== "transparent") backgroundLayers.push(color);
+        if (/^rgb\(/.test(color) || /,\s*1\)$/.test(color)) break;
       }
       backgroundLayers.push(getComputedStyle(document.documentElement).backgroundColor || "rgb(255, 255, 255)");
       const style = getComputedStyle(node);
@@ -204,8 +233,6 @@ try {
         imageBackground,
       };
     });
-    if (styles.imageBackground) { unmeasured.push(metadata); continue; }
-
     let background = { r: 255, g: 255, b: 255, a: 1 };
     for (const layer of styles.backgroundLayers.toReversed()) {
       const color = parseColor(layer);
@@ -213,7 +240,15 @@ try {
     }
     const foreground = parseColor(styles.color);
     if (!foreground) continue;
-    const contrast = contrastRatio(foreground, background);
+    let contrast = contrastRatio(foreground, background);
+    if (styles.imageBackground) {
+      try {
+        const samples = await sampleBackground(page, element);
+        background = samples.reduce((lowest, sample) => contrastRatio(foreground,sample)<contrastRatio(foreground,lowest)?sample:lowest);
+        contrast = contrastRatio(foreground,background);
+        sampled++;
+      } catch (error) { unmeasured.push({...metadata, reason: String(error.message || error).split("\n")[0]}); continue; }
+    }
     const entry = {
       ...metadata,
       color: styles.color,
@@ -221,11 +256,12 @@ try {
       ownBackground: styles.backgroundColor,
       borderColor: styles.borderColor,
       contrast: Number(contrast.toFixed(2)),
+      measurement: styles.imageBackground ? "rendered_background_samples" : "computed_solid_background",
     };
     checked.push(entry);
     if (contrast < (metadata.large ? Math.min(3, minimum) : minimum)) failures.push(entry);
   }
-  result = { url, theme, minimum, checked: checked.length, failures, unmeasured: unmeasured.length };
+  result = { url, theme, minimum, checked: checked.length, sampled, failures, unmeasured: unmeasured.length, unmeasuredDetails: unmeasured };
 } finally {
   await browser.close();
 }
@@ -237,6 +273,7 @@ console.log(JSON.stringify({
   theme: result.theme,
   minimum: result.minimum,
   checked: result.checked,
+  sampled: result.sampled,
   failures: result.failures.length,
   unmeasured: result.unmeasured,
 }, null, 2));

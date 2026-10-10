@@ -31,6 +31,7 @@
   var unreadCount = 0;
   var scrollBound = false;
   var restoring = 0;
+  var revealedResults = new Set();
   var actionSource = null;
   var actionObserver = null;
 
@@ -44,6 +45,18 @@
       restoring -= 1;
       if (node) node.scrollTop = top;
     }
+  }
+
+  function revealResult(card, historical) {
+    if (!card.final || !["result", "content-result", "compose-result", "composing"].includes(card.kind)) return;
+    if (revealedResults.has(card.id)) return;
+    revealedResults.add(card.id);
+    if (restoring || historical || document.hidden || global.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    var bounds = card.el?.getBoundingClientRect();
+    if (!bounds || bounds.bottom < 0 || bounds.top > global.innerHeight) return;
+    card.el?.animate?.([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "translateY(0)" }], {
+      duration: 240, easing: "cubic-bezier(.2,.75,.25,1)",
+    });
   }
 
   function legacyDockEnabled() {
@@ -277,6 +290,7 @@
         container.append(cardShell(existing));
       }
       applyHtml(existing, html);
+      revealResult(existing, payload.historical);
       if (payload.announce && existing.renderedHtml === html) announce(payload.announce);
       return existing.el;
     }
@@ -305,6 +319,7 @@
       }
     }
     trim();
+    revealResult(card, payload.historical);
     if (restoring || payload.historical) return card.el;
     if (payload.announce) announce(payload.announce);
     if (pinnedBeforeInsert) scrollToBottom("auto");
@@ -443,7 +458,7 @@
     }
     const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
     const eyebrow = bar.querySelector('[data-cs-action-eyebrow]');
-    setText(eyebrow, String(action.eyebrow ?? "待确认事项"));
+    setText(eyebrow, String(action.eyebrow ?? "待你确认"));
     eyebrow.hidden = !eyebrow.textContent;
     setText(bar.querySelector('[data-cs-action-summary]'), String(action.summary || ""));
     setText(bar.querySelector('[data-cs-action-reason]'), String(action.reason || ""));

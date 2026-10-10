@@ -457,6 +457,7 @@ class EditSessionRenderRequest(BaseModel):
     subtitleDraftId: str | None = None
     versionLabel: str | None = Field(default=None, max_length=80)
     acknowledgedWarningCodes: list[str] = Field(default_factory=list, max_length=32)
+    aspectExports: list[str] = Field(default_factory=list, max_length=4)
 
 
 class EditSessionProposalRequest(BaseModel):

@@ -106,10 +106,40 @@
     return headers;
   }
 
+  function uploadResponse(path, options, headers) {
+    return new Promise((resolve, reject) => {
+      const xhr = new global.XMLHttpRequest();
+      xhr.open(options.method || "POST", path);
+      headers.forEach((value, name) => xhr.setRequestHeader(name, value));
+      const abort = () => xhr.abort();
+      const finish = () => options.signal?.removeEventListener("abort", abort);
+      xhr.upload.onprogress = event => {
+        if (event.lengthComputable) options.onUploadProgress(event.loaded / event.total);
+      };
+      xhr.upload.onload = () => options.onUploadProgress(1);
+      xhr.onload = () => {
+        finish();
+        const responseHeaders = new Headers();
+        xhr.getAllResponseHeaders().trim().split(/[\r\n]+/).filter(Boolean).forEach(line => {
+          const colon = line.indexOf(":");
+          if (colon > 0) responseHeaders.append(line.slice(0, colon), line.slice(colon + 1).trim());
+        });
+        resolve(new global.Response([204, 205, 304].includes(xhr.status) ? null : xhr.responseText, { status: xhr.status, headers: responseHeaders }));
+      };
+      xhr.onerror = () => { finish(); reject(new Error("网络连接失败")); };
+      xhr.onabort = () => { finish(); reject(new global.DOMException("上传已取消", "AbortError")); };
+      if (options.signal?.aborted) return reject(new global.DOMException("上传已取消", "AbortError"));
+      options.signal?.addEventListener("abort", abort, { once: true });
+      xhr.send(options.body);
+    });
+  }
+
   async function authenticateAndRetry(path, options, allowTokenPrompt) {
     let response;
     try {
-      response = await fetch(path, {
+      response = typeof options.onUploadProgress === "function"
+        ? await uploadResponse(path, options, requestHeaders(options))
+        : await fetch(path, {
         ...options,
         headers: requestHeaders(options),
         credentials: "same-origin",

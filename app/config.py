@@ -133,7 +133,6 @@ class Settings:
     maximum_workers: int
     content_search_model_concurrency: int
     access_token: str
-    allow_unauthenticated_remote: bool
     allow_private_model_endpoints: bool
     maximum_storage_bytes: int
     retention_days: int
@@ -238,7 +237,6 @@ class Settings:
                 "CONTENT_SEARCH_MODEL_CONCURRENCY", 3, 4,
             ),
             access_token=os.environ.get("HIGHLIGHT_ACCESS_TOKEN", "").strip(),
-            allow_unauthenticated_remote=_boolean("HIGHLIGHT_ALLOW_UNAUTHENTICATED_REMOTE", False),
             allow_private_model_endpoints=_boolean("HIGHLIGHT_ALLOW_PRIVATE_MODEL_ENDPOINTS", False),
             maximum_storage_bytes=_positive_int("HIGHLIGHT_MAX_STORAGE_BYTES", 50 * 1024**3),
             retention_days=_nonnegative_int("HIGHLIGHT_RETENTION_DAYS", 0),
@@ -320,7 +318,6 @@ class Settings:
     def validate_deployment_security(self) -> None:
         validate_deployment_access(
             self.host, self.access_token,
-            allow_unauthenticated_remote=self.allow_unauthenticated_remote,
         )
         if self.published_bind_address:
             validate_deployment_access(

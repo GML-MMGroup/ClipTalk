@@ -1660,6 +1660,7 @@ def rank_units(
     exclusions = _strings(intent.get("excludeRules"))
     by_id = {str(item.get("id")): item for item in units if str(item.get("id") or "")}
     model_scores: dict[str, dict[str, Any]] = {}
+    rejected_units: set[str] = set()
     model_rank_sources: list[dict[str, float]] = []
     for result in model_results or []:
         source_scores: dict[str, float] = {}
@@ -1669,6 +1670,8 @@ def rank_units(
             unit_id = str(match.get("unit_id") or match.get("unitId") or "")
             if unit_id not in by_id:
                 continue
+            if match.get("satisfied") is not None and not _bool_value(match.get("satisfied"), True):
+                rejected_units.add(unit_id)
             score = max(0.0, min(100.0, _number(match.get("score"))))
             source_scores[unit_id] = max(source_scores.get(unit_id, 0.0), score)
             if score > _number(model_scores.get(unit_id, {}).get("score")):
@@ -1726,6 +1729,10 @@ def rank_units(
         ) if source_ranks else 0.0
         model_grounded = _model_evidence_is_grounded(model, unit)
         model_satisfied = bool(model) and _bool_value(model.get("satisfied"), True)
+        # Lexical recall is not proof of a condition. An explicit verifier
+        # rejection must not be promoted by repeated query words.
+        if unit_id in rejected_units:
+            continue
         support_level = str(model.get("supportLevel") or "").lower()
         if support_level not in {"explicit", "contextual"}:
             support_level = "explicit" if lexical >= 60 else "contextual"

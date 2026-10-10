@@ -5,6 +5,7 @@ import json
 import shutil
 import uuid
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -161,18 +162,20 @@ def build_output_package(
 
 def render_cover_intro(
     video: Path, cover: Path, output: Path, *, duration: float,
-    ffmpeg: str, ffprobe: str,
+    ffmpeg: str, ffprobe: str, cancelled=None,
 ) -> dict[str, Any]:
     """Render a new MP4 with a silent still cover prepended; never mutate the source."""
     info = probe_video(video, ffprobe)
-    intro_seconds = max(.5, min(5.0, float(duration)))
+    intro_seconds = max(.2, min(60.0, float(duration)))
     width = max(2, int(info.width) // 2 * 2)
     height = max(2, int(info.height) // 2 * 2)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.tmp.mp4")
     cover_filter = (
-        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},setsar=1,fps=30,format=yuv420p[v0]"
+        # A confirmed cover includes its title and safe margins. Cropping a
+        # landscape cover into a portrait video can remove the whole title.
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,format=yuv420p[v0]"
     )
     video_filter = (
         f"[1:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
@@ -202,7 +205,8 @@ def render_cover_intro(
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
     ])
     try:
-        _run(command, timeout=max(600.0, info.duration * 12.0))
+        from .media import _run_cancellable
+        _run_cancellable(command, timeout=max(600.0, info.duration * 12.0), cancelled=cancelled)
         rendered = probe_video(temporary, ffprobe)
         if rendered.duration < info.duration + intro_seconds - .35:
             raise MediaError("封面片头成片时长校验失败")
@@ -214,3 +218,93 @@ def render_cover_intro(
         "height": rendered.height, "hasAudio": rendered.has_audio,
         "introDuration": round(intro_seconds, 3),
     }
+
+
+@contextmanager
+def cover_replacement_source(video: Path, source_output: dict, target: Path, *, ffmpeg: str, ffprobe: str, cancelled=None):
+    """Strip only the recorded old cover, with a private temporary file."""
+    from .delivery_lineage import cover_interval
+    start, duration = cover_interval(source_output)
+    if not duration:
+        yield video
+        return
+    temporary = target.with_name(f".{target.stem}.{uuid.uuid4().hex}.body.mp4")
+    try:
+        remove_leading_intro(video, temporary, start=start, duration=duration,
+                             ffmpeg=ffmpeg, ffprobe=ffprobe, cancelled=cancelled)
+        yield temporary
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def remove_leading_intro(video: Path, output: Path, *, duration: float, ffmpeg: str, ffprobe: str, cancelled=None, start: float = 0) -> None:
+    """Remove a recorded cover interval, retaining later prepended motion."""
+    import math
+    from .media import _run_cancellable
+    info = probe_video(video, ffprobe)
+    if not math.isfinite(duration) or not math.isfinite(start) or start < 0 or not 0 < duration < info.duration - start:
+        raise MediaError("已有封面片头的时间记录无效，未修改原成片")
+    temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.tmp.mp4")
+    try:
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if start == 0:
+            command += ["-ss", f"{duration:.6f}", "-i", str(video), "-map", "0:v:0", "-map", "0:a:0?"]
+        else:
+            graph = (f"[0:v]trim=end={start:.6f},setpts=PTS-STARTPTS[v0];"
+                     f"[0:v]trim=start={start + duration:.6f},setpts=PTS-STARTPTS[v1]")
+            if info.has_audio:
+                graph += (f";[0:a]atrim=end={start:.6f},asetpts=PTS-STARTPTS[a0];"
+                          f"[0:a]atrim=start={start + duration:.6f},asetpts=PTS-STARTPTS[a1];"
+                          "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
+            else:
+                graph += ";[v0][v1]concat=n=2:v=1:a=0[v]"
+            command += ["-i", str(video), "-filter_complex", graph, "-map", "[v]"]
+            if info.has_audio:
+                command += ["-map", "[a]"]
+        _run_cancellable([*command, "-c:v", "libx264",
+                          "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
+                          "-movflags", "+faststart", str(temporary)],
+                         timeout=max(600, info.duration * 12), cancelled=cancelled)
+        rendered = probe_video(temporary, ffprobe)
+        if abs(rendered.duration - (info.duration - duration)) > .35:
+            raise MediaError("移除旧片头后的时长校验失败")
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def verify_cover_intro_frame(video: Path, cover: Path | None, *, ffmpeg: str, ffprobe: str, cancelled=None) -> dict:
+    """Compare the actual opening frame to the approved cover, not its flag.
+
+    This validates image placement/identity, not OCR or title legibility.
+    Compression/resampling differences are tolerated; unreadable media is
+    unknown, never a successful inspection.
+    """
+    import tempfile
+    from PIL import Image, ImageChops, ImageOps, ImageStat
+    from .media import _run_cancellable
+    try:
+        if cover is None or not cover.is_file():
+            return {"status": "unknown", "reason": "缺少可比较的已确认封面图片"}
+        info = probe_video(video, ffprobe)
+        width = 320
+        height = max(2, round(width * info.height / info.width))
+        with tempfile.TemporaryDirectory(prefix="cliptalk-cover-check-") as directory:
+            frame = Path(directory) / "opening.png"
+            _run_cancellable([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "0.1", "-i", str(video),
+                              "-frames:v", "1", "-vf", f"scale={width}:{height}", str(frame)],
+                             timeout=30, cancelled=cancelled)
+            with Image.open(frame) as image:
+                actual = image.convert("RGB")
+            with Image.open(cover) as image:
+                fitted = ImageOps.contain(image.convert("RGB"), (width, height), Image.Resampling.LANCZOS)
+            expected = Image.new("RGB", (width, height), "black")
+            expected.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+            error = sum(ImageStat.Stat(ImageChops.difference(actual, expected)).mean) / (3 * 255)
+        return {"status": "supported" if error <= .08 else "mismatch", "method": "opening_frame_image_comparison",
+                "difference": round(error, 4), "sampleTime": .1, "titleLegibilityChecked": False,
+                "reason": "片头抽帧与已确认封面相符" if error <= .08 else "片头实际画面与已确认封面不一致"}
+    except Exception:
+        if cancelled and cancelled():
+            raise RuntimeError("封面检查已取消") from None
+        return {"status": "unknown", "reason": "片头抽帧检查未完成"}

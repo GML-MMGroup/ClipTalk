@@ -99,9 +99,14 @@ def _select_duration_subset(
     if sum(_duration(item) for item in segments) <= upper_limit + .01:
         return segments, []
     best: tuple[float, tuple[int, ...]] | None = None
+    required = {index for index, item in enumerate(segments) if item.get("essential")}
+    if sum(_duration(segments[i]) for i in required) > upper_limit + .01:
+        raise ValueError("必须保留的片段超过时长上限，请增加时长或调整必选内容")
     if len(segments) <= 16:
         for count in range(1, len(segments) + 1):
             for indices in itertools.combinations(range(len(segments)), count):
+                if not required.issubset(indices):
+                    continue
                 chosen = [segments[index] for index in indices]
                 duration = sum(_duration(item) for item in chosen)
                 if duration > upper_limit + .01:
@@ -128,6 +133,44 @@ def _select_duration_subset(
                 key = (score, indices)
                 if best is None or key > best:
                     best = key
+    else:
+        # Bounded beam, not the old >16 one-shot fallback. Seed mandatory
+        # segments so pruning can never silently remove them. Duration bins
+        # preserve alternatives near and below the target throughout search.
+        scores = [_number(candidate_map.get(_candidate_id(s), s).get("editorialScore"),
+                          _number(candidate_map.get(_candidate_id(s), s).get("score"), 50)) for s in segments]
+        lengths = [_duration(s) for s in segments]
+        def value(indices):
+            events = {_event_id(segments[i]) for i in indices if _event_id(segments[i])}
+            roles = {str(segments[i].get("storyFunction") or segments[i].get("role") or "") for i in indices}
+            capacity = max(1, min(4, round(target / 20)))
+            switches = sum(bool(_event_id(segments[a]) and _event_id(segments[b])
+                                and _event_id(segments[a]) != _event_id(segments[b])) for a, b in zip(indices, indices[1:]))
+            duration = sum(lengths[i] for i in indices)
+            return (min(len(events), capacity) * 5 - max(0, len(events) - capacity) * 14
+                    + sum(scores[i] for i in indices) * .11 + len(required) * 4
+                    + min(5, len(roles)) * 2 - switches * 2.5
+                    - abs(target - duration) * 2.4 - (30 if duration < target * .55 else 0))
+        seed = tuple(sorted(required))
+        states = {seed: sum(lengths[i] for i in seed)}
+        resolution = max(.05, upper_limit / 128)
+        for index in range(len(segments)):
+            if index in required:
+                continue
+            expanded = dict(states)
+            for indices, duration in states.items():
+                if duration + lengths[index] <= upper_limit + .01:
+                    chosen = tuple(sorted((*indices, index)))
+                    expanded[chosen] = duration + lengths[index]
+            bins = {}
+            for indices, duration in expanded.items():
+                bucket = int(duration / resolution)
+                bins.setdefault(bucket, []).append((value(indices), indices, duration))
+            states = {indices: duration for rows in bins.values()
+                      for _, indices, duration in sorted(rows, reverse=True)[:4]}
+        candidates = [(value(indices), indices) for indices in states if indices]
+        if candidates:
+            best = max(candidates)
     if best is None:
         chosen = [max(segments, key=lambda item: (
             _number(candidate_map.get(_candidate_id(item), item).get("score"), 50) - _duration(item) * .3,

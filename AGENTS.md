@@ -72,3 +72,17 @@ invent a parallel installation procedure.
   Compose 配置，再检查容器状态、有限范围日志和健康接口。
 - 最终说明安装方式、通过项、剩余告警、本地访问地址、服务是否仍在运行，
   以及用户下一步需要在界面完成的模型配置。
+
+## Real-video acceptance / 真实验收脚本（opt-in，CI 不跑）
+
+- `tests/real_video_acceptance.py` 是真实视频端到端验收 runner，**不被 pytest 收集**（文件名非 `test_` 开头），
+  因为它会新建任务、调用已配置的模型并保留产物 —— 只应在本地开发环境按需执行。
+- 三个脚本的分工：主脚本跑 `highlight/topic/shorter/anchor/speaker`；
+  `real_automatic_followup_acceptance.py` 基于已完成的 isolated 报告续跑
+  `shorter/audio/motion/cover/cover_default`（需 automatic_delivery）；
+  `real_voice_acceptance.py` 做参考声纹验收。
+- 常用顺序：先 `--check`（会探活 `/api/health`），再 `--dry-run` 看计划，最后 `--run`；
+  `--total-timeout` 可限制全部用例的总耗时（`--timeout` 只是单个 plan 的）。
+- `speaker` 用例必须传 `--speaker-video`（多人素材），否则标记 blocked —— 不会用主视频冒充。
+- `audio/motion/cover/cover_default` 不在主脚本执行，需走 followup 脚本并指向 isolated 报告。
+- 结果恒定 `semanticVerdict="manual_review_required"`：内容准确性、人脸与声纹仍需人工审核。

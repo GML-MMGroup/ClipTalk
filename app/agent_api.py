@@ -15,6 +15,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .job_projection import plan_with_presentation
 from .agent_platform import AgentPlatform, AgentServiceError
 from .assistant_interaction import AssistantInteraction
 from .agent_store import content_hash, parse_skill_markdown
@@ -29,7 +30,7 @@ class WorkspaceCreateRequest(BaseModel):
 class AgentMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     skillId: str | None = Field(default=None, max_length=64)
-    executionMode: Literal["autonomous_review", "stepwise_review"] = "autonomous_review"
+    executionMode: Literal["automatic_delivery", "autonomous_review", "stepwise_review"] = "autonomous_review"
     clientMessageId: str | None = Field(default=None, max_length=96)
     uiContext: dict[str, Any] | None = None
     replyToActionId: str | None = Field(default=None, max_length=96)
@@ -123,7 +124,15 @@ def build_agent_router(
         runs = platform.store.list(
             "runs", predicate=lambda item: item.get("workspaceId") == workspace_id,
         )
-        return {"workspace": workspace, "plans": plans, "runs": runs}
+        plans = [plan_with_presentation(plan) for plan in plans]
+        reasons = {plan["id"]: plan.get("terminalReason") for plan in plans}
+        messages = []
+        for message in workspace.get("messages") or []:
+            reason = reasons.get(message.get("planId"))
+            if message.get("kind") == "plan_result" and reason:
+                message = {**message, "text": "。".join(reason[key] for key in ("label", "message", "hint"))}
+            messages.append(message)
+        return {"workspace": {**workspace, "messages": messages}, "plans": plans, "runs": runs}
 
     @router.get("/health")
     def agent_health() -> dict[str, Any]:
@@ -398,7 +407,7 @@ def build_agent_router(
         plan = platform.store.get("plans", plan_id)
         if not plan:
             raise HTTPException(404, "执行计划不存在")
-        return {"plan": plan}
+        return {"plan": plan_with_presentation(plan)}
 
     @router.post("/plans/{plan_id}/confirm")
     def confirm_plan(plan_id: str, request: PlanApprovalRequest) -> dict[str, Any]:

@@ -43,11 +43,12 @@ def test_secondary_render_commits_a_child_version_and_preserves_parent(monkeypat
     rendered_text_layers: list[dict] = []
 
     def fake_confirmed_render(*args) -> None:
-        rendered_text_layers.extend(copy.deepcopy(args[18]))
-        metadata = dict(args[12])
+        request = args[0]
+        rendered_text_layers.extend(copy.deepcopy(request.text_layers))
+        metadata = dict(request.auto_meta)
         job["outputVersions"].append({
             "id": "version-2", "number": 2, **metadata,
-            "outputs": [{"filename": "version-2.mp4", "segments": copy.deepcopy(args[6])}],
+            "outputs": [{"filename": "version-2.mp4", "segments": copy.deepcopy(request.planned_sequence)}],
         })
         job["currentOutputVersionId"] = "version-2"
         job["status"] = "completed"

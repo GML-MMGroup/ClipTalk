@@ -21,6 +21,9 @@ EDIT_SESSION_AUDIO_BRIDGES = {"none", "j_cut", "l_cut"}
 EDIT_SESSION_REFRAME_ASPECTS = {"9:16", "4:5", "1:1", "16:9"}
 EDIT_SESSION_REFRAME_FITS = {"blur", "crop", "pad"}
 MIN_EDIT_CLIP_SECONDS = 0.25
+COVER_CLIP_ANIMATIONS = ("none", "fade", "zoom")
+DEFAULT_COVER_ANIMATION = "fade"
+
 EDIT_PROPOSAL_OPERATION_TYPES = frozenset({
     "insert_clip", "delete_clips", "trim_clip", "split_clip", "reorder_clips",
     "update_clip", "update_clips", "set_subtitle", "add_marker",
@@ -39,6 +42,38 @@ def _now_iso() -> str:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _is_image_clip(clip: dict[str, Any]) -> bool:
+    """True when the clip renders a still image instead of a source range."""
+    return str(clip.get("assetKind") or "").strip().lower() == "image"
+
+
+def _normalize_cover_animation(value: Any) -> str:
+    animation = str(value or "").strip().lower()
+    return animation if animation in COVER_CLIP_ANIMATIONS else "none"
+
+
+def _segment_canvas(job: dict[str, Any], session: dict[str, Any]) -> tuple[int, int]:
+    """Resolve the delivery canvas in pixels for stills inserted on a timeline."""
+    candidates: list[dict[str, Any]] = []
+    video_info = job.get("videoInfo") if isinstance(job.get("videoInfo"), dict) else {}
+    if video_info:
+        candidates.append(video_info)
+    for version in job.get("outputVersions") or []:
+        if not isinstance(version, dict):
+            continue
+        candidates.extend(item for item in version.get("outputs") or [] if isinstance(item, dict))
+    candidates.extend(item for item in job.get("outputs") or [] if isinstance(item, dict))
+    for candidate in candidates:
+        try:
+            width = int(candidate.get("width") or 0)
+            height = int(candidate.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        if width >= 2 and height >= 2:
+            return width // 2 * 2, height // 2 * 2
+    return 0, 0
 
 
 def _duration(start: float, end: float, rate: float = 1.0) -> float:
@@ -260,7 +295,11 @@ def edit_session_preflight(
     if session.get("subtitleEnabled") and not session.get("subtitleDraftId"):
         issues.append({"severity": "warning", "code": "subtitle_unconfirmed", "message": "字幕已开启，但还没有确认的字幕草稿。"})
     for left_index, left in enumerate(clips):
+        if _is_image_clip(left):
+            continue
         for right in clips[left_index + 1:]:
+            if _is_image_clip(right):
+                continue
             overlap = max(0.0, min(float(left.get("sourceEnd") or 0), float(right.get("sourceEnd") or 0)) - max(float(left.get("sourceStart") or 0), float(right.get("sourceStart") or 0)))
             shorter = min(
                 float(left.get("sourceEnd") or 0) - float(left.get("sourceStart") or 0),
@@ -275,6 +314,8 @@ def edit_session_preflight(
         issues.append({"severity": "warning", "code": "event_interleave", "message": "同一事件被其他事件切开后再次出现，建议确认叙事顺序。"})
     transcript = _job_transcript_segments(job)
     for index, clip in enumerate(clips):
+        if _is_image_clip(clip):
+            continue
         for boundary_name, boundary in (("入点", float(clip.get("sourceStart") or 0)), ("出点", float(clip.get("sourceEnd") or 0))):
             if any(
                 float(item.get("start") or 0) + .12 < boundary < float(item.get("end") or 0) - .12
@@ -718,9 +759,90 @@ def _normalize_text_layer_style(value: Any, current: dict[str, Any] | None = Non
     }
 
 
+def _cover_insert_index(clips: list[dict[str, Any]], position: Any, position_mode: str) -> int:
+    """Resolve where a cover still lands: an explicit index, or start/middle/end."""
+    if position not in (None, ""):
+        try:
+            return max(0, min(len(clips), int(position)))
+        except (TypeError, ValueError):
+            pass
+    mode = str(position_mode or "start").strip().lower()
+    if mode == "end":
+        return len(clips)
+    if mode == "middle":
+        def length(clip: dict[str, Any]) -> float:
+            try:
+                return max(0.0, float(clip.get("duration") or 0))
+            except (TypeError, ValueError):
+                return 0.0
+        total = sum(length(clip) for clip in clips)
+        if total <= 0:
+            return len(clips)
+        seen = 0.0
+        for index, clip in enumerate(clips):
+            seen += length(clip)
+            if seen >= total / 2:
+                return index + 1
+        return len(clips)
+    return 0
+
+
 def _apply_operation(job: dict[str, Any], session: dict[str, Any], operation: dict[str, Any]) -> str:
     operation_type = str(operation.get("type") or "")
     clips = session.setdefault("clips", [])
+    if operation_type == "insert_cover_clip":
+        from .cover_delivery import current_cover_version, cover_version_path
+        try:
+            duration = float(operation.get("duration") or 3.0)
+        except (TypeError, ValueError):
+            duration = 3.0
+        duration = round(max(0.2, min(60.0, duration)), 3)
+        wanted_id = str(operation.get("coverVersionId") or "")
+        cover_version = None
+        if wanted_id:
+            cover_version = next((
+                item for item in job.get("coverVersions") or []
+                if isinstance(item, dict) and str(item.get("id") or "") == wanted_id
+            ), None)
+        if cover_version is None:
+            cover_version = current_cover_version(job)
+        if not cover_version:
+            raise EditSessionError("请先生成并确认封面")
+        cover_path = cover_version_path(job, cover_version)
+        if not cover_path or not cover_path.is_file():
+            raise EditSessionError("封面文件不存在，请重新生成封面")
+        position_mode = str(operation.get("positionMode") or "start").strip().lower()
+        insert_at = _cover_insert_index(clips, operation.get("position"), position_mode)
+        clips.insert(insert_at, {
+            "id": _id("edit_clip"),
+            "sourceRef": {"kind": "image", "id": str(cover_version.get("id") or "")},
+            "title": str(operation.get("title") or "封面")[:100],
+            "sourceStart": 0.0,
+            "sourceEnd": duration,
+            "duration": duration,
+            "assetKind": "image",
+            "assetPath": str(cover_path),
+            "assetDuration": duration,
+            "coverAnimation": _normalize_cover_animation(
+                operation.get("animation") or DEFAULT_COVER_ANIMATION
+            ),
+            "playbackRate": 1.0,
+            "transitionIn": {"type": "cut", "duration": 0.0},
+            "audioBridge": {"type": "none", "duration": 0.0},
+            "audioGain": 1.0,
+            "muted": True,
+            "audioFadeIn": 0.06,
+            "audioFadeOut": 0.06,
+            "boundaryConfidence": 1.0,
+            "origin": {
+                "workflowKind": "cover_intro",
+                "eventId": "", "candidateId": "", "matchId": "",
+            },
+        })
+        where = {"start": "片头", "end": "片尾", "middle": "正片中间"}.get(
+            position_mode, f"第 {insert_at + 1} 位",
+        )
+        return f"已在{where}插入封面片段（{duration:g} 秒）"
     if operation_type == "trim_clip":
         clip = _clip_lookup(session, str(operation.get("clipId") or ""))
         start, end = _validate_range(job, operation.get("sourceStart"), operation.get("sourceEnd"))
@@ -890,6 +1012,8 @@ def _apply_operation(job: dict[str, Any], session: dict[str, Any], operation: di
             for key in ("audioFadeIn", "audioFadeOut"):
                 if operation.get(key) is not None:
                     clip[key] = round(max(0.0, min(.35, float(operation[key]))), 3)
+            if operation.get("coverAnimation") is not None and _is_image_clip(clip):
+                clip["coverAnimation"] = _normalize_cover_animation(operation["coverAnimation"])
         return f"已更新 {len(targets)} 个片段的剪辑参数"
     if operation_type == "add_marker":
         clip = _clip_lookup(session, str(operation.get("clipId") or ""))
@@ -1093,6 +1217,9 @@ def build_edit_session_render_plan(
             "sourceContentContract": copy.deepcopy(source.get("sourceContentContract") or
                                                     (session.get("contentBinding") or {}).get("contract") or {}),
             "duration": round(end - start, 3),
+            "assetKind": str(clip.get("assetKind") or "video"),
+            "assetPath": str(clip.get("assetPath") or ""),
+            "assetDuration": round(float(clip.get("assetDuration") or (end - start)), 3),
             "sourceOrder": start,
             "editOrder": index,
             "role": str(clip.get("title") or source.get("role") or "二次编辑片段")[:100],
@@ -1109,6 +1236,12 @@ def build_edit_session_render_plan(
             "reason": str(source.get("reason") or ("用户从内容检索结果直接精剪" if session.get("sourceSearchId") else "用户基于已有成片进行二次编辑"))[:600],
             "evidence": list(source.get("evidence") or (["用户确认内容检索片段后进入精剪。"] if session.get("sourceSearchId") else ["用户从成片版本继续编辑。"])) ,
         })
+        if _is_image_clip(clip):
+            canvas_width, canvas_height = _segment_canvas(job, session)
+            source["coverAnimation"] = _normalize_cover_animation(clip.get("coverAnimation"))
+            if canvas_width >= 2 and canvas_height >= 2:
+                source["canvasWidth"] = canvas_width
+                source["canvasHeight"] = canvas_height
         segments.append(source)
     disabled = {str(value) for value in session.get("disabledCutawayIds") or []}
     cutaways = [
@@ -1131,6 +1264,13 @@ def build_edit_proposal(
     if isinstance(model_result, dict):
         valid_clip_ids = {str(item.get("id") or "") for item in session.get("clips") or []}
         for raw in model_result.get("operations") or []:
+            # Some compatible models return {"trim_clip": {...}} instead of
+            # {"type": "trim_clip", ...}. Normalize only an unambiguous,
+            # whitelisted operation, then apply the exact same ID/range checks.
+            if isinstance(raw, dict) and "type" not in raw and len(raw) == 1:
+                operation_name, arguments = next(iter(raw.items()))
+                if operation_name in EDIT_PROPOSAL_OPERATION_TYPES and isinstance(arguments, dict):
+                    raw = {**arguments, "type": operation_name}
             if not isinstance(raw, dict) or str(raw.get("type") or "") not in EDIT_PROPOSAL_OPERATION_TYPES:
                 continue
             operation = copy.deepcopy(raw)

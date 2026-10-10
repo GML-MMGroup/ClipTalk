@@ -25,6 +25,8 @@ def test_build_motion_graphics_html_escapes_user_text() -> None:
     assert "本地渲染 &amp; 不调用 API" in html
     assert "--w: 1080px" in html
     assert "--h: 1920px" in html
+    assert '<div class="label"></div>' in html
+    assert ">ClipTalk<" not in html
 
 
 def test_write_editing_draft_package_is_current_task_scoped(tmp_path: Path) -> None:

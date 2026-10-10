@@ -1,0 +1,14 @@
+#!/bin/sh
+# Project-local launcher for ruff.
+#
+# ruff is installed for the conda interpreter (/opt/conda/bin/python3) on this
+# machine but is not exposed on the default PATH, and the system python3 has no
+# ruff module, so `npm run lint:python` used to fail with "ruff: not found".
+# Resolve an interpreter that can run ruff instead of hardcoding one path.
+for py in /opt/conda/bin/python3 /usr/bin/python3 python3; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -m ruff --version >/dev/null 2>&1; then
+    exec "$py" -m ruff "$@"
+  fi
+done
+echo "ruff not found. Install it with: python3 -m pip install ruff" >&2
+exit 127

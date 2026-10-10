@@ -10,17 +10,23 @@
     <link rel="preload" href="/static/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin />
     <script src="/static/theme-runtime.js?v=20260917-default-light-1"></script>
     <link rel="stylesheet" href="/static/generative-loaders.css?v=20260909-theme-cleanup-1" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260915-workflow-instruction-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260925-motion-1" />
     <link rel="stylesheet" href="/static/typography.css?v=20260921-interface-type-1" />
     <link rel="stylesheet" href="/static/interaction-surfaces.css?v=20260909-theme-cleanup-1" />
-    <link rel="stylesheet" href="/static/app-shell.css?v=20260915-settings-system-1" />
-    <link rel="stylesheet" href="/static/editing-workspace.css?v=20260911-user-journey-1" />
-    <link rel="stylesheet" href="/static/agent-workspace.css?v=20260923-plan-handoff-1" />
-    <link rel="stylesheet" href="/static/secondary-editor-focus.css?v=20260921-cascade-cleanup-1" />
+    <link rel="stylesheet" href="/static/app-shell.css?v=20260925-ux-review-1" />
+    <link rel="stylesheet" href="/static/editing-workspace.css?v=20260911-user-journey-1" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="/static/agent-workspace.css?v=20260925-motion-1" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="/static/secondary-editor-focus.css?v=20260921-cascade-cleanup-1" media="print" onload="this.media='all'" />
     <link rel="stylesheet" href="/static/theme.css?v=20260921-interface-type-1" />
     <link rel="stylesheet" href="/static/cliptalk-tokens.css?v=20260910-ui-consistency-3" />
-    <link rel="stylesheet" href="/static/workbench.css?v=20260923-quality-review-2" />
+    <link rel="stylesheet" href="/static/workbench.css?v=20260925-ux-review-1" media="print" onload="this.media='all'" />
     <link rel="stylesheet" href="/static/interface-type.css?v=20260924-interface-type-2" />
+    <noscript>
+      <link rel="stylesheet" href="/static/editing-workspace.css?v=20260911-user-journey-1" />
+      <link rel="stylesheet" href="/static/agent-workspace.css?v=20260925-motion-1" />
+      <link rel="stylesheet" href="/static/secondary-editor-focus.css?v=20260921-cascade-cleanup-1" />
+      <link rel="stylesheet" href="/static/workbench.css?v=20260925-ux-review-1" />
+    </noscript>
   </head>
   <body data-shell-view="home" data-shell-mode="page" data-sidebar-overlay="false">
     <a class="skip-link" href="#workspace">跳到剪辑工作区</a>
@@ -81,7 +87,7 @@
     <main id="workspace" class="studio home-mode">
       <section id="homeView" class="home-view" data-home-state="loading" aria-label="首页" aria-busy="true">
         <header class="home-heading">
-          <div><small>ClipTalk 工作台</small><h1><span class="sr-only">开始剪辑 · </span>开始一个剪辑任务</h1><p>上传素材，描述想保留的内容。生成前可以检查计划，生成后可以继续在时间轴中调整。</p></div>
+          <div><small>ClipTalk 工作台</small><h1><span class="sr-only">开始剪辑 · </span>开始一个剪辑任务</h1><p>上传素材，描述想保留的内容。提交要求后自动生成成片，完成后也可以继续修改。</p></div>
           <div class="home-summary hidden" aria-label="工作区统计"><span><b id="homeAssetCount">0</b><small>个视频</small></span><span><b id="homeTaskCount">0</b><small>个任务</small></span><span><b id="homeOutputCount">0</b><small>条成片</small></span></div>
         </header>
         <section class="home-create-surface">
@@ -116,7 +122,7 @@
         <section id="chatMessages" class="chat-messages" aria-live="polite">
           <article class="chat-message assistant">
             <span class="avatar">AI</span>
-            <div class="bubble"><small>开始新任务</small><p>告诉我想保留什么；准备好视频后，我会先整理计划供你确认。</p></div>
+            <div class="bubble"><small>开始新任务</small><p>告诉我想保留什么；准备好视频后，我会按要求自动完成，必要时再向你确认。</p></div>
           </article>
         </section>
 
@@ -135,21 +141,23 @@
 
         <section id="ctAgentWelcome" hidden aria-labelledby="ctAgentWelcomeTitle">
           <h2 id="ctAgentWelcomeTitle">你想怎么剪？</h2>
+          <p id="ctEntrySequence">添加视频 → 描述要求 → 提交后开始</p>
         </section>
         <nav id="ctAgentEntryPrompts" hidden aria-label="剪辑示例">
           <button type="button" data-empty-prompt="保留完整发言">保留完整发言</button>
           <button type="button" data-empty-prompt="提取高光">提取高光</button>
           <button type="button" data-empty-prompt="按描述找片段">按描述找片段</button>
         </nav>
+        <p id="ctComposerReadiness" role="status" hidden></p>
         <form id="chatForm" class="chat-composer">
           <section id="contentSelectionBasket" class="content-selection-basket hidden" aria-live="polite"></section>
           <div id="chatContextBar" class="chat-context-bar hidden" aria-label="本次对话引用的剪辑界面状态"></div>
           <button id="composerSuggestion" class="composer-suggestion hidden" type="button" aria-label="使用推荐剪辑要求"></button>
           <div class="chat-input-shell composer-homepage-beam" data-border-beam data-beam-size="md" data-beam-color="ocean" data-beam-theme="dark" data-beam-strength="0.56" data-beam-duration="3.8" data-beam-brightness="1.18" data-beam-saturation="1" data-beam-hue-range="22" data-beam-radius="12">
-            <textarea id="chatInput" maxlength="4000" rows="2" disabled placeholder="描述剪辑要求，或询问当前结果……" aria-label="描述剪辑要求或询问当前结果"></textarea>
+            <textarea id="chatInput" maxlength="4000" rows="2" disabled placeholder="描述剪辑要求，或询问当前结果……" aria-label="描述剪辑要求或询问当前结果" aria-describedby="ctComposerReadiness"></textarea>
             <div class="composer-toolbar" aria-label="输入工具栏">
               <div class="composer-toolbar-left">
-                <div class="agent-skill-row"><button id="agentSkillMenuButton" type="button" aria-expanded="false" aria-controls="agentSkillMenu" aria-label="自动执行，打开执行设置" title="调整下一次提交的执行方式和剪辑技能"><small>自动执行</small></button><div id="agentSkillMenu" class="agent-skill-menu hidden" popover="manual" role="dialog" aria-label="执行设置"><header><strong>本次执行设置</strong><small>用于下一次提交的要求</small></header><label><span>剪辑技能</span><select id="agentSkillSelect" aria-label="剪辑技能"><option value="">自动选择</option></select></label><label><span>执行方式</span><select id="agentExecutionMode" aria-label="执行方式"><option value="autonomous_review" selected>自动剪辑并预览</option><option value="stepwise_review">分步审核</option></select></label><button id="agentRegistryButton" type="button">管理技能与插件</button></div></div>
+                <div class="agent-skill-row"><button id="agentSkillMenuButton" type="button" aria-expanded="false" aria-controls="agentSkillMenu" aria-label="自动完成，打开执行设置" title="调整下一次提交的执行方式和剪辑技能"><small>自动完成</small></button><div id="agentSkillMenu" class="agent-skill-menu hidden" popover="manual" role="dialog" aria-label="执行设置"><header><strong>本次执行设置</strong><small>用于下一次提交的要求</small></header><label><span>剪辑技能</span><select id="agentSkillSelect" aria-label="剪辑技能"><option value="">自动选择</option></select></label><label><span>执行方式</span><select id="agentExecutionMode" aria-label="执行方式"><option value="automatic_delivery" selected>自动完成并生成成片</option><option value="autonomous_review">自动到预览</option><option value="stepwise_review">分步审核</option></select></label><button id="agentRegistryButton" type="button">管理技能与插件</button></div></div>
                 <button id="chatLegacyModeButton" class="quick-workflow-trigger hidden" type="button" aria-expanded="false" aria-controls="quickWorkflowPicker">选择处理方式</button>
               </div>
               <div class="composer-toolbar-right">
@@ -342,8 +350,6 @@
                 <span id="timelineEventSummaryTime"></span>
               </section>
               <div class="timeline-review-controls">
-                <button id="timelineExpandToggle" class="timeline-expand-toggle" type="button" aria-expanded="false">展开精细时间轴</button>
-                <button id="timelineLocatePlayhead" class="timeline-locate-playhead hidden" type="button">回到播放头</button>
                 <b><small id="timelineClockLabel">源片</small><span id="timelineCurrent">00:00.0</span> / <span id="timelineDuration">00:00.0</span></b>
               </div>
             </header>
@@ -352,6 +358,8 @@
               <div id="timelinePrecisionDrawerBody"></div>
             </aside>
             <div class="timeline-toolbar">
+              <div class="timeline-tool-group timeline-header-actions" aria-label="时间轴展开与定位"><button id="timelineExpandToggle" class="timeline-expand-toggle" type="button" aria-expanded="false">展开精细时间轴</button>
+<button id="timelineLocatePlayhead" class="timeline-locate-playhead hidden" type="button">回到播放头</button></div>
               <div class="timeline-tool-group" aria-label="显示内容"><div class="timeline-view-switch"><button id="timelineWaveMode" class="active" type="button" aria-pressed="true" title="显示或隐藏音频波形">音频波形</button><button id="timelineFrameMode" class="active" type="button" aria-pressed="true" title="显示或隐藏画面缩略图">画面缩略图</button></div></div>
               <div class="timeline-tool-group timeline-zoom-controls" aria-label="缩放时间轴"><button id="timelineZoomOut" type="button" title="缩小时间轴" aria-label="缩小时间轴">−</button><button id="timelineFit" type="button" aria-pressed="true" title="显示完整时间轴">显示全片</button><button id="timelineZoomIn" type="button" title="放大时间轴" aria-label="放大时间轴">＋</button><output id="timelineZoomLevel" aria-live="polite">100%</output><button id="timelineFocusReview" class="hidden" type="button" disabled>缩放到当前事件</button></div>
               <details class="timeline-toolbar-more">
@@ -596,7 +604,7 @@
             <form id="secondaryEditorAiForm"><label for="secondaryEditorAiInput">本次想怎么改</label><textarea id="secondaryEditorAiInput" rows="4" maxlength="500" placeholder="例如：删掉第 2 段的重复表达，其他片段不变"></textarea><button type="submit">生成修改清单</button></form>
             <div id="secondaryEditorProposal" class="secondary-editor-proposal hidden"></div>
           </section>
-          <section class="secondary-inspector-section secondary-export-settings" data-secondary-inspector-panel="export"><header><small>生成成片</small><strong>成片信息</strong></header><label><span>本次导出名称</span><input id="secondaryEditorVersionLabel" type="text" maxlength="80" value="精剪版" aria-describedby="secondaryEditorVersionLabelHint"></label><small id="secondaryEditorVersionLabelHint">生成时使用，不会重命名已有版本，也不随剪辑草稿保存。</small><div id="secondaryEditorPreflight" class="secondary-editor-preflight" role="status"></div><small id="secondaryEditorOutputSettingsHint">使用当前精剪的画幅和清晰度设置。</small></section>
+          <section class="secondary-inspector-section secondary-export-settings" data-secondary-inspector-panel="export"><header><small>生成成片</small><strong>成片信息</strong></header><label><span>本次导出名称</span><input id="secondaryEditorVersionLabel" type="text" maxlength="80" value="精剪版" aria-describedby="secondaryEditorVersionLabelHint"></label><small id="secondaryEditorVersionLabelHint">生成时使用，不会重命名已有版本，也不随剪辑草稿保存。</small><div id="secondaryEditorPreflight" class="secondary-editor-preflight" role="status"></div><small id="secondaryEditorOutputSettingsHint">使用当前精剪的画幅和清晰度设置。</small><fieldset class="secondary-inspector-fieldset secondary-aspect-exports"><legend>同时导出</legend><div class="secondary-aspect-export-options"><label class="secondary-inspector-check"><input type="checkbox" data-aspect-export value="9:16"><span>竖版 9:16</span></label><label class="secondary-inspector-check"><input type="checkbox" data-aspect-export value="1:1"><span>方形 1:1</span></label><label class="secondary-inspector-check"><input type="checkbox" data-aspect-export value="16:9"><span>横版 16:9</span></label></div><small>勾选后，成片生成完成时会额外导出对应画幅的副本；当前主画幅不受影响。</small></fieldset></section>
         </aside>
         <div id="secondaryEditorInspectorResize" class="secondary-editor-inspector-resize" role="separator" tabindex="0" aria-label="调整右侧设置栏宽度" aria-orientation="vertical" aria-valuemin="360" aria-valuemax="560" aria-valuenow="420"><span aria-hidden="true"></span></div>
         <div id="secondaryEditorWorkspaceResize" class="secondary-editor-workspace-resize" role="separator" tabindex="0" aria-label="调整预览与时间线高度" aria-orientation="horizontal" aria-valuemin="40" aria-valuemax="80" aria-valuenow="72"><span aria-hidden="true"></span></div>
@@ -664,10 +672,10 @@
         <footer><button id="probeEffectiveAgent" type="button" class="hidden">验证当前模型的 Tool Calling</button><span>人物说话识别属于可选增强能力，不会阻断基础剪辑。</span></footer>
       </section>
       <nav class="model-role-tabs" aria-label="模型职责">
-        <button type="button" class="active" data-model-role="vision" aria-selected="true"><strong>视觉分析</strong><small>发现事件与镜头边界</small></button>
-        <button type="button" data-model-role="llm" aria-selected="false"><strong>剪辑规划</strong><small>理解需求与编排成片</small></button>
-        <button type="button" data-model-role="agent" aria-selected="false"><strong>Agent 执行</strong><small>路由 Skill 与调用工具</small></button>
-        <button type="button" data-model-role="system" aria-selected="false"><strong>系统能力</strong><small>本地识别与运行环境</small></button>
+        <button type="button" class="active" data-model-role="vision" aria-selected="true"><strong>画面分析</strong><small>发现事件与镜头边界</small></button>
+        <button type="button" data-model-role="llm" aria-selected="false"><strong>理解剪辑要求</strong><small>理解需求与编排成片</small></button>
+        <button type="button" data-model-role="agent" aria-selected="false"><strong>执行剪辑</strong><small>按要求完成剪辑步骤</small></button>
+        <button type="button" data-model-role="system" aria-selected="false"><strong>本地能力</strong><small>本地识别与运行环境</small></button>
       </nav>
       <form id="visionSettingsForm" class="vision-settings-form model-settings-view" data-model-view="vision">
         <section class="vision-provider-section">
@@ -730,7 +738,7 @@
         <footer class="settings-save-bar hidden" data-settings-save-role="llm" aria-live="polite"><span><b id="llmDirtyState">有未保存修改</b><small id="llmSaveHint">保存后立即生效</small></span><div><button id="discardLlmSettings" type="button" disabled>放弃修改</button><button id="saveLlmSettings" type="submit" class="primary" disabled>保存更改</button></div></footer>
       </form>
       <form id="agentSettingsForm" class="vision-settings-form model-settings-view agent-model-settings hidden" data-model-view="agent" autocomplete="off">
-        <header class="settings-form-heading"><div><small>模型运行环境</small><h2>Agent 模型</h2><p>负责理解剪辑要求与调用工具。可复用剪辑规划模型，也可单独配置；两种方式都需要通过工具调用测试。</p></div><span id="agentSettingsState">尚未检查</span></header>
+        <header class="settings-form-heading"><div><small>模型运行环境</small><h2>执行剪辑的模型</h2><p>负责理解剪辑要求与调用工具。可复用剪辑规划模型，也可单独配置；两种方式都需要通过工具调用测试。</p></div><span id="agentSettingsState">尚未检查</span></header>
         <section class="agent-effective-model" aria-labelledby="agentEffectiveTitle">
           <strong id="agentEffectiveTitle">当前生效模型</strong>
           <p id="agentEffectiveModel">正在读取配置</p>
@@ -850,24 +858,24 @@
       </form>
     </dialog>
 <script src="/static/ui-states.js?v=20260917-ui-states-1" defer></script>
-<script src="/static/thinking-orbs.js?v=20260806-subtitle-label-69" defer></script>
-    <script src="/static/generative-loaders.js?v=20260811-loader-runtime-2" defer></script>
+<script src="/static/thinking-orbs.js?v=20260925-motion-1" defer></script>
+    <script src="/static/generative-loaders.js?v=20260925-motion-1" defer></script>
     <script src="/static/border-beam.js?v=20260811-border-beam-2" defer></script>
     <script src="/static/ui-icons.js?v=20260827-home-icons-1" defer></script>
     <script src="/static/openui-adapter.js?v=20260917-openui-1" defer></script>
     <script src="/static/openui-host.js?v=20260917-openui-1" defer></script>
-    <script src="/static/api-client.js?v=20260909-workflow-audit-1" defer></script>
+    <script src="/static/api-client.js?v=20260925-motion-1" defer></script>
     <script src="/static/runtime-errors.js?v=20260821-runtime-errors-1" defer></script>
     <script src="/static/review-actions.js?v=20260821-review-actions-1" defer></script>
     <script src="/static/workspace-state.js?v=20260911-user-journey-1" defer></script>
-    <script src="/static/ui-copy.js?v=20260915-capability-groups-1" defer></script>
+    <script src="/static/ui-copy.js?v=20260925-ux-review-1" defer></script>
     <script src="/static/task-creation.js?v=20260921-status-clarity-1" defer></script>
-    <script src="/static/chat-stream.js?v=20260922-confirm-bottom-1" defer></script>
-    <script src="/static/agent-workspace.js?v=20260923-cover-intro-final-1" defer></script>
+    <script src="/static/chat-stream.js?v=20260925-motion-1" defer></script>
+    <script src="/static/agent-workspace.js?v=20260925-ux-review-1" defer></script>
     <script src="/static/delivery-state.js?v=20260910-render-spec-2" defer></script>
-    <script src="/static/app.js?v=20260923-agent-elapsed-1" defer></script>
-    <script src="/static/app-shell.js?v=20260915-capability-groups-1" defer></script>
+    <script src="/static/app.js?v=20260925-ux-review-1" defer></script>
+    <script src="/static/app-shell.js?v=20260925-ux-review-1" defer></script>
     <script src="/static/timeline-presentation.js?v=20260914-unified-flow-2" defer></script>
-    <script src="/static/workspace-controller.js?v=20260922-execution-2" defer></script>
+    <script src="/static/workspace-controller.js?v=20260925-ux-review-1" defer></script>
   </body>
 </html>

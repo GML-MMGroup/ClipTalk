@@ -255,6 +255,37 @@
     gap: 8px !important;
   }
 
+  #setupReadinessSteps .setup-other-checks {
+    grid-column: 1 / -1;
+    list-style: none;
+    color: var(--text-secondary, inherit);
+  }
+
+  #setupReadinessSteps .setup-other-checks summary {
+    padding-block: 12px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  #setupReadinessSteps .setup-other-checks ol {
+    display: grid;
+    gap: 8px;
+    padding: 0;
+    list-style: none;
+  }
+
+  #agentPlanDock a.primary,
+  .assistant-plan-card a.primary {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding-inline: 16px;
+    border-radius: 8px;
+    background: var(--pw-accent, #355f4c);
+    color: #fff;
+    text-decoration: none;
+  }
+
   @media (max-width: 720px) {
     body[data-shell-view="home"] .home-heading h1,
     body[data-shell-view="library"] #libraryView > header h1,

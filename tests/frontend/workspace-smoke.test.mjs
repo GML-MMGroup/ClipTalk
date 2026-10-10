@@ -305,6 +305,7 @@ async function startStubServer() {
 
 async function openAuthenticatedWorkspace(page, url) {
   await page.goto(url, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
   await page.locator("#accessTokenDialog[open]").waitFor({ state: "visible" });
   await page.locator("#accessTokenDialog input").fill("browser-test-token");
   await page.locator("#accessTokenDialog button[type=submit]").click();
@@ -676,6 +677,7 @@ test("workspace loads, authenticates without URL token, and opens new-task flow"
   page.on("pageerror", (error) => pageErrors.push(error.message));
   try {
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator("#accessTokenDialog[open]").waitFor({ state: "visible" });
     await page.locator("#accessTokenDialog input").fill("browser-test-token");
     await page.locator("#accessTokenDialog button[type=submit]").click();
@@ -1270,6 +1272,7 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
       ] }) });
     });
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator("#accessTokenDialog[open]").waitFor({ state: "visible" });
     await page.locator("#accessTokenDialog input").fill("browser-test-token");
     await page.locator("#accessTokenDialog button[type=submit]").click();
@@ -1379,7 +1382,7 @@ test("integrated navigation opens a focused history drawer above its scrim", asy
     assert.ok(taskBadgeGeometry.clientWidth >= 18, JSON.stringify(taskBadgeGeometry));
     assert.ok(taskBadgeGeometry.scrollWidth <= taskBadgeGeometry.clientWidth, JSON.stringify(taskBadgeGeometry));
     assert.equal(taskBadgeGeometry.borderRadius, "999px", JSON.stringify(taskBadgeGeometry));
-    assert.match(await page.locator("#sidebarHistoryToggle").getAttribute("aria-label"), /共 3 个任务，其中 2 个需要处理/);
+    assert.match(await page.locator("#sidebarHistoryToggle").getAttribute("aria-label"), /共 3 个任务，其中 1 个需要处理/);
     const rows = await page.locator("#sidebarHistoryList .shell-task-card").evaluateAll((nodes) => nodes.map((node) => ({
       openId: node.querySelector("[data-shell-open]")?.dataset.shellOpen || "",
       deleteId: node.querySelector("[data-shell-delete]")?.dataset.shellDelete || "",
@@ -1537,6 +1540,7 @@ test("home task load failure keeps new-task entry and offers retry", async () =>
       });
     });
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator("#accessTokenDialog[open]").waitFor({ state: "visible" });
     await page.locator("#accessTokenDialog input").fill("browser-test-token");
     await page.locator("#accessTokenDialog button[type=submit]").click();
@@ -3023,6 +3027,7 @@ test("editable formal output can be retained independently", async () => {
     }, job);
     const button = page.locator("#saveToLibraryButton");
     await page.evaluate(() => window.ClipTalkWorkspaceController.openRail('materials'));
+    await page.locator('.ct-v4-version-more > summary').click();
     await button.waitFor({ state: "visible" });
     assert.equal(await button.textContent(), "长期保留");
     assert.equal(await button.evaluate((node) => node.parentElement.classList.contains("ct-v4-version-secondary-actions")), true);
@@ -3259,6 +3264,7 @@ test("question-only search does not render person or dialogue controls", async (
   const page = await browser.newPage();
   try {
     await page.goto(stub.url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForTimeout(100);
     const audit = await page.evaluate(() => {
       const job = {
@@ -3430,7 +3436,7 @@ test("speaker confirmation identifies the target anonymous person", async () => 
     assert.match(audit.outputCardText, /内容视频已生成.*V1.*3 个已选片段.*点击播放/);
     assert.equal(audit.outputPreviewFilename, "v001-content.mp4");
     assert.equal(audit.outputDownloadCount, 0);
-    assert.match(audit.outputCardText, /播放器顶部下载/);
+    assert.match(audit.outputCardText, /正式成片可直接下载/);
     assert.equal(audit.capabilityTitle, "确认识别依据");
     assert.match(audit.completeCapabilityText, /按必要依据查找.*人物.*听到的对白.*画面/);
     assert.equal(audit.personCapabilityDisabled, true);
@@ -3936,7 +3942,7 @@ test("failed automatic quality keeps rendered drafts visible for manual review",
     assert.match(audit.summary, /0\s*个通过/);
     assert.match(audit.summary, /1\s*个需复核/);
     assert.equal(audit.chatVersionCount, 0);
-    assert.match(audit.version, /需人工复核/);
+    assert.match(audit.version, /有提醒待检查/);
     assert.equal(audit.outputName, "draft.mp4");
   } finally {
     await browser.close();
@@ -4007,8 +4013,8 @@ test("mixed quality results expose passed and manual-review variants together", 
     assert.match(audit.summary, /2\s*个需复核/);
     assert.equal(audit.chatVersionCount, 0);
     assert.equal(audit.details.length, 3);
-    assert.equal(audit.details.filter((item) => /AI 推荐/.test(item.text)).length, 1);
-    assert.equal(audit.details.filter((item) => /需人工复核/.test(item.text)).length, 2);
+    assert.equal(audit.details.filter((item) => /检查通过 · 推荐/.test(item.text)).length, 1);
+    assert.equal(audit.details.filter((item) => /有提醒待检查/.test(item.text)).length, 2);
     assert.deepEqual(audit.details.map((item) => item.filename).sort(), [
       "variant-1.mp4", "variant-2.mp4", "variant-3.mp4",
     ]);
@@ -5618,7 +5624,7 @@ test("upload prepares preview and the selected Skill runs only after explicit se
     assert.deepEqual(agentMessages.map(({ clientMessageId, uiContext, replyToActionId, ...message }) => message), [{
       text: "剪成三分钟访谈精华，按主题组织回答并生成字幕预览",
       skillId: "cliptalk-interview-editor",
-      executionMode: "autonomous_review",
+      executionMode: "automatic_delivery",
     }]);
     assert.equal(stub.requests.some((item) => item.path === "/api/workflow-intent/classify"), false);
   } finally {
@@ -7165,7 +7171,7 @@ test("assistant panel can be resized in an active desktop workspace without caus
     const panel = page.locator(".chat-panel");
     assert.equal(await handle.isVisible(), true);
     const initialWidth = await panel.evaluate((node) => node.getBoundingClientRect().width);
-    assert.equal(initialWidth, 432, `unexpected 1440px assistant default width: ${initialWidth}`);
+    assert.equal(initialWidth, 360, `unexpected 1440px assistant default width: ${initialWidth}`);
     const handleBox = await handle.boundingBox();
     await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 120);
     await page.mouse.down();
@@ -7740,6 +7746,11 @@ test("visual system assigns functional fonts and removes idle chrome", async () 
     assert.equal(workflowAudit.upcomingFill, "rgba(168, 194, 105, 0.08)");
     assert.equal(workflowAudit.currentSweep, "workflow-line-sweep");
 
+    // workbench.css 经 print-swap 异步加载：media 提升为 all 之后样式应用
+    // 仍有极短窗口，直接读 computed style 会偶发读到中间值。先进入工作区
+    // 模式并等播放器背景规则真正生效，再进入媒体面板读取。
+    await page.evaluate(() => { document.body.dataset.shellMode = "workspace"; });
+    await page.waitForFunction(() => getComputedStyle(document.querySelector("#mainVideo")).backgroundColor !== "rgba(0, 0, 0, 0)");
     const mediaAudit = await page.evaluate(() => {
       document.body.dataset.shellMode = "workspace";
       document.body.dataset.shellView = "workspace";

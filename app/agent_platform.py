@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from .quality_repair import quality_repair_plan
+from .job_projection import plan_terminal_reason
+from .quality_repair import quality_repair_plan, repair_step_ids
+from .automatic_delivery import (
+    AUTOMATIC_DELIVERY, AUTOMATIC_MODES, DELIVERY_TOOL, VIDEO_TOOLS,
+    blocking_quality_issues, enabled as automatic_delivery_enabled, may_auto_approve,
+)
 
 import copy
 import hashlib
@@ -19,6 +24,7 @@ import httpx
 
 from .agent_store import AgentStore, content_hash, now_iso, parse_skill_markdown
 from .service_security import service_token, plugin_tree_hash
+from . import copy_messages
 
 
 CORE_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
@@ -46,7 +52,7 @@ CORE_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "analyze_reframe_safe_areas", "description": "分析当前输出画幅转换的安全策略，保护人物、字幕、屏幕文字和产品主体", "sideEffect": "analysis", "parameters": {"type": "object", "properties": {"aspect": {"type": "string"}, "fit": {"type": "string"}}, "required": ["aspect"], "additionalProperties": False}},
     {"name": "layout_subtitles", "description": "更新当前精剪时间线已确认字幕稿的布局，支持顶部/底部、安全区、字号和双语等要求；不会自行生成字幕文字", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"position": {"type": "string"}, "style": {"type": "string"}, "fontSizeRatio": {"type": "number"}}, "additionalProperties": False}},
     {"name": "export_subtitles", "description": "从当前成片或审核样片导出字幕文件，支持 SRT/VTT，不生成或修改视频", "sideEffect": "export", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "format": {"type": "string", "enum": ["srt", "vtt"]}}, "additionalProperties": False}},
-    {"name": "polish_audio_mix", "description": "基于当前任务输出生成音频优化版本，支持响度规范化、保守降噪和人声优先", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "noiseReduction": {"type": "boolean"}, "voiceFirst": {"type": "boolean"}}, "additionalProperties": False}},
+    {"name": "polish_audio_mix", "description": "按要求调整音量、静音、响度或降噪；不支持混合音轨的人声/配乐分离", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "noiseReduction": {"type": "boolean"}, "voiceFirst": {"type": "boolean"}, "normalizeLoudness": {"type": "boolean"}, "gainDb": {"type": "number", "minimum": -24, "maximum": 24}, "mute": {"type": "boolean"}}, "additionalProperties": False}},
     {"name": "propose_broll_overlay", "description": "把已确认的辅助画面作为静音插入镜头加入当前时间线，保留主音频", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "maxOverlays": {"type": "integer"}}, "required": ["query"], "additionalProperties": False}},
     {"name": "render_graphics_package", "description": "在当前精剪时间线添加可编辑图文层，如标题、标签、参数卡、价格、Logo、水印或 CTA", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "placement": {"type": "string"}, "style": {"type": "string"}}, "additionalProperties": False}},
     {"name": "render_motion_graphics", "description": "使用本地 HTML/React 风格渲染管线生成动态图文、标题卡、片头或封面动效视频，不依赖外部 API", "sideEffect": "preview", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "subtitle": {"type": "string"}, "aspect": {"type": "string"}, "duration": {"type": "number"}, "theme": {"type": "string"}}, "additionalProperties": False}},
@@ -63,7 +69,15 @@ ACTION_REQUIRED_EFFECTS = frozenset({"identity", "review"})
 VALID_SIDE_EFFECTS = frozenset({"read", "analysis", "preview", "identity", "review", "export", "delete"})
 AUTONOMOUS_REVIEW = "autonomous_review"
 STEPWISE_REVIEW = "stepwise_review"
-VALID_EXECUTION_MODES = frozenset({AUTONOMOUS_REVIEW, STEPWISE_REVIEW})
+VALID_EXECUTION_MODES = frozenset({AUTOMATIC_DELIVERY, AUTONOMOUS_REVIEW, STEPWISE_REVIEW})
+
+CORE_TOOL_CATALOG += ({
+    "name": DELIVERY_TOOL, "description": "按本次已授权计划从源素材生成正式文件，不复制审核样片，不发布到外部平台",
+    "sideEffect": "export", "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}, {
+    "name": "prepare_delivery_timeline", "description": "核对已应用时间线并记录版本指纹，供自动模式直接生成正式成片；不生成审核样片",
+    "sideEffect": "read", "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+})
 
 
 for _tool in CORE_TOOL_CATALOG:
@@ -456,8 +470,11 @@ class AgentPlatform:
     @staticmethod
     def _strip_negative_clauses(text: str) -> str:
         clauses: list[str] = []
-        for clause in AgentPlatform._split_clauses(text):
-            if re.search(r"^(?:但|但是|并且|同时|也)?\s*(?:不要|不能|不应|无需|不需要|别|禁止)", clause):
+        # A contrast starts a new instruction even without punctuation:
+        # “不要字幕但要封面” must retain the affirmative cover request.
+        scoped_text = re.sub(r"(?:但是|不过|但)(?=(?:也|仍|还)?(?:要|需|请|加|生成|保留|制作))", "，", text)
+        for clause in AgentPlatform._split_clauses(scoped_text):
+            if re.search(r"^(?:但|但是|并且|同时|也)?\s*(?:不要|不能|不应|无需|不需要|别|禁止|不(?:剪辑|生成|制作|导出|合成|添加|加|做))", clause):
                 continue
             clauses.append(clause)
         return "，".join(clauses)
@@ -512,6 +529,14 @@ class AgentPlatform:
                     "source": "remove_prefix",
                 }
 
+        # Cover/title placement describes the OUTPUT intro, not an input trim.
+        # Mask just that phrase so a separate explicit source selection survives.
+        selection_text = re.sub(
+            r"(?:封面|动态图文|标题卡)[^，,。；;\n]{0,12}?"
+            r"(?:放在|放到|放至|置于|作为|插入|加在|加到)[^，,。；;\n]{0,12}?"
+            r"(?:开头|片头)\s*[0-9.零〇一二两三四五六七八九十半]+\s*(?:分钟|分|秒钟|秒)",
+            "", str(text or ""),
+        )
         # “前 3 秒进入 Hook”“前三秒突出核心亮点”描述的是成片开头该做什么，
         # 不是素材选取范围。金额紧跟成片谓语动词时不作为 sourceRange。
         include = re.search(
@@ -519,7 +544,7 @@ class AgentPlatform:
             r"(最后|结尾|末尾|开头|前)\s*([0-9.零〇一二两三四五六七八九十半]+)\s*(分钟|分|秒钟|秒)"
             r"(?!\s*(?:要|应(?:该)?|需要|必须|尽量|最好|先)?\s*"
             r"(?:突出|展示|呈现|强调|显示|出现|放出|给出|交代|点明|点题|聚焦|抓住|切入|进入|抛出|引出|露|印|放))",
-            str(text or ""),
+            selection_text,
         )
         if include:
             seconds = cls._parse_duration_amount(include.group(2), include.group(3))
@@ -543,7 +568,7 @@ class AgentPlatform:
         return copy.deepcopy(existing) if isinstance(existing, dict) else None
 
     @classmethod
-    def _duration_target(cls, text: str) -> tuple[int | None, bool]:
+    def _duration_target(cls, text: str) -> tuple[float | None, bool]:
         source_text = str(text or "")
         normalized = cls._strip_timeline_or_cover_time_refs(source_text)
         normalized = re.sub(
@@ -572,7 +597,7 @@ class AgentPlatform:
             re.IGNORECASE,
         )
         if tolerance_match:
-            return round(float(tolerance_match.group(1))), True
+            return float(tolerance_match.group(1)), True
         total_match = re.search(
             r"(?:总(?:时长|长度)|组合成|合成为|拼接(?:合成)?(?:成|为)|拼成|剪成|做成|最终(?:视频|成片)?(?:为|要)?)"
             r".{0,12}?(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))",
@@ -580,7 +605,7 @@ class AgentPlatform:
             re.IGNORECASE,
         )
         if total_match:
-            return round(float(total_match.group(1))), True
+            return float(total_match.group(1)), True
         minute_match = re.search(r"(?:约|大约|约为|做成)?\s*(\d+(?:\.\d+)?)\s*(?:分钟|分)", normalized)
         second_match = re.search(
             r"(?:约|大约|约为|做成)?\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))",
@@ -590,9 +615,9 @@ class AgentPlatform:
         if minute_match:
             minutes = float(minute_match.group(1))
             trailing = re.search(rf"{re.escape(minute_match.group(0))}\s*(\d+)\s*秒", normalized)
-            return round(minutes * 60 + (float(trailing.group(1)) if trailing else 0)), True
+            return minutes * 60 + (float(trailing.group(1)) if trailing else 0), True
         if second_match:
-            return round(float(second_match.group(1))), True
+            return float(second_match.group(1)), True
         chinese_minute = re.search(r"([零〇一二两三四五六七八九十半]+)\s*(?:分钟|分)(半)?", normalized)
         if chinese_minute:
             minutes = cls._chinese_number(chinese_minute.group(1))
@@ -606,7 +631,7 @@ class AgentPlatform:
         return None, False
 
     @staticmethod
-    def _duration_tolerance(text: str) -> int | None:
+    def _duration_tolerance(text: str) -> float | None:
         text = AgentPlatform._strip_timeline_or_cover_time_refs(str(text or ""))
         match = re.search(
             r"\d+(?:\.\d+)?\s*(?:±|\+\s*/\s*-|\+\s*-)\s*"
@@ -614,7 +639,9 @@ class AgentPlatform:
             text,
             re.IGNORECASE,
         )
-        return max(0, round(float(match.group(1)))) if match else None
+        if not match:
+            match = re.search(r"(?:允许\s*)?(?:误差|浮动|偏差)(?:\s*(?:为|不超过|最多|[：:±]))?\s*(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))", text, re.IGNORECASE)
+        return max(0, float(match.group(1))) if match else None
 
     @staticmethod
     def _strip_timeline_or_cover_time_refs(text: str) -> str:
@@ -645,7 +672,7 @@ class AgentPlatform:
         # not to the full video.  Keep it available to _cover_intro_duration
         # by parsing that field from the original goal, while excluding it
         # from targetSeconds here.
-        value = re.sub(rf"{time_token}\s*(?:的)?片头", "片头", value, flags=re.IGNORECASE)
+        value = re.sub(rf"{time_token}\s*(?:的)?(?:动态图文|动态|图文|动画)?片头", "片头", value, flags=re.IGNORECASE)
         value = re.sub(rf"片头[^，,。；;\n]{{0,12}}?{time_token}", "片头", value, flags=re.IGNORECASE)
         # “54s 出现的人/第54秒画面/54秒处” is a source timestamp, especially
         # when used to pick a cover frame. It must not become targetSeconds.
@@ -709,10 +736,14 @@ class AgentPlatform:
                 if seconds is not None:
                     payload["sourceTimeSeconds"] = round(seconds, 3)
                 return payload
+        # "起" only counts as the start marker when it stands alone.  Without the
+        # lookahead the lazy group stops at the first character and reads the
+        # trailing "起" of a verb such as "拿起" as the marker, collapsing
+        # "从拿起西瓜的地方开始" to the meaningless anchor query "拿".
         match = re.search(
             r"从\s*(?:讲到|讲|提到|介绍|说到|说)?\s*"
             r"(.{1,100}?)(?:的地方|的位置|那里|那儿|处)?\s*"
-            r"(?:开始|起)(?:剪|保留|播放|做|生成|编辑)?",
+            r"(?:开始|起(?=[剪保播做生编\s，,。；;！!？?]|$))(?:剪|保留|播放|做|生成|编辑)?",
             str(text or ""),
         )
         if not match:
@@ -761,13 +792,14 @@ class AgentPlatform:
         return bool(re.search(
             r"片头|(?:最)?开头.{0,30}封面"
             r"|封面.{0,24}(?:放进|合入|加入|插入|作为(?:视频|成片)?开头)"
+            r"|封面[^，,。；;\n]{0,24}(?:放在|放到|置于|作为)[^，,。；;\n]{0,8}(?:开头|片头)"
             r"|封面.{0,16}(?:直接)?(?:和|与|同).{0,10}(?:成片|视频|样片).{0,10}(?:进行)?(?:合成|拼接)"
             r"|(?:将|把)?(?:这个|该|当前)?封面.{0,16}(?:合成|拼接)(?:到|进|入|至)?(?:当前)?(?:成片|视频|样片)",
             str(text or ""),
         ))
 
     @staticmethod
-    def _cover_intro_duration(text: str, *, default: float = 1.5) -> float:
+    def _cover_intro_duration(text: str, *, default: float = 1.0) -> float:
         """Read a duration attached to a cover/intro phrase, otherwise use the product default."""
         match = re.search(
             r"(?:封面|片头)[^，,。；;\n]{0,20}?(\d+(?:\.\d+)?)\s*(?:秒钟|秒|s(?![a-z]))"
@@ -818,7 +850,7 @@ class AgentPlatform:
             explicit_duration = True
             duration_source = "relative"
         elif target_seconds is None and isinstance(context.get("targetSeconds"), (int, float)):
-            target_seconds = int(context["targetSeconds"])
+            target_seconds = float(context["targetSeconds"])
             duration_source = "context"
         if relative_duration and not re.search(r"找出|找到|查找|搜索|检索|定位|提取|截取|介绍|讲解|讲到|提到|讨论|说到", text):
             # This is a timeline adjustment, not a request to search for the
@@ -844,7 +876,7 @@ class AgentPlatform:
             re.IGNORECASE,
         ))
         subtitle_requested = bool(re.search(
-            r"(?:加上?|添加|生成|制作|配上?|烧录|导出|需要|要有|带)(?:对应的?|顶部|底部|双语|中英|中文|英文|汉语)?字幕"
+            r"(?:加上?|添加|生成|制作|配上?|烧录|导出|需要|要有|带)(?:对应的?|顶部|底部|双语|中英|中文|英文|汉语|对白|对话|语音)?字幕"
             r"|字幕(?:稿|文件|样式|校对|审核)|SRT|双语字幕",
             affirmative_text,
             re.IGNORECASE,
@@ -853,12 +885,15 @@ class AgentPlatform:
         qc_requested = bool(re.search(r"质检|交付检查|检查(?:成片|输出|视频).*(?:质量|交付)|是否可以交付", text))
         social_delivery = AgentPlatform._social_delivery(text)
         cover_requested = bool(re.search(r"封面|缩略图|海报帧|poster\s*frame|thumbnail", affirmative_text, re.IGNORECASE))
+        cover_intro_requested = cover_intro_requested and cover_requested
         audio_polish_requested = bool(re.search(r"降噪|人声增强|声音增强|音频优化|音量|响度|爆音|削波|静音|背景音乐|混音|音乐压低", affirmative_text))
+        from .delivery_contract import parse_audio_operations
+        audio_operations = parse_audio_operations(text, affirmative_text)
         broll_requested = bool(re.search(r"穿插|补充画面|补画面|覆盖画面|叠加画面|b-?roll|B-?roll|空镜|产品画面覆盖", affirmative_text, re.IGNORECASE))
         graphics_requested = bool(re.search(
             r"标题卡|参数卡|价格卡|报价卡|角标|标签|贴纸|水印|logo|Logo|CTA|关键词高亮|图文|文字(?!幕)层"
-            r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:价格|报价)"
-            r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}(?:文本|文字(?!幕)|文案|说明)",
+            r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^，,。；;\n]{0,24}(?:价格|报价)"
+            r"|(?:添加|加上?|叠加|写上?|显示|放上?)[^，,。；;\n]{0,24}(?:文本|文字(?!幕)|文案|说明)",
             affirmative_text,
         ) or re.search(
             r"(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}?[“\"'‘][^。；;”\"'’\n]{1,120}[”\"'’]\s*(?:文本|文字(?!幕)|文案|说明)",
@@ -880,6 +915,11 @@ class AgentPlatform:
                 r"(?:添加|加上?|叠加|写上?|显示|放上?)[^。；;\n]{0,24}?"
                 r"[“\"'‘]([^。；;”\"'’\n]{1,120})[”\"'’]\s*(?:文本|文字(?!幕)|文案|说明)",
                 text,
+            )
+        if not graphics_text_match and re.search(r"动态图文|动态片头|标题卡|标题动画|片头动画", affirmative_text):
+            graphics_text_match = re.search(
+                r"标题\s*(?:写|为|是|用|：|:)\s*[：:]?\s*[“\"'‘]?([^，,。；;”\"'’\n]{1,120})",
+                affirmative_text,
             )
         graphics_text = str(graphics_text_match.group(1) if graphics_text_match else "").strip(" \t\r\n“”\"'‘’")
         overlay_duration_match = re.search(
@@ -904,7 +944,7 @@ class AgentPlatform:
                 overlay_duration_seconds = float(overlay_duration_loose.group(1))
         motion_graphics_requested = bool(re.search(
             r"Remotion|HyperFrames?|HTML\s*(?:视频|动效)|动效|动态图文|动态字幕|动态封面|动态片头|标题动画|片头动画|可视化视频",
-            text,
+            affirmative_text,
             re.IGNORECASE,
         ))
         motion_intro_requested = bool(
@@ -1078,6 +1118,8 @@ class AgentPlatform:
         cover_intro_only_request = bool(
             cover_requested
             and cover_intro_requested
+            and not explicit_duration
+            and not re.search(r"提取高光|剪辑高光|剪成|精简|缩短", affirmative_text)
             and not retrieval_query
             and not source_range
             and not removed_source_ranges
@@ -1215,6 +1257,7 @@ class AgentPlatform:
             "coverIntroRequested": cover_intro_requested,
             "coverIntroDurationSeconds": cover_intro_duration,
             "audioPolishRequested": audio_polish_requested,
+            "audioOperations": audio_operations,
             "brollRequested": broll_requested,
             "graphicsRequested": graphics_requested,
             "graphicsText": graphics_text,
@@ -1222,6 +1265,7 @@ class AgentPlatform:
             "overlayDurationSeconds": overlay_duration_seconds,
             "motionGraphicsRequested": motion_graphics_requested,
             "motionIntroRequested": bool(motion_intro_requested),
+            "motionIntroDurationSeconds": AgentPlatform._cover_intro_duration(affirmative_text, default=1.5),
             "draftExportRequested": draft_export_requested,
             "deliveryExportRequested": delivery_export_requested,
             "diagnosticsRequested": diagnostics_requested,
@@ -1784,11 +1828,16 @@ class AgentPlatform:
         )
         if not self._supports_autonomous_review(selected_skills):
             mode = STEPWISE_REVIEW
+        automatic_delivery = mode == AUTOMATIC_DELIVERY
+        # Reuse the proven autonomous evidence/subtitle pipeline, but preserve
+        # the stronger delivery authorization on the persisted plan.
+        if automatic_delivery:
+            mode = AUTONOMOUS_REVIEW
         profile_kinds = {str(self._profile_for_skill(item).get("kind") or "custom") for item in selected_skills}
         # A standalone cover task ends in an explicit creative choice. Keep
         # that task in review mode even when cover generation is an automatic
         # add-on to a larger editing workflow.
-        if str(profile.get("kind") or "") == "cover":
+        if str(profile.get("kind") or "") == "cover" and not automatic_delivery:
             mode = STEPWISE_REVIEW
         brief = self._editing_brief(goal, context)
         # Plans created before the duration-inference fix may still carry the
@@ -1799,9 +1848,23 @@ class AgentPlatform:
                 and brief.get("targetSeconds") is not None):
             brief["targetSeconds"] = None
         result["brief"] = brief
+        from .delivery_contract import cover_intro_seconds, duration_budget
+        budget = duration_budget(brief)
+        brief["durationBudget"] = budget
+        if (brief.get("audioOperations") or {}).get("unsupported"):
+            raise ValueError("当前不能自动分离或单独压低混合音轨中的背景音乐，或音量调整超出支持范围；未用降噪代替该要求")
+        if brief.get("motionGraphicsRequested") and re.search(r"动态字幕", self._strip_negative_clauses(goal)):
+            raise ValueError("当前支持动态图文片头和独立标题视频，暂不支持动态对白字幕；可改为普通字幕")
+        if brief.get("motionGraphicsRequested") and profile["kind"] != "local-motion":
+            if not brief.get("motionIntroRequested"):
+                raise ValueError("组合剪辑中的动效暂支持片头，请说明是否添加动态图文片头，未省略动效要求")
+            if not automatic_delivery:
+                raise ValueError("剪辑与动态片头组合目前需要自动交付模式；审核模式可分别生成，未省略片头要求")
+        if brief.get("audioPolishRequested") and profile["kind"] != "audio-polish" and not automatic_delivery:
+            raise ValueError("剪辑与音频处理组合目前需要自动交付模式；审核模式可分别处理，未省略音频要求")
         result["planningContext"] = context
         result["profile"] = profile["kind"]
-        result["executionMode"] = mode
+        result["executionMode"] = AUTOMATIC_DELIVERY if automatic_delivery else mode
         result["skillChain"] = self._skill_chain_payload(selected_skills)
         if not profile["managed"]:
             return result
@@ -1828,12 +1891,12 @@ class AgentPlatform:
             return step_id
 
         def qc_arguments() -> dict[str, Any]:
-            arguments: dict[str, Any] = {"strict": True}
+            arguments: dict[str, Any] = {"strict": not automatic_delivery}
             delivery_aspect = (brief.get("socialDelivery") or {}).get("aspect")
             expected_aspect = (
                 delivery_aspect
                 if (brief.get("socialDelivery") or {}).get("requested") else
-                brief.get("coverAspect") if brief.get("coverIntroRequested") else ""
+                brief.get("coverAspect") if brief.get("coverIntroRequested") and not automatic_delivery else ""
             )
             if expected_aspect in {"9:16", "16:9", "1:1", "4:5"}:
                 arguments["expectedAspect"] = expected_aspect
@@ -1842,7 +1905,7 @@ class AgentPlatform:
             if brief.get("coverIntroRequested"):
                 arguments["requireCoverIntro"] = True
             if isinstance(brief.get("targetSeconds"), (int, float)):
-                arguments["targetSeconds"] = float(brief["targetSeconds"])
+                arguments["targetSeconds"] = budget["finalSeconds"] if automatic_delivery else float(brief["targetSeconds"])
                 arguments["toleranceSeconds"] = float(
                     brief.get("durationToleranceSeconds") or 0
                 )
@@ -1941,7 +2004,11 @@ class AgentPlatform:
         elif kind == "edit-diagnostics":
             add("diagnose_edit_failure", "诊断当前剪辑流程问题", {"focus": brief["goal"][:240]}, "失败原因、受影响产物和可执行下一步")
             decision.append({"rule": "diagnostics", "outcome": "inspect", "reason": "目标要求解释失败、卡住或界面结果异常"})
-        elif kind == "local-motion":
+        elif automatic_delivery and kind in {"audio-polish", "local-motion"}:
+            # These operations are applied to the full-quality master by the
+            # durable delivery worker, not to a low-quality review proxy.
+            pass
+        elif kind == "local-motion" and not automatic_delivery:
             editing = context.get("editing") if isinstance(context.get("editing"), dict) else {}
             social = brief.get("socialDelivery") if isinstance(brief.get("socialDelivery"), dict) else {}
             aspect = str(social.get("aspect") or brief.get("coverAspect") or "9:16")
@@ -2012,13 +2079,14 @@ class AgentPlatform:
                 render_arguments["titleText"] = title_text
             cover_variant_step = add("render_cover_variants", "生成封面预览版本", render_arguments, "不覆盖当前封面的封面预览", [cover_candidate_step])
             cover_review_step = add("review_cover_variants", "选择当前任务封面", {}, "已选择的当前任务封面", [cover_variant_step])
-            cover_confirm_step = add("confirm_cover", "保存当前任务封面", {}, "已绑定当前任务的封面版本", [cover_review_step])
-            intro_step = add(
-                "compose_cover_intro", "合成封面片头",
-                {"duration": float(brief.get("coverIntroDurationSeconds") or 1.5)},
-                "带当前封面片头的新成片版本", [cover_confirm_step],
-            )
-            add("run_delivery_qc", "检查封面片头成片质量", qc_arguments(), "封面片头成片质检报告", [intro_step])
+            cover_confirm_step = add("confirm_cover", "保存当前任务封面", {}, copy_messages.COVER_SAVED_AUTO_REVIEW, [cover_review_step])
+            if not automatic_delivery:
+                intro_step = add(
+                    "compose_cover_intro", "合成封面片头",
+                    {"duration": cover_intro_seconds(brief) or 1.0},
+                    "带当前封面片头的新成片版本", [cover_confirm_step],
+                )
+                add("run_delivery_qc", "检查封面片头成片质量", qc_arguments(), "封面片头成片质检报告", [intro_step])
             decision.append({"rule": "cover_intro", "outcome": "compose", "reason": "目标要求封面出现在视频开头"})
         elif kind == "caption-layout":
             if bool(brief.get("subtitleAssetRequested")):
@@ -2069,10 +2137,10 @@ class AgentPlatform:
                     "生成字幕校对稿，经人工确认后应用排版并生成带字幕样片"
                 ),
             })
-        elif kind == "audio-polish":
+        elif kind == "audio-polish" and not automatic_delivery:
             polish_step = add(
                 "polish_audio_mix", "生成音频优化版本",
-                {"noiseReduction": bool(brief.get("audioPolishRequested")), "voiceFirst": True},
+                {key: value for key, value in brief["audioOperations"].items() if key != "unsupported"},
                 "音频优化版本",
             )
             add("run_delivery_qc", "检查音频优化版本质量", qc_arguments(), "音频优化版本质检报告", [polish_step])
@@ -2099,8 +2167,8 @@ class AgentPlatform:
         elif kind == "platform-delivery":
             delivery = brief.get("socialDelivery") if isinstance(brief.get("socialDelivery"), dict) else {}
             export_step = add(
-                "export_delivery_master", "导出正式交付版本",
-                {"platform": "generic", "aspect": str(delivery.get("aspect") or "")},
+                DELIVERY_TOOL if automatic_delivery else "export_delivery_master", "导出正式交付版本",
+                {} if automatic_delivery else {"platform": "generic", "aspect": str(delivery.get("aspect") or "")},
                 "需要明确授权的正式交付文件",
             )
             add("run_delivery_qc", "检查正式交付质量", qc_arguments(), "正式交付文件质检报告", [export_step])
@@ -2141,7 +2209,7 @@ class AgentPlatform:
             else:
                 highlight_arguments: dict[str, Any] = {"instruction": brief["goal"]}
                 if brief.get("targetSeconds") is not None:
-                    highlight_arguments["targetSeconds"] = brief["targetSeconds"]
+                    highlight_arguments["targetSeconds"] = budget["bodySeconds"]
                 add(
                     "analyze_highlights", "提取高光候选",
                     highlight_arguments, "按内容质量排序的高光证据",
@@ -2320,7 +2388,7 @@ class AgentPlatform:
                 [cover_candidate_step],
             )
             cover_review_step = add("review_cover_variants", "自动优选当前任务封面", {}, "按当前主题和画幅自动选择的封面候选", [cover_variant_step])
-            add("confirm_cover", "保存当前任务封面", {}, "已绑定当前任务的封面版本", [cover_review_step])
+            add("confirm_cover", "保存当前任务封面", {}, copy_messages.COVER_SAVED_AUTO_REVIEW, [cover_review_step])
             decision.append({
                 "rule": "cover_generation", "outcome": "local_source_variants",
                 "reason": f"从当前任务生成 {aspect} 的三种源帧封面方向，不调用外部生成服务",
@@ -2333,7 +2401,7 @@ class AgentPlatform:
         # already applied timeline when its source request did not change.
         instruction = str(brief["goal"] or strategy.get("timelineInstruction") or "")
         if brief["targetSeconds"]:
-            instruction = f"{instruction}；目标 {brief['targetSeconds']} 秒，允许浮动 ±{brief['durationToleranceSeconds']} 秒"
+            instruction = f"{instruction}；目标 {budget['bodySeconds']:g} 秒，允许浮动 ±{brief['durationToleranceSeconds']:g} 秒"
         if brief.get("anchorStart"):
             anchor_query = str(brief["anchorStart"].get("query") or "")
             instruction = (
@@ -2372,7 +2440,7 @@ class AgentPlatform:
             }
             if brief.get("targetSeconds") is not None:
                 timeline_arguments.update({
-                    "targetSeconds": float(brief["targetSeconds"]),
+                    "targetSeconds": budget["bodySeconds"],
                     "toleranceSeconds": float(brief["durationToleranceSeconds"]),
                     "durationSource": str(brief.get("durationSource") or "explicit"),
                 })
@@ -2480,7 +2548,7 @@ class AgentPlatform:
                 [cover_candidate_step],
             )
             cover_review_step = add("review_cover_variants", "自动优选当前任务封面", {}, "按当前主题和画幅自动选择的封面候选", [cover_variant_step])
-            cover_confirm_step_id = add("confirm_cover", "保存当前任务封面", {}, "已绑定当前任务的封面版本", [cover_review_step])
+            cover_confirm_step_id = add("confirm_cover", "保存当前任务封面", {}, copy_messages.COVER_SAVED_AUTO_REVIEW, [cover_review_step])
             decision.append({
                 "rule": "cover_generation", "outcome": "local_source_variants",
                 "reason": f"从当前成片生成 {aspect} 的三种源帧封面方向，不调用外部生成服务",
@@ -2506,10 +2574,14 @@ class AgentPlatform:
             )
             final_delivery_step_id = social_step
             delivery_qc_needed = True
+        # 默认合入：只要本次有封面（coverRequested），审核样片也带片头，与成片一致。
+        # 不再要求 Skill 画像含 cover-intro —— 片头合成是通用渲染能力，
+        # 代码编排注入的步骤在执行时不校验 Skill 工具白名单。
+        cover_intro_duration = cover_intro_seconds(brief)
         if (
             kind != "cover-intro"
-            and bool(brief.get("coverIntroRequested"))
-            and "cover-intro" in profile_kinds
+            and not automatic_delivery
+            and cover_intro_duration > 0
             and cover_confirm_step_id
         ):
             intro_dependencies = [cover_confirm_step_id]
@@ -2518,8 +2590,8 @@ class AgentPlatform:
             elif preview_dependency_id:
                 intro_dependencies.append(preview_dependency_id)
             intro_step = add(
-                "compose_cover_intro", "合成封面片头审核样片",
-                {"duration": float(brief.get("coverIntroDurationSeconds") or 1.5)},
+                "compose_cover_intro", "把封面合成为片头审核样片",
+                {"duration": cover_intro_duration},
                 "带当前任务封面片头的最终审核样片",
                 intro_dependencies,
             )
@@ -2528,24 +2600,24 @@ class AgentPlatform:
             decision.append({
                 "rule": "cover_intro",
                 "outcome": "compose_review_preview",
-                "reason": "目标要求封面出现在视频开头，因此封面确认后继续合成审核样片",
+                "reason": "已确认封面默认合入开头，因此封面确认后继续合成带片头的审核样片",
             })
-        if delivery_qc_needed and final_delivery_step_id:
+        if delivery_qc_needed and final_delivery_step_id and not automatic_delivery:
             qc_dependencies = [final_delivery_step_id]
             if (
                 cover_confirm_step_id
-                and not brief.get("coverIntroRequested")
+                and cover_intro_duration <= 0
                 and cover_confirm_step_id not in qc_dependencies
             ):
                 qc_dependencies.append(cover_confirm_step_id)
             add(
                 "run_delivery_qc",
-                "检查最终审核样片质量" if bool(brief.get("coverIntroRequested")) else "检查社媒预览质量",
+                "检查带封面片头的审核样片质量" if cover_intro_duration > 0 else "检查社媒预览质量",
                 qc_arguments(),
                 "最终审核样片的完整质检报告",
                 qc_dependencies,
             )
-        elif kind not in {"social-reframe", "dynamic-reframe", "local-motion", "delivery-qc"} and bool(brief.get("deliveryQcRequested")):
+        elif not automatic_delivery and kind not in {"social-reframe", "dynamic-reframe", "local-motion", "delivery-qc"} and bool(brief.get("deliveryQcRequested")):
             if needs_timeline and not bool(brief.get("reviewPreviewRequested")):
                 add("render_review_preview", "生成质检所需的审核输出", {"subtitleMode": "none"}, "已确认时间线的审核输出")
             add("run_delivery_qc", "检查成片交付质量", qc_arguments(), "逐文件质检报告与可追踪问题")
@@ -2571,7 +2643,7 @@ class AgentPlatform:
         elif kind == "caption-layout":
             result["summary"] = "为当前时间线生成字幕排版草稿并渲染审核预览，优先满足位置、安全区和可读性要求。"
         elif kind == "audio-polish":
-            result["summary"] = "基于当前成片生成音频优化版本，进行响度规范化和保守降噪后运行质检。"
+            result["summary"] = "基于当前成片，仅执行本次要求的音量、响度或降噪处理，并检查生成结果。"
         elif kind == "broll-overlay":
             result["summary"] = "检索并加入相关辅助画面插入轨，保留主音频，完成后生成审核预览。"
         elif kind == "graphics-package":
@@ -2632,8 +2704,23 @@ class AgentPlatform:
             constraints.append("各版本不得复用源片段；无法满足时停止并说明原因")
         if constraints:
             result["summary"] += " 要求：" + "；".join(constraints) + "。"
+        if automatic_delivery and (kind in {"audio-polish", "local-motion", "cover-intro"} or any(step["tool"] in VIDEO_TOOLS for step in steps)) and not any(step["tool"] == DELIVERY_TOOL for step in steps):
+            # Depend on every upstream output, including cover and subtitles.
+            delivery_step = add(DELIVERY_TOOL, "生成可下载成片", {}, "本次请求的正式视频文件",
+                                [step["id"] for step in steps])
+            add("run_delivery_qc", "检查最终成片", qc_arguments(), "最终文件交付检查", [delivery_step])
+            result["summary"] = "按本次要求自动完成剪辑并生成可下载成片；只有必须由你决定的问题才会暂停。"
         result["steps"] = steps
         result["decisionRecord"] = decision
+        if (automatic_delivery and needs_timeline and not brief.get("reviewPreviewRequested")
+                and not any(brief.get(key) for key in ("subtitleRequested", "coverRequested", "brollRequested", "graphicsRequested"))
+                and not social.get("requested")):
+            for step in steps:
+                if step["tool"] == "render_review_preview":
+                    step.update(tool="prepare_delivery_timeline", title="核对时间线，准备直接生成成片",
+                                sideEffect="read", arguments={}, expectedOutput="已核对的时间线版本与指纹")
+            decision.append({"rule": "direct_delivery", "outcome": "skip_review_render",
+                             "reason": "无需审核样片且无预览依赖，直接从已核对时间线生成正式文件"})
         return result
 
     def create_workspace(self, *, job_id: str, title: str = "") -> dict[str, Any]:
@@ -2887,6 +2974,8 @@ class AgentPlatform:
         message_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         normalized_mode = str(execution_mode or AUTONOMOUS_REVIEW)
+        if normalized_mode == AUTOMATIC_DELIVERY and not automatic_delivery_enabled():
+            raise ValueError("自动交付暂未启用，请选择自动到预览或分步审核")
         if normalized_mode not in VALID_EXECUTION_MODES:
             raise ValueError("Agent 执行方式无效")
         planning_brief = self._editing_brief(goal, {})
@@ -3185,11 +3274,15 @@ class AgentPlatform:
                 if isinstance(event, dict):
                     self.store.append_event(workspace_id, "agent.message_update", event)
             self.store.append_event(workspace_id, "plan.created", {"plan": plan})
-            self.store.append_event(workspace_id, "plan.confirmation_required", {
-                "planId": plan["id"], "planHash": plan["planHash"],
-            })
-            self._notify_workspace_state(workspace, plan)
-            return plan
+            automatic = may_auto_approve(plan)
+            if not automatic:
+                self.store.append_event(workspace_id, "plan.confirmation_required", {
+                    "planId": plan["id"], "planHash": plan["planHash"],
+                })
+                self._notify_workspace_state(workspace, plan)
+        if automatic:
+            return self.approve_plan(plan["id"], expected_hash=plan["planHash"])
+        return plan
 
 
     def _normalize_plan(
@@ -3207,7 +3300,13 @@ class AgentPlatform:
             selected_profile = self._profile_for_skill(selected)
             declared_tools = {str(item) for item in selected.get("allowedTools") or [] if str(item)}
             allowed_tools.update(set(selected_profile["tools"]) if selected_profile["managed"] else declared_tools)
+        if execution_mode == AUTOMATIC_DELIVERY and all(self._profile_for_skill(s)["managed"] for s in selected_skills):
+            allowed_tools.update({DELIVERY_TOOL, "run_delivery_qc", "prepare_delivery_timeline"})
         raw_steps = raw.get("steps") if isinstance(raw.get("steps"), list) else []
+        # 封面片头由编排层默认注入，不是 Skill 自带能力。这里只在计划确实包含封面确认
+        # 步骤时放行，避免无差别授权导致模型在尚未生成封面时误调该工具。
+        if any(isinstance(item, dict) and str(item.get("tool") or "") == "confirm_cover" for item in raw_steps):
+            allowed_tools.add("compose_cover_intro")
         if not raw_steps or len(raw_steps) > 24:
             raise ValueError("Agent 必须生成 1–24 个计划步骤")
         seen: set[str] = set()
@@ -3509,21 +3608,23 @@ class AgentPlatform:
             ), None)
             if next_step is None:
                 if all(step["status"] in {"completed", "skipped", "failed"} for step in plan["steps"]):
-                    self._finish_plan(plan, "preview_ready")
+                    self._finish_plan(plan, "completed" if plan.get("executionMode") == AUTOMATIC_DELIVERY else "preview_ready")
                 return
             execution_mode = str(plan.get("executionMode") or STEPWISE_REVIEW)
             requires_action = (
                 (
                     next_step["sideEffect"] in FORBIDDEN_AUTONOMOUS_EFFECTS
                     and str(next_step.get("tool") or "") not in SAFE_AUTONOMOUS_EXPORT_TOOLS
+                    and not (execution_mode == AUTOMATIC_DELIVERY and next_step["tool"] == DELIVERY_TOOL
+                             and not next_step.get("pluginId"))
                 )
                 or (
                     next_step["sideEffect"] == "identity"
-                    and execution_mode != AUTONOMOUS_REVIEW
+                    and execution_mode not in AUTOMATIC_MODES
                 )
                 or (
                     next_step["sideEffect"] == "review"
-                    and execution_mode != AUTONOMOUS_REVIEW
+                    and execution_mode not in AUTOMATIC_MODES
                 )
             )
             if requires_action:
@@ -3793,6 +3894,10 @@ class AgentPlatform:
         result: Any = None, error: str = "", expected_attempt: int | None = None,
         expected_operation_id: str | None = None,
     ) -> None:
+        if status == "completed" and self._handle_automatic_quality(
+            plan_id, step_id, result, expected_attempt, expected_operation_id,
+        ):
+            return
         should_replan = False
         no_result = bool(
             status == "completed" and isinstance(result, dict)
@@ -3808,6 +3913,15 @@ class AgentPlatform:
             if expected_attempt is not None and int(step.get("attempts") or 0) != expected_attempt:
                 return
             if expected_operation_id is not None and step.get("operationId") != expected_operation_id:
+                return
+            if status == "completed" and isinstance(result, dict) and result.get("actionRequired"):
+                step.update({"status": "action_required", "result": result})
+                plan["status"] = "action_required"
+                self.store.save("plans", plan)
+                self.store.append_event(plan["workspaceId"], "action.required", {"planId": plan_id, "step": step})
+                workspace = self.store.get("workspaces", str(plan["workspaceId"]))
+                if workspace:
+                    self._notify_workspace_state(workspace, plan)
                 return
             step.update({"status": status, "completedAt": now_iso()})
             if result is not None:
@@ -3856,10 +3970,53 @@ class AgentPlatform:
             return
         self._advance_plan(plan_id)
 
+    def _handle_automatic_quality(self, plan_id: str, step_id: str, result: Any,
+                                  attempt: int | None, operation_id: str | None) -> bool:
+        errors = blocking_quality_issues(result)
+        if not errors:
+            return False
+        with self._execution_lock:
+            plan = self.store.get("plans", plan_id)
+            step = next((s for s in (plan or {}).get("steps", []) if s["id"] == step_id), None)
+            if (not plan or plan.get("executionMode") != AUTOMATIC_DELIVERY or plan.get("status") != "running"
+                    or not step or step.get("status") not in {"running", "waiting_operation"}
+                    or (attempt is not None and int(step.get("attempts") or 0) != attempt)
+                    or (operation_id is not None and step.get("operationId") != operation_id)):
+                return False
+            repair = quality_repair_plan({"reports": [{"issues": errors}]}, plan["steps"], plan.get("inputContext"))
+            repair_key = content_hash(json.dumps({"tool": repair.get("replayFromTool"), "codes": repair.get("issueCodes")}, sort_keys=True))
+            attempted = plan.get("automaticRepairKeys") or []
+            if repair.get("available") and repair_key not in attempted and int(plan.get("automaticRepairCount") or 0) < 3:
+                index = next(i for i, s in enumerate(plan["steps"]) if s["tool"] == repair["replayFromTool"])
+                plan["automaticRepairCount"] = int(plan.get("automaticRepairCount") or 0) + 1
+                plan.setdefault("automaticRepairKeys", []).append(repair_key)
+                plan.setdefault("qualityRepairHistory", []).append({"createdAt": now_iso(), "repair": repair,
+                                                                    "qualityReport": copy.deepcopy(result["artifact"])})
+                affected = repair_step_ids(plan["steps"], plan["steps"][index]["id"])
+                for replay in plan["steps"]:
+                    if replay["id"] not in affected:
+                        continue
+                    replay["status"] = "pending"
+                    for key in ("result", "error", "operationId", "completedAt"):
+                        replay.pop(key, None)
+                self.store.save("plans", plan)
+                self.store.append_event(plan["workspaceId"], "plan.automatic_repair", {"planId": plan_id, "repair": repair})
+                workspace = self.store.get("workspaces", str(plan["workspaceId"]))
+                if workspace:
+                    self._notify_workspace_state(workspace, plan)
+            else:
+                step.update({"status": "failed", "result": result, "completedAt": now_iso(),
+                             "error": "；".join(str(i.get("message") or i.get("code")) for i in errors[:3])})
+                self.store.save("plans", plan)
+                self._finish_plan(plan, "failed")
+                return True
+        self._advance_plan(plan_id)
+        return True
+
     def _attempt_replan(self, plan_id: str, failed_step_id: str) -> bool:
         with self._execution_lock:
             plan = self.store.get("plans", plan_id)
-            if not plan or int(plan.get("replanCount") or 0) >= 2:
+            if not plan or int(plan.get("replanCount") or 0) >= (1 if plan.get("executionMode") == AUTOMATIC_DELIVERY else 2):
                 return False
             workspace = self.store.get("workspaces", str(plan["workspaceId"]))
             skill = self.store.get("skills", str(plan["skillId"]))
@@ -4032,6 +4189,7 @@ class AgentPlatform:
 
     def _finish_plan(self, plan: dict[str, Any], status: str) -> None:
         plan["status"] = status
+        plan["terminalReason"] = plan_terminal_reason(plan)
         plan["completedAt"] = now_iso()
         self.store.save("plans", plan)
         run_id = str(plan.get("runId") or "")
@@ -4050,16 +4208,18 @@ class AgentPlatform:
             quality_failed = any(a.get("kind") == "delivery_qc_report" and a.get("passed") is False for a in artifacts)
             result_text = (
                 "审核样片已生成；检查存在提醒，请查看本次方案的检查详情。" if quality_failed else
-                "审核样片已生成。" if has_preview else "本次方案已执行完成，可查看对应结果。"
+                "审核样片已生成。" if has_preview else copy_messages.PLAN_DONE
             ) if status == "preview_ready" else {
-                "failed": "本次方案执行失败。请查看失败步骤。",
-                "no_result": "本次未找到可用片段，可以调整条件重新检索。",
+                "completed": copy_messages.PLAN_DONE_VIEW,
+                "failed": "本次要求尚未全部完成，已有结果已保留。请查看未完成的原因。",
+                "no_result": "。".join(str((plan.get("terminalReason") or {}).get(key) or "") for key in ("label", "message", "hint")),
                 "cancelled": "本次方案已停止。",
             }.get(status, "本次方案已结束。")
             messages.append({"id": result_id, "role": "assistant", "kind": "plan_result", "planId": plan["id"], "text": result_text, "createdAt": now_iso()})
             workspace["messages"] = messages
             workspace = self.store.save("workspaces", workspace)
         event_type = {
+            "completed": "plan.completed",
             "preview_ready": "preview.ready",
             "no_result": "plan.no_result",
             "cancelled": "plan.cancelled",
@@ -4078,7 +4238,7 @@ class AgentPlatform:
             plan = self.store.get("plans", plan_id)
             if not plan:
                 raise KeyError(plan_id)
-            if plan.get("status") in {"preview_ready", "no_result", "failed", "cancelled"}:
+            if plan.get("status") in {"completed", "preview_ready", "no_result", "failed", "cancelled"}:
                 return plan
             plan["status"] = "cancelled"
             plan["completedAt"] = now_iso()

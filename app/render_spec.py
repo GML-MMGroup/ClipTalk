@@ -1,5 +1,6 @@
 """Versioned, JSON-only render inputs. Frozen at confirmation, never at execution."""
 from __future__ import annotations
+from .automatic_delivery import subtitle_source_ready
 
 import copy
 import hashlib
@@ -38,7 +39,7 @@ def freeze_spec(*, segments: list[dict], cutaways=None, chapters=None, technique
                 409,
                 subtitle_review_required_detail("字幕草稿尚未完成校对，请先打开字幕校对面板确认文字与断句。"),
             )
-        if draft.get("sourceSubtitleAcknowledged") is False:
+        if not subtitle_source_ready(draft):
             raise HTTPException(
                 409,
                 subtitle_review_required_detail(

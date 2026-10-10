@@ -376,7 +376,7 @@ body[data-shell-mode="workspace"] .agent-plan-dock .agent-planning-flow li > .ag
 @keyframes agent-planning-node { 50% { box-shadow: 0 0 0 6px rgba(208, 160, 91, 0); transform: scale(.88); } }
 .agent-plan-dock > footer { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; }
 .agent-plan-dock > footer > span { margin-right: auto; color: #718089; font: 600 10px/1 var(--font-data, sans-serif); font-variant-numeric: tabular-nums; }
-.agent-plan-dock button, .agent-plan-drawer button { min-height: 28px; padding: 0 9px; border: 0; border-radius: 7px; color: #b8c3c8; background: #243139; font: 600 10px/1 var(--font-ui, sans-serif); cursor: pointer; transition: transform .18s ease, color .18s ease, background-color .18s ease; }
+.agent-plan-dock button, .agent-plan-drawer button { min-height: 28px; padding: 0 9px; border: 0; border-radius: 7px; color: #b8c3c8; background: #243139; font: 600 10px/1 var(--font-ui, sans-serif); cursor: pointer; transition: transform var(--ct-duration-hover, 120ms) var(--ct-ease, ease), color var(--ct-duration-hover, 120ms) ease, background-color var(--ct-duration-hover, 120ms) ease; }
 .agent-plan-dock button:hover, .agent-plan-drawer button:hover { color: #eef3f5; background: #2d3c45; }
 .agent-plan-dock button:active, .agent-plan-drawer button:active { transform: translateY(1px) scale(.985); }
 .agent-plan-dock button:focus-visible, .agent-plan-drawer button:focus-visible { outline: 2px solid rgba(201, 151, 79, .7); outline-offset: 2px; }
@@ -404,7 +404,7 @@ body[data-shell-mode="workspace"] .agent-plan-dock > footer .agent-plan-text-act
   overflow: hidden;
   color: #dfe7ea;
   opacity: 0;
-  transition: transform .19s ease, opacity .19s ease;
+  transition: transform var(--ct-duration-panel, 180ms) var(--ct-ease, ease), opacity var(--ct-duration-panel, 180ms) ease;
 }
 .agent-plan-drawer.open { opacity: 1; }
 .agent-plan-drawer > header { display: flex; justify-content: space-between; gap: 16px; }

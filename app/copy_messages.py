@@ -50,13 +50,37 @@ COVER_SAVED_AUTO_REVIEW = "封面已保存"
 
 
 def cover_saved(bound_count: int = 0, *, rendering: bool = False) -> str:
-    """封面保存后的唯一播报口径。
+    """封面保存后的唯一播报口径：只说结果，「封面已保存。」。
 
-    bound_count: 本次绑定到的当前成片数量（0 表示当前任务还没有成片）
-    rendering:   是否已排入后台渲染（正在出成片）
+    bound_count / rendering 仅保留调用兼容；它们描述的状态不由消息承担。
     """
-    if bound_count:
-        return f"封面已保存，并关联到 {bound_count} 条当前成片；视频画面未改动"
-    if rendering:
-        return "封面已保存；正在生成可下载成片"
-    return "封面已保存；本次只更新封面，不修改视频画面"
+    # 参数保留兼容：绑定数量、是否渲染、是否改动画面都属于界面约束/状态，
+    # 由封面卡说明；写进消息会让同一次保存堆叠出多行近义长句。
+    _ = (bound_count, rendering)
+    return MSG["cover_saved"]
+# ---------------------------------------------------------------- 文案注册表（集中登记）
+# 用户可见文案的唯一来源。业务代码（app/*.py 与前端）应从这里引用，
+# 不要再写中文字面量（写作规范见文件头）。前端无法 import，请在
+# static/ 对应文件里维护同名常量并加注释指向此处。
+STATUS = {
+    "cover_saved": "封面已保存",
+    "plan_confirm": "待确认",
+    "preview_ready": "预览已就绪",
+    "exported": "成片已生成",
+}
+MSG = {
+    "cover_saved": "封面已保存。",
+    "plan_done": "本次方案已执行完成。",
+    "plan_done_view": "本次要求已完成。",
+}
+ACTION = {
+    "view_detail": "查看详情",
+    "view_cover": "查看生成的封面",
+    "view_clip": "查看片段",
+    "view_history": "查看上次处理结果",
+    "view_plan": "查看方案",
+    "view_quality": "查看质量提醒并定位问题片段",
+}
+
+PLAN_DONE = MSG["plan_done"]
+PLAN_DONE_VIEW = MSG["plan_done_view"]

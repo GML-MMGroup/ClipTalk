@@ -133,8 +133,8 @@ def inspect_environment(profile: str = "visual") -> dict[str, Any]:
     except SecurityConfigurationError as error:
         checks.append(_result("部署访问控制", "blocker", str(error)))
     else:
-        token_state = "已配置访问令牌" if settings.access_token else (
-            "已允许无认证访问；不要直接暴露公网" if settings.allow_unauthenticated_remote else "仅允许本机访问，无需令牌"
+        token_state = (
+            "已配置访问令牌" if settings.access_token else "仅允许本机访问，无需令牌"
         )
         checks.append(_result("部署访问控制", "ok", f"监听 {settings.host}:{settings.port}；{token_state}"))
 

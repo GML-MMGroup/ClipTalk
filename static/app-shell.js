@@ -147,19 +147,7 @@
     let displayName = "";
     try { displayName = JSON.parse(localStorage.getItem(`cliptalk-project-preferences-v1:${job?.id}`) || "{}").displayName || ""; } catch { /* Local preferences are optional. */ }
     const filename = String(job?.filename || "未命名视频").replace(/\.[a-z0-9]{2,5}$/i, "");
-    const objective = String(
-      job?.brief?.objective
-      || job?.request?.objective
-      || job?.request?.contentInstruction
-      || "",
-    ).trim();
-    const generic = new Set(["事件高光合集", "自动剪辑", "智能剪辑", "内容探索", "内容检索", ""]);
-    let title = displayName
-      || (!generic.has(objective) && objective
-        ? (objective.length <= 24 ? objective : `${objective.slice(0, 24)}…`)
-        : filename);
-    const hashMatch = title.match(/^([0-9a-f]{8})[0-9a-f]{8,}([0-9a-f]{5})$/i);
-    if (hashMatch) title = `${hashMatch[1]}…${hashMatch[2]}`;
+    const title = window.ClipTalkCopy.taskTitle(job, displayName);
     return {
       title,
       filename,
@@ -219,10 +207,10 @@
       ${deletable && taskCanDelete(job) ? `<details class="shell-task-menu"><summary aria-label="${escapeHtml(`${display.title}的任务操作`)}" title="任务操作">•••</summary><div><button type="button" data-shell-delete="${escapeHtml(job?.id)}" data-shell-delete-related="${escapeHtml(historyIds.join(","))}">${escapeHtml(deleteLabel)}</button></div></details>` : ""}
       <button class="shell-task-open" type="button" data-shell-open="${escapeHtml(job?.openJobId || job?.id)}"${output?.filename && group === "completed" ? ` data-shell-output="${escapeHtml(output.filename)}"` : ""}>
         ${home ? taskArtworkMarkup(job) : ""}
-        <span class="shell-task-heading"><strong title="${escapeHtml(display.title)}">${escapeHtml(display.title)}</strong><b class="shell-task-state">${escapeHtml(taskStateLabel(group))}</b></span>
+        <span class="shell-task-heading"><strong title="${escapeHtml(display.title)}">${escapeHtml(display.title)}</strong><b class="shell-task-state">${escapeHtml((job?.presentation?.terminalReason?.label || taskStateLabel(group)))}</b></span>
         <small>${escapeHtml(workflow)} · ${escapeHtml(display.filename)}${escapeHtml(outputLabel)}${current ? " · 当前任务" : ""}</small>
         <span class="shell-task-detail" title="${escapeHtml(statusText(job))}">${escapeHtml(statusText(job))}</span>
-        <span class="shell-task-foot"><time>${escapeHtml(updated)}</time>${taskProgressMarkup(job)}</span>
+        <span class="shell-task-foot"><time title="更新时间">${escapeHtml(updated)}</time>${state.catalog.filter(item => taskDisplayName(item).title === display.title).length > 1 ? `<span>创建 ${escapeHtml(formatDate(job.createdAt))} · ${escapeHtml(String(job.id || "").slice(-4))}</span>` : ""}${taskProgressMarkup(job)}</span>
       </button>
       ${job.executionHistory?.length ? `<details class="shell-task-history"><summary>历史记录 · ${job.executionHistory.length}</summary>${job.executionHistory.map(record => `<button type="button" data-shell-open="${escapeHtml(record.id)}">${escapeHtml(taskDisplayName(record).title)} · ${escapeHtml(formatDate(record.updatedAt || record.createdAt))}</button>`).join("")}</details>` : ""}
     </article>`;
@@ -239,7 +227,7 @@
       currentTask.setAttribute("aria-label", currentId ? "返回当前任务" : "当前没有已打开的任务");
     }
     const tasks = window.ClipTalkWorkspaceState.logicalTasks([...state.catalog, ...state.sidebarJobs]);
-    const attention = tasks.filter((job) => ["active", "agent_planning", "action_required"].includes(statusGroup(job))).length;
+    const attention = tasks.filter((job) => homeGroupFor(job) === "attention").length;
     const loadedTotal = tasks.length;
     const hasUnloadedTasks = state.hasMore || state.catalogHasMore;
     const totalLabel = `${loadedTotal}${hasUnloadedTasks ? "+" : ""}`;
@@ -266,7 +254,10 @@
 
   function homeGroupFor(job) {
     const status = statusGroup(job);
-    return ["action_required", "failed", "no_result"].includes(status) ? "attention"
+    // A ready legacy preview is an available result, not an unanswered question.
+    if (job?.presentation?.key === "preview_review" && job?.presentation?.quality?.status !== "failed") return "recent";
+    return status === "action_required" ? "attention"
+      : ["failed", "no_result"].includes(status) ? "unfinished"
       : ["active", "agent_planning"].includes(status) ? "running" : "recent";
   }
 
@@ -293,7 +284,7 @@
       root.before(groupNotice);
     }
     groupNotice.hidden = !state.homeGroup;
-    groupNotice.textContent = `${{ attention: "需要你处理", running: "正在进行", recent: "最近任务" }[state.homeGroup] || ""} · 清除分组筛选`;
+    groupNotice.textContent = `${{ attention: "需要回答", unfinished: "未完成", running: "处理中", recent: "结果与最近任务" }[state.homeGroup] || ""} · 清除分组筛选`;
     root.innerHTML = jobs.length
       ? jobs.map((job) => taskCard(job)).join("")
       : ctEmpty(state.query || state.filter !== "all"
@@ -325,7 +316,7 @@
       return `<section class="home-task-section" data-home-group="${key}"><header><strong>${title} · ${count}</strong><button type="button" class="home-task-view-all" data-home-history="${key}">查看全部</button></header><p class="home-task-hint">${hint}</p><div>${items.length ? items.slice(0, 4).map(job => taskCard(job, { home: true, deletable: false })).join("") : `<p class="home-task-hint">暂无${title}</p>`}</div></section>`;
     };
     root.innerHTML = tasks.length
-      ? `${section("attention", "需要你处理", "待确认、执行失败或未找到结果")}${section("running", "正在进行", "正在规划或处理，无需重复提交")}${section("recent", "最近任务", "按最近更新时间排列")}<button type="button" class="home-task-view-all" data-home-history>查看全部任务</button>`
+      ? `${section("attention", "需要回答", "这些任务需要你做一个选择")}${section("running", "处理中", "后台会继续处理，无需重复提交")}${section("unfinished", "未完成", "已有内容已保留，可继续处理")}${section("recent", "结果与最近任务", "预览、下载或继续修改")}<button type="button" class="home-task-view-all" data-home-history>查看全部任务</button>`
       : `<div class="home-current-empty"><div><strong>还没有剪辑任务</strong><span>上传一段视频，剪辑助理会帮你规划第一版成片。</span></div></div>`;
     wireTaskArtwork(root);
     renderNavigationBadges();
@@ -366,24 +357,43 @@
     }
   }
 
+  let sidebarRequestSequence = 0;
   async function loadSidebarCatalog({ append = false } = {}) {
-    if (state.loadingSidebar) return;
+    if (append && state.loadingSidebar) return;
+    const sequence = ++sidebarRequestSequence;
+    const query = state.query;
     state.loadingSidebar = true;
     const root = $("#sidebarHistoryList");
     if (!append && root) root.innerHTML = '<div class="app-sidebar-loading">正在读取历史任务</div>';
     try {
       const response = await request(catalogUrl({ cursor: append ? state.nextCursor : null }));
       const jobs = Array.isArray(response?.jobs) ? response.jobs : [];
-      const localMatches = state.query ? state.catalog.filter(job => taskDisplayName(job).title.toLocaleLowerCase().includes(state.query.toLocaleLowerCase()) && (state.filter === "all" || statusGroup(job) === state.filter)) : [];
+      if (sequence !== sidebarRequestSequence) return;
+      const namedIds = [];
+      if (query) try {
+        for (let index = 0; index < localStorage.length; index++) {
+          const key = localStorage.key(index);
+          if (!key.startsWith("cliptalk-project-preferences-v1:")) continue;
+          const name = JSON.parse(localStorage.getItem(key) || "{}").displayName || "";
+          if (name.toLocaleLowerCase().includes(query.toLocaleLowerCase())) namedIds.push(key.slice("cliptalk-project-preferences-v1:".length));
+        }
+      } catch { /* Local names are optional. */ }
+      const namedJobs = await Promise.all(namedIds.filter(id => !jobs.some(job => job.id === id)).map(async id => {
+        try { return (await request(`/api/jobs/${encodeURIComponent(id)}`)).job; } catch { return null; }
+      }));
+      if (sequence !== sidebarRequestSequence) return;
+      jobs.push(...namedJobs.filter(job => job && (state.filter === "all" || statusGroup(job) === state.filter)));
+      const localMatches = state.query ? state.catalog.filter(job => [taskDisplayName(job).title, job.filename, job.brief?.objective, job.request?.contentInstruction, job.instruction].filter(Boolean).join(" ").toLocaleLowerCase().includes(state.query.toLocaleLowerCase()) && (state.filter === "all" || statusGroup(job) === state.filter)) : [];
       state.sidebarJobs = [...new Map([...(append ? state.sidebarJobs : []), ...jobs, ...localMatches].map(job => [job.id, job])).values()];
       state.nextCursor = response?.nextCursor || null;
       state.hasMore = Boolean(response?.hasMore);
       renderSidebar();
       renderHome();
     } catch (error) {
+      if (sequence !== sidebarRequestSequence) return;
       if (root) root.innerHTML = `<div class="app-sidebar-error">历史任务读取失败<br>${escapeHtml(error?.message || "请稍后重试")}</div>`;
     } finally {
-      state.loadingSidebar = false;
+      if (sequence === sidebarRequestSequence) state.loadingSidebar = false;
     }
   }
 

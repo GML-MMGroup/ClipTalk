@@ -52,7 +52,7 @@ for (const change of ["job", "revision", "subtitles", "stale preview"]) {
     vm.runInContext(exportSource, context);
     await vm.runInContext("exportAgentReviewPreview(item)", context);
     assert.equal(requests.length, 0);
-    assert.ok(messages.length && /变化|最新预览/.test(messages[0]));
+    assert.ok(messages.length && /变化|过期/.test(messages[0]));
   });
 }
 

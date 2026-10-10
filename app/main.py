@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from .delivery import merge_committed_version, output_capabilities, output_revision, prepare_formal_export
 from . import copy_messages
+from .job_creation_form import CreateJobForm, create_job_form
+from .render_requests import RenderRequest
 from .render_spec import freeze_spec, validate_spec, content_hash, subtitle_review_required_detail
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -68,7 +70,7 @@ from .chat_api import build_chat_router
 from .client_observability_api import build_client_observability_router
 from .upload_api import build_upload_router
 from .upload_sessions import UploadSessionStore
-from .job_projection import ui_presentation_snapshot
+from .job_projection import ui_presentation_snapshot, plan_terminal_reason
 from .api_schemas import (
     AddEventSegmentRequest,
     AdjustCandidateRequest,
@@ -399,9 +401,11 @@ from .job_lifecycle import (
     CANCELLING,
     QUEUED,
     RUNNING,
+    audit_status_transition,
     background_status,
     can_cancel as can_cancel_job,
     can_delete as can_delete_job,
+    forget_status_memory,
     has_active_execution,
     has_background_execution,
     interrupted_job_patch,
@@ -409,6 +413,7 @@ from .job_lifecycle import (
 from .security import (
     SecurityConfigurationError,
     access_token_matches,
+    is_loopback_client_address,
     session_cookie_matches,
     session_cookie_value,
     validate_public_http_endpoint,
@@ -446,6 +451,7 @@ from .cover_delivery import (
     output_package_filename,
     cover_version_path,
     render_cover_intro,
+    verify_cover_intro_frame,
 )
 from .subtitle_review import (
     evaluate_subtitle_suggestion,
@@ -471,6 +477,11 @@ def safe_highlight_filename(title: str, position: int) -> str:
 
 
 settings = Settings.from_environment()
+
+_render_guard_lock = threading.Lock()
+_active_render_targets: dict[tuple[str, str], str] = {}
+
+LOGGER = logging.getLogger("cliptalk")
 settings.validate_deployment_security()
 settings.ensure_directories()
 voice_profile_store = VoiceProfileStore(
@@ -604,7 +615,14 @@ async def app_lifespan(_app: FastAPI):
         worker_lock.close()
 
 
-app = FastAPI(title="ClipTalk Video Editor", version="2.0.0", lifespan=app_lifespan)
+app = FastAPI(
+    title="ClipTalk Video Editor",
+    version="2.0.0",
+    lifespan=app_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 def _api_recovery_action(status_code: int, code: str = "") -> str:
@@ -691,7 +709,7 @@ async def structured_validation_error(request: Request, error: RequestValidation
 
 @app.exception_handler(Exception)
 async def structured_internal_error(request: Request, error: Exception) -> JSONResponse:
-    logging.getLogger("cliptalk").exception(
+    LOGGER.exception(
         "unhandled_api_error",
         extra={"structured": {
             "requestId": str(getattr(request.state, "request_id", "")),
@@ -798,7 +816,7 @@ workflow_intent_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def report_client_error(report: ClientErrorReportRequest) -> Response:
-    logging.getLogger("cliptalk").error(
+    LOGGER.error(
         "client_runtime_error",
         extra={"structured": client_error_log_fields(report)},
     )
@@ -816,12 +834,14 @@ async def protect_and_limit_requests(request: Request, call_next):
     authenticated_by_cookie = bool(
         settings.access_token and session_cookie_matches(cookie_token, settings.access_token)
     )
+    # Loopback peers are trusted; everything else must present a valid credential.
+    # Never derive this from X-Forwarded-For: that header is attacker-controlled.
+    loopback_client = is_loopback_client_address(request.client.host if request.client else None)
     if (
-        settings.access_token
-        and path.startswith("/api/")
+        path.startswith("/api/")
         and path != "/api/health"
-        and not authenticated_by_header
-        and not authenticated_by_cookie
+        and not loopback_client
+        and not (settings.access_token and (authenticated_by_header or authenticated_by_cookie))
     ):
         return JSONResponse(
             api_error_payload(
@@ -849,6 +869,16 @@ async def protect_and_limit_requests(request: Request, call_next):
     response = await call_next(request)
     if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+        "media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; "
+        "object-src 'none'; base-uri 'self'",
+    )
     if authenticated_by_header:
         forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
         response.set_cookie(
@@ -1891,7 +1921,7 @@ def _sync_output_manifest(job: dict[str, Any]) -> None:
         try:
             bind_cover_to_output_version(job, cover, active_version)
         except MediaError as error:
-            logging.getLogger("cliptalk").warning("无法自动绑定当前封面到新成片：%s", error)
+            LOGGER.warning("无法自动绑定当前封面到新成片：%s", error)
     output_directory = Path(str(job.get("outputDirectory") or ""))
     if not output_directory:
         return
@@ -2596,14 +2626,22 @@ def _render_review_repair_version(
         "reviewStatus": "pending",
     }
     meta["displayName"] = "AI 证据恢复版" if mode == "evidence_recovery" else f"AI 审片返修 · 第 {round_number} 轮"
-    run_confirmed_render(
-        job_id, [], "single_reel", "complete", meta["sourceLabel"], False,
-        segments, meta["displayName"], list(base_output.get("chapters") or []),
-        str(base_output.get("subtitleMode") or "none"), "selection",
-        str(base_output.get("subtitleStyle") or "clean"), auto_meta=meta,
-        background_auto=True, planned_cutaways=list(base_output.get("cutaways") or []),
+    run_confirmed_render(RenderRequest(
+        job_id=job_id,
+        selection_keys=[],
+        variant_label=meta["sourceLabel"],
+        finalize_status=False,
+        planned_sequence=segments,
+        planned_title=meta["displayName"],
+        planned_chapters=list(base_output.get("chapters") or []),
+        subtitle_mode=str(base_output.get("subtitleMode") or "none"),
+        order_mode="selection",
+        subtitle_style=str(base_output.get("subtitleStyle") or "clean"),
+        auto_meta=meta,
+        background_auto=True,
+        planned_cutaways=list(base_output.get("cutaways") or []),
         technique_policy=dict(base_output.get("techniquePolicy") or {}),
-    )
+    ))
     with jobs_lock:
         versions = list((jobs.get(job_id) or {}).get("outputVersions") or [])
     created = next((item for item in reversed(versions) if str(item.get("id")) not in before), None)
@@ -3347,11 +3385,41 @@ def _perform_job_deletion(
             try:
                 save_job(snapshot)
             except Exception:
-                pass
+                LOGGER.exception(
+                    "删除失败记录无法落盘，重启后该记录会丢失，用户会误以为删除成功：%s", job_id,
+                )
         _append_delete_audit({**context, "jobId": job_id, "revision": revision, "result": "failed", "detail": str(error)[:500]})
         raise RuntimeError(f"任务存储删除不完整：{error}") from error
+    forget_status_memory(job_id)
+    with _render_guard_lock:
+        for _guard_key in [key for key in _active_render_targets if key[0] == job_id]:
+            _active_render_targets.pop(_guard_key, None)
     _append_delete_audit({**context, "jobId": job_id, "revision": revision, "result": "deleted", "detail": "物理删除完成"})
     return {"deleted": True, "requestId": context["requestId"]}
+
+
+def report_orphaned_work_directories() -> None:
+    """Report work directories without a matching job without deleting them.
+
+    Removal stays a human decision; this only makes the leak visible at startup.
+    """
+    with jobs_lock:
+        known = {
+            str(Path(str(job.get("workDirectory") or "")).name)
+            for job in jobs.values() if job.get("workDirectory")
+        }
+    root = settings.data_root / "work"
+    if not root.is_dir():
+        return
+    orphaned = sorted(
+        entry.name for entry in root.iterdir()
+        if entry.is_dir() and entry.name and entry.name not in known
+    )
+    if orphaned:
+        LOGGER.warning(
+            "data/work 下存在 %s 个无主目录（样例：%s），请人工确认后再清理",
+            len(orphaned), ", ".join(orphaned[:5]),
+        )
 
 
 def cleanup_orphaned_media_cache() -> None:
@@ -3765,6 +3833,7 @@ def _agent_plan_progress(plan: dict[str, Any] | None) -> dict[str, Any]:
         "planHash": str(plan.get("planHash") or ""),
         "status": str(plan.get("status") or "planning"),
         "summary": str(plan.get("summary") or ""),
+        "goal": str(plan.get("goal") or "")[:1000],
         "skillId": str(plan.get("skillId") or ""),
         # Keep completedSteps as the legacy settled count. New presentation
         # surfaces use the explicit successful/skipped/settled fields below.
@@ -3780,6 +3849,7 @@ def _agent_plan_progress(plan: dict[str, Any] | None) -> dict[str, Any]:
         "currentStepAction": str(((current or {}).get("result") or {}).get("action") or ""),
         "currentStepMessage": str(((current or {}).get("result") or {}).get("message") or "")[:500],
         "quality": _agent_plan_quality(plan),
+        "terminalReason": plan_terminal_reason(plan),
     }
 
 
@@ -3795,7 +3865,7 @@ def _agent_autonomous_checkpoint_active(
     worker Future completing and the Agent callback advancing.
     """
     agent = job.get("agent") if isinstance(job.get("agent"), dict) else {}
-    if str(agent.get("executionMode") or "") != "autonomous_review":
+    if str(agent.get("executionMode") or "") not in {"autonomous_review", "automatic_delivery"}:
         return False
     if str(agent.get("status") or "") not in {"approved", "running"}:
         return False
@@ -3964,6 +4034,12 @@ def sync_agent_workspace_to_job(
         previous_agent = job.get("agent") if isinstance(job.get("agent"), dict) else {}
         changed = previous_agent != next_agent
         job["agent"] = next_agent
+        automatic_delivery = job.get("automaticDelivery") or {}
+        if automatic_delivery.get("planId") == (plan or {}).get("id"):
+            delivery_status = {"completed": "completed", "failed": "failed", "cancelled": "cancelled"}.get(plan_status)
+            if delivery_status and automatic_delivery.get("status") != delivery_status:
+                automatic_delivery["status"] = delivery_status
+                changed = True
         previous_review_previews = job.get("agentReviewPreviews") if isinstance(job.get("agentReviewPreviews"), list) else []
         if review_previews:
             job["agentReviewPreviews"] = review_previews
@@ -3984,19 +4060,12 @@ def sync_agent_workspace_to_job(
             job["instructionSubmitted"] = True
 
         if plan_status == "no_result":
-            no_match = next((
-                (step.get("result") or {}).get("artifact")
-                for step in (plan or {}).get("steps") or []
-                if isinstance(step, dict)
-                and isinstance(step.get("result"), dict)
-                and isinstance((step.get("result") or {}).get("artifact"), dict)
-                and str(((step.get("result") or {}).get("artifact") or {}).get("kind") or "") == "no_match"
-            ), {})
+            reason = summary.get("terminalReason") or {}
             job.update({
                 "status": "completed", "stage": "agent_no_result",
                 "progress": 1.0, "stageProgress": 1.0,
-                "currentAction": "未找到可用于自动剪辑的内容",
-                "detail": str(no_match.get("message") or "没有可靠候选，后续时间线与渲染步骤已跳过。"),
+                "currentAction": str(reason.get("label") or "本次任务未完成"),
+                "detail": str(reason.get("message") or "请查看未完成原因。"),
                 "progressMode": "completed", "etaSeconds": None, "etaMode": "completed",
             })
         elif str(job.get("stage") or "") == "agent_no_result":
@@ -4019,7 +4088,7 @@ def sync_agent_workspace_to_job(
         # checkpoint. Autonomous plans own and immediately resolve that state,
         # so do not expose it as a user action, even for a polling interval.
         if (
-            str(workspace.get("executionMode") or "") == "autonomous_review"
+            str(workspace.get("executionMode") or "") in {"autonomous_review", "automatic_delivery"}
             and plan_status in {"approved", "running"}
             and str(job.get("status") or "") in {
                 AWAITING_CONTENT_CONFIRMATION, "awaiting_confirmation",
@@ -4076,6 +4145,11 @@ def sync_agent_workspace_to_job(
                     job.update({"status": AWAITING_CONTENT_CONFIRMATION, "stage": "content_search_ready",
                                 "actionRequired": "review_content", "currentAction": "请核验所选片段的内容与边界",
                                 "detail": summary.get("currentStepMessage") or "请在候选面板预览并确认范围，再继续 Agent 计划。"})
+            elif plan_status == "completed":
+                job.update({"status": "completed", "stage": "completed", "progress": 1.0,
+                            "stageProgress": 1.0, "actionRequired": None, "error": None,
+                            "currentAction": "本次要求已完成", "detail": "可查看结果或继续提出修改要求。",
+                            "progressMode": "completed", "etaSeconds": None, "etaMode": "completed"})
             elif plan_status == "preview_ready":
                 quality = summary.get("quality") if isinstance(summary.get("quality"), dict) else {}
                 quality_status = str(quality.get("status") or "not_run")
@@ -4155,7 +4229,7 @@ def sync_agent_workspace_projection_for_job(job_id: str) -> None:
         plan = agent_platform.store.get("plans", plan_id) if plan_id else None
         sync_agent_workspace_to_job(workspace, plan)
     except Exception:
-        logging.exception("agent_workspace_projection_sync_failed", extra={"job_id": job_id})
+        LOGGER.exception("agent_workspace_projection_sync_failed", extra={"job_id": job_id})
 
 
 def execution_snapshot(job: dict[str, Any]) -> dict[str, Any]:
@@ -4204,6 +4278,9 @@ def execution_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     elif outer_status in {"completed", "failed", "cancelled"}:
         status = outer_status
     else:
+        LOGGER.warning(
+            "任务 %s 携带未声明的状态 %r，前端无法准确呈现", job.get("id"), outer_status,
+        )
         status = "failed" if job.get("error") else "waiting_user"
 
     if outer_status in {AWAITING_AGENT_PLAN, AWAITING_AGENT_INSTRUCTION} and agent:
@@ -4355,6 +4432,7 @@ def execution_snapshot(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_job(job: dict[str, Any]) -> None:
+    audit_status_transition(job, logger=LOGGER)
     _update_processing_elapsed(job)
     # Every durable mutation receives a monotonically increasing revision.
     # Lightweight polling can therefore avoid transferring and rebuilding the
@@ -4976,6 +5054,10 @@ def load_jobs() -> None:
             file_job = json.loads(path.read_text(encoding="utf-8"))
             stored = records.get(file_job.get("id"))
             if not stored:
+                LOGGER.warning(
+                    "SQLite 缺少任务 %s 的记录，改用 JSON 备份复活，可能与主库不一致",
+                    file_job.get("id"),
+                )
                 records[file_job["id"]] = file_job
         except (OSError, ValueError, KeyError):
             continue
@@ -5554,8 +5636,14 @@ def workflow_presentation_snapshot(job: dict[str, Any]) -> dict[str, Any]:
         "terminology": vocabulary,
         "error": error,
     }
+    projection_job = job
+    agent = job.get("agent") or {}
+    if agent.get("status") == "no_result" and not agent.get("terminalReason") and agent.get("planId"):
+        plan = agent_platform.store.get("plans", str(agent["planId"]))
+        if plan and str(plan.get("workspaceId") or "") == str(agent.get("workspaceId") or ""):
+            projection_job = {**job, "agent": {**agent, "terminalReason": plan_terminal_reason(plan)}}
     presentation.update(ui_presentation_snapshot(
-        job,
+        projection_job,
         workflow=workflow,
         execution=execution,
         output_count=job_output_count(job),
@@ -6266,6 +6354,10 @@ def public_job_summary(job: dict[str, Any]) -> dict[str, Any]:
         "stage": job.get("stage"),
         "detail": _content_public_detail(job) if job.get("taskMode") == "content_extract" else job.get("detail"),
         "filename": job.get("filename"),
+        "objective": str((job.get("agent") or {}).get("goal") or content_search.get("instruction")
+                         or (job.get("request") or {}).get("contentInstruction")
+                         or job.get("contentInstruction") or (job.get("brief") or {}).get("objective")
+                         or job.get("instruction") or job.get("theme") or "")[:1000],
         "taskMode": job.get("taskMode", "highlight"),
         "workflowKind": workflow_kind_for_job(job),
         "sourceProjectId": source_project_id_for_job(job),
@@ -6417,7 +6509,7 @@ def update_job(job_id: str, **patch: Any) -> None:
         elif next_stage and next_stage != previous_stage:
             job_stage_metrics.transition(job_id, next_stage)
     except Exception:
-        logging.getLogger(__name__).warning("Job committed; stage metrics update failed for %s", job_id, exc_info=True)
+        LOGGER.warning("Job committed; stage metrics update failed for %s", job_id, exc_info=True)
 
 
 def append_message(
@@ -10844,6 +10936,7 @@ def _match_person_description_with_wemm(
         query_vector = text_vectors[0]
         scores = image_vectors @ query_vector
     except Exception:
+        LOGGER.exception("视觉人物检索失败：调用方无法区分「确实没有」与「识别服务故障」")
         return None
     threshold = float(getattr(settings, "recognition_wemm_recall_threshold", .18))
     candidate_by_id = {str(item.get("id") or ""): item for item in candidates}
@@ -16111,7 +16204,10 @@ def _search_content_index(
         "scannedDuration": round(max(0.0, scope_end - scope_start) * max(0.0, min(1.0, coverage_progress)), 3),
         "totalDuration": round(max(0.0, scope_end - scope_start), 3),
         "analyzedRangesUs": copy.deepcopy(stats.get("strictVisualAnalyzedRangesUs") or []),
-        "canContinue": bool(result_mode == "exhaustive" and not coverage_complete),
+        # 覆盖不完整就意味着还能继续（扩大线索或升级扫描范围）。
+        # 原条件要求 result_mode == "exhaustive"，而默认模式是 top_k，
+        # 导致默认路径下恒为 False，恰好堵死了最该给继续的场景。
+        "canContinue": bool(not coverage_complete),
     }
     stats["scanProgress"] = scan_progress
     result = {
@@ -16174,8 +16270,9 @@ def _search_content_index(
                 "kind": "coverage_incomplete",
                 "question": "检索覆盖尚未完成",
                 "message": (
-                    "当前没有找到可靠匹配，但必要识别或语义复核尚未完整覆盖检索范围，"
-                    "不能据此断言全片没有结果。"
+                    "还没找到可靠匹配。这次只扫描了画面中的部分候选片段，"
+                    "不代表全片没有；可以补充其他线索（对白、画面文字、人物）继续查找，"
+                    "或换个说法描述后重试。"
                 ),
                 "options": [],
                 "canContinue": bool(scan_progress.get("canContinue")),
@@ -17337,13 +17434,21 @@ def run_automatic_composition(job_id: str) -> None:
                 target_seconds=float(target) if target not in (None, "", "auto") else None,
                 insufficient_evidence=False, require_verified_uncertainty=False,
             )
-        run_confirmed_render(
-            job_id, group_ids, "single_reel", "complete", vlm_meta["sourceLabel"], False,
-            list(vlm_techniques.get("segments") or []), vlm_meta["displayName"],
-            list(vlm_reel.get("chapters") or []), subtitle_mode, "source", subtitle_style,
-            auto_meta=vlm_meta, background_auto=True,
-            planned_cutaways=list(vlm_techniques.get("cutaways") or []), technique_policy=vlm_policy,
-        )
+        run_confirmed_render(RenderRequest(
+            job_id=job_id,
+            selection_keys=group_ids,
+            variant_label=vlm_meta["sourceLabel"],
+            finalize_status=False,
+            planned_sequence=list(vlm_techniques.get("segments") or []),
+            planned_title=vlm_meta["displayName"],
+            planned_chapters=list(vlm_reel.get("chapters") or []),
+            subtitle_mode=subtitle_mode,
+            subtitle_style=subtitle_style,
+            auto_meta=vlm_meta,
+            background_auto=True,
+            planned_cutaways=list(vlm_techniques.get("cutaways") or []),
+            technique_policy=vlm_policy,
+        ))
 
         if llm_version_count == 0:
             try:
@@ -17551,14 +17656,22 @@ def run_automatic_composition(job_id: str) -> None:
             plan_meta["editorialNarrative"] = str(plan.get("narrative") or "")[:1000]
             plan_meta["sequenceValidation"] = copy.deepcopy(plan.get("sequenceValidation") or {})
             plan_meta["orderReason"] = "由剪辑规划模型依据事件完整性、因果关系、情绪递进和用户目标重新编排。"
-            run_confirmed_render(
-                job_id, [], "single_reel", "complete", plan_meta["sourceLabel"],
-                index == len(plans) - 1, list(plan.get("sequence") or []),
-                plan_meta["displayName"], list(plan.get("chapters") or []), subtitle_mode,
-                "selection", subtitle_style, auto_meta=plan_meta, background_auto=True,
+            run_confirmed_render(RenderRequest(
+                job_id=job_id,
+                selection_keys=[],
+                variant_label=plan_meta["sourceLabel"],
+                finalize_status=index == len(plans) - 1,
+                planned_sequence=list(plan.get("sequence") or []),
+                planned_title=plan_meta["displayName"],
+                planned_chapters=list(plan.get("chapters") or []),
+                subtitle_mode=subtitle_mode,
+                order_mode="selection",
+                subtitle_style=subtitle_style,
+                auto_meta=plan_meta,
+                background_auto=True,
                 planned_cutaways=list(plan.get("cutaways") or []),
                 technique_policy=dict(plan.get("techniquePolicy") or {}),
-            )
+            ))
             with jobs_lock:
                 job = jobs.get(job_id)
                 if not job:
@@ -17852,13 +17965,22 @@ def run_missing_auto_variants(job_id: str, batch_id: str) -> None:
                 "sequenceValidation": copy.deepcopy(plan.get("sequenceValidation") or {}),
                 "orderReason": "复用已选事件证据生成的差异化补充版本。",
             })
-            run_confirmed_render(
-                job_id, [], "single_reel", "complete", meta["sourceLabel"], False,
-                list(plan.get("sequence") or []), meta["displayName"], list(plan.get("chapters") or []),
-                "none", "selection", subtitle_style, auto_meta=meta, background_auto=True,
+            run_confirmed_render(RenderRequest(
+                job_id=job_id,
+                selection_keys=[],
+                variant_label=meta["sourceLabel"],
+                finalize_status=False,
+                planned_sequence=list(plan.get("sequence") or []),
+                planned_title=meta["displayName"],
+                planned_chapters=list(plan.get("chapters") or []),
+                subtitle_mode="none",
+                order_mode="selection",
+                subtitle_style=subtitle_style,
+                auto_meta=meta,
+                background_auto=True,
                 planned_cutaways=list(plan.get("cutaways") or []),
                 technique_policy=dict(plan.get("techniquePolicy") or {}),
-            )
+            ))
         try:
             run_automatic_composition_review(job_id, batch_id)
         except Exception as review_error:
@@ -19165,7 +19287,35 @@ def _content_selection_fidelity(
     }
 
 
-def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: str = "single_reel", variant_mode: str = "complete", variant_label: str = "", finalize_status: bool = True, planned_sequence: list[dict[str, Any]] | None = None, planned_title: str = "", planned_chapters: list[dict[str, Any]] | None = None, subtitle_mode: str = "none", order_mode: str = "source", subtitle_style: str = "clean", auto_meta: dict[str, Any] | None = None, background_auto: bool = False, planned_cutaways: list[dict[str, Any]] | None = None, technique_policy: dict[str, Any] | None = None, finalize_source_version_id: str | None = None, subtitle_draft_id: str | None = None, text_layers: list[dict[str, Any]] | None = None, output_reframe: dict[str, Any] | None = None, render_spec: dict[str, Any] | None = None) -> None:
+def run_confirmed_render(request: RenderRequest, *legacy_arguments: Any, **legacy_options: Any) -> None:
+    """Render one delivery version described by a single :class:`RenderRequest`.
+
+    The legacy positional form is still accepted so queued and stored render
+    arguments keep working, but every in-process caller now passes the object.
+    """
+    if not isinstance(request, RenderRequest):
+        request = RenderRequest(request, *legacy_arguments, **legacy_options)
+    job_id = request.job_id
+    selection_keys = request.selection_keys
+    output_mode = request.output_mode
+    variant_mode = request.variant_mode
+    variant_label = request.variant_label
+    finalize_status = request.finalize_status
+    planned_sequence = request.planned_sequence
+    planned_title = request.planned_title
+    planned_chapters = request.planned_chapters
+    subtitle_mode = request.subtitle_mode
+    order_mode = request.order_mode
+    subtitle_style = request.subtitle_style
+    auto_meta = request.auto_meta
+    background_auto = request.background_auto
+    planned_cutaways = request.planned_cutaways
+    technique_policy = request.technique_policy
+    finalize_source_version_id = request.finalize_source_version_id
+    subtitle_draft_id = request.subtitle_draft_id
+    text_layers = request.text_layers
+    output_reframe = request.output_reframe
+    render_spec = request.render_spec
     if render_spec is not None:
         render_spec = validate_spec(render_spec)
         planned_sequence = render_spec["segments"]
@@ -19301,7 +19451,8 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             subtitle_draft = copy.deepcopy(render_spec["subtitleDraft"]) if render_spec is not None else _subtitle_draft_for_job(job, subtitle_draft_id)
             if str(subtitle_draft.get("status") or "") not in {"confirmed", "auto_reviewed"}:
                 raise RuntimeError("字幕草稿尚未完成校对，请返回字幕编辑面板检查")
-            if subtitle_draft.get("sourceSubtitleAcknowledged") is False:
+            from .automatic_delivery import subtitle_source_ready
+            if not subtitle_source_ready(subtitle_draft):
                 raise RuntimeError("尚未确认原视频字幕状态，请返回字幕校对面板完成确认")
             render_outputs = [{"segments": list(selection.get("segments") or [{
                 "start": selection["start"], "end": selection["end"],
@@ -20016,7 +20167,7 @@ def run_confirmed_render(job_id: str, selection_keys: list[Any], output_mode: st
             committed_snapshot = job_store.committed_snapshot(job_id) or {}
             version_committed = any(version.get("id") == version_id for version in committed_snapshot.get("outputVersions") or [])
         if version_committed:
-            logging.getLogger(__name__).warning("Output committed; post-commit effects pending for %s: %s", job_id, error)
+            LOGGER.warning("Output committed; post-commit effects pending for %s: %s", job_id, error)
             return
         cancelled = cancel_event.is_set()
         if not version_committed:
@@ -20571,11 +20722,25 @@ def run_edit_session_render(job_id: str, session_id: str, requested_revision: in
             "changeSummary": f"{len(segments)} 个片段，成片约 {float(session.get('duration') or 0):.1f} 秒",
             **({"reframe": copy.deepcopy(reframe), "socialReframe": True} if reframe else {}),
         }
-        run_confirmed_render(
-            job_id, [], "single_reel", "complete", str(session.get("renderLabel") or "精剪版"), True,
-            segments, "二次精剪成片", [], subtitle_mode, "selection", subtitle_style,
-            metadata, False, cutaways, {}, None, subtitle_draft_id, text_layers, reframe, frozen_spec,
-        )
+        run_confirmed_render(RenderRequest(
+            job_id=job_id,
+            selection_keys=[],
+            variant_label=str(session.get("renderLabel") or "精剪版"),
+            finalize_status=True,
+            planned_sequence=segments,
+            planned_title="二次精剪成片",
+            planned_chapters=[],
+            subtitle_mode=subtitle_mode,
+            order_mode="selection",
+            subtitle_style=subtitle_style,
+            auto_meta=metadata,
+            planned_cutaways=cutaways,
+            technique_policy={},
+            subtitle_draft_id=subtitle_draft_id,
+            text_layers=text_layers,
+            output_reframe=reframe,
+            render_spec=frozen_spec,
+        ))
         with jobs_lock:
             job = jobs.get(job_id)
             if not job:
@@ -20593,6 +20758,19 @@ def run_edit_session_render(job_id: str, session_id: str, requested_revision: in
             if not rendered_version:
                 raise RuntimeError(str(job.get("error") or job.get("detail") or "二次编辑版本未生成"))
             version_id = str(rendered_version.get("id") or "")
+            try:
+                aspect_exports = _append_aspect_exports(job, rendered_version, session)
+                session["aspectExports"] = [
+                    {"filename": item["filename"], "aspect": item["aspect"]}
+                    for item in aspect_exports
+                ]
+                session["aspectExportErrors"] = []
+                if aspect_exports:
+                    _sync_output_manifest(job)
+            except Exception as aspect_error:
+                # The master is already finished; a missing extra aspect must not
+                # throw away that render, but it also must not pass silently.
+                session["aspectExportErrors"] = [str(aspect_error)[:300]]
             session.update({
                 "status": "rendered",
                 "renderedVersionId": version_id,
@@ -20649,8 +20827,17 @@ def _check_rendered_content(job: dict[str, Any], session: dict[str, Any], media_
     try:
         schedule = session.get("schedule") or []
         clips = {c["id"]: c for c in session.get("clips") or []}
-        if not schedule or len(schedule) > 24:
-            raise ValueError("抽检预算不足或缺少成片时间映射")
+        if not schedule:
+            raise ValueError("缺少成片时间映射")
+        total_clips = len(schedule)
+        if total_clips > 24:
+            chosen = {round(i * (total_clips - 1) / 23) for i in range(24)}
+            unchecked = [item for i, item in enumerate(schedule) if i not in chosen]
+            report["issues"].append({"severity": "warning", "code": "content_render_sample_unavailable",
+                                     "status": "unknown", "message": f"另有 {len(unchecked)} 段未纳入本次抽检",
+                                     "evidence": {"reason": "抽检预算不足，未检查不代表内容错误", "timebase": "output",
+                                                  "ranges": [{"start": row["outputStart"], "end": row["outputEnd"]} for row in unchecked]}})
+            schedule = [item for i, item in enumerate(schedule) if i in chosen]
         client = create_vision_client_for_job(job)
         root = Path(job["workDirectory"]) / "content-qc" / f"{session['id']}-{uuid.uuid4().hex[:8]}"
         all_frames, transcript_context = [], []
@@ -20691,10 +20878,11 @@ def _check_rendered_content(job: dict[str, Any], session: dict[str, Any], media_
             raw_coverage = client.analyze_image(coverage_prompt(contract, report["samples"], transcript_context),
                                                overview, maximum_tokens=3000,
                                                system_prompt="核对整条成片的原始内容要求，保留不确定性，严格返回 JSON。")
-            coverage = assess_coverage(raw_coverage, report["samples"], str(contract.get("query") or ""))
+            coverage = assess_coverage(raw_coverage, report["samples"], str(contract.get("query") or ""), contract)
             report["goalCoverage"] = {key: value for key, value in coverage.items() if key != "issues"}
             report["issues"].extend(coverage["issues"])
-        report["renderedSampling"] = {"status": "completed", "clipCount": checked, "framesPerClip": 5, "exhaustive": False}
+        report["renderedSampling"] = {"status": "partial" if total_clips > 24 else "completed", "clipCount": checked,
+                                      "totalClipCount": total_clips, "framesPerClip": 5, "exhaustive": False}
     except Exception:
         if cancel_event.is_set():
             raise RuntimeError("任务已取消") from None
@@ -20964,7 +21152,7 @@ def run_agent_review_render(job_id: str, session_id: str, requested_revision: in
             job_id, session_id, requested_revision,
         )
     except Exception:
-        logging.getLogger("cliptalk").warning(
+        LOGGER.warning(
             "Unable to create the automatic review cover for %s", job_id,
             exc_info=True,
         )
@@ -21020,6 +21208,12 @@ def run_agent_review_batch(
     }
 
 
+def run_automatic_delivery(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    from . import main as runtime
+    from .automatic_delivery_runtime import run_delivery
+    return run_delivery(runtime, job_id, request)
+
+
 def run_agent_final_output(job_id: str, session_id: str, requested_revision: int, frozen_spec: dict | None = None) -> dict[str, Any]:
     """Create a downloadable output version from the timeline approved by Agent review.
 
@@ -21067,12 +21261,15 @@ def run_agent_final_output(job_id: str, session_id: str, requested_revision: int
             cover = current_cover_version(job)
             portrait_final_path = portrait_path
             cover_intro = None
-            if cover:
+            from .delivery_contract import cover_intro_seconds
+            intro_seconds = cover_intro_seconds(brief)
+            if cover and intro_seconds > 0:
                 cover_path = cover_version_path(job, cover)
                 if cover_path and cover_path.is_file():
                     portrait_final_path = portrait_path.with_name(f"{portrait_path.stem}-cover-intro.mp4")
                     intro_media = render_cover_intro(
-                        portrait_path, cover_path, portrait_final_path, duration=1.0,
+                        portrait_path, cover_path, portrait_final_path,
+                        duration=intro_seconds,
                         ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
                     )
                     portrait_path.unlink(missing_ok=True)
@@ -21118,6 +21315,96 @@ def run_agent_final_output(job_id: str, session_id: str, requested_revision: int
                 "message": "已生成当前任务封面及可下载成片；竖屏已输出为独立正式版本。",
             },
         }
+
+
+DELIVERY_ASPECT_EXPORTS = ("9:16", "4:5", "1:1", "16:9")
+
+
+def _normalized_aspect_exports(values: list[str] | None) -> list[str]:
+    from .media import SOCIAL_PREVIEW_SIZES
+
+    result: list[str] = []
+    for value in values or []:
+        aspect = str(value or "").strip()
+        if aspect in SOCIAL_PREVIEW_SIZES and aspect not in result:
+            result.append(aspect)
+    return result
+
+
+def _output_aspect(output: dict[str, Any]) -> str:
+    from .media import SOCIAL_PREVIEW_SIZES
+
+    try:
+        width = int(output.get("width") or 0)
+        height = int(output.get("height") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if width <= 0 or height <= 0:
+        return ""
+    ratio = width / height
+    for aspect in DELIVERY_ASPECT_EXPORTS:
+        aspect_width, aspect_height = SOCIAL_PREVIEW_SIZES[aspect]
+        if abs(ratio - aspect_width / aspect_height) < .01:
+            return aspect
+    return ""
+
+
+def _append_aspect_exports(
+    job: dict[str, Any], version: dict[str, Any], session: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Render the finished master once more for each requested delivery aspect."""
+    from .media import create_social_reframe_preview
+
+    aspects = [
+        str(value) for value in session.get("renderAspectExports") or []
+        if str(value) in DELIVERY_ASPECT_EXPORTS
+    ]
+    outputs = [item for item in version.get("outputs") or [] if isinstance(item, dict)]
+    master = next((
+        item for item in outputs
+        if str(item.get("filename") or "") and not item.get("aspectExportOf")
+    ), None)
+    if not aspects or not master:
+        return []
+    output_root = Path(str(job.get("outputDirectory") or ""))
+    master_path = output_root / str(master["filename"])
+    if not master_path.is_file():
+        return []
+    reframe = _effective_edit_session_reframe(job, session) or {}
+    fit = str(reframe.get("fit") or "blur")
+    if fit not in {"blur", "crop", "pad"}:
+        fit = "blur"
+    try:
+        focus_x = max(0.0, min(1.0, float(reframe.get("focusX", .5))))
+        focus_y = max(0.0, min(1.0, float(reframe.get("focusY", .5))))
+    except (TypeError, ValueError):
+        focus_x = focus_y = .5
+    master_aspect = _output_aspect(master)
+    created: list[dict[str, Any]] = []
+    for aspect in aspects:
+        if aspect == master_aspect:
+            continue
+        stem = Path(str(master["filename"])).stem
+        filename = f"{stem}-{aspect.replace(':', 'x')}.mp4"
+        info = create_social_reframe_preview(
+            master_path, output_root / filename,
+            aspect=aspect, fit=fit, focus_x=focus_x, focus_y=focus_y,
+            has_audio=bool(master.get("hasAudio", True)),
+            ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, preview_only=False,
+        )
+        created.append({
+            "filename": filename,
+            "width": int(info.width),
+            "height": int(info.height),
+            "duration": round(float(info.duration), 3),
+            "hasAudio": bool(info.has_audio),
+            "aspect": aspect,
+            "aspectExportOf": str(master["filename"]),
+            "previewOnly": False,
+        })
+    if created:
+        version["outputs"] = [*outputs, *created]
+    return created
 
 
 @job_transaction
@@ -21191,6 +21478,7 @@ def render_edit_session(
             subtitle_draft=_subtitle_draft_for_job(job, request.subtitleDraftId) if request.subtitleMode == "burn" else None,
         )
         session["renderLabel"] = str(request.versionLabel or "精剪版").strip()[:80] or "精剪版"
+        session["renderAspectExports"] = _normalized_aspect_exports(request.aspectExports)
         session.update({"status": "rendering", "renderError": None, "updatedAt": now_iso()})
         job.update({
             "status": "running", "stage": "secondary_edit_rendering", "progress": .82,
@@ -21234,7 +21522,9 @@ def _edit_session_planner_prompt(
 - set_subtitle: enabled, subtitleStyle
 - add_marker: clipId, sourceTime, label, color
 只能引用输入中真实存在的 clip id。速度只能为 0.5、0.75、1、1.1、1.25、1.5、2；转场只能 cut、dissolve、fade_black；声音桥只能 none、j_cut、l_cut。
-返回 JSON：{{"title":"提案名","summary":"具体变化","operations":[...]}}。
+如果已有片段和顺序满足要求，无须改变结构，请明确返回保持当前完整 clipIds 顺序的 reorder_clips 操作，并在 summary 说明保留原因；不要返回空 operations。
+此步骤只调整时间线结构。字幕识别、字幕稿确认、封面和片头由后续专门步骤处理，不要在没有字幕稿时用 set_subtitle 冒充已完成字幕。
+返回 JSON：{{"title":"提案名","summary":"具体变化","operations":[{{"type":"reorder_clips","clipIds":["输入中真实的 clip id"]}}]}}。每个操作必须使用 type 字段，不要用操作名称作为嵌套键。
 当前时间线：{json.dumps(clips, ensure_ascii=False)}
 当前选中：{json.dumps(selected_clip_ids, ensure_ascii=False)}
 用户要求：{text}
@@ -21339,6 +21629,21 @@ def create_edit_session_proposal(
             system_prompt=COMMON_SYSTEM_PROMPT,
         )
         model_result.pop("_usage", None)
+        try:
+            build_secondary_edit_proposal(
+                copy.deepcopy(snapshot), copy.deepcopy(session_snapshot), text=request.text,
+                selected_clip_ids=request.selectedClipIds, model_result=model_result,
+            )
+        except EditSessionError as validation_error:
+            # Ask the planner to repair its own schema/operations once. Never
+            # fabricate a successful no-op or silently assemble arbitrary clips.
+            model_result = client.complete_json(
+                _edit_session_planner_prompt(session_snapshot, text=request.text, selected_clip_ids=request.selectedClipIds)
+                + "\n上次返回未通过操作校验：" + str(validation_error)
+                + "\n请根据上述真实 clip id 返回有效 operations，完整返回修正后的 JSON。",
+                maximum_tokens=2200, system_prompt=COMMON_SYSTEM_PROMPT,
+            )
+            model_result.pop("_usage", None)
     except Exception as error:
         # Provider exceptions may contain request URLs or credentials.
         planner_error = type(error).__name__
@@ -21425,7 +21730,16 @@ def run_auto_variant_render(job_id: str, selection_keys: list[Any], output_mode:
             brief = jobs[job_id].get("brief") or {}
             subtitle_mode = str(brief.get("subtitlePreference") or jobs[job_id].get("request", {}).get("subtitleMode") or "none")
             subtitle_style = normalize_subtitle_style(brief.get("subtitleStyle") or jobs[job_id].get("request", {}).get("subtitleStyle"))
-        run_confirmed_render(job_id, selection_keys, output_mode, "complete", label, finalize_status=index == len(profiles) - 1, subtitle_mode=subtitle_mode, order_mode=order_mode, subtitle_style=subtitle_style)
+        run_confirmed_render(RenderRequest(
+            job_id=job_id,
+            selection_keys=selection_keys,
+            output_mode=output_mode,
+            variant_label=label,
+            finalize_status=index == len(profiles) - 1,
+            subtitle_mode=subtitle_mode,
+            order_mode=order_mode,
+            subtitle_style=subtitle_style,
+        ))
         with jobs_lock:
             if jobs[job_id].get("status") in {"failed", "cancelled"}:
                 break
@@ -21487,12 +21801,20 @@ def run_alternative_cut(job_id: str) -> None:
         plan = candidates[0]
         label = str(plan.get("label") or "另一种剪法")
     append_message(job_id, "assistant", f"已选出差异最大的方案“{label}”，正在后台生成新版本。", kind="notice")
-    run_confirmed_render(
-        job_id, [], "single_reel", "complete", label, True,
-        list(plan.get("sequence") or []), label, list(plan.get("chapters") or []),
-        "none", "selection", "clean", None, False,
-        list(plan.get("cutaways") or []), dict(plan.get("techniquePolicy") or {}),
-    )
+    run_confirmed_render(RenderRequest(
+        job_id=job_id,
+        selection_keys=[],
+        variant_label=label,
+        finalize_status=True,
+        planned_sequence=list(plan.get("sequence") or []),
+        planned_title=label,
+        planned_chapters=list(plan.get("chapters") or []),
+        subtitle_mode="none",
+        order_mode="selection",
+        subtitle_style="clean",
+        planned_cutaways=list(plan.get("cutaways") or []),
+        technique_policy=dict(plan.get("techniquePolicy") or {}),
+    ))
 
 
 def _serializable_render_arg(value: Any) -> Any:
@@ -21542,6 +21864,7 @@ def run_persisted_render_task(job_id: str, kind: str, raw_args: list[Any]) -> An
         run_agent_review_render.__name__: run_agent_review_render,
         run_agent_review_batch.__name__: run_agent_review_batch,
         run_agent_final_output.__name__: run_agent_final_output,
+        run_automatic_delivery.__name__: run_automatic_delivery,
         run_cover_intro_render.__name__: run_cover_intro_render,
     }
     target = targets.get(str(kind))
@@ -21631,12 +21954,23 @@ def submit_render_task(job_id: str, target: Any, *args: Any, dedup_key: str | No
                 subtitle_draft=_subtitle_draft_for_job(job, draft_id) if draft_id else None)
             args = (*args, spec)
     serializable_args = [_serializable_render_arg(value) for value in args]
+    target_name = str(getattr(target, "__name__", "") or "")
+    arg_fingerprint = json.dumps(serializable_args, sort_keys=True, ensure_ascii=False, default=str)
+    guard_key = (job_id, f"{target_name}:{arg_fingerprint}")
+    with _render_guard_lock:
+        previous_task_id = _active_render_targets.get(guard_key)
+    if previous_task_id:
+        previous = render_task_store.get(previous_task_id) or {}
+        if str(previous.get("status") or "") in {"queued", "running"}:
+            raise HTTPException(409, "该渲染任务仍在进行中，请等待完成后重试")
     task_id, future = durable_render_executor.submit(
         job_id=job_id,
         target=run_persisted_render_task,
         args=(job_id, target.__name__, serializable_args),
         dedup_key=dedup_key,
     )
+    with _render_guard_lock:
+        _active_render_targets[guard_key] = task_id
     future.operation_id = task_id
     register_render_future(job_id, future)
     return future
@@ -21746,6 +22080,12 @@ def list_jobs(
         if query:
             haystack = " ".join((
                 str(job.get("filename") or ""),
+                str((job.get("brief") or {}).get("objective") or ""),
+                str((job.get("agent") or {}).get("goal") or ""),
+                str((job.get("contentSearch") or {}).get("instruction") or ""),
+                str((job.get("request") or {}).get("contentInstruction") or ""),
+                str((job.get("request") or {}).get("objective") or ""),
+                str(job.get("contentInstruction") or job.get("instruction") or job.get("theme") or ""),
                 str(job.get("detail") or ""),
                 raw_status,
                 job_workflow,
@@ -21858,50 +22198,53 @@ def delete_kept_output(job_id: str, filename: str, require_source: bool = False)
 
 async def create_job(
     video: UploadFile | None = File(None),
-    upload_session_id: str = Form(""),
-    expected_size_bytes: str = Form(""),
-    task_mode: str = Form("auto"),
-    intent_mode: str = Form(""),
-    parameter_context: str = Form("legacy_explicit"),
-    storage_mode: str = Form("editable"),
-    instruction: str = Form(""),
-    count: str = Form("auto"),
-    target_seconds: str = Form("auto"),
-    total_target_seconds: str = Form(""),
-    theme: str = Form(""),
-    analysis_mode: str = Form("audiovisual"),
-    recognition_profile: str = Form("auto"),
-    force_reanalyze: str = Form("true"),
-    subtitle_mode: str = Form("none"),
-    subtitle_style: str = Form("clean"),
-    edit_mode: str = Form("ai_plan"),
-    structure: str = Form("auto"),
-    auto_variant_count: str = Form(str(DEFAULT_HIGHLIGHT_VARIANT_COUNT)),
-    technique_preset: str = Form("auto"),
-    allow_speed: str = Form("true"),
-    allow_transitions: str = Form("true"),
-    allow_audio_bridges: str = Form("true"),
-    allow_cutaways: str = Form("true"),
-    allow_silence_compression: str = Form("true"),
-    allow_cold_open: str = Form("false"),
-    source_scope_kind: str = Form("all"),
-    source_scope_start: str = Form(""),
-    source_scope_end: str = Form(""),
-    result_strategy: str = Form("smart"),
-    search_scope_kind: str = Form("all"),
-    search_scope_start: str = Form(""),
-    search_scope_end: str = Form(""),
-    search_result_limit: str = Form("12"),
-    search_boundary_mode: str = Form("complete"),
-    content_auto_generate: str = Form("false"),
-    content_exclusions: str = Form(""),
-    search_evidence_mode: str = Form(""),
-    search_allowed_capabilities: str = Form(""),
-    entry_workflow: str = Form(""),
-    workflow_kind: str = Form(""),
-    agent_draft: str = Form("false"),
-    draft_session_id: str = Form(""),
+    form: CreateJobForm = Depends(create_job_form),
 ) -> dict[str, Any]:
+    # The intake contract is one object; unpack it once so the body below
+    # keeps reading exactly as it did with 45 separate Form parameters.
+    upload_session_id = form.upload_session_id
+    expected_size_bytes = form.expected_size_bytes
+    task_mode = form.task_mode
+    intent_mode = form.intent_mode
+    parameter_context = form.parameter_context
+    storage_mode = form.storage_mode
+    instruction = form.instruction
+    count = form.count
+    target_seconds = form.target_seconds
+    total_target_seconds = form.total_target_seconds
+    theme = form.theme
+    analysis_mode = form.analysis_mode
+    recognition_profile = form.recognition_profile
+    force_reanalyze = form.force_reanalyze
+    subtitle_mode = form.subtitle_mode
+    subtitle_style = form.subtitle_style
+    edit_mode = form.edit_mode
+    structure = form.structure
+    technique_preset = form.technique_preset
+    allow_speed = form.allow_speed
+    allow_transitions = form.allow_transitions
+    allow_audio_bridges = form.allow_audio_bridges
+    allow_cutaways = form.allow_cutaways
+    allow_silence_compression = form.allow_silence_compression
+    allow_cold_open = form.allow_cold_open
+    source_scope_kind = form.source_scope_kind
+    source_scope_start = form.source_scope_start
+    source_scope_end = form.source_scope_end
+    result_strategy = form.result_strategy
+    search_scope_kind = form.search_scope_kind
+    search_scope_start = form.search_scope_start
+    search_scope_end = form.search_scope_end
+    search_result_limit = form.search_result_limit
+    search_boundary_mode = form.search_boundary_mode
+    content_auto_generate = form.content_auto_generate
+    content_exclusions = form.content_exclusions
+    search_evidence_mode = form.search_evidence_mode
+    search_allowed_capabilities = form.search_allowed_capabilities
+    entry_workflow = form.entry_workflow
+    workflow_kind = form.workflow_kind
+    agent_draft = form.agent_draft
+    draft_session_id = form.draft_session_id
+    auto_variant_count = form.auto_variant_count or str(DEFAULT_HIGHLIGHT_VARIANT_COUNT)
     if video is None and not upload_session_id:
         raise HTTPException(400, "请选择视频")
     normalized_entry_workflow = str(entry_workflow or "").strip().lower()
@@ -22444,7 +22787,7 @@ async def create_job(
         try:
             agent_platform.create_workspace(job_id=job_id, title=str(job.get("filename") or "智能剪辑工作区"))
         except Exception:
-            logging.exception("agent_workspace_create_failed", extra={"job_id": job_id})
+            LOGGER.exception("agent_workspace_create_failed", extra={"job_id": job_id})
     schedule_job_thumbnail(job_id)
     if source_validation.get("status") == "truncated":
         schedule_preview_proxy(job_id)
@@ -22468,7 +22811,9 @@ def get_job(job_id: str) -> dict[str, Any]:
                 }
                 save_job(job)
             except Exception:
-                pass
+                LOGGER.warning(
+                    "探测视频信息失败，videoInfo 保持缺失或陈旧：%s", job_id, exc_info=True,
+                )
         return {"job": public_job(job)}
 
 
@@ -29683,7 +30028,7 @@ def keep_job_output(job_id: str, filename: str, request: KeepOutputRequest) -> d
         try:
             persist_manifest_outputs(job)
         except OSError:
-            logging.getLogger(__name__).warning("Kept flag committed; manifest refresh pending for %s", job_id)
+            LOGGER.warning("Kept flag committed; manifest refresh pending for %s", job_id)
     version_label = f"V{int((version or {}).get('number') or 1)}" + (f".{index}" if len(version_outputs) > 1 else "")
     append_message(job_id, "user", f"{'长期保留' if request.kept else '取消长期保留'} {version_label}", kind="review")
     append_message(
@@ -29718,7 +30063,7 @@ def activate_job_output_version(job_id: str, version_id: str) -> dict[str, Any]:
         try:
             persist_manifest_outputs(job)
         except OSError:
-            logging.getLogger(__name__).warning("Selection committed; manifest refresh pending for %s", job_id)
+            LOGGER.warning("Selection committed; manifest refresh pending for %s", job_id)
         return {"job": public_job(job)}
 
 
@@ -31907,7 +32252,7 @@ def recover_durable_render_tasks() -> int:
         register_render_future(job_id, future)
         task = render_task_store.get(_task_id)
         args = task.get("args") if isinstance(task, dict) else None
-        if isinstance(args, list) and len(args) >= 3 and str(args[1]) == "run_agent_final_output":
+        if isinstance(args, list) and len(args) >= 3 and str(args[1]) in {"run_agent_final_output", "run_automatic_delivery"}:
             with jobs_lock:
                 job = jobs.get(job_id)
                 agent = job.get("agent") if isinstance(job, dict) else {}
@@ -31916,7 +32261,8 @@ def recover_durable_render_tasks() -> int:
             operation_id = ""
             if plan_id:
                 plan = agent_platform.store.get("plans", plan_id)
-                step = next((item for item in (plan or {}).get("steps", []) if item.get("tool") == "confirm_cover"), None)
+                tool = "deliver_current_plan" if args[1] == "run_automatic_delivery" else "confirm_cover"
+                step = next((item for item in (plan or {}).get("steps", []) if item.get("tool") == tool), None)
                 step_id = step_id or str((step or {}).get("id") or "")
                 operation_id = str((step or {}).get("operationId") or "")
             if plan_id and step_id and operation_id:
@@ -31975,7 +32321,7 @@ def startup_maintenance() -> None:
             try:
                 repair_committed_output_effects(job["id"])
             except Exception:
-                logging.getLogger(__name__).warning("Post-commit repair pending for %s", job["id"], exc_info=True)
+                LOGGER.warning("Post-commit repair pending for %s", job["id"], exc_info=True)
             for session in sessions.values():
                 if isinstance(session, dict) and str(session.get("status") or "") in {"queued", "running", "cancelling"}:
                     session.update({
@@ -32024,6 +32370,11 @@ def startup_maintenance() -> None:
             daemon=True,
         ).start()
     threading.Thread(target=restore_kept_library_copies, name="kept-library-repair", daemon=True).start()
+    try:
+        upload_session_store.cleanup_stale()
+    except Exception:
+        LOGGER.warning("清理过期上传分片失败", exc_info=True)
+    report_orphaned_work_directories()
     if settings.retention_days > 0:
         cutoff = time.time() - settings.retention_days * 86400
         active_render_job_ids = render_task_store.recoverable_job_ids()
@@ -32057,7 +32408,7 @@ def startup_maintenance() -> None:
         try:
             sync_current_cover_thumbnail(job)
         except OSError:
-            logging.getLogger(__name__).warning(
+            LOGGER.warning(
                 "Unable to restore approved cover thumbnail for %s", job.get("id"),
                 exc_info=True,
             )
@@ -32289,7 +32640,8 @@ def _validated_subtitle_draft_for_burn(job: dict[str, Any], draft_id: str) -> di
     draft = _subtitle_draft_for_job(job, draft_id)
     if str(draft.get("status") or "") not in {"confirmed", "auto_reviewed"}:
         _raise_subtitle_review_required("字幕草稿尚未完成校对，请先打开字幕校对面板确认文字与断句。")
-    if draft.get("sourceSubtitleAcknowledged") is False:
+    from .automatic_delivery import subtitle_source_ready
+    if not subtitle_source_ready(draft):
         _raise_subtitle_review_required(
             "请先在字幕校对面板确认原视频字幕状态，避免重复叠加字幕。",
             code="source_subtitle_ack_required",
@@ -32323,6 +32675,7 @@ def _edit_session_subtitle_readiness(job: dict[str, Any], session: dict[str, Any
         return result
     status = str(draft.get("status") or "draft")
     source_ack = draft.get("sourceSubtitleAcknowledged")
+    from .automatic_delivery import subtitle_source_ready
     result.update({
         "status": status,
         "sourceSubtitleAcknowledged": source_ack,
@@ -32334,7 +32687,7 @@ def _edit_session_subtitle_readiness(job: dict[str, Any], session: dict[str, Any
     })
     if status not in {"confirmed", "auto_reviewed"}:
         result["message"] = "字幕草稿尚未完成校对，请先确认文字与断句。"
-    elif source_ack is False:
+    elif not subtitle_source_ready(draft):
         result.update({
             "status": "source_ack_required",
             "message": "请先确认原视频字幕状态，避免重复叠加字幕。",
@@ -32909,6 +33262,8 @@ def run_agent_auto_subtitle_review(job_id: str, session_id: str, subtitle_style:
         if not current:
             raise RuntimeError("字幕生成时素材任务已不存在")
         session = find_edit_session(current, session_id)
+        expected_revision = int(session.get("revision") or 0)
+        subtitle_session_snapshot = copy.deepcopy(session)
         outputs = _agent_subtitle_outputs(session)
         transcript_ready = _subtitle_transcription_complete(current)
 
@@ -32975,11 +33330,23 @@ def run_agent_auto_subtitle_review(job_id: str, session_id: str, subtitle_style:
         "reviewNotice": "字幕已自动生成并完成低风险校对，审核样片会直接使用；正式导出前仍可逐句修改并确认原视频字幕状态。",
     })
 
+    automatic_delivery = str((current.get("agent") or {}).get("executionMode") or "") == "automatic_delivery"
+    if automatic_delivery:
+        from . import main as runtime
+        from .source_subtitle_check import check_source_subtitles
+        draft["confirmationMode"] = "automatic_delivery"
+        draft["sourceSubtitleCheck"] = check_source_subtitles(runtime, copy.deepcopy(current), subtitle_session_snapshot, draft)
+        draft["reviewNotice"] = "字幕已自动校对；源片字幕为抽样检查，可随时打开字幕面板调整。"
     with jobs_lock:
         current = jobs.get(job_id)
         if not current:
             raise RuntimeError("保存字幕草稿时素材任务已不存在")
         session = find_edit_session(current, session_id)
+        event = cancel_events.get(job_id)
+        if event and event.is_set():
+            raise RuntimeError("字幕任务已停止，未把旧结果应用到时间线")
+        if int(session.get("revision") or 0) != expected_revision:
+            raise RuntimeError("时间线已变化，未把旧字幕检查结果应用到新版本")
         save_subtitle_draft_file(str(current.get("workDirectory") or ""), draft)
         session.update({
             "subtitleEnabled": True,
@@ -32994,6 +33361,9 @@ def run_agent_auto_subtitle_review(job_id: str, session_id: str, subtitle_style:
         current["updatedAt"] = completed_at
         save_job(current)
 
+    if automatic_delivery and draft["sourceSubtitleCheck"]["status"] != "clear":
+        return {"actionRequired": True, "action": "subtitle_overlap", "sessionId": session_id,
+                "message": "原视频可能已有字幕。请预览并确认是否叠加新字幕，避免显示两层文字。"}
     return {
         "artifact": {
             "kind": "subtitle_review_draft",
@@ -33207,7 +33577,7 @@ def _cover_timeline_settings(job: dict[str, Any], variant_id: str) -> dict[str, 
     variants = timeline.get("variants") if isinstance(timeline.get("variants"), dict) else {}
     settings_state = variants.get(variant_id) if isinstance(variants.get(variant_id), dict) else {}
     return {
-        "duration": round(max(.5, min(5.0, float(settings_state.get("duration") or 1.0))), 3),
+        "duration": round(max(.2, min(60.0, float(settings_state.get("duration") or 1.0))), 3),
     }
 
 
@@ -33412,7 +33782,11 @@ def activate_cover_timeline_variant(
 def run_cover_intro_render(
     job_id: str, filename: str, duration: float, source_kind: str = "output",
 ) -> None:
+    from .cover_delivery import cover_replacement_source
+    from .delivery_lineage import replace_cover_lineage
     target_path: Path | None = None
+    snapshot: dict[str, Any] | None = None
+    published = False
     try:
         with jobs_lock:
             live = jobs.get(job_id)
@@ -33439,19 +33813,36 @@ def run_cover_intro_render(
             if source_output.get("previewOnly") or source_version.get("previewOnly"):
                 raise RuntimeError("请先将审核样片导出为高清成片，再添加封面片头")
             source_path = Path(str(snapshot.get("outputDirectory") or "")) / filename
-            render_cover_id = str(source_output.get("coverVersionId") or source_version.get("coverVersionId") or "")
-            cover_path = output_cover_path(snapshot, source_output, source_version)
+            selected_cover = current_cover_version(snapshot)
+            render_cover_id = str((selected_cover or {}).get("id") or source_output.get("coverVersionId") or source_version.get("coverVersionId") or "")
+            cover_path = (cover_version_path(snapshot, selected_cover) if selected_cover
+                          else output_cover_path(snapshot, source_output, source_version))
         if not source_path.is_file() or not cover_path:
             raise RuntimeError("视频或已确认封面不存在")
         _version_id, version_number = next_output_version(snapshot)
         target_path = Path(str(snapshot.get("outputDirectory") or "")) / output_intro_filename(
             filename, version_number,
         )
-        media = render_cover_intro(
-            source_path, cover_path, target_path, duration=duration,
-            ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
-        )
+        def check_current():
+            with jobs_lock:
+                live = jobs.get(job_id)
+                event = cancel_events.get(job_id)
+                if event and event.is_set():
+                    raise RuntimeError("封面片头任务已停止，原成片保持不变")
+                if not live or live.get("currentCoverVersionId") != snapshot.get("currentCoverVersionId"):
+                    raise RuntimeError("封面选择已变化，未提交旧结果")
+                if live.get("currentOutputVersionId") != snapshot.get("currentOutputVersionId"):
+                    raise RuntimeError("当前成片版本已变化，未覆盖新选择")
+            return False
+        check_current()
+        with cover_replacement_source(source_path, source_output, target_path,
+                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, cancelled=check_current) as body_path:
+            media = render_cover_intro(
+                body_path, cover_path, target_path, duration=duration,
+                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, cancelled=check_current,
+            )
         with jobs_lock:
+            check_current()
             current = jobs.get(job_id)
             if not current:
                 raise RuntimeError("片头渲染完成时任务已不存在")
@@ -33471,6 +33862,7 @@ def run_cover_intro_render(
             if not cover_version:
                 raise RuntimeError("已确认的封面版本已不存在")
             new_output = copy.deepcopy(current_output)
+            new_output.update(replace_cover_lineage(source_output, float(media["introDuration"])))
             new_output.update({
                 "filename": target_path.name,
                 "title": f"{str(current_output.get('title') or '高光成片')}（封面片头）",
@@ -33480,7 +33872,8 @@ def run_cover_intro_render(
                 "versionId": version_id, "versionNumber": version_number,
                 "versionCreatedAt": now_iso(), "previewOnly": False,
                 "coverIntro": {
-                    "enabled": True, "duration": float(media["introDuration"]),
+                    "enabled": True, "start": 0, "duration": float(media["introDuration"]),
+                    "coverVersionId": render_cover_id,
                     "sourceFilename": filename, "sourceKind": source_kind,
                 },
             })
@@ -33493,6 +33886,8 @@ def run_cover_intro_render(
                 "id": version_id, "number": version_number, "createdAt": now_iso(),
                 "outputs": [new_output], "previewOnly": False,
                 "variantKind": "cover_intro_export",
+                "qualityStatus": "pending", "reviewStatus": "pending",
+                "qualityReport": {}, "qualityGate": {}, "reviewReport": {},
             })
             if current_version.get("id"):
                 new_version["parentVersionId"] = str(current_version["id"])
@@ -33501,6 +33896,7 @@ def run_cover_intro_render(
             current.setdefault("outputVersions", []).append(new_version)
             current["currentOutputVersionId"] = version_id
             current["outputs"] = new_version["outputs"]
+            published = True
             current["coverIntroOperation"] = {
                 "status": "completed", "outputVersionId": version_id,
                 "filename": target_path.name, "sourceKind": source_kind,
@@ -33523,11 +33919,15 @@ def run_cover_intro_render(
             save_job(current)
         append_message(job_id, "assistant", f"已生成带 {float(media['introDuration']):.1f} 秒封面片头的新成片版本。", kind="notice")
     except Exception as error:
-        if target_path:
+        if target_path and not published:
             target_path.unlink(missing_ok=True)
         with jobs_lock:
             current = jobs.get(job_id)
-            if current:
+            stopped = cancel_events.get(job_id)
+            superseded = bool(current and snapshot and (
+                current.get("currentCoverVersionId") != snapshot.get("currentCoverVersionId")
+                or current.get("currentOutputVersionId") != snapshot.get("currentOutputVersionId")))
+            if current and not superseded and not (stopped and stopped.is_set()):
                 current["coverIntroOperation"] = {
                     "status": "failed", "filename": filename, "sourceKind": source_kind,
                     "error": str(error)[:1000], "failedAt": now_iso(),
@@ -33557,7 +33957,8 @@ def create_cover_intro_output(
         output, version, _position = context
         if output.get("previewOnly") or version.get("previewOnly"):
             raise HTTPException(409, "请先导出高清成片，再添加封面片头")
-        if not output_cover_path(job, output, version):
+        selected_cover = current_cover_version(job)
+        if not ((selected_cover and cover_version_path(job, selected_cover)) or output_cover_path(job, output, version)):
             raise HTTPException(409, "请先确认封面并绑定到当前成片")
         operation = job.get("coverIntroOperation") if isinstance(job.get("coverIntroOperation"), dict) else {}
         if operation.get("status") in {"queued", "running"}:
@@ -33619,27 +34020,11 @@ def render_cover_intro_draft(job_id: str, request: CoverIntroRequest) -> dict[st
                 candidate = str(output.get("filename") or "")
                 candidate_path = Path(str(job.get("outputDirectory") or "")) / candidate
                 if candidate and not output.get("previewOnly") and candidate_path.is_file():
-                    existing_intro = output.get("coverIntro") if isinstance(output.get("coverIntro"), dict) else {}
-                    original_filename = str(existing_intro.get("sourceFilename") or "")
-                    original_kind = str(existing_intro.get("sourceKind") or "")
-                    if original_filename and original_kind == "source_video":
-                        original_source = Path(str(job.get("sourcePath") or ""))
-                        if original_source.is_file():
-                            source_filename = original_source.name
-                            source_kind = "source_video"
-                    elif original_filename and original_kind == "output":
-                        original_context = output_download_context(job, original_filename)
-                        if original_context:
-                            original_output, original_version, _position = original_context
-                            original_path = Path(str(job.get("outputDirectory") or "")) / original_filename
-                            if not original_output.get("previewOnly") and original_path.is_file():
-                                bind_cover_to_output_version(job, cover_version, original_version)
-                                source_filename = original_filename
-                                source_kind = "output"
-                    if not source_filename:
-                        bind_cover_to_output_version(job, cover_version, current_version)
-                        source_filename = candidate
-                        source_kind = "output"
+                    # Replace the recorded cover in the selected master, not
+                    # an ancestor that predates later sound/layout edits.
+                    # Bind the new cover only to the new output on success.
+                    source_filename = candidate
+                    source_kind = "output"
                     break
         # A timeline cover-intro render must always attach to the current
         # generated cut.  Falling back to the source video here silently
@@ -33799,6 +34184,10 @@ def agent_planning_context(job_id: str) -> dict[str, Any]:
         },
         "editing": {
             "hasActiveSession": bool(job.get("activeEditSessionId")),
+            "activeSessionId": str((active_session or {}).get("id") or ""),
+            "activeSessionRevision": int((active_session or {}).get("revision") or 0),
+            "currentOutputVersionId": str(job.get("currentOutputVersionId") or ""),
+            "currentOutputFilename": str(job["outputs"][0].get("filename") or "") if len(job.get("outputs") or []) == 1 else "",
             "hasOutputs": job_has_visible_review_result(job),
             "hasSubtitleDraft": bool((active_session or {}).get("subtitleDraftId")),
             "currentDurationSeconds": round(current_duration, 3) if current_duration else None,
@@ -34088,6 +34477,11 @@ def _fit_agent_session_to_target(
     search = search if isinstance(search, dict) else {}
     intent = search.get("intent") if isinstance(search.get("intent"), dict) else {}
     request = job.get("request") if isinstance(job.get("request"), dict) else {}
+    timeline_request = (
+        session.get("agentTimelineRequest")
+        if isinstance(session.get("agentTimelineRequest"), dict) else {}
+    )
+    instruction = str(timeline_request.get("instruction") or "")
     target = 0.0
     for raw_target in (
         intent.get("targetSeconds"), job.get("targetSeconds"),
@@ -34102,19 +34496,17 @@ def _fit_agent_session_to_target(
         if target > 0:
             break
     if target <= 0:
-        timeline_request = (
-            session.get("agentTimelineRequest")
-            if isinstance(session.get("agentTimelineRequest"), dict) else {}
-        )
-        instruction = str(timeline_request.get("instruction") or "")
         target_match = re.search(r"目标\s*(\d+(?:\.\d+)?)\s*秒", instruction)
         if target_match:
             target = float(target_match.group(1))
     if target <= 0:
         return {"targetSeconds": target or None, "actualSeconds": float(session.get("duration") or 0), "status": "not_requested"}
+    # Use the SAME bound recorded in the approved plan, not a narrower local
+    # heuristic which can reject a complete clip that the user allowed.
+    tolerance_match = re.search(r"允许浮动\s*±\s*(\d+(?:\.\d+)?)\s*秒", instruction)
+    tolerance = float(tolerance_match.group(1)) if tolerance_match else max(2.0, target * .1)
     if isinstance(session.get("agentAssembly"), dict):
         actual = float(session.get("duration") or 0)
-        tolerance = max(2.0, target * .1)
         status = "on_target" if target - tolerance <= actual <= target + tolerance else (
             "insufficient_coverage" if actual < target - tolerance else "over_target"
         )
@@ -34161,7 +34553,6 @@ def _fit_agent_session_to_target(
     session["clips"] = fitted
     refresh_edit_session(session, job)
     actual = float(session.get("duration") or 0)
-    tolerance = max(2.0, target * .1)
     upper_target = target + tolerance
     lower_target = target - tolerance
     if actual > upper_target and len(session.get("clips") or []) > 1:
@@ -34393,7 +34784,7 @@ def _public_cover_artifact(job_id: str, item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _prepare_content_composition_contract(job_id: str) -> dict[str, Any] | None:
+def _prepare_content_composition_contract(job_id: str, *, automatic_minor_refinement: bool = False) -> dict[str, Any] | None:
     """Recheck legacy selections without mutating saved edits or old searches."""
     with jobs_lock:
         snapshot = copy.deepcopy(jobs.get(job_id) or {})
@@ -34439,6 +34830,15 @@ def _prepare_content_composition_contract(job_id: str) -> dict[str, Any] | None:
         current["updatedAt"] = now_iso()
         save_job(current)
     changed = [(m.get("id"), m["start"], m["end"]) for m in replacements] != [(m.get("id"), m["start"], m["end"]) for m in selected]
+    old_ranges = {str(m["id"]): m for m in selected}
+    minor_verified_trim = bool(automatic_minor_refinement and selected and len(accepted) == len(selected)
+        and len(replacements) == len(selected) and all(
+            str(m["id"]) in old_ranges and not m.get("requiresReview")
+            and 0 <= float(m["start"]) - float(old_ranges[str(m["id"])]["start"]) <= .5
+            and 0 <= float(old_ranges[str(m["id"])]["end"]) - float(m["end"]) <= .5
+            for m in replacements))
+    if minor_verified_trim:
+        return None
     if changed or len(accepted) != len(selected):
         return {"actionRequired": True, "action": "content_evidence_review",
                 "message": "已重新核验所选片段并保存新检索修订；请检查缩短、拆分或待审核的范围。旧预览和手动编辑未改动。"}
@@ -34550,17 +34950,2905 @@ def _conversational_timeline_proposal(job: dict[str, Any], arguments: dict[str, 
             "message": "已生成时间线修改草案，可在新版本中预览。"}
 
 
+_AGENT_TOOL_FALLTHROUGH = object()
+"""Sentinel: a tool branch completed without returning; keep dispatching."""
+
+
+def _agent_tool_inspect_workspace(*, tool_name, arguments, job_id, snapshot, no_result) -> dict[str, Any] | None:
+    required_state = str(arguments.get("requiredState") or "")
+    if required_state:
+        reason_code = str(arguments.get("preconditionCode") or "missing_precondition")
+        message = str(arguments.get("preconditionMessage") or "当前任务不满足所选编辑能力的前置条件")
+        has_timeline = bool(snapshot.get("activeEditSessionId"))
+        has_output = bool(snapshot.get("outputs"))
+        has_external_cover_asset = bool(snapshot.get("externalCoverAsset"))
+        satisfied = (
+            (required_state == "active_timeline" and has_timeline)
+            or (required_state == "current_output" and has_output)
+            or (required_state == "external_cover_asset" and has_external_cover_asset)
+        )
+        if required_state == "compatible_request" or not satisfied:
+            next_step = "先在当前任务生成并确认成片" if required_state == "current_output" else "先在当前任务建立并确认时间线"
+            if required_state == "compatible_request":
+                next_step = "修改目标或改用适合源素材检索与剪辑的 Skill"
+            elif required_state == "external_cover_asset":
+                next_step = "修改封面要求，改用本次视频中的画面"
+            return no_result(
+                reason_code, f"前置条件未满足：{message}",
+                artifact_kind="precondition_missing",
+                suggestions=[next_step, "确认当前工作区绑定的是本次任务", "不要复用其他任务产物"],
+            )
+    public = public_job(snapshot)
+    return {
+        "artifact": {
+            "kind": "workspace_snapshot", "jobId": job_id,
+            "status": public.get("status"), "stage": public.get("stage"),
+            "duration": public.get("duration"), "workflowKind": workflow_kind_for_job(snapshot),
+            "candidateCount": len(public.get("candidates") or []),
+            "outputCount": len(public.get("outputs") or []),
+        },
+    }
+
+
+def _agent_tool_validate_task_provenance(*, workspace, tool_name, job_id, snapshot) -> dict[str, Any] | None:
+    public = public_job(snapshot)
+    editing = agent_planning_context(job_id).get("editing") if job_id else {}
+    issues: list[dict[str, Any]] = []
+    if str(workspace.get("jobId") or "") != job_id:
+        issues.append({"severity": "error", "code": "workspace_job_mismatch", "message": "工作区绑定任务与当前任务不一致。"})
+    source_hash = str(snapshot.get("sourceHash") or snapshot.get("sourceAssetId") or "")
+    for cover in snapshot.get("coverVersions") or []:
+        if isinstance(cover, dict) and str(cover.get("sourceAssetId") or "") and str(cover.get("sourceAssetId") or "") != source_hash:
+            issues.append({"severity": "warning", "code": "cover_source_mismatch", "message": "存在来源不匹配的封面版本。"})
+            break
+    if snapshot.get("agentHandoffJobId") and not str(workspace.get("sourceJobId") or ""):
+        issues.append({"severity": "warning", "code": "handoff_without_source_workspace", "message": "任务曾发生同源交接，需确认当前工作区已切到新任务。"})
+    return {
+        "artifact": {
+            "kind": "task_provenance_report", "jobId": job_id,
+            "sourceHash": source_hash, "sourceScope": str((snapshot.get("request") or {}).get("sourceScopeKind") or "all"),
+            "workspaceJobId": str(workspace.get("jobId") or ""),
+            "hasOutputs": bool((editing or {}).get("hasOutputs")),
+            "hasActiveSession": bool((editing or {}).get("hasActiveSession")),
+            "issues": issues, "passed": not any(item["severity"] == "error" for item in issues),
+        },
+    }
+
+
+def _agent_tool_diagnose_edit_failure(*, workspace, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    public = public_job(snapshot)
+    plan_id = str(workspace.get("activePlanId") or "")
+    plan = agent_platform.store.get("plans", plan_id) if plan_id else None
+    failed_steps = [
+        {"id": str(item.get("id") or ""), "title": str(item.get("title") or ""), "tool": str(item.get("tool") or ""), "error": str(item.get("error") or "")}
+        for item in (plan or {}).get("steps") or [] if str(item.get("status") or "") == "failed"
+    ]
+    no_result_steps = [
+        item for item in (plan or {}).get("steps") or []
+        if isinstance(item.get("result"), dict) and str(item["result"].get("terminalStatus") or "") == "no_result"
+    ]
+    causes: list[dict[str, Any]] = []
+    if failed_steps:
+        causes.append({"code": "failed_steps", "message": "Agent 计划存在失败步骤。", "items": failed_steps})
+    if no_result_steps:
+        causes.append({"code": "no_result", "message": "上游检索或时间线约束未得到可用结果。"})
+    if not (public.get("outputs") or public.get("agentPreviewOutputs") or public.get("agentReviewPreviews")):
+        causes.append({"code": "no_outputs", "message": "当前任务没有可播放的审核样片或成片。"})
+    if public.get("status") in {"running", "queued", "cancelling"}:
+        causes.append({"code": "background_running", "message": "当前任务仍有后台操作在执行。"})
+    return {
+        "artifact": {
+            "kind": "edit_diagnostics", "jobId": job_id,
+            "focus": str(arguments.get("focus") or "")[:240],
+            "status": public.get("status"), "stage": public.get("stage"),
+            "causes": causes or [{"code": "no_obvious_failure", "message": "未发现明确失败状态，请检查具体预览或导出对象。"}],
+            "nextSteps": ["刷新当前任务状态", "查看失败步骤技术详情", "重新生成审核样片"] if causes else ["继续当前审核流程"],
+        },
+    }
+
+
+def _agent_tool_select_multi_topic_evidence(*, tool_name, arguments, job_id, no_result) -> dict[str, Any] | None:
+    with jobs_lock:
+        current = jobs.get(job_id)
+        search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
+        candidates = [
+            item for item in search.get("candidates") or []
+            if isinstance(item, dict) and item.get("reviewStatus") != "rejected"
+            and float(item.get("end") or 0) > float(item.get("start") or 0)
+        ]
+        reliable = [
+            item for item in candidates
+            if item.get("selected") is True
+            or str(item.get("confidenceTier") or "") == "reliable"
+            or (not str(item.get("confidenceTier") or "") and not bool(item.get("requiresReview")))
+        ]
+        reliable_ids = {str(item.get("id") or "") for item in reliable if str(item.get("id") or "")}
+        spec = _content_assembly_spec(search, allowed_match_ids=reliable_ids)
+        if not current or not str(search.get("id") or ""):
+            return no_result("no_search", "当前任务还没有可用于多主题选择的内容检索结果。", query=str(arguments.get("query") or ""))
+        if len(spec.get("predicateIds") or []) < 2:
+            return no_result("not_multi_topic", "当前检索没有拆出多个必需主题，无法按多主题配额编排。", query=str(arguments.get("query") or ""), candidate_count=len(candidates), reliable_count=len(reliable))
+        if spec.get("missingPredicates"):
+            return no_result(
+                "missing_required_categories",
+                "自动编排缺少必要类别的可靠候选：" + "、".join(str(value) for value in spec["missingPredicates"]),
+                query=str(arguments.get("query") or search.get("instruction") or ""),
+                candidate_count=len(candidates), reliable_count=len(reliable),
+            )
+        selected_ids = [str(value) for value in spec.get("selectedMatchIds") or [] if str(value) in reliable_ids]
+        if not selected_ids:
+            return no_result("no_match", "多主题检索没有生成可用于自动编排的可靠候选。", query=str(arguments.get("query") or ""), candidate_count=len(candidates), reliable_count=len(reliable))
+        search["reviewDraft"] = {
+            "schemaVersion": "content-review-draft-v1",
+            "searchId": str(search["id"]),
+            "selectedMatchIds": selected_ids,
+            "orderedMatchIds": selected_ids,
+            "source": "agent_multi_topic_selection",
+            "updatedAt": now_iso(),
+        }
+        search["defaultSelectedIds"] = selected_ids
+        search["agentAssemblySpec"] = {**copy.deepcopy(spec), "searchId": str(search["id"])}
+        current.update({
+            "status": AWAITING_AGENT_PLAN, "stage": "agent_plan_running",
+            "actionRequired": None, "currentAction": "已按多主题选定内容候选",
+            "detail": f"已采用 {len(selected_ids)} 个多主题可靠候选，正在建立时间线。",
+            "progressMode": "indeterminate", "etaSeconds": None, "etaMode": "unavailable",
+            "updatedAt": now_iso(),
+        })
+        save_job(current)
+    return {
+        "artifact": {
+            "kind": "multi_topic_evidence_selection", "jobId": job_id,
+            "searchId": str(search["id"]), "matchIds": selected_ids,
+            "coverage": copy.deepcopy(spec.get("coverage") or []),
+            "message": f"我已为 {len(spec.get('predicateIds') or [])} 个主题选择可靠候选。",
+        },
+    }
+
+
+def _agent_tool_propose_cover_candidates(*, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    source_scope = str(arguments.get("sourceScope") or "accepted_cut")
+    candidate_budget = max(3, min(24, int(arguments.get("candidateBudget") or 16)))
+    aspects = [
+        str(value) for value in arguments.get("aspectRatios") or ["16:9"]
+        if str(value) in COVER_ASPECT_SIZES
+    ] or ["16:9"]
+    title_text = str(arguments.get("titleText") or "")[:80]
+    focus = str(arguments.get("focus") or "")[:240]
+    subject = str(arguments.get("subject") or "")[:120].strip()
+    requested_source_time = arguments.get("sourceTime")
+    source_path, source_metadata, evidence = _cover_source(snapshot, source_scope)
+    draft_id = f"cover_draft_{uuid.uuid4().hex[:12]}"
+    work_root = Path(str(snapshot.get("workDirectory") or ""))
+    cover_root = work_root / "cover-director" / draft_id
+    frames_directory = cover_root / "candidates"
+
+    def propose_cover_worker() -> dict[str, Any]:
+        points = cover_sample_points(
+            float(source_metadata.get("duration") or 0), evidence,
+            budget=candidate_budget,
+            include_uniform=str(source_metadata.get("kind") or "") != "accepted_timeline",
+        )
+        if requested_source_time is not None:
+            source_time = max(0.0, min(
+                max(0.0, float(source_metadata.get("duration") or 0) - .001),
+                float(requested_source_time),
+            ))
+            duration = max(0.0, float(source_metadata.get("duration") or 0))
+            nearby_times = []
+            for offset in (0.0, -.5, .5):
+                value = max(0.0, min(max(0.0, duration - .001), source_time + offset))
+                if all(abs(value - existing) >= .05 for existing in nearby_times):
+                    nearby_times.append(value)
+            points = [{
+                "time": value,
+                "evidenceRefs": [],
+                "evidenceStrength": 1.0,
+                "evidenceText": f"用户指定封面时间 {source_time:.3f} 秒附近",
+            } for value in nearby_times]
+        frames = extract_frames_at_times(
+            source_path, frames_directory, [float(item["time"]) for item in points],
+            ffmpeg=settings.ffmpeg,
+        )
+        raw_frames = []
+        for index, (frame, point) in enumerate(zip(frames, points), 1):
+            raw_frames.append({
+                "id": f"cover_candidate_{index:02d}", "path": frame.path,
+                "sourceTime": round(frame.time, 3),
+                "evidenceRefs": list(point.get("evidenceRefs") or []),
+                "evidenceStrength": float(point.get("evidenceStrength") or .35),
+                "evidenceText": str(point.get("evidenceText") or ""),
+            })
+        selected, rejected = score_cover_frames(
+            raw_frames, request_focus=focus, require_person=bool(subject), limit=candidate_budget,
+        )
+        if requested_source_time is not None:
+            requested_number = float(requested_source_time)
+            selected = [
+                item for item in selected
+                if abs(float(item.get("sourceTime") or 0) - requested_number) <= .75
+            ]
+        if not selected:
+            if requested_source_time is not None:
+                subject_hint = f"且包含“{subject}”" if subject else ""
+                raise RuntimeError(
+                    f"没有找到 {float(requested_source_time):.1f} 秒附近{subject_hint}的可用封面画面；"
+                    "请调整时间点或封面要求"
+                )
+            if subject and any(item.get("rejectionReason") == "missing_person" for item in rejected):
+                raise RuntimeError(f"没有找到包含人物的封面画面，无法确认“{subject}”；请更换时间点或封面要求")
+            raise RuntimeError("没有找到可用的非黑、可解码封面画面")
+        candidates: list[dict[str, Any]] = []
+        for item in selected:
+            path = Path(str(item.pop("path")))
+            candidates.append({
+                **item,
+                "subjectVerification": {
+                    "subject": subject,
+                    "status": "identity_unverified" if subject else "not_required",
+                    "personDetected": (item.get("metrics") or {}).get("faceCount", None) not in {0, None},
+                },
+                "artifactFile": str(path.relative_to(work_root)),
+                "previewUrl": f"/api/jobs/{job_id}/cover-artifacts/{item['id']}",
+            })
+        draft = {
+            "schemaVersion": COVER_SCHEMA_VERSION, "id": draft_id, "jobId": job_id,
+            "status": "candidates_ready", "source": source_metadata,
+            "sourceAssetId": str(snapshot.get("sourceAssetId") or snapshot.get("sourceHash") or ""),
+            "sourceSearchId": str((snapshot.get("contentSearch") or {}).get("id") or "") if isinstance(snapshot.get("contentSearch"), dict) else "",
+            "sourceQuery": str(((snapshot.get("contentSearch") or {}).get("intent") or {}).get("query") or (snapshot.get("contentSearch") or {}).get("instruction") or "")[:500] if isinstance(snapshot.get("contentSearch"), dict) else "",
+            "aspectRatios": aspects, "titleText": title_text, "focus": focus,
+            "subject": subject,
+            "requestedSourceTime": float(requested_source_time) if requested_source_time is not None else None,
+            "candidates": candidates, "variants": [],
+            "rejectedSummary": {
+                reason: sum(1 for item in rejected if item.get("rejectionReason") == reason)
+                for reason in {str(item.get("rejectionReason") or "unknown") for item in rejected}
+            },
+            "createdAt": now_iso(), "updatedAt": now_iso(),
+        }
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                raise RuntimeError("封面候选完成时素材任务已不存在")
+            current["coverDraft"] = draft
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "cover_candidates", "jobId": job_id, "draftId": draft_id,
+                "source": copy.deepcopy(source_metadata),
+                "candidates": [_public_cover_artifact(job_id, item) for item in candidates],
+                "rejectedSummary": copy.deepcopy(draft["rejectedSummary"]),
+            },
+        }
+
+    future = output_preview_executor.submit(propose_cover_worker)
+    return {
+        "operationId": f"{job_id}:cover_candidates:{draft_id}",
+        "operation": "cover_candidates", "accepted": True, "future": future,
+        "cancel": lambda: future.cancel(),
+    }
+
+
+def _agent_tool_render_cover_variants(*, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    draft = snapshot.get("coverDraft") if isinstance(snapshot.get("coverDraft"), dict) else {}
+    candidates = [item for item in draft.get("candidates") or [] if isinstance(item, dict)]
+    if not draft.get("id") or not candidates:
+        raise RuntimeError("请先生成可用的封面候选")
+    directions = [
+        str(value) for value in arguments.get("directions") or COVER_DIRECTIONS
+        if str(value) in COVER_DIRECTIONS
+    ]
+    directions = list(dict.fromkeys(directions))[:3] or list(COVER_DIRECTIONS)
+    aspects = [
+        str(value) for value in arguments.get("aspectRatios") or draft.get("aspectRatios") or ["16:9"]
+        if str(value) in COVER_ASPECT_SIZES
+    ] or ["16:9"]
+    title_text = str(arguments.get("titleText") or draft.get("titleText") or "")[:80]
+    work_root = Path(str(snapshot.get("workDirectory") or ""))
+    variants_directory = work_root / "cover-director" / str(draft["id"]) / "variants"
+    font_path = Path(__file__).resolve().parent.parent / "fonts" / "SourceHanSansSC-Bold.otf"
+
+    def render_cover_worker() -> dict[str, Any]:
+        variants: list[dict[str, Any]] = []
+        for aspect in aspects:
+            for index, direction in enumerate(directions):
+                candidate = candidates[index % len(candidates)]
+                source_frame = (work_root / str(candidate.get("artifactFile") or "")).resolve()
+                try:
+                    source_frame.relative_to(work_root.resolve())
+                except ValueError as error:
+                    raise RuntimeError("封面候选路径无效") from error
+                if not source_frame.is_file():
+                    raise RuntimeError("封面候选画面不存在")
+                signature = hashlib.sha256(
+                    f"{draft['id']}:{candidate.get('id')}:{aspect}:{direction}:{title_text}".encode("utf-8")
+                ).hexdigest()[:12]
+                variant_id = f"cover_variant_{signature}"
+                output = variants_directory / f"{variant_id}.jpg"
+                rendered = render_cover_variant(
+                    source_frame, output, aspect=aspect, direction=direction,
+                    title=title_text,
+                    font_path=font_path,
+                )
+                variants.append({
+                    "schemaVersion": COVER_SCHEMA_VERSION,
+                    "variantId": variant_id, "status": "preview",
+                    "direction": direction, "aspectRatio": aspect,
+                    "width": rendered["width"], "height": rendered["height"],
+                    "titleText": title_text,
+                    "titleLines": rendered["titleLines"],
+                    "sourceCandidateId": str(candidate.get("id") or ""),
+                    "sourceTime": float(candidate.get("sourceTime") or 0),
+                    "evidenceRefs": copy.deepcopy(candidate.get("evidenceRefs") or []),
+                    "score": copy.deepcopy(candidate.get("score") or {}),
+                    "subjectVerification": copy.deepcopy(candidate.get("subjectVerification") or {}),
+                    "contentHash": rendered["contentHash"],
+                    "artifactFile": str(output.relative_to(work_root)),
+                    "previewUrl": f"/api/jobs/{job_id}/cover-artifacts/{variant_id}",
+                    "provenance": {
+                        "kind": "source_frame_composite", "renderer": "cliptalk-cover-v1",
+                        "createdAt": now_iso(),
+                    },
+                })
+        with jobs_lock:
+            current = jobs.get(job_id)
+            current_draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
+            if not current or str(current_draft.get("id") or "") != str(draft.get("id") or ""):
+                raise RuntimeError("封面渲染完成前候选版本已经变化")
+            current_draft.update({
+                "status": "review_ready", "variants": variants,
+                "selectedVariantId": variants[0]["variantId"] if variants else "",
+                "updatedAt": now_iso(),
+            })
+            current["coverTimelineDraft"] = {
+                "schemaVersion": "cover-timeline-draft-v1",
+                "activeVariantId": variants[0]["variantId"] if variants else "",
+                "variants": {
+                    str(item["variantId"]): {"duration": 1.0, "updatedAt": now_iso()}
+                    for item in variants
+                },
+                "updatedAt": now_iso(),
+            }
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "cover_variant_set", "jobId": job_id,
+                "draftId": str(draft["id"]),
+                "variants": [_public_cover_artifact(job_id, item) for item in variants],
+                "defaultVariantId": variants[0]["variantId"] if variants else "",
+            },
+        }
+
+    future = output_preview_executor.submit(render_cover_worker)
+    return {
+        "operationId": f"{job_id}:cover_variants:{draft['id']}",
+        "operation": "cover_variants", "accepted": True, "future": future,
+        "cancel": lambda: future.cancel(),
+    }
+
+
+def _agent_tool_review_cover_variants(*, tool_name, job_id, autonomous, snapshot) -> dict[str, Any] | None:
+    if autonomous and not str((snapshot.get("coverDraft") or {}).get("subject") or "").strip():
+        with jobs_lock:
+            current = jobs.get(job_id)
+            draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
+            variants = [item for item in draft.get("variants") or [] if isinstance(item, dict)]
+            if not variants:
+                raise RuntimeError("尚未生成可用的封面候选版本")
+            required_title = str(draft.get("titleText") or "").strip()
+            required_aspects = {
+                str(value) for value in draft.get("aspectRatios") or [] if str(value)
+            }
+            accepted_timeline = str((draft.get("source") or {}).get("kind") or "") == "accepted_timeline"
+            eligible = [
+                item for item in variants
+                if (not required_title or (
+                    str(item.get("titleText") or "").strip() == required_title
+                    and bool(item.get("titleLines"))
+                ))
+                and (not required_aspects or str(item.get("aspectRatio") or "") in required_aspects)
+                and (not accepted_timeline or bool(item.get("evidenceRefs")))
+            ]
+            if not eligible:
+                raise RuntimeError("封面候选未满足当前任务的标题、画幅或来源要求，已停止自动选择")
+            # Candidate scoring is deterministic and already performed by
+            # render_cover_variants. Keep the highest ranked candidate as
+            # the automatic default, while leaving the full set available
+            # for a user override before final delivery.
+            def cover_score(item: dict[str, Any]) -> float:
+                score = item.get("score") if isinstance(item.get("score"), dict) else {}
+                return float(score.get("total") or sum(
+                    float(score.get(key) or 0)
+                    for key in ("requestAlignment", "subjectReadability", "emotionOrAction", "visualClarity", "titleSafeSpace", "distinctiveness")
+                ))
+            selected = max(eligible, key=cover_score)
+            draft["selectedVariantId"] = str(selected.get("variantId") or "")
+            draft["selectionMode"] = "auto_best_validated"
+            draft["status"] = "auto_selected"
+            draft["updatedAt"] = now_iso()
+            current["coverDraft"] = draft
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "cover_auto_selection", "jobId": job_id,
+                "selectedVariantId": str(selected.get("variantId") or ""),
+                "variants": [_public_cover_artifact(job_id, item) for item in variants],
+                "message": "已按当前任务主题和画幅自动选择最佳封面，可在正式成片生成前替换。",
+            },
+        }
+    subject = str((snapshot.get("coverDraft") or {}).get("subject") or "").strip()
+    return {
+        "actionRequired": True, "action": "cover_review",
+        "message": (
+            f"请核对候选画面中的人物是否为“{subject}”。系统只确认画面中检测到人物，不能仅凭画面自动证明具体身份。"
+            if subject else
+            "封面候选已放入主时间轴。选择后会保存为当前任务封面，不会重新生成视频。"
+        ),
+    }
+
+
+def _agent_tool_confirm_cover(*, workspace, tool_name, job_id, autonomous) -> dict[str, Any] | None:
+    with jobs_lock:
+        current = jobs.get(job_id)
+        draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
+        selected_id = str(draft.get("selectedVariantId") or "")
+    public_version, bound_outputs, revision = _activate_cover_variant(job_id, selected_id)
+    # Confirming a cover is an atomic cover operation.  It must not
+    # silently turn into a full video export: doing so previously made a
+    # successfully saved cover appear to fail when an unrelated export
+    # precondition (for example source-subtitle acknowledgement) blocked
+    # the downstream render.  Cover-intro composition and formal export
+    # are represented by their own explicit plan steps.
+    append_cover_result(job_id, bound_outputs)
+    with jobs_lock:
+        current = jobs.get(job_id)
+        session_id = str((current or {}).get("activeEditSessionId") or "")
+        session = next((
+            item for item in (current or {}).get("editSessions") or []
+            if isinstance(item, dict) and str(item.get("id") or "") == session_id
+        ), None)
+        revision_number = int((session or {}).get("revision") or 0)
+        brief = current.get("brief") if current and isinstance(current.get("brief"), dict) else {}
+        goal_text = " ".join(
+            str(message.get("text") or "")
+            for message in (current or {}).get("messages") or []
+            if isinstance(message, dict)
+        )
+    if autonomous:
+        cover_intro_requested = bool(brief.get("coverIntroRequested")) or AgentPlatform._cover_intro_requested(goal_text)
+        intro_duration = float(
+            brief.get("coverIntroDurationSeconds")
+            or AgentPlatform._cover_intro_duration(goal_text)
+        )
+        active_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
+        has_explicit_intro_step = any(
+            str(step.get("tool") or "") == "compose_cover_intro"
+            for step in active_plan.get("steps") or []
+            if isinstance(step, dict)
+        )
+        if cover_intro_requested and not has_explicit_intro_step and session_id and revision_number > 0:
+            def cover_intro_preview_worker() -> dict[str, Any]:
+                with jobs_lock:
+                    current_job = jobs.get(job_id)
+                    if not current_job:
+                        raise RuntimeError("封面片头生成时任务已不存在")
+                    current_session = find_edit_session(current_job, session_id)
+                    preview_path = Path(str(current_session.get("previewPath") or ""))
+                    cover = current_cover_version(current_job)
+                    cover_path = cover_version_path(current_job, cover) if cover else None
+                    output_dir = Path(str(current_job.get("outputDirectory") or ""))
+                if not preview_path.is_file():
+                    raise RuntimeError("当前审核样片不存在，无法合成封面片头")
+                if not cover_path or not cover_path.is_file():
+                    raise RuntimeError("当前任务封面文件不存在，无法合成封面片头")
+                output_dir.mkdir(parents=True, exist_ok=True)
+                target_path = output_dir / f"agent-cover-intro-preview-{uuid.uuid4().hex[:8]}.mp4"
+                rendered = render_cover_intro(
+                    preview_path, cover_path, target_path, duration=intro_duration,
+                    ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
+                )
+                output = {
+                    "filename": target_path.name,
+                    "title": "封面片头审核预览",
+                    "duration": round(float(rendered["duration"]), 3),
+                    "width": int(rendered["width"]),
+                    "height": int(rendered["height"]),
+                    "hasAudio": bool(rendered.get("hasAudio")),
+                    "previewOnly": True,
+                    "outputKind": "cover_intro_review_preview",
+                    "sourceOutputFilename": preview_path.name,
+                    "sourceEditSessionId": session_id,
+                    "overlayVerification": copy.deepcopy(
+                        current_session.get("previewOverlayVerification") or {}
+                    ),
+                    "subtitleMode": (
+                        "burn"
+                        if int((current_session.get("previewOverlayVerification") or {}).get("subtitleCueCount") or 0) > 0
+                        else "none"
+                    ),
+                    "coverIntro": {
+                        "enabled": True,
+                        "duration": float(rendered.get("introDuration") or intro_duration),
+                        "coverVersionId": str((cover or {}).get("id") or ""),
+                    },
+                }
+                with jobs_lock:
+                    current_job = jobs.get(job_id)
+                    if current_job:
+                        current_job.setdefault("agentPreviewOutputs", []).append(output)
+                        current_job["updatedAt"] = now_iso()
+                        save_job(current_job)
+                return {
+                    "artifact": {
+                        "kind": "review_preview",
+                        "jobId": job_id,
+                        "output": copy.deepcopy(output),
+                        "message": "已生成带当前任务封面片头的审核预览。",
+                    },
+                }
+            future = output_preview_executor.submit(cover_intro_preview_worker)
+            return {
+                "operationId": f"{job_id}:cover_intro_preview:{session_id}:{revision_number}",
+                "operation": "cover_intro_preview", "accepted": True,
+                "future": future, "cancel": lambda: cancel_job(job_id),
+            }
+        return {
+            "artifact": {
+                "kind": "current_cover", "jobId": job_id,
+                "cover": public_version,
+                "thumbnailUrl": f"/api/jobs/{job_id}/thumbnail?revision={revision}",
+                "boundOutputs": bound_outputs,
+                "message": copy_messages.COVER_SAVED_AUTO_REVIEW,
+            },
+        }
+    return {
+        "artifact": {
+            "kind": "current_cover", "jobId": job_id,
+            "cover": public_version,
+            "thumbnailUrl": f"/api/jobs/{job_id}/thumbnail?revision={revision}",
+            "boundOutputs": bound_outputs,
+            "message": copy_messages.cover_saved(len(bound_outputs)),
+        },
+    }
+
+
+def _agent_tool_cancel_operation(*, tool_name, job_id) -> dict[str, Any] | None:
+    return {"cancelled": True, "job": cancel_job(job_id).get("job")}
+
+
+def _agent_tool_select_people(*, workspace, tool_name, arguments, job_id, autonomous, snapshot, no_result) -> dict[str, Any] | None:
+    if autonomous:
+        search = snapshot.get("contentSearch") if isinstance(snapshot.get("contentSearch"), dict) else {}
+        if tool_name == "select_people":
+            target = (
+                (snapshot.get("request") or {}).get("contentSearchPersonTarget")
+                or snapshot.get("contentSearchPersonTarget")
+                or (search.get("intent") or {}).get("personTarget")
+                or {}
+            )
+            selected = [str(value) for value in target.get("personIds") or [] if str(value)]
+            label = "人物"
+            selection_source = "persisted_reliable_evidence"
+            description = str(arguments.get("description") or "").strip()
+            if not selected and description:
+                index = _load_content_person_index(snapshot)
+                catalog = _content_person_catalog(snapshot, index)
+                try:
+                    matched, diagnostics = _match_person_catalog_by_visual_description(
+                        job_id, snapshot, f"agent_person_{uuid.uuid4().hex[:12]}",
+                        description, catalog,
+                        cancel_events.setdefault(job_id, threading.Event()),
+                        person_tracks=[
+                            item for item in index.get("personTracks") or []
+                            if isinstance(item, dict)
+                        ],
+                        require_reliable=True,
+                    )
+                except Exception as error:
+                    return no_result(
+                        "identity_verification_unavailable",
+                        f"已完成人物识别，但暂时无法可靠核定“{description}”：{str(error)[:180]}",
+                        candidate_count=len(catalog), reliable_count=0,
+                    )
+                reliable_ids = {
+                    str(value) for value in diagnostics.get("reliablePersonIds") or []
+                    if str(value)
+                }
+                selected_people = [
+                    item for item in matched
+                    if str(item.get("id") or "") in reliable_ids
+                ]
+                if selected_people:
+                    selected = [str(item.get("id") or "") for item in selected_people]
+                    selection_source = "visual_description_consensus"
+                    select_content_person_target(
+                        job_id,
+                        PersonTargetRequest(
+                            personIds=selected, matchMode="any", activity="appearance",
+                        ),
+                        display_text=f"根据外观描述选择人物：{description}",
+                    )
+                else:
+                    possible_count = len(diagnostics.get("uncertainPersonIds") or [])
+                    if possible_count and str(workspace.get("executionMode") or "") == "automatic_delivery":
+                        return {"actionRequired": True, "action": "identity_selection",
+                                "message": f"有 {possible_count} 个候选人物可能符合描述。请核对缩略图选择一次，我会继续完成剪辑。"}
+                    return no_result(
+                        "ambiguous_identity" if possible_count else "no_match",
+                        (
+                            f"已识别画面人物，但“{description}”只有 {possible_count} 个待核对候选，"
+                            "没有足够可靠证据可自动选定。"
+                            if possible_count else
+                            f"已检查画面人物，没有找到可靠符合“{description}”的对象。"
+                        ),
+                        candidate_count=len(catalog), reliable_count=0,
+                    )
+        else:
+            intent = search.get("intent") if isinstance(search.get("intent"), dict) else {}
+            selected = list(dict.fromkeys(
+                str(value) for value in [
+                    *(search.get("selectedSpeakerRefs") or []),
+                    *(intent.get("speakerRefs") or []),
+                ] if str(value)
+            ))
+            label = "说话人"
+            selection_source = "persisted_reliable_evidence"
+            requested_label = str(arguments.get("label") or "").strip().casefold()
+            if not selected and requested_label:
+                matching_voices = [
+                    voice for voice in _public_current_voice_catalog(snapshot)
+                    if requested_label in {
+                        str(voice.get("label") or "").strip().casefold(),
+                        str(voice.get("speakerRef") or "").strip().casefold(),
+                    }
+                ]
+                if len(matching_voices) == 1:
+                    selected = [str(matching_voices[0].get("speakerRef") or "")]
+                    selection_source = "explicit_anonymous_label"
+            # Speaker discovery deliberately precedes this step.  Do not
+            # discard that fresh evidence merely because no selection had
+            # existed before the plan started.  A single, high-confidence
+            # non-mixed candidate is safe to adopt; anything less certain
+            # must become a review checkpoint, never a misleading
+            # "no content" terminal result.
+            if not selected:
+                reliable_voices = []
+                for voice in _public_current_voice_catalog(snapshot):
+                    speaker_ref = str(voice.get("speakerRef") or "").strip()
+                    narration = voice.get("narration") if isinstance(voice.get("narration"), dict) else {}
+                    quality = voice.get("quality") if isinstance(voice.get("quality"), dict) else {}
+                    if (
+                        speaker_ref
+                        and not bool(voice.get("requiresReview"))
+                        and not bool(quality.get("suspectedMixed"))
+                        and str(narration.get("status") or "") in {"candidate", "confirmed"}
+                        and float(narration.get("score") or 0.0) >= 0.80
+                    ):
+                        reliable_voices.append((speaker_ref, narration))
+                if len(reliable_voices) == 1:
+                    selected = [reliable_voices[0][0]]
+                    selection_source = "voice_timeline_heuristics"
+        if selected:
+            adopted_match_ids: list[str] = []
+            if tool_name == "select_people":
+                # Selecting an appearance target synchronously materializes
+                # a content-search result from the cached person tracks.
+                # That helper normally exposes a human review checkpoint;
+                # autonomous review has already resolved the identity, so
+                # adopt only its reliable candidates here and immediately
+                # return ownership of the job state to the Agent plan.
+                with jobs_lock:
+                    current = jobs.get(job_id)
+                    current_search = (
+                        current.get("contentSearch")
+                        if current and isinstance(current.get("contentSearch"), dict)
+                        else {}
+                    )
+                    reliable_candidates = [
+                        item for item in current_search.get("candidates") or []
+                        if isinstance(item, dict)
+                        and item.get("reviewStatus") != "rejected"
+                        and float(item.get("end") or 0) > float(item.get("start") or 0)
+                        and (
+                            item.get("selected") is True
+                            or str(item.get("confidenceTier") or "") == "reliable"
+                            or (
+                                not str(item.get("confidenceTier") or "")
+                                and not bool(item.get("requiresReview"))
+                            )
+                        )
+                    ]
+                    adopted_match_ids = list(dict.fromkeys(
+                        str(item.get("id") or "") for item in reliable_candidates
+                        if str(item.get("id") or "")
+                    ))[:64]
+                    if current and str(current_search.get("id") or "") and adopted_match_ids:
+                        current_search["reviewDraft"] = {
+                            "schemaVersion": "content-review-draft-v1",
+                            "searchId": str(current_search["id"]),
+                            "selectedMatchIds": adopted_match_ids,
+                            "orderedMatchIds": adopted_match_ids,
+                            "source": "agent_autonomous_identity_selection",
+                            "updatedAt": now_iso(),
+                        }
+                        current_search["defaultSelectedIds"] = adopted_match_ids
+                        current.update({
+                            "status": AWAITING_AGENT_PLAN,
+                            "stage": "agent_plan_running",
+                            "actionRequired": None,
+                            "currentAction": "已自动采用人物出镜范围",
+                            "detail": (
+                                f"已采用 {len(adopted_match_ids)} 个可靠出镜片段，"
+                                "正在建立可审阅时间线。"
+                            ),
+                            "progressMode": "indeterminate",
+                            "etaSeconds": None,
+                            "etaMode": "unavailable",
+                            "updatedAt": now_iso(),
+                        })
+                        save_job(current)
+            if tool_name == "select_speakers" and selection_source in {
+                "voice_timeline_heuristics", "explicit_anonymous_label",
+            }:
+                # Persist the automatic identity decision through the
+                # same path as the review panel.  The following semantic
+                # search then inherits the selected speaker scope.
+                select_current_voices(
+                    job_id,
+                    CurrentVoiceSelectionRequest(
+                        speakerRefs=selected,
+                        mode=str(arguments.get("mode") or "include"),
+                        query="",
+                    ),
+                )
+            return {"artifact": {
+                "kind": "identity_selection", "identityKind": tool_name,
+                "selectedIds": selected, "source": selection_source,
+                **({"matchIds": adopted_match_ids} if adopted_match_ids else {}),
+                "message": (
+                    f"我已根据多帧可见外观证据采用符合“{str(arguments.get('description') or '')}”的{label}。"
+                    if selection_source == "visual_description_consensus"
+                    else
+                    f"我已采用用户指定的{str(arguments.get('label') or label)}。"
+                    if selection_source == "explicit_anonymous_label"
+                    else f"我已根据刚完成的说话人证据自动采用可靠{label}范围。"
+                    if selection_source == "voice_timeline_heuristics"
+                    else f"我已采用现有可靠{label}范围。"
+                ),
+            }}
+        return {
+            "actionRequired": True,
+            "action": "identity_selection",
+            "message": (
+                f"已完成{label}识别，但存在多个候选或证据不足。"
+                f"请在{label}面板试听或核对后选择要保留的对象，再继续。"
+            ),
+        }
+    return {
+        "actionRequired": True,
+        "action": "identity_selection",
+        "message": "请在人物或说话人审核面板中完成结构化选择。",
+    }
+
+
+def _agent_tool_review_content_evidence(*, tool_name, arguments, job_id, autonomous, no_result) -> dict[str, Any] | None:
+    if autonomous:
+        with jobs_lock:
+            current = jobs.get(job_id)
+            search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
+            candidates = [
+                item for item in search.get("candidates") or []
+                if isinstance(item, dict) and item.get("reviewStatus") != "rejected"
+                and float(item.get("end") or 0) > float(item.get("start") or 0)
+            ]
+            allowed = {str(item.get("id") or "") for item in candidates if str(item.get("id") or "")}
+            if any(item.get("matchType") == "voice_identity" for item in candidates):
+                contract = build_contract(search)
+                review = search.get("reviewDraft") or {}
+                reviewed_ids = set(review.get("orderedMatchIds") or review.get("selectedMatchIds") or [])
+                selected_voice = [item for item in candidates if item.get("id") in reviewed_ids]
+                if not selected_voice or any(not verification_current(item, contract) for item in selected_voice):
+                    return {"actionRequired": True, "action": "content_evidence_review",
+                            "message": "参考声纹仅提供疑似匹配。请试听并确认要保留的片段，再继续生成样片。"}
+            reliable_candidates = [
+                item for item in candidates
+                if (
+                    item.get("selected") is True
+                    or str(item.get("confidenceTier") or "") == "reliable"
+                    or (
+                        not str(item.get("confidenceTier") or "")
+                        and not bool(item.get("requiresReview"))
+                    )
+                )
+            ]
+            reliable_ids = {
+                str(item.get("id") or "") for item in reliable_candidates
+                if str(item.get("id") or "")
+            }
+            # Required branch coverage is evaluated against the exact
+            # reliable set that autonomous mode is allowed to consume.
+            # A merely "possible" match must not make a required category
+            # look covered and then disappear from the resulting timeline.
+            assembly_spec = _content_assembly_spec(
+                search, allowed_match_ids=reliable_ids,
+            )
+            existing = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
+            confirmed_ids = [
+                str(value) for value in search.get("confirmedMatchIds") or []
+                if str(value) in allowed
+            ]
+            existing_ids = [
+                str(value)
+                for value in (
+                    existing.get("orderedMatchIds")
+                    or existing.get("selectedMatchIds")
+                    or []
+                )
+                if str(value) in allowed
+            ]
+            existing_source = str(existing.get("source") or "")
+            # Search workers may preselect a single representative match
+            # for UI focus. In autonomous review that must not become the
+            # whole edit when the user asked for “所有/全部” content. Only
+            # user-confirmed selections constrain the timeline; otherwise
+            # consume the full reliable set.
+            manual_review_sources = {"user", "manual", "content_review_user", "user_review"}
+            selected_ids = confirmed_ids or (
+                existing_ids if existing_source in manual_review_sources else []
+            )
+            selection_policy = str(arguments.get("selectionPolicy") or "all_reliable")
+            if selection_policy == "unique_or_review":
+                # UI focus/preselection alone does not establish a reliable
+                # semantic starting point.
+                reliable_candidates = [item for item in candidates if (
+                    str(item.get("confidenceTier") or "") == "reliable"
+                    or (not item.get("confidenceTier") and not item.get("requiresReview"))
+                )]
+                reliable_ids = {str(item["id"]) for item in reliable_candidates if item.get("id")}
+                reviewed_ids = [value for value in selected_ids if value in reliable_ids]
+                if len(reviewed_ids) == 1:
+                    selected_ids = reviewed_ids
+                elif len(reliable_ids) == 1:
+                    selected_ids = list(reliable_ids)
+                elif len(reliable_ids) > 1:
+                    return {
+                        "actionRequired": True,
+                        "action": "structured_review",
+                        "message": (
+                            f"找到 {len(reliable_ids)} 个可靠的起剪位置。"
+                            "请在候选面板预览并仅保留一个作为新的开始位置。"
+                        ),
+                        "candidateCount": len(candidates),
+                        "reliableCandidateCount": len(reliable_candidates),
+                    }
+                else:
+                    return no_result(
+                        "no_match",
+                        "没有找到可靠的起剪位置，未修改当前时间线。",
+                        query=str(arguments.get("query") or search.get("instruction") or ""),
+                        candidate_count=len(candidates), reliable_count=0,
+                    )
+            if selection_policy != "unique_or_review" and len(assembly_spec.get("predicateIds") or []) >= 2:
+                if assembly_spec.get("missingPredicates"):
+                    return no_result(
+                        "missing_required_categories",
+                        "自动编排缺少必要类别的可靠候选："
+                        + "、".join(str(value) for value in assembly_spec["missingPredicates"]),
+                        query=str(arguments.get("query") or search.get("instruction") or ""),
+                        candidate_count=len(candidates), reliable_count=len(reliable_candidates),
+                    )
+                selected_ids = [
+                    str(value) for value in assembly_spec.get("selectedMatchIds") or []
+                    if str(value) in reliable_ids
+                ]
+            if not selected_ids:
+                selected_ids = [
+                    str(item.get("id") or "") for item in candidates
+                    if str(item.get("id") or "") in reliable_ids
+                ]
+            selected_ids = list(dict.fromkeys(value for value in selected_ids if value))[:64]
+            if not current or not str(search.get("id") or "") or not selected_ids:
+                return no_result(
+                    "no_match",
+                    "内容检索没有生成可用于自动编排的可靠候选。",
+                    query=str(arguments.get("query") or search.get("instruction") or ""),
+                    candidate_count=len(candidates), reliable_count=len(reliable_candidates),
+                )
+            selected_lookup = {
+                str(item.get("id") or ""): item for item in candidates
+                if str(item.get("id") or "") in set(selected_ids)
+            }
+            coverage_seconds = sum(
+                max(0.0, float(item.get("end") or 0) - float(item.get("start") or 0))
+                for item in selected_lookup.values()
+            )
+            search["reviewDraft"] = {
+                "schemaVersion": "content-review-draft-v1",
+                "searchId": str(search["id"]),
+                "selectedMatchIds": selected_ids,
+                "orderedMatchIds": selected_ids,
+                "source": "agent_autonomous_review",
+                "updatedAt": now_iso(),
+            }
+            search["defaultSelectedIds"] = selected_ids
+            if len(assembly_spec.get("predicateIds") or []) >= 2:
+                search["agentAssemblySpec"] = copy.deepcopy(assembly_spec)
+            # The search worker deliberately stops at a review checkpoint.
+            # Autonomous review has resolved it, so the outer job must
+            # return to Agent-owned execution instead of advertising a
+            # user action while the timeline is already being applied.
+            current.update({
+                "status": AWAITING_AGENT_PLAN,
+                "stage": "agent_plan_running",
+                "actionRequired": None,
+                "currentAction": "已自动选定内容候选",
+                "detail": f"已采用 {len(selected_ids)} 个可靠候选，正在建立可审阅时间线。",
+                "progressMode": "indeterminate",
+                "etaSeconds": None,
+                "etaMode": "unavailable",
+            })
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "content_evidence_selection", "jobId": job_id,
+                "searchId": str(search["id"]), "matchIds": selected_ids,
+                "candidateCount": len(candidates),
+                "reliableCandidateCount": len(reliable_candidates),
+                "coverageSeconds": round(coverage_seconds, 3),
+                "message": f"我已自动采用 {len(selected_ids)} 个有效内容候选。",
+            },
+        }
+    return _AGENT_TOOL_FALLTHROUGH
+
+
+def _agent_tool_compose_cover_intro(*, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    from .cover_delivery import cover_replacement_source
+    from .delivery_lineage import replace_cover_lineage
+    duration = max(.2, min(60.0, float(arguments.get('duration') or 1.5)))
+    with jobs_lock:
+        current = jobs.get(job_id)
+        if not current:
+            raise RuntimeError("任务不存在")
+        cover_version = current_cover_version(current)
+        cover_path = cover_version_path(current, cover_version) if cover_version else None
+        if not cover_version or not cover_path or not cover_path.is_file():
+            raise RuntimeError("请先生成并确认当前任务封面")
+        normalize_output_versions(current)
+        output_dir = Path(str(current.get("outputDirectory") or ""))
+        source_filename = ""
+        source_output: dict[str, Any] | None = None
+        requested_filename = str(arguments.get("filename") or "").strip()
+        if requested_filename and Path(requested_filename).name != requested_filename:
+            raise RuntimeError("成片文件名无效，未改用其他视频")
+        available = [
+            item for item in all_job_outputs(current)
+            if isinstance(item, dict) and str(item.get("filename") or "")
+        ]
+
+        def cover_intro_source_rank(item: dict[str, Any], index: int) -> tuple[int, int]:
+            kind = str(item.get("outputKind") or "")
+            if kind == "cover_intro_review_preview":
+                return (-1, index)
+            if kind == "social_reframe_preview" or item.get("socialReframe"):
+                return (5, index)
+            if item.get("previewOnly"):
+                return (4, index)
+            return (3, index)
+
+        if requested_filename:
+            source_output = next((
+                item for item in available
+                if Path(str(item.get("filename") or "")).name == requested_filename
+            ), None)
+        else:
+            ranked = sorted(
+                enumerate(available),
+                key=lambda pair: cover_intro_source_rank(pair[1], pair[0]),
+                reverse=True,
+            )
+            source_output = next((item for _index, item in ranked), None)
+        if source_output:
+            candidate = Path(str(source_output.get("filename") or "")).name
+            candidate_path = output_dir / candidate
+            if candidate and candidate_path.is_file():
+                source_filename = candidate
+                source_path = candidate_path
+            else:
+                source_path = None
+        else:
+            source_path = None
+        if not source_filename:
+            raise RuntimeError("请先生成审核样片，再添加封面片头")
+        expected_output_version = current.get("currentOutputVersionId")
+        source_kind = "agent_preview" if bool((source_output or {}).get("previewOnly")) else "output"
+        current["coverIntroDraft"] = {
+            "schemaVersion": "cover-intro-timeline-v1", "enabled": True,
+            "duration": duration, "coverVersionId": str(cover_version.get("id") or ""),
+            "updatedAt": now_iso(),
+        }
+        current["coverIntroOperation"] = {
+            "status": "queued", "filename": source_filename,
+            "sourceKind": source_kind, "duration": duration, "queuedAt": now_iso(),
+        }
+        current.update({
+            "status": "running", "stage": "rendering", "progress": .9,
+            "stageProgress": 0.0, "progressMode": "indeterminate",
+            "detail": "正在生成封面片头审核样片", "currentAction": "正在把当前任务封面合入审核样片",
+            "model": "FFmpeg", "error": None, "updatedAt": now_iso(),
+        })
+        save_job(current)
+    target_name = f"agent-cover-intro-preview-{uuid.uuid4().hex[:8]}.mp4"
+    target_path = Path(str(snapshot.get("outputDirectory") or output_dir)) / target_name
+
+    source_output = copy.deepcopy(source_output or {})
+    expected_cover_id = str(cover_version.get("id") or "")
+    def check_cover_current():
+        with jobs_lock:
+            live = jobs.get(job_id)
+            event = cancel_events.get(job_id)
+            if event and event.is_set():
+                raise RuntimeError("封面合成已停止，原版本保持不变")
+            if not live or str(live.get("currentCoverVersionId") or "") != expected_cover_id:
+                raise RuntimeError("封面选择已变化，未提交旧封面样片")
+            if live.get("currentOutputVersionId") != expected_output_version:
+                raise RuntimeError("当前成片版本已变化，未覆盖新选择")
+        return False
+
+    def cover_intro_agent_worker() -> dict[str, Any]:
+        if source_path is None or not source_path.is_file():
+            raise RuntimeError("封面片头合成源样片不存在")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        check_cover_current()
+        with cover_replacement_source(source_path, source_output, target_path,
+                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, cancelled=check_cover_current) as body_path:
+            rendered = render_cover_intro(
+                body_path, cover_path, target_path, duration=duration,
+                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, cancelled=check_cover_current,
+            )
+        output = copy.deepcopy(source_output or {})
+        output.update(replace_cover_lineage(source_output, float(rendered.get("introDuration") or duration)))
+        output.update({
+            "filename": target_name,
+            "title": "带封面片头的审核样片",
+            "duration": round(float(rendered["duration"]), 3),
+            "width": int(rendered["width"]),
+            "height": int(rendered["height"]),
+            "hasAudio": bool(rendered.get("hasAudio")),
+            "previewOnly": True,
+            "outputKind": "cover_intro_review_preview",
+            "sourceOutputFilename": source_filename,
+            "coverIntro": {
+                "enabled": True, "start": 0,
+                "duration": float(rendered.get("introDuration") or duration),
+                "coverVersionId": str(cover_version.get("id") or ""),
+                "sourceFilename": source_filename,
+                "sourceKind": source_kind,
+            },
+        })
+        with jobs_lock:
+            try:
+                check_cover_current()
+            except RuntimeError:
+                target_path.unlink(missing_ok=True)
+                raise
+            current_job = jobs.get(job_id)
+            if not current_job:
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("封面片头审核样片生成完成时任务已不存在")
+            current_job.setdefault("agentPreviewOutputs", []).append(output)
+            current_job["lastAgentCoverIntroPreviewFilename"] = target_name
+            current_job["coverIntroOperation"] = {
+                "status": "completed",
+                "filename": target_name,
+                "sourceFilename": source_filename,
+                "sourceKind": source_kind,
+                "completedAt": now_iso(),
+            }
+            current_job["coverIntroDraft"] = {
+                "schemaVersion": "cover-intro-timeline-v1",
+                "enabled": True,
+                "duration": float(rendered.get("introDuration") or duration),
+                "coverVersionId": str(cover_version.get("id") or ""),
+                "renderedFilename": target_name,
+                "updatedAt": now_iso(),
+            }
+            current_job.update({
+                "status": "completed", "stage": "completed", "progress": 1.0,
+                "stageProgress": 1.0, "progressMode": "determinate",
+                "detail": "封面片头审核样片已生成",
+                "currentAction": "封面片头审核样片已生成",
+                "model": "FFmpeg", "error": None, "updatedAt": now_iso(),
+            })
+            save_job(current_job)
+        public_output = {
+            **copy.deepcopy(output),
+            "videoUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
+            "previewUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
+        }
+        return {
+            "artifact": {
+                "kind": "cover_intro_review_preview",
+                "jobId": job_id,
+                "output": public_output,
+                "message": "已生成带当前任务封面片头的最终审核样片。",
+            },
+        }
+
+    future = output_preview_executor.submit(cover_intro_agent_worker)
+    return {
+        "operationId": f"{job_id}:cover_intro_preview:{source_filename}:{duration:.1f}",
+        "operation": "cover_intro_preview", "accepted": True,
+        "future": future, "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_propose_timeline_edit(*, workspace, tool_name, arguments, job_id, autonomous, snapshot, no_result) -> dict[str, Any] | None:
+    approved_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
+    frozen_input = approved_plan.get("inputContext") or {}
+    validate_frozen(snapshot, frozen_input)
+    if arguments.get("anchorStartQuery") or arguments.get("durationSource") == "relative":
+        with jobs_lock:
+            current = jobs[job_id]
+            try:
+                result = _conversational_timeline_proposal(
+                    current, arguments, frozen_input, str(approved_plan.get("id") or ""),
+                )
+            except (ValueError, EditSessionError) as error:
+                return no_result("revision_constraint_unmet", str(error))
+            save_job(current)
+        return {**result, "actionRequired": not autonomous}
+    contract_action = None if frozen_input.get("outputFilename") else _prepare_content_composition_contract(
+        job_id, automatic_minor_refinement=workspace.get("executionMode") == "automatic_delivery")
+    if contract_action:
+        return contract_action
+    with jobs_lock:
+        snapshot = copy.deepcopy(jobs.get(job_id) or snapshot)
+    session_id = str(snapshot.get("activeEditSessionId") or "")
+    created = False
+    if frozen_input.get("outputFilename"):
+        with jobs_lock:
+            current = jobs.get(job_id)
+            validate_frozen(current or {}, frozen_input)
+            session = next((s for s in current.get("editSessions") or [] if s.get("agentInputPlanId") == approved_plan.get("id")), None)
+            if session is None:
+                if frozen_input.get("outputVersionId"):
+                    base, _ = create_or_resume_edit_session(current, version_id=frozen_input["outputVersionId"], output_filename=frozen_input["outputFilename"])
+                else:
+                    base = next((s for s in current.get("editSessions") or [] if s.get("id") == frozen_input.get("editSessionId")), None)
+                if not base:
+                    raise RuntimeError("所引用的样片没有可编辑时间线，请先在精剪中建立草稿")
+                session = copy.deepcopy(base)
+                session.update({"id": f"edit_session_{uuid.uuid4().hex[:12]}", "agentInputPlanId": approved_plan["id"], "revision": 0, "status": "draft", "previewStatus": "idle", "undo": [], "redo": []})
+                for key in ("previewPath", "previewUrl", "previewFingerprint", "pendingProposal", "contentVerification"):
+                    session.pop(key, None)
+                current.setdefault("editSessions", []).append(session)
+                created = True
+            session_id = session["id"]
+            current["activeEditSessionId"] = session_id
+            save_job(current)
+    duration_fit: dict[str, Any] = {}
+    requested_variants = max(1, min(4, int(arguments.get("variantCount") or 1)))
+    variant_directions = [
+        str(item).strip()[:160] for item in arguments.get("variantDirections") or []
+        if str(item).strip()
+    ][:requested_variants]
+    instruction = str(arguments.get("instruction") or "按已确认候选建立可审核时间线")[:500]
+    with jobs_lock:
+        current = jobs.get(job_id)
+        if current and session_id and not any(
+            str(item.get("id") or "") == session_id for item in current.get("editSessions") or []
+        ):
+            session_id = ""
+        search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
+        if frozen_input.get("outputFilename"):
+            search = {}
+        candidates = [item for item in search.get("candidates") or [] if isinstance(item, dict)]
+        candidates = [item for item in candidates if float(item.get("end") or 0) > float(item.get("start") or 0)]
+        review = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
+        saved_ids = review.get("orderedMatchIds") or review.get("selectedMatchIds") or search.get("confirmedMatchIds") or search.get("defaultSelectedIds") or []
+        if frozen_input.get("contentSelection"):
+            validate_frozen(current, frozen_input)
+            saved_ids = frozen_input["contentSelection"]["matchIds"]
+        allowed_ids = {str(item.get("id") or "") for item in candidates}
+        selected_ids = [str(value) for value in saved_ids if str(value) in allowed_ids]
+        if current and session_id and str(search.get("id") or ""):
+            active_session = find_edit_session(current, session_id)
+            if (
+                str(active_session.get("sourceSearchId") or "") != str(search.get("id") or "")
+                or list(active_session.get("sourceMatchIds") or []) != selected_ids
+                or (active_session.get("contentBinding") or {}).get("selectionFingerprint") != selection_binding(
+                    search, [item for value in selected_ids for item in candidates if str(item.get("id")) == value]
+                )["selectionFingerprint"]
+            ):
+                # An edit session created by an earlier search or by the
+                # candidate drawer is not the approved Agent selection.
+                # Reusing it silently injected every candidate into the
+                # new timeline.
+                session_id = ""
+            elif autonomous:
+                assembly_spec = (
+                    search.get("agentAssemblySpec")
+                    if isinstance(search.get("agentAssemblySpec"), dict)
+                    else _content_assembly_spec(search)
+                )
+                assembly_spec = {
+                    **assembly_spec, "searchId": str(search.get("id") or ""),
+                }
+                if (
+                    len(assembly_spec.get("predicateIds") or []) >= 2
+                    and _content_session_needs_assembly_fit(active_session, assembly_spec)
+                ):
+                    _fit_content_session_to_assembly(
+                        current, active_session, search, assembly_spec,
+                    )
+                    current["updatedAt"] = now_iso()
+                    save_job(current)
+        if current and not session_id and str(search.get("id") or ""):
+            if selected_ids:
+                try:
+                    session, created = create_or_resume_content_edit_session(
+                        current, search_id=str(search["id"]), selected_match_ids=selected_ids,
+                        order_mode="selection",
+                    )
+                    assembly_spec = (
+                        search.get("agentAssemblySpec")
+                        if isinstance(search.get("agentAssemblySpec"), dict)
+                        else _content_assembly_spec(search)
+                    )
+                    assembly_spec = {
+                        **assembly_spec, "searchId": str(search.get("id") or ""),
+                    }
+                    if (
+                        autonomous
+                        and len(assembly_spec.get("predicateIds") or []) >= 2
+                        and _content_session_needs_assembly_fit(session, assembly_spec)
+                    ):
+                        if not created:
+                            session = copy.deepcopy(session)
+                            session.update({
+                                "id": f"edit_session_{uuid.uuid4().hex[:12]}",
+                                "revision": 0, "undo": [], "redo": [],
+                                "pendingProposal": None, "proposalVariants": [],
+                                "createdAt": now_iso(), "updatedAt": now_iso(),
+                            })
+                            for key in (
+                                "previewPath", "previewUrl", "previewFingerprint", "previewRevision",
+                                "renderPlanFingerprint", "renderedVersionId",
+                            ):
+                                session.pop(key, None)
+                            session["previewStatus"] = "idle"
+                            current.setdefault("editSessions", []).append(session)
+                            created = True
+                        _fit_content_session_to_assembly(current, session, search, assembly_spec)
+                    session["agentTimelineRequest"] = {
+                        "variantCount": requested_variants,
+                        "instruction": instruction,
+                        "source": "agent_plan",
+                    }
+                    session["title"] = (
+                        f"内容检索精剪 · {requested_variants} 个结构方向"
+                        if requested_variants > 1 else "内容检索精剪"
+                    )
+                    session_id = str(session.get("id") or "")
+                    current["activeEditSessionId"] = session_id
+                    current["updatedAt"] = now_iso()
+                    save_job(current)
+                except EditSessionError:
+                    session_id = ""
+        if current and not session_id and not str(search.get("id") or ""):
+            highlight_candidates: list[tuple[str, dict[str, Any]]] = []
+            for index, item in enumerate(current.get("candidates") or []):
+                if not isinstance(item, dict) or float(item.get("end") or 0) <= float(item.get("start") or 0):
+                    continue
+                identity = item.get("id") or item.get("candidateId")
+                if identity in (None, "") and item.get("index") is not None:
+                    identity = item.get("index")
+                candidate_id = str(identity if identity not in (None, "") else f"candidate_{index}")
+                highlight_candidates.append((candidate_id, item))
+            if highlight_candidates:
+                allowed_ids = {candidate_id for candidate_id, _item in highlight_candidates}
+                preferred_values = (
+                    current.get("confirmedIndices") or current.get("recommendedIndices") or []
+                )
+                selected_ids = [
+                    str(value) for value in preferred_values if str(value) in allowed_ids
+                ]
+                if not selected_ids:
+                    selected_group_ids = {
+                        str(value) for value in (
+                            current.get("confirmedGroupIds") or current.get("recommendedGroupIds") or []
+                        ) if str(value)
+                    }
+                    for group in current.get("eventGroups") or []:
+                        if selected_group_ids and str(group.get("id") or "") not in selected_group_ids:
+                            continue
+                        for segment in group.get("segments") or []:
+                            candidate_id = str(segment.get("candidateId") or segment.get("id") or "")
+                            if candidate_id in allowed_ids and candidate_id not in selected_ids:
+                                selected_ids.append(candidate_id)
+                if not selected_ids:
+                    ranked = sorted(
+                        highlight_candidates,
+                        key=lambda row: float(
+                            row[1].get("editorialScore") or row[1].get("score") or 0
+                        ),
+                        reverse=True,
+                    )
+                    selected_ids = [candidate_id for candidate_id, _item in ranked]
+                selected_ids = list(dict.fromkeys(selected_ids))[:64]
+                try:
+                    session, created = create_or_resume_candidate_edit_session(
+                        current, candidate_ids=selected_ids, order_mode="source",
+                    )
+                    session["agentTimelineRequest"] = {
+                        "variantCount": requested_variants,
+                        "instruction": instruction,
+                        "source": "agent_plan",
+                    }
+                    session["title"] = (
+                        f"高光候选精剪 · {requested_variants} 个结构方向"
+                        if requested_variants > 1 else "高光候选精剪"
+                    )
+                    session_id = str(session.get("id") or "")
+                    current["activeEditSessionId"] = session_id
+                    current["updatedAt"] = now_iso()
+                    save_job(current)
+                except EditSessionError:
+                    session_id = ""
+        if current and not session_id and not str(search.get("id") or ""):
+            delivery = AgentPlatform._social_delivery(instruction)
+            retrieval_query = AgentPlatform._retrieval_query(instruction)
+            duration = float(
+                (current.get("videoInfo") or {}).get("duration")
+                or current.get("duration") or 0
+            )
+            request_state = (
+                current.get("request") if isinstance(current.get("request"), dict) else {}
+            )
+            source_scope = (
+                request_state.get("sourceScope")
+                if isinstance(request_state.get("sourceScope"), dict) else {}
+            )
+            source_start = max(0.0, float(source_scope.get("start") or 0))
+            source_end = min(duration, float(source_scope.get("end") or duration))
+            if (
+                bool(delivery.get("requested"))
+                and not retrieval_query
+                and source_end - source_start >= .25
+            ):
+                # A format-only request means “keep the source and change
+                # its canvas”, not “discover an arbitrary highlight”.
+                # Materialize one full-scope candidate so the regular edit
+                # and preview paths remain traceable without visual analysis.
+                search_id = f"source_passthrough_{uuid.uuid4().hex[:12]}"
+                match_id = f"source_match_{uuid.uuid4().hex[:12]}"
+                passthrough_search = {
+                    "schemaVersion": CONTENT_SEARCH_VERSION,
+                    "id": search_id,
+                    "instruction": instruction,
+                    "status": "ready",
+                    "candidateCount": 1,
+                    "candidates": [{
+                        "id": match_id,
+                        "start": round(source_start, 3),
+                        "end": round(source_end, 3),
+                        "duration": round(source_end - source_start, 3),
+                        "title": "完整素材 · 画幅转换",
+                        "reason": "用户仅要求改变画幅，完整保留所选素材范围",
+                        "confidence": 1.0,
+                        "confidenceTier": "reliable",
+                        "requiresReview": False,
+                        "selected": True,
+                        "reviewStatus": "confirmed",
+                        "evidenceType": "source_scope",
+                        "matchedModalities": ["source"],
+                    }],
+                    "defaultSelectedIds": [match_id],
+                    "reviewDraft": {
+                        "schemaVersion": "content-review-draft-v1",
+                        "searchId": search_id,
+                        "selectedMatchIds": [match_id],
+                        "orderedMatchIds": [match_id],
+                        "source": "agent_source_passthrough",
+                        "updatedAt": now_iso(),
+                    },
+                    "createdAt": now_iso(),
+                }
+                current["contentSearch"] = passthrough_search
+                try:
+                    session, created = create_or_resume_content_edit_session(
+                        current,
+                        search_id=search_id,
+                        selected_match_ids=[match_id],
+                        order_mode="source",
+                    )
+                    session["title"] = "完整素材画幅转换"
+                    session["agentTimelineRequest"] = {
+                        "variantCount": 1,
+                        "instruction": instruction,
+                        "source": "agent_source_passthrough",
+                    }
+                    session_id = str(session.get("id") or "")
+                    current["activeEditSessionId"] = session_id
+                    current["updatedAt"] = now_iso()
+                    save_job(current)
+                except EditSessionError:
+                    session_id = ""
+    if autonomous and not session_id:
+        search_id = str((search or {}).get("id") or "")
+        if search_id and not candidates:
+            return no_result(
+                "no_match",
+                "内容检索没有生成可用于自动编排的可靠候选，已跳过后续时间线与渲染步骤。",
+                query=str(arguments.get("instruction") or (search or {}).get("instruction") or ""),
+                candidate_count=0,
+                reliable_count=0,
+            )
+        if search_id and not selected_ids:
+            reliable_count = sum(
+                1 for item in candidates
+                if (
+                    item.get("selected") is True
+                    or str(item.get("confidenceTier") or "") == "reliable"
+                    or (
+                        not str(item.get("confidenceTier") or "")
+                        and not bool(item.get("requiresReview"))
+                    )
+                )
+            )
+            return no_result(
+                "content_candidates_not_selected",
+                "内容检索存在候选，但没有形成可自动编排的确认选择，已跳过后续时间线与渲染步骤。",
+                query=str(arguments.get("instruction") or (search or {}).get("instruction") or ""),
+                candidate_count=len(candidates),
+                reliable_count=reliable_count,
+            )
+    if autonomous and session_id and not frozen_input.get("outputFilename"):
+        with jobs_lock:
+            current = jobs.get(job_id)
+            session = find_edit_session(current, session_id) if current else None
+            search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
+            duration_fit = _fit_agent_session_to_target(current, session, search) if current and session else {}
+            if current:
+                current["updatedAt"] = now_iso()
+                save_job(current)
+        if str(duration_fit.get("status") or "") in {"insufficient_coverage", "over_target"}:
+            fit_status = str(duration_fit.get("status") or "")
+            message = (
+                f"可靠候选最多只能组成约 {float(duration_fit.get('actualSeconds') or 0):.1f} 秒，"
+                f"不足以达到 {float(duration_fit.get('targetSeconds') or 0):.1f} 秒目标。"
+                if fit_status == "insufficient_coverage" else
+                f"保留完整语义边界后时间线仍为 {float(duration_fit.get('actualSeconds') or 0):.1f} 秒，"
+                f"无法收敛到 {float(duration_fit.get('targetSeconds') or 0):.1f} 秒目标范围。"
+            )
+            return no_result(
+                "insufficient_coverage" if fit_status == "insufficient_coverage" else "duration_constraint_unmet",
+                message,
+                query=str(arguments.get("instruction") or ""),
+                candidate_count=len((snapshot.get("contentSearch") or {}).get("candidates") or snapshot.get("candidates") or []),
+                coverage_seconds=float(duration_fit.get("actualSeconds") or 0),
+            )
+    proposal: dict[str, Any] | None = None
+    proposal_variants: list[dict[str, Any]] = []
+    if session_id:
+        with jobs_lock:
+            current = jobs.get(job_id)
+            session = find_edit_session(current, session_id) if current else None
+            pending = session.get("pendingProposal") if isinstance(session, dict) else None
+            revision = int(session.get("revision") or 0) if isinstance(session, dict) else 0
+            clip_ids = [
+                str(item.get("id") or "") for item in (session.get("clips") or [])
+                if str(item.get("id") or "")
+            ][:64] if isinstance(session, dict) else []
+            if (isinstance(pending, dict) and str(pending.get("status") or "") == "pending"
+                    and not pending.get("plannerDegradedReason") and not pending.get("validationRejected")):
+                proposal = copy.deepcopy(pending)
+                proposal_variants = copy.deepcopy([
+                    item for item in session.get("proposalVariants") or [] if isinstance(item, dict)
+                ])
+        if proposal is None:
+            with jobs_lock:
+                current = jobs.get(job_id)
+                session = find_edit_session(current, session_id) if current else None
+                deterministic_assembly = bool(
+                    autonomous and requested_variants == 1
+                    and isinstance((session or {}).get("agentAssembly"), dict)
+                    and not variant_directions
+                )
+                if deterministic_assembly and current and session:
+                    proposal = build_secondary_edit_proposal(
+                        current, session, text=instruction,
+                        selected_clip_ids=clip_ids,
+                        model_result={
+                            "title": "Agent 均衡时间线草案",
+                            "summary": "按检索类别分组，并依据每类时长配额建立待审核时间线。",
+                            "operations": [{"type": "reorder_clips", "clipIds": clip_ids}],
+                        },
+                    )
+                    save_job(current)
+            try:
+                if proposal is not None:
+                    pass
+                elif requested_variants > 1:
+                    proposal_variants = create_agent_timeline_variant_proposals(
+                        job_id, session_id, revision=revision, instruction=instruction,
+                        selected_clip_ids=clip_ids, count=requested_variants,
+                        directions=variant_directions,
+                    )
+                    proposal = copy.deepcopy(proposal_variants[0])
+                else:
+                    payload = create_edit_session_proposal(
+                        job_id, session_id,
+                        EditSessionProposalRequest(
+                            revision=revision, text=instruction, selectedClipIds=clip_ids,
+                        ),
+                    )
+                    proposal = copy.deepcopy(payload.get("proposal") or {})
+            except Exception as error:
+                cause = error.__cause__
+                detail = str(cause)[:240] if isinstance(cause, EditSessionError) else type(error).__name__
+                raise RuntimeError(
+                    f"剪辑编排未完成（{detail}）。候选与草稿已保留，"
+                    "未用简单拼接替代原要求；请重试编排步骤。"
+                ) from error
+        if autonomous and proposal and proposal.get("plannerDegradedReason"):
+            raise RuntimeError("剪辑规划模型不可用，当前仅有降级草稿；未自动应用或生成样片，请重试编排步骤。")
+    if session_id and requested_variants > 1:
+        if len(proposal_variants) != requested_variants:
+            return no_result(
+                "variant_count_unmet",
+                f"要求生成 {requested_variants} 版，但当前只得到 {len(proposal_variants) or int(bool(proposal))} 个有效方案；未自动应用或渲染。请调整要求后重新规划。",
+            )
+        if arguments.get("distinctSourceAcrossVariants"):
+            with jobs_lock:
+                validation_job = copy.deepcopy(jobs[job_id])
+            base = find_edit_session(validation_job, session_id)
+            used_ranges: list[tuple[float, float]] = []
+            for variant in proposal_variants:
+                branch = copy.deepcopy(base)
+                branch["pendingProposal"] = copy.deepcopy(variant)
+                try:
+                    apply_secondary_edit_proposal(validation_job, branch, str(variant.get("id") or ""))
+                except EditSessionError as error:
+                    return no_result("variant_validation_failed", f"版本检查未通过：{error}")
+                ranges = [(float(clip.get("sourceStart") or 0), float(clip.get("sourceEnd") or 0)) for clip in branch.get("clips") or []]
+                if any(min(end, old_end) - max(start, old_start) > .001 for start, end in ranges for old_start, old_end in used_ranges):
+                    return no_result(
+                        "variant_source_overlap",
+                        "当前方案存在跨版本重复片段，无法满足“不要复用片段”；未自动应用或渲染。请减少版本数、缩短时长或补充素材后重新规划。",
+                    )
+                used_ranges.extend(ranges)
+    if autonomous and session_id:
+        def proposal_is_safe(value: dict[str, Any]) -> bool:
+            preview = value.get("preview") if isinstance(value.get("preview"), dict) else None
+            # Third-party/legacy dispatch tests may not provide a preview;
+            # first-party proposals always do, and those are the values
+            # this safety gate is designed to validate.
+            if preview is None:
+                return True
+            if int(preview.get("clipCountAfter") or 0) <= 0:
+                return False
+            preflight = preview.get("preflight") if isinstance(preview.get("preflight"), dict) else {}
+            if int(preflight.get("errorCount") or 0) > 0:
+                return False
+            target = float(duration_fit.get("targetSeconds") or 0)
+            tolerance = float(duration_fit.get("toleranceSeconds") or 0)
+            actual = float(preview.get("durationAfter") or 0)
+            return not target or target - tolerance <= actual <= target + tolerance
+
+        safe_variants = [
+            value for value in proposal_variants
+            if isinstance(value, dict) and proposal_is_safe(value)
+        ]
+        if requested_variants > 1 and len(safe_variants) != requested_variants:
+            return no_result(
+                "insufficient_safe_variants",
+                "通过时长与内容检查的方案不足请求版本数；请调整版本数、时长或素材后重新规划。",
+            )
+        if safe_variants:
+            proposal_variants = safe_variants
+            proposal = copy.deepcopy(safe_variants[0])
+        elif proposal and not proposal_is_safe(proposal):
+            with jobs_lock:
+                current = jobs.get(job_id)
+                current_session = find_edit_session(current, session_id) if current else None
+                pending = (current_session or {}).get("pendingProposal") or {}
+                if pending.get("id") == proposal.get("id"):
+                    pending["validationRejected"] = True
+                    save_job(current)
+            proposal = None
+            proposal_variants = []
+        if proposal is None:
+            raise RuntimeError("剪辑提案未通过内容或时长检查，未自动应用；已保留原草稿，请重试编排步骤。")
+    batch_entries: list[dict[str, Any]] = []
+    if autonomous:
+        if not session_id or not proposal:
+            raise RuntimeError("Agent 无法从当前候选生成有效时间线方案")
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                raise RuntimeError("素材任务不存在")
+            base_session = find_edit_session(current, session_id)
+            variants = proposal_variants or [proposal]
+            for index, variant in enumerate(variants):
+                if index == 0:
+                    branch = base_session
+                else:
+                    branch = copy.deepcopy(base_session)
+                    branch["id"] = f"edit_session_{uuid.uuid4().hex[:12]}"
+                    branch["createdAt"] = now_iso()
+                    current.setdefault("editSessions", []).append(branch)
+                branch["title"] = str(variant.get("title") or f"Agent 结构方案 {index + 1}")[:100]
+                branch["pendingProposal"] = copy.deepcopy(variant)
+                branch["proposalVariants"] = [copy.deepcopy(variant)]
+                branch["agentVariantIndex"] = index + 1
+                branch["updatedAt"] = now_iso()
+                batch_entries.append({
+                    "sessionId": str(branch["id"]),
+                    "proposalId": str(variant.get("id") or ""),
+                    "title": branch["title"],
+                    "direction": str(variant.get("direction") or ""),
+                })
+            current["agentTimelineBatch"] = {
+                "planId": str(workspace.get("activePlanId") or ""),
+                "status": "proposed", "variants": batch_entries,
+                "createdAt": now_iso(), "updatedAt": now_iso(),
+            }
+            current["activeEditSessionId"] = str(batch_entries[0]["sessionId"])
+            current["updatedAt"] = now_iso()
+            save_job(current)
+    return {
+        "actionRequired": not autonomous,
+        "action": "timeline_proposal",
+        "sessionId": session_id or None,
+        "proposalId": str((proposal or {}).get("id") or "") or None,
+        "proposalVariantCount": len(proposal_variants) or (1 if proposal else 0),
+        "proposalVariants": [{
+            "id": str(item.get("id") or ""), "title": str(item.get("title") or ""),
+            "summary": str(item.get("summary") or ""), "direction": str(item.get("direction") or ""),
+        } for item in proposal_variants],
+        "timelineBatch": copy.deepcopy(batch_entries),
+        "message": (
+            ((f"我已生成 {len(proposal_variants)} 个时间线结构方案，将自动验证并应用。"
+              if autonomous and len(proposal_variants) > 1 else
+              "我已生成时间线草案，将自动验证并应用。"
+              if autonomous else
+              f"我已生成 {len(proposal_variants)} 个可切换的时间线结构方案。" if len(proposal_variants) > 1 else
+              f"我已生成待审核时间线草案“{str((proposal or {}).get('title') or '初始时间线草案')}”。")
+             + ("" if autonomous else "请点击“打开精剪时间线”核对；在你应用前不会修改时间线。"))
+            if session_id else "当前任务还没有可用的高光或内容候选，请先完成素材分析。"
+        ),
+        "createdSession": created,
+    }
+
+
+def _agent_tool_confirm_timeline_edit(*, tool_name, job_id, autonomous, snapshot) -> dict[str, Any] | None:
+    if autonomous:
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                raise RuntimeError("素材任务不存在")
+            batch = current.get("agentTimelineBatch") if isinstance(current.get("agentTimelineBatch"), dict) else {}
+            entries = [item for item in batch.get("variants") or [] if isinstance(item, dict)]
+            if not entries:
+                active_id = str(current.get("activeEditSessionId") or "")
+                active = find_edit_session(current, active_id)
+                pending = active.get("pendingProposal") if isinstance(active.get("pendingProposal"), dict) else {}
+                entries = [{"sessionId": active_id, "proposalId": str(pending.get("id") or ""), "title": active.get("title")}]
+            # Validate the entire batch on a copy before changing any draft.
+            trial_job = copy.deepcopy(current)
+            for entry in entries:
+                trial_session = find_edit_session(trial_job, str(entry.get("sessionId") or ""))
+                apply_secondary_edit_proposal(trial_job, trial_session, str(entry.get("proposalId") or ""))
+                content_report = timeline_content_report(trial_session, trial_job)
+                if not content_report["passed"]:
+                    return {"actionRequired": True, "action": "timeline_confirmation",
+                            "sessionId": trial_session["id"], "contentVerification": content_report,
+                            "message": "草案超出已核验范围或包含未核验内容，请在精剪时间线修正后再继续。"}
+            applied: list[dict[str, Any]] = []
+            for entry in entries:
+                session = find_edit_session(current, str(entry.get("sessionId") or ""))
+                proposal_id = str(entry.get("proposalId") or "")
+                if not proposal_id:
+                    raise RuntimeError("时间线方案缺少可应用的提案")
+                apply_secondary_edit_proposal(current, session, proposal_id)
+                applied.append({
+                    "sessionId": str(session["id"]), "revision": int(session.get("revision") or 0),
+                    "title": str(entry.get("title") or session.get("title") or "审核方案"),
+                })
+            batch.update({"status": "applied", "variants": applied, "updatedAt": now_iso()})
+            current["agentTimelineBatch"] = batch
+            current["activeEditSessionId"] = str(applied[0]["sessionId"])
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "applied_timeline_batch", "jobId": job_id,
+                "variants": applied,
+                "message": f"我已验证并应用 {len(applied)} 个时间线方案。",
+            },
+            "sessionId": str(applied[0]["sessionId"]), "timelineBatch": applied,
+        }
+    return {
+        "actionRequired": True,
+        "action": "timeline_confirmation",
+        "sessionId": str(snapshot.get("activeEditSessionId") or "") or None,
+        "message": "请应用并保存已审核的时间线草案，再继续生成字幕。",
+    }
+
+
+def _agent_tool_prepare_subtitle_review(*, workspace, tool_name, arguments, job_id, autonomous, snapshot) -> dict[str, Any] | None:
+    from .automatic_delivery import subtitle_source_ready
+    session_id = str(snapshot.get("activeEditSessionId") or "")
+    session = next((
+        item for item in snapshot.get("editSessions") or []
+        if str(item.get("id") or "") == session_id
+    ), None)
+    if autonomous:
+        if not session or not session.get("clips"):
+            raise RuntimeError("请先建立并应用时间线，再自动生成字幕草稿")
+        draft_id = str(session.get("subtitleDraftId") or "")
+        if session.get("subtitleEnabled") and draft_id:
+            try:
+                existing_draft = _subtitle_draft_for_job(snapshot, draft_id)
+            except (HTTPException, OSError, ValueError):
+                existing_draft = None
+            if existing_draft and str(existing_draft.get("status") or "") in {"confirmed", "auto_reviewed"}:
+                if str(workspace.get("executionMode") or "") == "automatic_delivery" and not subtitle_source_ready(existing_draft):
+                    return {"actionRequired": True, "action": "subtitle_overlap", "sessionId": session_id,
+                            "message": "当前字幕稿尚未确认原片字幕情况。请预览后确认是否叠加新字幕，避免重复显示。"}
+                return {"artifact": {
+                    "kind": "subtitle_review_draft", "mode": "reuse_reviewed",
+                    "sessionId": session_id, "subtitleDraftId": draft_id,
+                    "cueCount": len(existing_draft.get("cues") or []),
+                    "autoReviewed": str(existing_draft.get("status") or "") == "auto_reviewed",
+                    "message": "已复用当前时间线的字幕稿；审核样片生成后仍可继续修改。",
+                }}
+        subtitle_style = normalize_subtitle_style(str(arguments.get("style") or "clean"))
+        future = output_preview_executor.submit(
+            run_agent_auto_subtitle_review, job_id, session_id, subtitle_style,
+        )
+        return {
+            "operationId": f"{job_id}:agent_subtitle_review:{session_id}:{uuid.uuid4().hex[:8]}",
+            "operation": "agent_subtitle_review",
+            "accepted": True,
+            "sessionId": session_id,
+            "future": future,
+            "cancel": lambda: cancel_job(job_id),
+        }
+    return {
+        "actionRequired": True,
+        "action": "subtitle_review",
+        "sessionId": session_id or None,
+        "message": (
+            "请在精剪时间线中建立并确认字幕草稿（文字、断句、说话人标签），再继续生成样片。"
+            if session and session.get("clips") else "请先建立并应用精剪时间线，再生成字幕审核稿。"
+        ),
+    }
+
+
+def _agent_tool_prepare_delivery_timeline(*, workspace, tool_name, snapshot) -> dict[str, Any] | None:
+    if workspace.get("executionMode") != "automatic_delivery":
+        raise RuntimeError("直接生成时间线检查仅适用于自动交付")
+    variants = (snapshot.get("agentTimelineBatch") or {}).get("variants") or []
+    if not variants:
+        raise RuntimeError("本次任务尚未形成已应用时间线")
+    checked = []
+    for item in variants:
+        session = find_edit_session(snapshot, str(item.get("sessionId") or ""))
+        if session.get("pendingProposal") or int(session.get("revision") or 0) <= 0:
+            raise RuntimeError("时间线尚未应用，不能直接生成")
+        preflight = edit_session_preflight(session, snapshot)
+        if not preflight.get("ready"):
+            raise RuntimeError("时间线检查未通过：" + "；".join(str(issue.get("message") or "") for issue in preflight.get("issues") or []))
+        checked.append({"sessionId": session["id"], "revision": session["revision"],
+                        "fingerprint": _edit_session_preview_fingerprint(snapshot, session)})
+    return {"artifact": {"kind": "delivery_timeline_ready", "sessions": checked,
+                         "message": "时间线已核对，将直接生成正式成片"}}
+
+
+def _agent_tool_render_review_preview(*, tool_name, job_id, autonomous, snapshot) -> dict[str, Any] | None:
+    if autonomous:
+        batch = snapshot.get("agentTimelineBatch") if isinstance(snapshot.get("agentTimelineBatch"), dict) else {}
+        variants = [item for item in batch.get("variants") or [] if isinstance(item, dict)]
+        ready_variants: list[dict[str, Any]] = []
+        for item in variants:
+            session = next((
+                value for value in snapshot.get("editSessions") or []
+                if str(value.get("id") or "") == str(item.get("sessionId") or "")
+            ), None)
+            if session and int(session.get("revision") or 0) > 0 and not isinstance(session.get("pendingProposal"), dict):
+                ready_variants.append({
+                    "sessionId": str(session["id"]),
+                    "revision": int(session.get("revision") or 0),
+                    "title": str(item.get("title") or session.get("title") or "审核方案"),
+                })
+        if not ready_variants:
+            raise RuntimeError("自动时间线尚未应用，无法生成审核样片")
+        future = submit_render_task(job_id, run_agent_review_batch, ready_variants)
+        return {
+            "operationId": f"{job_id}:agent_review_batch:{uuid.uuid4().hex[:8]}",
+            "operation": "agent_review_batch", "accepted": True,
+            "variantCount": len(ready_variants), "future": future,
+            "cancel": lambda: cancel_job(job_id),
+        }
+    session_id = str(snapshot.get("activeEditSessionId") or "")
+    session = next((
+        item for item in snapshot.get("editSessions") or []
+        if str(item.get("id") or "") == session_id
+    ), None)
+    if session and int(session.get("revision") or 0) > 0 and not isinstance(session.get("pendingProposal"), dict):
+        revision = int(session.get("revision") or 0)
+        future = submit_render_task(job_id, run_agent_review_batch, [{
+            "sessionId": session_id, "revision": revision,
+            "title": str(session.get("title") or "审核方案"),
+        }])
+        return {
+            "operationId": f"{job_id}:agent_review_render:{session_id}:{revision}",
+            "operation": "agent_review_render", "accepted": True, "future": future,
+            "cancel": lambda: cancel_job(job_id),
+        }
+    outputs = public_job(snapshot).get("outputs") or []
+    if outputs:
+        return {"artifact": {"kind": "review_preview", "jobId": job_id, "outputs": outputs,
+                             "message": "已复用当前审核输出。"}}
+    return {"actionRequired": True, "action": "preview_generation",
+            "message": "请先应用并保存时间线草案，再继续生成审核输出。"}
+
+
+def _agent_tool_analyze_reframe_safe_areas(*, tool_name, arguments, job_id, current_output_reference) -> dict[str, Any] | None:
+    aspect = str(arguments.get("aspect") or "9:16")
+    fit = str(arguments.get("fit") or "blur")
+    output, path = current_output_reference()
+    if path is None or not path.is_file():
+        return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于画幅分析的成片或审核样片。"}
+    info = probe_video(path, settings.ffprobe)
+    source_ratio = round(info.width / max(1, info.height), 4)
+    target_size = {"9:16": (1080, 1920), "4:5": (1080, 1350), "1:1": (1080, 1080), "16:9": (1920, 1080)}.get(aspect)
+    target_ratio = round(target_size[0] / target_size[1], 4) if target_size else source_ratio
+    recommended_fit = "blur" if abs(source_ratio - target_ratio) > .03 and fit != "crop" else fit
+    return {
+        "artifact": {
+            "kind": "reframe_safe_area_report", "jobId": job_id,
+            "sourceFilename": str((output or {}).get("filename") or path.name),
+            "source": {"width": info.width, "height": info.height, "ratio": source_ratio},
+            "target": {"aspect": aspect, "ratio": target_ratio},
+            "fit": recommended_fit,
+            "protections": ["complete_frame", "subtitles", "screen_text", "faces", "product_subject"],
+            "message": "建议完整保留原画面并使用同画面虚化背景补齐。" if recommended_fit == "blur" else "按用户指定方式进行画幅适配。",
+        },
+    }
+
+
+def _agent_tool_layout_subtitles(*, tool_name, arguments, job_id) -> dict[str, Any] | None:
+    position = str(arguments.get("position") or "bottom").strip().lower()
+    vertical = "top" if position in {"top", "顶部", "上方"} else "middle" if position in {"middle", "center", "居中"} else "bottom"
+    style = normalize_subtitle_style(str(arguments.get("style") or "clean"))
+    raw_size = arguments.get("fontSizeRatio")
+    layout_input: dict[str, Any] = {"preset": style, "vertical": vertical, "horizontal": "center"}
+    if raw_size is not None:
+        layout_input["fontSizeRatio"] = raw_size
+    layout = normalize_subtitle_layout(layout_input, style)
+    with jobs_lock:
+        current = jobs.get(job_id)
+        session_id = str((current or {}).get("activeEditSessionId") or "")
+        session = find_edit_session(current, session_id) if current and session_id else None
+        if not current or not session:
+            return {"actionRequired": True, "action": "subtitle_review", "message": "请先建立并应用精剪时间线，再进行字幕排版。"}
+        draft_id = str(session.get("subtitleDraftId") or "")
+        if not bool(session.get("subtitleEnabled")) or not draft_id:
+            return {
+                "actionRequired": True, "action": "subtitle_review",
+                "message": "请先生成并确认当前时间线的字幕草稿，再调整字幕排版。",
+            }
+        try:
+            draft = _subtitle_draft_for_job(current, draft_id)
+        except (HTTPException, OSError, ValueError):
+            return {
+                "actionRequired": True, "action": "subtitle_review",
+                "message": "当前字幕草稿不可用，请重新生成并确认后再调整排版。",
+            }
+        if str(draft.get("status") or "") not in {"confirmed", "auto_reviewed"}:
+            return {
+                "actionRequired": True, "action": "subtitle_review",
+                "message": "字幕文字与断句尚未确认；请先完成字幕审核，再调整排版。",
+            }
+        cues = [
+            copy.deepcopy(cue) for cue in draft.get("cues") or []
+            if isinstance(cue, dict) and str(cue.get("text") or "").strip()
+        ]
+        if not cues:
+            return {"actionRequired": True, "action": "subtitle_review", "message": "当前字幕草稿没有有效文字，请先补全并确认字幕。"}
+        draft["globalStyle"] = layout
+        draft["revision"] = int(draft.get("revision") or 0) + 1
+        draft["updatedAt"] = now_iso()
+        save_subtitle_draft_file(str(current.get("workDirectory") or ""), draft)
+        session.update({
+            "subtitleEnabled": True, "subtitleDraftId": draft_id,
+            "subtitleStyle": style, "agentSubtitleLayout": layout,
+            "revision": int(session.get("revision") or 0) + 1,
+            "renderedVersionId": None, "updatedAt": now_iso(),
+        })
+        current["updatedAt"] = now_iso()
+        save_job(current)
+    return {
+        "artifact": {
+            "kind": "subtitle_layout_applied", "jobId": job_id,
+            "sessionId": session_id, "subtitleDraftId": draft_id,
+            "layout": layout, "cueCount": len(cues),
+            "message": (
+                f"已在自动校对稿上应用 {len(cues)} 条字幕的{vertical}部布局；成片阶段仍可修改。"
+                if str(draft.get("status") or "") == "auto_reviewed" else
+                f"已在确认稿上应用 {len(cues)} 条字幕的{vertical}部布局。"
+            ),
+        },
+    }
+
+
+def _agent_tool_propose_broll_overlay(*, tool_name, arguments, job_id, no_result) -> dict[str, Any] | None:
+    query = str(arguments.get("query") or "").strip()
+    max_overlays = max(1, min(12, int(arguments.get("maxOverlays") or 6)))
+    with jobs_lock:
+        current = jobs.get(job_id)
+        session_id = str((current or {}).get("activeEditSessionId") or "")
+        session = find_edit_session(current, session_id) if current and session_id else None
+        search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
+        review = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
+        selected_ids = [str(value) for value in review.get("orderedMatchIds") or review.get("selectedMatchIds") or [] if str(value)]
+        candidates = {
+            str(item.get("id") or ""): item for item in search.get("candidates") or []
+            if isinstance(item, dict) and float(item.get("end") or 0) > float(item.get("start") or 0)
+        }
+        if not current or not session:
+            return {"actionRequired": True, "action": "timeline_confirmation", "message": "请先建立当前时间线，再添加辅助画面。"}
+        primary_clips = [item for item in session.get("clips") or [] if isinstance(item, dict)]
+        if not primary_clips:
+            return no_result("empty_timeline", "当前时间线为空，无法插入辅助画面。", query=query)
+        schedule = composition_schedule([
+            {"start": item.get("sourceStart"), "end": item.get("sourceEnd"), "playbackRate": item.get("playbackRate") or 1, "transitionIn": item.get("transitionIn") or {"type": "cut", "duration": 0}}
+            for item in primary_clips
+        ])
+        overlays = []
+        for index, match_id in enumerate(selected_ids[:max_overlays]):
+            candidate = candidates.get(match_id)
+            if not candidate:
+                continue
+            primary_index = min(index, len(primary_clips) - 1)
+            primary_id = str(primary_clips[primary_index].get("id") or "")
+            overlay_start = float(schedule[primary_index].get("outputStart") or 0) + .2
+            duration = min(2.5, max(.2, float(candidate.get("end") or 0) - float(candidate.get("start") or 0)))
+            overlays.append({
+                "id": f"broll_{uuid.uuid4().hex[:10]}", "primarySegmentId": primary_id,
+                "sourceStart": round(float(candidate.get("start") or 0), 3),
+                "sourceEnd": round(float(candidate.get("start") or 0) + duration, 3),
+                "outputOffset": round(overlay_start - float(schedule[primary_index].get("outputStart") or 0), 3),
+                "muted": True, "sourceRef": {"kind": "content_match", "id": match_id},
+                "title": str(candidate.get("title") or candidate.get("summary") or "辅助画面")[:100],
+            })
+        if not overlays:
+            return no_result("no_broll_candidates", "没有可用于辅助画面插入的已确认候选。", query=query, candidate_count=len(candidates))
+        session.setdefault("cutaways", [])
+        session["cutaways"].extend(overlays)
+        session["revision"] = int(session.get("revision") or 0) + 1
+        session["renderedVersionId"] = None
+        session["updatedAt"] = now_iso()
+        current["updatedAt"] = now_iso()
+        save_job(current)
+    return {"artifact": {"kind": "broll_overlay_plan", "jobId": job_id, "sessionId": session_id, "cutaways": overlays, "message": f"已加入 {len(overlays)} 个辅助画面插入点。"}}
+
+
+def _agent_tool_render_graphics_package(*, tool_name, arguments, job_id) -> dict[str, Any] | None:
+    text = str(arguments.get("text") or "").strip()[:500]
+    placement = str(arguments.get("placement") or "top").strip().lower()
+    vertical = "bottom" if placement in {"bottom", "底部", "下方"} else "middle" if placement in {"middle", "center"} else "top"
+    if not text:
+        text = "视频重点"
+    with jobs_lock:
+        current = jobs.get(job_id)
+        session_id = str((current or {}).get("activeEditSessionId") or "")
+        session = find_edit_session(current, session_id) if current and session_id else None
+        if not current or not session:
+            return {"actionRequired": True, "action": "timeline_confirmation", "message": "请先建立当前时间线，再添加图文包装。"}
+        duration = max(.5, float(session.get("duration") or 0))
+        layer = {
+            "id": f"edit_text_{uuid.uuid4().hex[:12]}", "text": text,
+            "start": 0.0, "end": min(duration, 5.0),
+            "style": normalize_subtitle_layout({
+                "preset": "bold", "vertical": vertical, "horizontal": "center",
+                "fontSizeRatio": .052 if vertical != "middle" else .060,
+            }, "bold"),
+            "source": "agent_graphics_package",
+        }
+        session.setdefault("textLayers", []).append(layer)
+        session["revision"] = int(session.get("revision") or 0) + 1
+        session["renderedVersionId"] = None
+        session["updatedAt"] = now_iso()
+        current["updatedAt"] = now_iso()
+        save_job(current)
+    return {"artifact": {"kind": "graphics_package_layer", "jobId": job_id, "sessionId": session_id, "textLayer": layer, "message": "已添加当前任务图文包装层。"}}
+
+
+def _agent_tool_render_motion_graphics(*, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    title = str(arguments.get("title") or "").strip()[:120] or "精彩内容"
+    subtitle = str(arguments.get("subtitle") or "").strip()[:220]
+    aspect = str(arguments.get("aspect") or "9:16").strip()
+    duration = max(0.5, min(8.0, float(arguments.get("duration") or 1.5)))
+    fps = 24
+    width, height = motion_canvas_size(aspect)
+    output_name = f"agent-motion-{aspect.replace(':', 'x')}-{uuid.uuid4().hex[:8]}.mp4"
+    work_root = Path(str(snapshot.get("workDirectory") or ""))
+    output_root = Path(str(snapshot.get("outputDirectory") or ""))
+    render_id = f"motion_{uuid.uuid4().hex[:12]}"
+    render_root = work_root / "local-motion" / render_id
+    html_path = render_root / "index.html"
+    frames_dir = render_root / "frames"
+    output_path = output_root / output_name
+    renderer_script = Path(__file__).resolve().parent.parent / "tools" / "render_html_motion.mjs"
+
+    def motion_worker() -> dict[str, Any]:
+        render_root.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(
+            build_motion_graphics_html(
+                title=title,
+                subtitle=subtitle,
+                label="ClipTalk",
+                aspect=aspect,
+                theme=str(arguments.get("theme") or "cliptalk"),
+            ),
+            encoding="utf-8",
+        )
+        render_html_motion_video(
+            html_path=html_path,
+            output_path=output_path,
+            frames_dir=frames_dir,
+            width=width,
+            height=height,
+            duration=duration,
+            fps=fps,
+            ffmpeg=settings.ffmpeg,
+            renderer_script=renderer_script,
+        )
+        rendered = probe_video(output_path, settings.ffprobe)
+        output = {
+            "filename": output_name,
+            "title": title,
+            "duration": round(rendered.duration, 3),
+            "width": rendered.width,
+            "height": rendered.height,
+            "hasAudio": rendered.has_audio,
+            "previewOnly": True,
+            "outputKind": "local_motion_graphics",
+            "motionGraphics": {
+                "renderer": "html-playwright-ffmpeg",
+                "aspect": aspect,
+                "duration": duration,
+                "title": title,
+            },
+        }
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                output_path.unlink(missing_ok=True)
+                raise RuntimeError("本地图文动效生成完成时任务已不存在")
+            normalize_output_versions(current)
+            current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
+            if current_version:
+                current_version.setdefault("previewOutputs", []).append(output)
+            else:
+                current.setdefault("agentPreviewOutputs", []).append(output)
+            current["lastAgentMotionGraphicsFilename"] = output_name
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "local_motion_graphics",
+                "jobId": job_id,
+                "output": {
+                    **output,
+                    "videoUrl": f"/api/jobs/{job_id}/outputs/{output_name}",
+                    "previewUrl": f"/api/jobs/{job_id}/outputs/{output_name}",
+                },
+                "message": "本地图文动效视频已生成。",
+            },
+        }
+
+    future = output_preview_executor.submit(motion_worker)
+    return {
+        "operationId": f"{job_id}:local_motion:{output_name}",
+        "operation": "local_motion_graphics", "accepted": True,
+        "future": future, "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_export_editing_draft(*, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    export_format = str(arguments.get("format") or "cliptalk-json").strip().lower()
+    if export_format not in {"cliptalk-json", "jianying-bridge"}:
+        export_format = "cliptalk-json"
+    with jobs_lock:
+        current_snapshot = copy.deepcopy(jobs.get(job_id) or snapshot)
+    has_content = bool(
+        current_snapshot.get("activeEditSessionId")
+        or current_snapshot.get("editSessions")
+        or current_snapshot.get("outputVersions")
+        or current_snapshot.get("outputs")
+    )
+    draft_name = f"editing-draft-{export_format}-{uuid.uuid4().hex[:8]}.json"
+    draft_path = Path(str(current_snapshot.get("outputDirectory") or snapshot.get("outputDirectory") or "")) / draft_name
+    write_editing_draft_package(current_snapshot, draft_path)
+    artifact = {
+        "kind": "editing_draft_package",
+        "jobId": job_id,
+        "format": export_format,
+        "filename": draft_name,
+        "downloadUrl": f"/api/jobs/{job_id}/draft-exports/{draft_name}",
+        "mode": "timeline" if has_content else "source-only",
+        "message": (
+            "已导出 ClipTalk 本地草稿包；当前不会直接写入剪映目录。"
+            if has_content
+            else "当前还没有时间线或成片，已导出仅包含源素材与任务元数据的本地草稿包。"
+        ),
+    }
+    with jobs_lock:
+        current = jobs.get(job_id)
+        if current:
+            current.setdefault("draftExports", []).append({
+                **artifact,
+                "createdAt": now_iso(),
+                "path": str(draft_path),
+            })
+            current["updatedAt"] = now_iso()
+            save_job(current)
+    return {"artifact": artifact}
+
+
+def _agent_tool_compose_motion_intro(*, tool_name, arguments, job_id, snapshot, current_output_reference) -> dict[str, Any] | None:
+    from .delivery_lineage import derive_lineage
+    filename = str(arguments.get("filename") or "").strip()
+    intro_filename = str(arguments.get("introFilename") or snapshot.get("lastAgentMotionGraphicsFilename") or "").strip()
+    if Path(intro_filename).name != intro_filename or not intro_filename:
+        return {"actionRequired": True, "action": "preview_generation", "message": "请先生成本地图文动效片头。"}
+    output, source_path = current_output_reference(filename)
+    intro_path = Path(str(snapshot.get("outputDirectory") or "")) / intro_filename
+    if source_path is None or not source_path.is_file():
+        return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可合入动态图文片头的成片。"}
+    if not intro_path.is_file():
+        return {"actionRequired": True, "action": "preview_generation", "message": "本地图文动效片头文件不存在，请重新生成。"}
+    target_name = f"motion-intro-{uuid.uuid4().hex[:8]}.mp4"
+    target_path = Path(str(snapshot.get("outputDirectory") or "")) / target_name
+
+    def compose_motion_worker() -> dict[str, Any]:
+        event = cancel_events.get(job_id)
+        media = compose_motion_intro_video(
+            intro_path=intro_path,
+            source_path=source_path,
+            output_path=target_path,
+            ffmpeg=settings.ffmpeg,
+            ffprobe=settings.ffprobe,
+            cancelled=event.is_set if event else None,
+        )
+        with jobs_lock:
+            if event and event.is_set():
+                raise RuntimeError("动态图文片头合成已停止，保留已有版本")
+            current = jobs.get(job_id)
+            if not current:
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("动态图文片头合成完成时任务已不存在")
+            normalize_output_versions(current)
+            current_output, current_version, _position = output_download_context(current, str((output or {}).get("filename") or filename or source_path.name)) or ({}, {}, 0)
+            version_id, version_number = next_output_version(current)
+            new_output = copy.deepcopy(current_output or output or {})
+            source_is_preview = bool(new_output.get("previewOnly"))
+            new_output.update(derive_lineage(new_output, "compose_motion_intro", prepend_seconds=float(media["introDuration"])))
+            new_output.update({
+                "filename": target_name,
+                "title": f"{str((current_output or output or {}).get('title') or '成片')}（动态图文片头）",
+                "duration": float(media["duration"]),
+                "width": int(media["width"]),
+                "height": int(media["height"]),
+                "hasAudio": bool(media["hasAudio"]),
+                "previewOnly": source_is_preview,
+                "versionId": version_id,
+                "versionNumber": version_number,
+                "versionCreatedAt": now_iso(),
+                "motionIntro": {
+                    "enabled": True,
+                    "introFilename": intro_filename,
+                    "introDuration": float(media["introDuration"]),
+                    "sourceFilename": str((current_output or output or {}).get("filename") or source_path.name),
+                },
+            })
+            new_version = {
+                "id": version_id,
+                "number": version_number,
+                "createdAt": now_iso(),
+                "outputs": [new_output],
+                "previewOnly": source_is_preview,
+                "variantKind": "motion_intro_preview" if source_is_preview else "motion_intro_export",
+                "parentVersionId": str((current_version or {}).get("id") or current.get("currentOutputVersionId") or ""),
+            }
+            current.setdefault("outputVersions", []).append(new_version)
+            current["currentOutputVersionId"] = version_id
+            current["outputs"] = [new_output]
+            current.update({
+                "status": "completed", "stage": "completed", "progress": 1.0,
+                "stageProgress": 1.0, "progressMode": "completed",
+                "detail": "动态图文片头审核样片已生成" if source_is_preview else "动态图文片头成片已生成",
+                "currentAction": "动态图文片头审核样片已生成" if source_is_preview else "动态图文片头成片已生成",
+                "error": None, "updatedAt": now_iso(),
+            })
+            _sync_output_manifest(current)
+            save_job(current)
+        return {
+            "artifact": {
+                "kind": "motion_intro_output",
+                "jobId": job_id,
+                "output": {
+                    **new_output,
+                    "videoUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
+                    "previewUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
+                },
+                "message": "已生成带动态图文片头的审核样片，尚非正式导出。" if source_is_preview else "已生成带本地图文动效片头的新成片版本。",
+            },
+        }
+
+    future = output_preview_executor.submit(compose_motion_worker)
+    return {
+        "operationId": f"{job_id}:compose_motion_intro:{target_name}",
+        "operation": "compose_motion_intro", "accepted": True,
+        "future": future, "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_render_social_preview(*, workspace, tool_name, arguments, job_id, autonomous, snapshot) -> dict[str, Any] | None:
+    from .delivery_lineage import derive_lineage
+    filename = str(arguments.get("filename") or "").strip()
+    aspect = str(arguments.get("aspect") or "9:16").strip()
+    fit = str(arguments.get("fit") or "blur").strip().lower()
+    focus_x = max(0.0, min(1.0, float(arguments.get("focusX", .5))))
+    focus_y = max(0.0, min(1.0, float(arguments.get("focusY", .5))))
+    available = [item for item in all_job_outputs(snapshot) if isinstance(item, dict) and item.get("filename")]
+    if filename:
+        source_output = next((item for item in available if str(item.get("filename")) == filename), None)
+        if not source_output:
+            raise RuntimeError("指定的审核样片或版本不存在，未改用其他视频")
+    else:
+        source_output = next((item for item in reversed(available) if not item.get("socialReframe")), None)
+    source_path: Path | None = None
+    source_session: dict[str, Any] | None = None
+    source_filename = ""
+    if source_output:
+        source_filename = str(source_output["filename"])
+        if Path(source_filename).name != source_filename:
+            raise RuntimeError("成片文件名无效")
+        source_path = Path(str(snapshot.get("outputDirectory") or "")) / source_filename
+        linked_session_id = str(
+            source_output.get("sourceEditSessionId")
+            or source_output.get("editSessionId")
+            or source_output.get("sessionId")
+            or ""
+        )
+        source_session = next((
+            item for item in snapshot.get("editSessions") or []
+            if str(item.get("id") or "") == linked_session_id
+        ), None)
+        if not source_path.is_file() and source_session and str(source_session.get("previewPath") or ""):
+            candidate_path = Path(source_session["previewPath"])
+            if candidate_path.name == source_filename and candidate_path.is_file():
+                source_path = candidate_path
+    elif autonomous:
+        batch = snapshot.get("agentTimelineBatch") if isinstance(snapshot.get("agentTimelineBatch"), dict) else {}
+        first = next((item for item in batch.get("variants") or [] if isinstance(item, dict)), None)
+        source_session = next((
+            item for item in snapshot.get("editSessions") or []
+            if first and str(item.get("id") or "") == str(first.get("sessionId") or "")
+        ), None)
+        candidate_path = Path(str((source_session or {}).get("previewPath") or ""))
+        if candidate_path.is_file():
+            source_path = candidate_path
+            source_filename = candidate_path.name
+    if not source_output:
+        if source_path is None:
+            return {
+                "actionRequired": True,
+                "action": "preview_generation",
+                "message": "当前没有可用于画幅重构的审核样片。",
+            }
+    if source_path is None or not source_path.is_file():
+        raise RuntimeError("画幅重构所需的成片文件不存在")
+    aspect_slug = aspect.replace(":", "x")
+    preview_filename = f"agent-social-{aspect_slug}-{uuid.uuid4().hex[:8]}.mp4"
+    preview_path = Path(str(snapshot.get("outputDirectory") or "")) / preview_filename
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    source_session_id = str((source_session or {}).get("id") or "")
+    source_session_revision = int((source_session or {}).get("revision") or 0)
+    source_session_fingerprint = (
+        _edit_session_preview_fingerprint(snapshot, source_session)
+        if source_session else ""
+    )
+
+    def render_social_worker() -> dict[str, Any]:
+        source_info = probe_video(source_path, settings.ffprobe)
+        rendered = create_social_reframe_preview(
+            source_path, preview_path, aspect=aspect, fit=fit,
+            focus_x=focus_x, focus_y=focus_y, has_audio=source_info.has_audio,
+            ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
+        )
+        fit_label = "虚化背景" if fit == "blur" else "留边" if fit == "pad" else "裁切"
+        output = {
+            "filename": preview_filename, "title": f"{aspect} {fit_label}审核预览",
+            "duration": round(rendered.duration, 3), "width": rendered.width,
+            "height": rendered.height, "previewOnly": True,
+            "outputKind": "social_reframe_preview", "socialReframe": True,
+            "sourceOutputFilename": source_filename,
+            "sourceEditSessionId": str((source_session or {}).get("id") or ""),
+            "reframe": {"aspect": aspect, "fit": fit, "focusX": focus_x, "focusY": focus_y},
+            "segments": copy.deepcopy(
+                (source_output or {}).get("segments")
+                or (source_session or {}).get("clips") or []
+            ),
+            "subtitleMode": (
+                (source_output or {}).get("subtitleMode")
+                or ("burn" if (source_session or {}).get("subtitleEnabled") else "none")
+            ),
+            "overlayVerification": copy.deepcopy(
+                (source_output or {}).get("overlayVerification")
+                or (source_session or {}).get("previewOverlayVerification")
+                or {}
+            ),
+            "reason": (
+                "完整保留原画面，并使用同画面虚化背景填充社媒画布。"
+                if fit == "blur" else
+                "完整保留原画面并使用留边填充社媒画布。"
+                if fit == "pad" else
+                "按指定焦点裁切为社媒画幅。"
+            ),
+        }
+        output.update(derive_lineage(source_output or {}, "render_social_preview"))
+        output["planId"] = workspace.get("activePlanId")
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                preview_path.unlink(missing_ok=True)
+                raise RuntimeError("画幅预览完成时素材任务已不存在")
+            normalize_output_versions(current)
+            live_session = next((
+                item for item in current.get("editSessions") or []
+                if str(item.get("id") or "") == source_session_id
+            ), None)
+            session_is_current = bool(
+                live_session
+                and int(live_session.get("revision") or 0) == source_session_revision
+                and _edit_session_preview_fingerprint(current, live_session) == source_session_fingerprint
+            )
+            current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
+            if current_version:
+                current_version.setdefault("previewOutputs", []).append(output)
+            else:
+                current.setdefault("agentPreviewOutputs", []).append(output)
+            current["lastAgentSocialPreviewFilename"] = preview_filename
+            if session_is_current and live_session:
+                live_session["reframe"] = copy.deepcopy(output["reframe"])
+                reframe_fingerprint = _edit_session_preview_fingerprint(current, live_session)
+                live_session.update({
+                    "previewStatus": "ready",
+                    "previewRevision": source_session_revision,
+                    "previewFingerprint": reframe_fingerprint,
+                    "previewPath": str(preview_path),
+                    "previewUrl": f"/api/jobs/{job_id}/edit-sessions/{source_session_id}/preview?r={source_session_revision}",
+                    "previewError": None,
+                    "renderPlanFingerprint": reframe_fingerprint,
+                    "previewOverlayVerification": {
+                        **copy.deepcopy(output.get("overlayVerification") or {}),
+                        "renderPipelineVersion": 3,
+                        "reframe": copy.deepcopy(output["reframe"]),
+                    },
+                    "updatedAt": now_iso(),
+                })
+            current["updatedAt"] = now_iso()
+            save_job(current)
+            public_output = {
+                **copy.deepcopy(output),
+                "videoUrl": f"/api/jobs/{job_id}/outputs/{preview_filename}",
+                "previewUrl": f"/api/jobs/{job_id}/outputs/{preview_filename}",
+            }
+        return {
+            "artifact": {
+                "kind": "social_reframe_preview", "jobId": job_id,
+                "output": public_output,
+                "message": "社媒画幅审核预览已生成。",
+            },
+        }
+
+    future = output_preview_executor.submit(render_social_worker)
+    return {
+        "operationId": f"{job_id}:social_reframe:{preview_filename}",
+        "operation": "social_reframe_preview", "accepted": True, "future": future,
+        "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_polish_audio_mix(*, tool_name, arguments, job_id, snapshot, no_result, current_output_reference) -> dict[str, Any] | None:
+    from .delivery_contract import audio_filters
+    from .media import _run_cancellable
+    filename = str(arguments.get("filename") or "").strip()
+    default_normalize = not any(key in arguments for key in ("gainDb", "mute", "noiseReduction"))
+    audio_operations = {"noiseReduction": bool(arguments.get("noiseReduction", False)),
+                        "normalizeLoudness": bool(arguments.get("normalizeLoudness", arguments.get("voiceFirst", default_normalize))),
+                        "gainDb": arguments.get("gainDb", 0), "mute": bool(arguments.get("mute", False))}
+    filters = audio_filters(audio_operations)
+    output, source_path = current_output_reference(filename)
+    if source_path is None or not source_path.is_file():
+        return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于音频优化的成片或审核样片。"}
+    output_name = f"agent-audio-polish-{uuid.uuid4().hex[:8]}.mp4"
+    target_path = Path(str(snapshot.get("outputDirectory") or "")) / output_name
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def audio_polish_worker() -> dict[str, Any]:
+        from .delivery_lineage import derive_lineage
+        info = probe_video(source_path, settings.ffprobe)
+        if not info.has_audio:
+            return no_result("missing_audio", "当前输出没有音轨，无法进行音频优化。", candidate_count=1)
+        temporary = target_path.with_suffix(".tmp.mp4")
+        temporary.unlink(missing_ok=True)
+        event = cancel_events.get(job_id)
+        _run_cancellable([
+            settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source_path), "-map", "0:v:0", "-map", "0:a:0",
+            "-c:v", "copy", "-af", ",".join(filters),
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+            str(temporary),
+        ], cancelled=event.is_set if event else None, timeout=max(180.0, info.duration * 3.0))
+        if event and event.is_set():
+            raise RuntimeError("本次音频处理已停止，保留已有版本")
+        temporary.replace(target_path)
+        rendered = probe_video(target_path, settings.ffprobe)
+        public_output = {
+            **copy.deepcopy(output or {}),
+            **derive_lineage(output or {}, "polish_audio_mix"),
+            "filename": output_name, "title": "音频优化审核版本",
+            "duration": round(rendered.duration, 3), "width": rendered.width,
+            "height": rendered.height, "hasAudio": rendered.has_audio,
+            "previewOnly": True, "outputKind": "audio_polish_preview",
+            "sourceOutputFilename": str((output or {}).get("filename") or source_path.name),
+            "audioPolish": audio_operations,
+        }
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current:
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("音频优化完成时任务已不存在")
+            normalize_output_versions(current)
+            current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
+            if current_version:
+                current_version.setdefault("previewOutputs", []).append(public_output)
+            else:
+                current.setdefault("agentPreviewOutputs", []).append(public_output)
+            current["lastAgentAudioPolishFilename"] = output_name
+            current["updatedAt"] = now_iso()
+            save_job(current)
+        return {"artifact": {"kind": "audio_polish_preview", "jobId": job_id, "output": {**public_output, "previewUrl": f"/api/jobs/{job_id}/outputs/{output_name}", "videoUrl": f"/api/jobs/{job_id}/outputs/{output_name}"}, "message": "音频优化审核版本已生成。"}}
+
+    future = output_preview_executor.submit(audio_polish_worker)
+    return {
+        "operationId": f"{job_id}:audio_polish:{output_name}",
+        "operation": "audio_polish_preview", "accepted": True,
+        "future": future, "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_export_subtitles(*, tool_name, arguments, job_id, no_result, current_output_reference) -> dict[str, Any] | None:
+    filename = str(arguments.get("filename") or "").strip()
+    fmt = str(arguments.get("format") or "srt").lower()
+    if fmt not in {"srt", "vtt"}:
+        raise RuntimeError("字幕格式仅支持 srt 或 vtt")
+    output, _source_path = current_output_reference(filename)
+    if not output or not output.get("filename"):
+        return {"actionRequired": True, "action": "select_output", "message": "当前没有可导出字幕的成片或审核样片。"}
+    output_filename = str(output.get("filename") or "")
+    with jobs_lock:
+        current = jobs.get(job_id)
+        if not current:
+            raise RuntimeError("任务不存在")
+        context = output_download_context(current, output_filename)
+        if not context:
+            return no_result("missing_output", "当前成片不存在，无法导出字幕。", artifact_kind="subtitle_export")
+        checked_output, version, position = context
+        frozen_cues = checked_output.get("subtitleCues") if isinstance(checked_output.get("subtitleCues"), list) else None
+        draft_id = str(checked_output.get("subtitleDraftId") or version.get("subtitleDraftId") or "")
+        draft = _subtitle_draft_for_job(current, draft_id) if draft_id and frozen_cues is None else None
+        cues = (
+            copy.deepcopy(frozen_cues) if frozen_cues is not None else ([
+                copy.deepcopy(cue) for cue in (draft.get("cues") or [])
+                if int(cue.get("outputIndex") or 0) == position - 1 and str(cue.get("text") or "").strip()
+            ] if draft else _subtitle_cues(current, checked_output))
+        )
+    if not cues:
+        return no_result("missing_subtitles", "当前成片没有可用对白字幕，无法导出字幕文件。", artifact_kind="subtitle_export")
+    download_url = f"/api/jobs/{job_id}/outputs/{quote(output_filename)}/subtitles?format={fmt}"
+    return {
+        "artifact": {
+            "kind": "subtitle_export",
+            "jobId": job_id,
+            "filename": output_filename,
+            "format": fmt,
+            "downloadUrl": download_url,
+            "cueCount": len(cues),
+            "message": f"已准备 {fmt.upper()} 字幕下载链接；没有生成或修改视频。",
+        },
+    }
+
+
+def _agent_tool_deliver_current_plan(*, workspace, tool_name) -> dict[str, Any] | None:
+    from . import main as runtime
+    from .automatic_delivery_runtime import prepare_delivery
+    plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
+    return prepare_delivery(runtime, workspace, plan)
+
+
+def _agent_tool_export_delivery_master(*, tool_name, arguments, job_id, snapshot, current_output_reference) -> dict[str, Any] | None:
+    filename = str(arguments.get("filename") or "").strip()
+    output, source_path = current_output_reference(filename)
+    if source_path is None or not source_path.is_file():
+        return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于正式交付的成片或审核样片。"}
+    if (output or {}).get("previewOnly"):
+        return {"actionRequired": True, "action": "preview_generation",
+                "message": "当前文件是审核样片，不能直接改为正式成片。请选择当前预览并使用自动完成，从源素材生成正式文件。"}
+    platform_name = re.sub(r"[^A-Za-z0-9_-]+", "-", str(arguments.get("platform") or "generic")).strip("-") or "generic"
+    export_name = f"delivery-{platform_name}-{uuid.uuid4().hex[:8]}.mp4"
+    target_path = Path(str(snapshot.get("outputDirectory") or "")) / export_name
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def export_worker() -> dict[str, Any]:
+        from .delivery_lineage import derive_lineage
+        requested_aspect = str(arguments.get("aspect") or "").strip()
+        if requested_aspect not in {"", "16:9", "9:16", "1:1", "4:5"}:
+            raise RuntimeError("不支持该导出画幅，未将原视频冒充为目标画幅")
+        source_info = probe_video(source_path, settings.ffprobe)
+        if requested_aspect and aspect_check(source_info.width, source_info.height, requested_aspect):
+            raise RuntimeError("当前正式成片与目标画幅不符，请先完成画幅调整再导出；未仅修改文件标签")
+        event = cancel_events.get(job_id)
+        if event and event.is_set():
+            raise RuntimeError("导出已停止，原版本保持不变")
+        with jobs_lock:
+            current = jobs.get(job_id)
+            if not current or current.get("currentOutputVersionId") != snapshot.get("currentOutputVersionId"):
+                raise RuntimeError("当前成片版本已变化，未导出旧选择")
+        shutil.copy2(source_path, target_path)
+        rendered = probe_video(target_path, settings.ffprobe)
+        with jobs_lock:
+            event = cancel_events.get(job_id)
+            if event and event.is_set():
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("导出已停止，未提交新版本")
+            current = jobs.get(job_id)
+            if not current:
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("正式交付完成时任务已不存在")
+            if current.get("currentOutputVersionId") != snapshot.get("currentOutputVersionId"):
+                target_path.unlink(missing_ok=True)
+                raise RuntimeError("当前成片版本已变化，未覆盖新选择")
+            version_id, version_number = next_output_version(current)
+            new_output = {
+                **copy.deepcopy(output or {}),
+                **derive_lineage(output or {}, "export_delivery_master"),
+                "filename": export_name, "title": f"{platform_name} 正式交付版",
+                "duration": round(rendered.duration, 3), "width": rendered.width,
+                "height": rendered.height, "hasAudio": rendered.has_audio,
+                "previewOnly": False, "outputKind": "delivery_master",
+                "sourceOutputFilename": str((output or {}).get("filename") or source_path.name),
+                "versionId": version_id, "versionNumber": version_number,
+                "versionCreatedAt": now_iso(),
+                "delivery": {"platform": platform_name, "aspect": str(arguments.get("aspect") or "")},
+            }
+            new_version = {
+                "id": version_id, "number": version_number, "createdAt": now_iso(),
+                "outputs": [new_output], "previewOnly": False,
+                "variantKind": "delivery_master",
+                "parentVersionId": str((output or {}).get("versionId") or current.get("currentOutputVersionId") or ""),
+            }
+            current.setdefault("outputVersions", []).append(new_version)
+            current["currentOutputVersionId"] = version_id
+            current["outputs"] = [new_output]
+            current.update({
+                "status": "completed", "stage": "completed", "progress": 1.0,
+                "stageProgress": 1.0, "progressMode": "completed",
+                "detail": "正式交付版本已生成", "currentAction": "正式交付版本已生成",
+                "error": None, "updatedAt": now_iso(),
+            })
+            _sync_output_manifest(current)
+            save_job(current)
+        return {"artifact": {"kind": "delivery_master", "jobId": job_id, "output": {**new_output, "videoUrl": f"/api/jobs/{job_id}/outputs/{export_name}"}, "message": "正式交付版本已生成。"}}
+
+    future = output_preview_executor.submit(export_worker)
+    return {
+        "operationId": f"{job_id}:delivery_export:{export_name}",
+        "operation": "delivery_master_export", "accepted": True,
+        "future": future, "cancel": lambda: cancel_job(job_id),
+    }
+
+
+def _agent_tool_run_delivery_qc(*, workspace, tool_name, arguments, job_id, snapshot) -> dict[str, Any] | None:
+    filename = str(arguments.get("filename") or "").strip()
+    strict = bool(arguments.get("strict", False))
+    raw_target_seconds = arguments.get("targetSeconds")
+    expected_aspect = str(arguments.get("expectedAspect") or "")
+    brief = snapshot.get("brief") if isinstance(snapshot.get("brief"), dict) else {}
+    cover_intro_required = bool(arguments.get("requireCoverIntro") or brief.get("coverIntroRequested"))
+    target_seconds = (
+        max(0.0, float(raw_target_seconds))
+        if isinstance(raw_target_seconds, (int, float)) and not isinstance(raw_target_seconds, bool)
+        else None
+    )
+    tolerance_seconds = max(0.0, float(arguments.get("toleranceSeconds") or 0))
+    available = [item for item in all_job_outputs(snapshot) if isinstance(item, dict) and item.get("filename")]
+    delivered = snapshot.get("automaticDelivery") or {}
+    delivery_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
+    if isinstance(delivery_plan.get("brief"), dict):
+        # A follow-up's QC must not resurrect requirements from the task's
+        # older brief (e.g. requiring the old cover before a new motion intro).
+        brief = delivery_plan["brief"]
+        cover_intro_required = bool(arguments.get("requireCoverIntro") or brief.get("coverIntroRequested"))
+    delivery_is_current = any(step.get("tool") == "deliver_current_plan" and step.get("status") == "completed"
+                              for step in delivery_plan.get("steps", []))
+    if (workspace.get("executionMode") == "automatic_delivery"
+            and delivered.get("planId") == workspace.get("activePlanId") and delivered.get("outputs")
+            and delivery_is_current and not filename):
+        selected = copy.deepcopy(delivered["outputs"])
+    elif filename:
+        selected = [item for item in available if str(item.get("filename")) == filename]
+    else:
+        preferred_value = (
+            snapshot.get("lastAgentCoverIntroPreviewFilename")
+            if cover_intro_required else
+            snapshot.get("lastAgentSocialPreviewFilename")
+            or snapshot.get("lastAgentCoverIntroPreviewFilename")
+        )
+        preferred = str(preferred_value or "")
+        selected = [item for item in available if str(item.get("filename")) == preferred]
+        if not selected:
+            selected = available[-1:] if available else []
+    if not selected:
+        return {
+            "actionRequired": True,
+            "action": "preview_generation",
+            "message": "当前没有可检查的成片，请先完成一个审核样片或正式输出。",
+        }
+
+    subtitle_required = bool(
+        brief.get("subtitleRequested")
+        or str(brief.get("subtitlePreference") or "").strip().lower()
+        not in {"", "none", "off", "false"}
+    )
+    graphics_required = bool(brief.get("graphicsRequested"))
+    cover_required = bool(arguments.get("requireCover") or brief.get("coverRequested"))
+    current_cover_id = str(snapshot.get("currentCoverVersionId") or "")
+    current_cover = next((
+        value for value in snapshot.get("coverVersions") or []
+        if isinstance(value, dict) and str(value.get("id") or "") == current_cover_id
+    ), None)
+    cover_draft = snapshot.get("coverDraft") if isinstance(snapshot.get("coverDraft"), dict) else {}
+    required_cover_title = str(arguments.get("expectedCoverTitle") or brief.get("coverTitle") or cover_draft.get("titleText") or "").strip()
+
+    def deliverable_issue(code: str, message: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "severity": "error", "code": code, "message": message,
+            "evidence": copy.deepcopy(evidence),
+        }
+
+    def delivery_qc_worker() -> dict[str, Any]:
+        reports: list[dict[str, Any]] = []
+        for item in selected:
+            selected_filename = str(item["filename"])
+            if Path(selected_filename).name != selected_filename:
+                raise RuntimeError("成片文件名无效")
+            media_path = Path(str(snapshot.get("outputDirectory") or "")) / selected_filename
+            if not media_path.is_file():
+                raise RuntimeError(f"成片文件不存在：{selected_filename}")
+            expected = item.get("duration")
+            report = analyze_rendered_media(
+                media_path, ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
+                expected_duration=float(expected) if isinstance(expected, (int, float)) else None,
+                expect_audio=None,
+            )
+            report["filename"] = selected_filename
+            report.pop("path", None)
+            aspect_issue = aspect_check((report.get("media") or {}).get("width"),
+                                        (report.get("media") or {}).get("height"), expected_aspect)
+            report["aspectCheck"] = {"expectedAspect": expected_aspect or None,
+                                     "status": aspect_issue["status"] if aspect_issue else "passed" if expected_aspect else "not_requested"}
+            if aspect_issue:
+                report.setdefault("issues", []).append(aspect_issue)
+                report["passed"] = False
+            source_session_id = str(item.get("sourceEditSessionId") or item.get("sessionId") or item.get("editSessionId") or "")
+            source_session = item.get("deliveryTimeline") or next((s for s in snapshot.get("editSessions") or [] if str(s.get("id")) == source_session_id), None)
+            if source_session is None and any(s.get("sourceContentContract") for s in item.get("segments") or []):
+                source_segments = copy.deepcopy(item["segments"])
+                source_session = {
+                    "id": f"qc_{uuid.uuid4().hex[:12]}",
+                    "contentBinding": selection_binding({"id": selected_filename, "recordType": "assembly",
+                        "basketSnapshot": {"outputFilename": selected_filename}}, source_segments),
+                    "clips": [{"id": s["id"], "sourceRef": {"id": s["id"]},
+                               "sourceStart": s["start"], "sourceEnd": s["end"],
+                               "playbackRate": s.get("playbackRate", 1), "transitionIn": s.get("transitionIn")}
+                              for s in source_segments],
+                }
+                refresh_edit_session(source_session, snapshot)
+            if source_session:
+                from .delivery_lineage import mapped_session
+                source_session = mapped_session(source_session, item)
+                content_report = _check_rendered_content(snapshot, source_session, media_path)
+                report["contentVerification"] = content_report
+                report.setdefault("issues", []).extend(content_report["issues"])
+                if not content_report["passed"]:
+                    report["passed"] = False
+            overlay = item.get("overlayVerification") if isinstance(item.get("overlayVerification"), dict) else {}
+            overlay_verified = bool(
+                overlay.get("applied")
+                and int(overlay.get("renderPipelineVersion") or 0) >= 2
+            )
+            subtitle_ready = bool(overlay_verified and int(overlay.get("subtitleCueCount") or 0) > 0)
+            motion_graphics = item.get("motionGraphics") or {}
+            graphics_ready = bool(
+                (overlay_verified and int(overlay.get("textLayerCount") or 0) > 0)
+                or (motion_graphics.get("renderer") == "html-playwright-ffmpeg" and motion_graphics.get("title"))
+            )
+            cover_title_ready = bool(
+                current_cover
+                and (
+                    not required_cover_title
+                    or (
+                        str(current_cover.get("titleText") or "").strip() == required_cover_title
+                        and bool(current_cover.get("titleLines"))
+                    )
+                )
+            )
+            cover_source = cover_draft.get("source") if isinstance(cover_draft.get("source"), dict) else {}
+            cover_source_ready = bool(
+                current_cover
+                and (
+                    str(cover_source.get("kind") or "") != "accepted_timeline"
+                    or (
+                        bool(str(cover_source.get("editSessionId") or ""))
+                        and bool(current_cover.get("evidenceRefs"))
+                    )
+                )
+            )
+            cover_ready = bool(current_cover and cover_title_ready and cover_source_ready)
+            cover_intro = item.get("coverIntro") if isinstance(item.get("coverIntro"), dict) else {}
+            cover_intro_ready = bool(
+                cover_intro.get("enabled")
+                and current_cover_id
+                and str(cover_intro.get("coverVersionId") or "") == current_cover_id
+            )
+            cover_frame_check = {"status": "not_requested"}
+            if cover_intro_required and cover_intro_ready:
+                try:
+                    confirmed_cover_path = cover_version_path(snapshot, current_cover)
+                except Exception:
+                    confirmed_cover_path = None
+                qc_event = cancel_events.get(job_id)
+                cover_frame_check = verify_cover_intro_frame(media_path, confirmed_cover_path,
+                    ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe, cancelled=qc_event.is_set if qc_event else None)
+                if cover_frame_check["status"] == "mismatch":
+                    cover_intro_ready = False
+                elif cover_frame_check["status"] == "unknown":
+                    report.setdefault("issues", []).append({"severity": "warning", "status": "unknown",
+                        "code": "cover_intro_visual_unverified", "message": "封面片头实际画面尚未确认",
+                        "evidence": cover_frame_check})
+                    report["passed"] = False
+            report["deliverables"] = {
+                "subtitle": {"required": subtitle_required, "passed": subtitle_ready, "verification": copy.deepcopy(overlay)},
+                "graphicsText": {"required": graphics_required, "passed": graphics_ready, "verification": copy.deepcopy(overlay)},
+                "cover": {
+                    "required": cover_required, "passed": cover_ready,
+                    "currentCoverVersionId": current_cover_id or None,
+                    "requiredTitle": required_cover_title or None,
+                    "actualTitle": str((current_cover or {}).get("titleText") or "") or None,
+                    "sourceKind": str(cover_source.get("kind") or "") or None,
+                },
+                "coverIntro": {
+                    "required": cover_intro_required, "passed": cover_intro_ready and cover_frame_check["status"] != "unknown",
+                    "visualVerification": cover_frame_check,
+                    "currentCoverVersionId": current_cover_id or None,
+                    "outputCoverVersionId": str(cover_intro.get("coverVersionId") or "") or None,
+                },
+            }
+            if subtitle_required and not subtitle_ready:
+                report.setdefault("issues", []).append(deliverable_issue(
+                    "requested_subtitles_not_rendered",
+                    "任务要求字幕，但成片没有可验证的已烧录字幕。",
+                    report["deliverables"]["subtitle"],
+                ))
+                report["passed"] = False
+            if graphics_required and not graphics_ready:
+                report.setdefault("issues", []).append(deliverable_issue(
+                    "requested_text_not_rendered",
+                    "任务要求添加文字，但成片没有可验证的已渲染文字图层。",
+                    report["deliverables"]["graphicsText"],
+                ))
+                report["passed"] = False
+            if cover_required and not cover_ready:
+                report.setdefault("issues", []).append(deliverable_issue(
+                    "requested_cover_not_validated",
+                    "任务要求封面，但当前封面未通过标题、来源或版本校验。",
+                    report["deliverables"]["cover"],
+                ))
+                report["passed"] = False
+            if cover_intro_required and not cover_intro_ready:
+                report.setdefault("issues", []).append(deliverable_issue(
+                    "requested_cover_intro_not_rendered",
+                    "任务要求把封面作为片头，但当前成片未绑定并合入本任务的封面版本。",
+                    report["deliverables"]["coverIntro"],
+                ))
+                report["passed"] = False
+            if target_seconds:
+                actual_seconds = float((report.get("media") or {}).get("duration") or 0)
+                minimum_seconds = max(0.0, target_seconds - tolerance_seconds)
+                maximum_seconds = target_seconds + tolerance_seconds
+                duration_passed = minimum_seconds <= actual_seconds <= maximum_seconds
+                report["targetDuration"] = {
+                    "targetSeconds": round(target_seconds, 3),
+                    "toleranceSeconds": round(tolerance_seconds, 3),
+                    "minimumSeconds": round(minimum_seconds, 3),
+                    "maximumSeconds": round(maximum_seconds, 3),
+                    "actualSeconds": round(actual_seconds, 3),
+                    "passed": duration_passed,
+                }
+                if not duration_passed:
+                    report.setdefault("issues", []).append({
+                        "severity": "error",
+                        "code": "target_duration_mismatch",
+                        "message": (
+                            f"成片时长 {actual_seconds:.2f} 秒不在目标范围 "
+                            f"{minimum_seconds:.2f}–{maximum_seconds:.2f} 秒内。"
+                        ),
+                        "evidence": copy.deepcopy(report["targetDuration"]),
+                    })
+                    report["passed"] = False
+            report["strictPassed"] = bool(report["passed"]) and (
+                not strict or not any(issue.get("severity") == "warning" for issue in report["issues"])
+            )
+            reports.append(report)
+        current_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
+        repair = quality_repair_plan({"reports": reports}, current_plan.get("steps") or [], current_plan.get("inputContext"))
+        return {
+            "artifact": {
+                "kind": "delivery_qc_report", "jobId": job_id,
+                "passed": all(report["strictPassed"] if strict else report["passed"] for report in reports),
+                "strict": strict, "reports": reports, "repair": repair,
+            },
+        }
+
+    future = output_preview_executor.submit(delivery_qc_worker)
+    return {
+        "operationId": f"{job_id}:delivery_qc", "operation": "delivery_qc",
+        "accepted": True, "future": future,
+        "cancel": lambda: cancel_job(job_id),
+    }
+
+
 def dispatch_agent_tool(
     workspace: dict[str, Any], tool_name: str, arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Bind approved Agent tools to the current workspace without exposing paths."""
     job_id = str(workspace.get("jobId") or "")
-    autonomous = str(workspace.get("executionMode") or "stepwise_review") == "autonomous_review"
+    autonomous = str(workspace.get("executionMode") or "stepwise_review") in {"autonomous_review", "automatic_delivery"}
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
             raise RuntimeError("工作区绑定的素材任务不存在")
         snapshot = copy.deepcopy(job)
+
+    active_request = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) if workspace.get("activePlanId") else None
+    if active_request and isinstance(active_request.get("brief"), dict):
+        # Handoffs need not persist the plan brief on the child job. Requirements
+        # must come from the active approved plan, never an old/missing job brief.
+        snapshot["brief"] = copy.deepcopy(active_request["brief"])
 
     def no_result(
         reason_code: str, message: str, *, query: str = "",
@@ -34617,2689 +37905,68 @@ def dispatch_agent_tool(
         if direct_path.is_file():
             return output, direct_path
         return output, None
-
     if tool_name == "inspect_workspace":
-        required_state = str(arguments.get("requiredState") or "")
-        if required_state:
-            reason_code = str(arguments.get("preconditionCode") or "missing_precondition")
-            message = str(arguments.get("preconditionMessage") or "当前任务不满足所选编辑能力的前置条件")
-            has_timeline = bool(snapshot.get("activeEditSessionId"))
-            has_output = bool(snapshot.get("outputs"))
-            has_external_cover_asset = bool(snapshot.get("externalCoverAsset"))
-            satisfied = (
-                (required_state == "active_timeline" and has_timeline)
-                or (required_state == "current_output" and has_output)
-                or (required_state == "external_cover_asset" and has_external_cover_asset)
-            )
-            if required_state == "compatible_request" or not satisfied:
-                next_step = "先在当前任务生成并确认成片" if required_state == "current_output" else "先在当前任务建立并确认时间线"
-                if required_state == "compatible_request":
-                    next_step = "修改目标或改用适合源素材检索与剪辑的 Skill"
-                elif required_state == "external_cover_asset":
-                    next_step = "修改封面要求，改用本次视频中的画面"
-                return no_result(
-                    reason_code, f"前置条件未满足：{message}",
-                    artifact_kind="precondition_missing",
-                    suggestions=[next_step, "确认当前工作区绑定的是本次任务", "不要复用其他任务产物"],
-                )
-        public = public_job(snapshot)
-        return {
-            "artifact": {
-                "kind": "workspace_snapshot", "jobId": job_id,
-                "status": public.get("status"), "stage": public.get("stage"),
-                "duration": public.get("duration"), "workflowKind": workflow_kind_for_job(snapshot),
-                "candidateCount": len(public.get("candidates") or []),
-                "outputCount": len(public.get("outputs") or []),
-            },
-        }
+        return _agent_tool_inspect_workspace(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot, no_result=no_result)
     if tool_name == "validate_task_provenance":
-        public = public_job(snapshot)
-        editing = agent_planning_context(job_id).get("editing") if job_id else {}
-        issues: list[dict[str, Any]] = []
-        if str(workspace.get("jobId") or "") != job_id:
-            issues.append({"severity": "error", "code": "workspace_job_mismatch", "message": "工作区绑定任务与当前任务不一致。"})
-        source_hash = str(snapshot.get("sourceHash") or snapshot.get("sourceAssetId") or "")
-        for cover in snapshot.get("coverVersions") or []:
-            if isinstance(cover, dict) and str(cover.get("sourceAssetId") or "") and str(cover.get("sourceAssetId") or "") != source_hash:
-                issues.append({"severity": "warning", "code": "cover_source_mismatch", "message": "存在来源不匹配的封面版本。"})
-                break
-        if snapshot.get("agentHandoffJobId") and not str(workspace.get("sourceJobId") or ""):
-            issues.append({"severity": "warning", "code": "handoff_without_source_workspace", "message": "任务曾发生同源交接，需确认当前工作区已切到新任务。"})
-        return {
-            "artifact": {
-                "kind": "task_provenance_report", "jobId": job_id,
-                "sourceHash": source_hash, "sourceScope": str((snapshot.get("request") or {}).get("sourceScopeKind") or "all"),
-                "workspaceJobId": str(workspace.get("jobId") or ""),
-                "hasOutputs": bool((editing or {}).get("hasOutputs")),
-                "hasActiveSession": bool((editing or {}).get("hasActiveSession")),
-                "issues": issues, "passed": not any(item["severity"] == "error" for item in issues),
-            },
-        }
+        return _agent_tool_validate_task_provenance(workspace=workspace, tool_name=tool_name, job_id=job_id, snapshot=snapshot)
     if tool_name == "diagnose_edit_failure":
-        public = public_job(snapshot)
-        plan_id = str(workspace.get("activePlanId") or "")
-        plan = agent_platform.store.get("plans", plan_id) if plan_id else None
-        failed_steps = [
-            {"id": str(item.get("id") or ""), "title": str(item.get("title") or ""), "tool": str(item.get("tool") or ""), "error": str(item.get("error") or "")}
-            for item in (plan or {}).get("steps") or [] if str(item.get("status") or "") == "failed"
-        ]
-        no_result_steps = [
-            item for item in (plan or {}).get("steps") or []
-            if isinstance(item.get("result"), dict) and str(item["result"].get("terminalStatus") or "") == "no_result"
-        ]
-        causes: list[dict[str, Any]] = []
-        if failed_steps:
-            causes.append({"code": "failed_steps", "message": "Agent 计划存在失败步骤。", "items": failed_steps})
-        if no_result_steps:
-            causes.append({"code": "no_result", "message": "上游检索或时间线约束未得到可用结果。"})
-        if not (public.get("outputs") or public.get("agentPreviewOutputs") or public.get("agentReviewPreviews")):
-            causes.append({"code": "no_outputs", "message": "当前任务没有可播放的审核样片或成片。"})
-        if public.get("status") in {"running", "queued", "cancelling"}:
-            causes.append({"code": "background_running", "message": "当前任务仍有后台操作在执行。"})
-        return {
-            "artifact": {
-                "kind": "edit_diagnostics", "jobId": job_id,
-                "focus": str(arguments.get("focus") or "")[:240],
-                "status": public.get("status"), "stage": public.get("stage"),
-                "causes": causes or [{"code": "no_obvious_failure", "message": "未发现明确失败状态，请检查具体预览或导出对象。"}],
-                "nextSteps": ["刷新当前任务状态", "查看失败步骤技术详情", "重新生成审核样片"] if causes else ["继续当前审核流程"],
-            },
-        }
+        return _agent_tool_diagnose_edit_failure(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "select_multi_topic_evidence":
-        with jobs_lock:
-            current = jobs.get(job_id)
-            search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
-            candidates = [
-                item for item in search.get("candidates") or []
-                if isinstance(item, dict) and item.get("reviewStatus") != "rejected"
-                and float(item.get("end") or 0) > float(item.get("start") or 0)
-            ]
-            reliable = [
-                item for item in candidates
-                if item.get("selected") is True
-                or str(item.get("confidenceTier") or "") == "reliable"
-                or (not str(item.get("confidenceTier") or "") and not bool(item.get("requiresReview")))
-            ]
-            reliable_ids = {str(item.get("id") or "") for item in reliable if str(item.get("id") or "")}
-            spec = _content_assembly_spec(search, allowed_match_ids=reliable_ids)
-            if not current or not str(search.get("id") or ""):
-                return no_result("no_search", "当前任务还没有可用于多主题选择的内容检索结果。", query=str(arguments.get("query") or ""))
-            if len(spec.get("predicateIds") or []) < 2:
-                return no_result("not_multi_topic", "当前检索没有拆出多个必需主题，无法按多主题配额编排。", query=str(arguments.get("query") or ""), candidate_count=len(candidates), reliable_count=len(reliable))
-            if spec.get("missingPredicates"):
-                return no_result(
-                    "missing_required_categories",
-                    "自动编排缺少必要类别的可靠候选：" + "、".join(str(value) for value in spec["missingPredicates"]),
-                    query=str(arguments.get("query") or search.get("instruction") or ""),
-                    candidate_count=len(candidates), reliable_count=len(reliable),
-                )
-            selected_ids = [str(value) for value in spec.get("selectedMatchIds") or [] if str(value) in reliable_ids]
-            if not selected_ids:
-                return no_result("no_match", "多主题检索没有生成可用于自动编排的可靠候选。", query=str(arguments.get("query") or ""), candidate_count=len(candidates), reliable_count=len(reliable))
-            search["reviewDraft"] = {
-                "schemaVersion": "content-review-draft-v1",
-                "searchId": str(search["id"]),
-                "selectedMatchIds": selected_ids,
-                "orderedMatchIds": selected_ids,
-                "source": "agent_multi_topic_selection",
-                "updatedAt": now_iso(),
-            }
-            search["defaultSelectedIds"] = selected_ids
-            search["agentAssemblySpec"] = {**copy.deepcopy(spec), "searchId": str(search["id"])}
-            current.update({
-                "status": AWAITING_AGENT_PLAN, "stage": "agent_plan_running",
-                "actionRequired": None, "currentAction": "已按多主题选定内容候选",
-                "detail": f"已采用 {len(selected_ids)} 个多主题可靠候选，正在建立时间线。",
-                "progressMode": "indeterminate", "etaSeconds": None, "etaMode": "unavailable",
-                "updatedAt": now_iso(),
-            })
-            save_job(current)
-        return {
-            "artifact": {
-                "kind": "multi_topic_evidence_selection", "jobId": job_id,
-                "searchId": str(search["id"]), "matchIds": selected_ids,
-                "coverage": copy.deepcopy(spec.get("coverage") or []),
-                "message": f"我已为 {len(spec.get('predicateIds') or [])} 个主题选择可靠候选。",
-            },
-        }
+        return _agent_tool_select_multi_topic_evidence(tool_name=tool_name, arguments=arguments, job_id=job_id, no_result=no_result)
     if tool_name == "propose_cover_candidates":
-        source_scope = str(arguments.get("sourceScope") or "accepted_cut")
-        candidate_budget = max(3, min(24, int(arguments.get("candidateBudget") or 16)))
-        aspects = [
-            str(value) for value in arguments.get("aspectRatios") or ["16:9"]
-            if str(value) in COVER_ASPECT_SIZES
-        ] or ["16:9"]
-        title_text = str(arguments.get("titleText") or "")[:80]
-        focus = str(arguments.get("focus") or "")[:240]
-        subject = str(arguments.get("subject") or "")[:120].strip()
-        requested_source_time = arguments.get("sourceTime")
-        source_path, source_metadata, evidence = _cover_source(snapshot, source_scope)
-        draft_id = f"cover_draft_{uuid.uuid4().hex[:12]}"
-        work_root = Path(str(snapshot.get("workDirectory") or ""))
-        cover_root = work_root / "cover-director" / draft_id
-        frames_directory = cover_root / "candidates"
-
-        def propose_cover_worker() -> dict[str, Any]:
-            points = cover_sample_points(
-                float(source_metadata.get("duration") or 0), evidence,
-                budget=candidate_budget,
-                include_uniform=str(source_metadata.get("kind") or "") != "accepted_timeline",
-            )
-            if requested_source_time is not None:
-                source_time = max(0.0, min(
-                    max(0.0, float(source_metadata.get("duration") or 0) - .001),
-                    float(requested_source_time),
-                ))
-                duration = max(0.0, float(source_metadata.get("duration") or 0))
-                nearby_times = []
-                for offset in (0.0, -.5, .5):
-                    value = max(0.0, min(max(0.0, duration - .001), source_time + offset))
-                    if all(abs(value - existing) >= .05 for existing in nearby_times):
-                        nearby_times.append(value)
-                points = [{
-                    "time": value,
-                    "evidenceRefs": [],
-                    "evidenceStrength": 1.0,
-                    "evidenceText": f"用户指定封面时间 {source_time:.3f} 秒附近",
-                } for value in nearby_times]
-            frames = extract_frames_at_times(
-                source_path, frames_directory, [float(item["time"]) for item in points],
-                ffmpeg=settings.ffmpeg,
-            )
-            raw_frames = []
-            for index, (frame, point) in enumerate(zip(frames, points), 1):
-                raw_frames.append({
-                    "id": f"cover_candidate_{index:02d}", "path": frame.path,
-                    "sourceTime": round(frame.time, 3),
-                    "evidenceRefs": list(point.get("evidenceRefs") or []),
-                    "evidenceStrength": float(point.get("evidenceStrength") or .35),
-                    "evidenceText": str(point.get("evidenceText") or ""),
-                })
-            selected, rejected = score_cover_frames(
-                raw_frames, request_focus=focus, require_person=bool(subject), limit=candidate_budget,
-            )
-            if requested_source_time is not None:
-                requested_number = float(requested_source_time)
-                selected = [
-                    item for item in selected
-                    if abs(float(item.get("sourceTime") or 0) - requested_number) <= .75
-                ]
-            if not selected:
-                if requested_source_time is not None:
-                    subject_hint = f"且包含“{subject}”" if subject else ""
-                    raise RuntimeError(
-                        f"没有找到 {float(requested_source_time):.1f} 秒附近{subject_hint}的可用封面画面；"
-                        "请调整时间点或封面要求"
-                    )
-                if subject and any(item.get("rejectionReason") == "missing_person" for item in rejected):
-                    raise RuntimeError(f"没有找到包含人物的封面画面，无法确认“{subject}”；请更换时间点或封面要求")
-                raise RuntimeError("没有找到可用的非黑、可解码封面画面")
-            candidates: list[dict[str, Any]] = []
-            for item in selected:
-                path = Path(str(item.pop("path")))
-                candidates.append({
-                    **item,
-                    "subjectVerification": {
-                        "subject": subject,
-                        "status": "identity_unverified" if subject else "not_required",
-                        "personDetected": (item.get("metrics") or {}).get("faceCount", None) not in {0, None},
-                    },
-                    "artifactFile": str(path.relative_to(work_root)),
-                    "previewUrl": f"/api/jobs/{job_id}/cover-artifacts/{item['id']}",
-                })
-            draft = {
-                "schemaVersion": COVER_SCHEMA_VERSION, "id": draft_id, "jobId": job_id,
-                "status": "candidates_ready", "source": source_metadata,
-                "sourceAssetId": str(snapshot.get("sourceAssetId") or snapshot.get("sourceHash") or ""),
-                "sourceSearchId": str((snapshot.get("contentSearch") or {}).get("id") or "") if isinstance(snapshot.get("contentSearch"), dict) else "",
-                "sourceQuery": str(((snapshot.get("contentSearch") or {}).get("intent") or {}).get("query") or (snapshot.get("contentSearch") or {}).get("instruction") or "")[:500] if isinstance(snapshot.get("contentSearch"), dict) else "",
-                "aspectRatios": aspects, "titleText": title_text, "focus": focus,
-                "subject": subject,
-                "requestedSourceTime": float(requested_source_time) if requested_source_time is not None else None,
-                "candidates": candidates, "variants": [],
-                "rejectedSummary": {
-                    reason: sum(1 for item in rejected if item.get("rejectionReason") == reason)
-                    for reason in {str(item.get("rejectionReason") or "unknown") for item in rejected}
-                },
-                "createdAt": now_iso(), "updatedAt": now_iso(),
-            }
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    raise RuntimeError("封面候选完成时素材任务已不存在")
-                current["coverDraft"] = draft
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "cover_candidates", "jobId": job_id, "draftId": draft_id,
-                    "source": copy.deepcopy(source_metadata),
-                    "candidates": [_public_cover_artifact(job_id, item) for item in candidates],
-                    "rejectedSummary": copy.deepcopy(draft["rejectedSummary"]),
-                },
-            }
-
-        future = output_preview_executor.submit(propose_cover_worker)
-        return {
-            "operationId": f"{job_id}:cover_candidates:{draft_id}",
-            "operation": "cover_candidates", "accepted": True, "future": future,
-            "cancel": lambda: future.cancel(),
-        }
+        return _agent_tool_propose_cover_candidates(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "render_cover_variants":
-        draft = snapshot.get("coverDraft") if isinstance(snapshot.get("coverDraft"), dict) else {}
-        candidates = [item for item in draft.get("candidates") or [] if isinstance(item, dict)]
-        if not draft.get("id") or not candidates:
-            raise RuntimeError("请先生成可用的封面候选")
-        directions = [
-            str(value) for value in arguments.get("directions") or COVER_DIRECTIONS
-            if str(value) in COVER_DIRECTIONS
-        ]
-        directions = list(dict.fromkeys(directions))[:3] or list(COVER_DIRECTIONS)
-        aspects = [
-            str(value) for value in arguments.get("aspectRatios") or draft.get("aspectRatios") or ["16:9"]
-            if str(value) in COVER_ASPECT_SIZES
-        ] or ["16:9"]
-        title_text = str(arguments.get("titleText") or draft.get("titleText") or "")[:80]
-        work_root = Path(str(snapshot.get("workDirectory") or ""))
-        variants_directory = work_root / "cover-director" / str(draft["id"]) / "variants"
-        font_path = Path(__file__).resolve().parent.parent / "fonts" / "SourceHanSansSC-Bold.otf"
-
-        def render_cover_worker() -> dict[str, Any]:
-            variants: list[dict[str, Any]] = []
-            for aspect in aspects:
-                for index, direction in enumerate(directions):
-                    candidate = candidates[index % len(candidates)]
-                    source_frame = (work_root / str(candidate.get("artifactFile") or "")).resolve()
-                    try:
-                        source_frame.relative_to(work_root.resolve())
-                    except ValueError as error:
-                        raise RuntimeError("封面候选路径无效") from error
-                    if not source_frame.is_file():
-                        raise RuntimeError("封面候选画面不存在")
-                    signature = hashlib.sha256(
-                        f"{draft['id']}:{candidate.get('id')}:{aspect}:{direction}:{title_text}".encode("utf-8")
-                    ).hexdigest()[:12]
-                    variant_id = f"cover_variant_{signature}"
-                    output = variants_directory / f"{variant_id}.jpg"
-                    rendered = render_cover_variant(
-                        source_frame, output, aspect=aspect, direction=direction,
-                        title=title_text,
-                        font_path=font_path,
-                    )
-                    variants.append({
-                        "schemaVersion": COVER_SCHEMA_VERSION,
-                        "variantId": variant_id, "status": "preview",
-                        "direction": direction, "aspectRatio": aspect,
-                        "width": rendered["width"], "height": rendered["height"],
-                        "titleText": title_text,
-                        "titleLines": rendered["titleLines"],
-                        "sourceCandidateId": str(candidate.get("id") or ""),
-                        "sourceTime": float(candidate.get("sourceTime") or 0),
-                        "evidenceRefs": copy.deepcopy(candidate.get("evidenceRefs") or []),
-                        "score": copy.deepcopy(candidate.get("score") or {}),
-                        "subjectVerification": copy.deepcopy(candidate.get("subjectVerification") or {}),
-                        "contentHash": rendered["contentHash"],
-                        "artifactFile": str(output.relative_to(work_root)),
-                        "previewUrl": f"/api/jobs/{job_id}/cover-artifacts/{variant_id}",
-                        "provenance": {
-                            "kind": "source_frame_composite", "renderer": "cliptalk-cover-v1",
-                            "createdAt": now_iso(),
-                        },
-                    })
-            with jobs_lock:
-                current = jobs.get(job_id)
-                current_draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
-                if not current or str(current_draft.get("id") or "") != str(draft.get("id") or ""):
-                    raise RuntimeError("封面渲染完成前候选版本已经变化")
-                current_draft.update({
-                    "status": "review_ready", "variants": variants,
-                    "selectedVariantId": variants[0]["variantId"] if variants else "",
-                    "updatedAt": now_iso(),
-                })
-                current["coverTimelineDraft"] = {
-                    "schemaVersion": "cover-timeline-draft-v1",
-                    "activeVariantId": variants[0]["variantId"] if variants else "",
-                    "variants": {
-                        str(item["variantId"]): {"duration": 1.0, "updatedAt": now_iso()}
-                        for item in variants
-                    },
-                    "updatedAt": now_iso(),
-                }
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "cover_variant_set", "jobId": job_id,
-                    "draftId": str(draft["id"]),
-                    "variants": [_public_cover_artifact(job_id, item) for item in variants],
-                    "defaultVariantId": variants[0]["variantId"] if variants else "",
-                },
-            }
-
-        future = output_preview_executor.submit(render_cover_worker)
-        return {
-            "operationId": f"{job_id}:cover_variants:{draft['id']}",
-            "operation": "cover_variants", "accepted": True, "future": future,
-            "cancel": lambda: future.cancel(),
-        }
+        return _agent_tool_render_cover_variants(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "review_cover_variants":
-        if autonomous and not str((snapshot.get("coverDraft") or {}).get("subject") or "").strip():
-            with jobs_lock:
-                current = jobs.get(job_id)
-                draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
-                variants = [item for item in draft.get("variants") or [] if isinstance(item, dict)]
-                if not variants:
-                    raise RuntimeError("尚未生成可用的封面候选版本")
-                required_title = str(draft.get("titleText") or "").strip()
-                required_aspects = {
-                    str(value) for value in draft.get("aspectRatios") or [] if str(value)
-                }
-                accepted_timeline = str((draft.get("source") or {}).get("kind") or "") == "accepted_timeline"
-                eligible = [
-                    item for item in variants
-                    if (not required_title or (
-                        str(item.get("titleText") or "").strip() == required_title
-                        and bool(item.get("titleLines"))
-                    ))
-                    and (not required_aspects or str(item.get("aspectRatio") or "") in required_aspects)
-                    and (not accepted_timeline or bool(item.get("evidenceRefs")))
-                ]
-                if not eligible:
-                    raise RuntimeError("封面候选未满足当前任务的标题、画幅或来源要求，已停止自动选择")
-                # Candidate scoring is deterministic and already performed by
-                # render_cover_variants. Keep the highest ranked candidate as
-                # the automatic default, while leaving the full set available
-                # for a user override before final delivery.
-                def cover_score(item: dict[str, Any]) -> float:
-                    score = item.get("score") if isinstance(item.get("score"), dict) else {}
-                    return float(score.get("total") or sum(
-                        float(score.get(key) or 0)
-                        for key in ("requestAlignment", "subjectReadability", "emotionOrAction", "visualClarity", "titleSafeSpace", "distinctiveness")
-                    ))
-                selected = max(eligible, key=cover_score)
-                draft["selectedVariantId"] = str(selected.get("variantId") or "")
-                draft["selectionMode"] = "auto_best_validated"
-                draft["status"] = "auto_selected"
-                draft["updatedAt"] = now_iso()
-                current["coverDraft"] = draft
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "cover_auto_selection", "jobId": job_id,
-                    "selectedVariantId": str(selected.get("variantId") or ""),
-                    "variants": [_public_cover_artifact(job_id, item) for item in variants],
-                    "message": "已按当前任务主题和画幅自动选择最佳封面，可在正式成片生成前替换。",
-                },
-            }
-        subject = str((snapshot.get("coverDraft") or {}).get("subject") or "").strip()
-        return {
-            "actionRequired": True, "action": "cover_review",
-            "message": (
-                f"请核对候选画面中的人物是否为“{subject}”。系统只确认画面中检测到人物，不能仅凭画面自动证明具体身份。"
-                if subject else
-                "封面候选已放入主时间轴。选择后会保存为当前任务封面，不会重新生成视频。"
-            ),
-        }
+        return _agent_tool_review_cover_variants(tool_name=tool_name, job_id=job_id, autonomous=autonomous, snapshot=snapshot)
     if tool_name == "confirm_cover":
-        with jobs_lock:
-            current = jobs.get(job_id)
-            draft = current.get("coverDraft") if current and isinstance(current.get("coverDraft"), dict) else {}
-            selected_id = str(draft.get("selectedVariantId") or "")
-        public_version, bound_outputs, revision = _activate_cover_variant(job_id, selected_id)
-        # Confirming a cover is an atomic cover operation.  It must not
-        # silently turn into a full video export: doing so previously made a
-        # successfully saved cover appear to fail when an unrelated export
-        # precondition (for example source-subtitle acknowledgement) blocked
-        # the downstream render.  Cover-intro composition and formal export
-        # are represented by their own explicit plan steps.
-        append_cover_result(job_id, bound_outputs)
-        with jobs_lock:
-            current = jobs.get(job_id)
-            session_id = str((current or {}).get("activeEditSessionId") or "")
-            session = next((
-                item for item in (current or {}).get("editSessions") or []
-                if isinstance(item, dict) and str(item.get("id") or "") == session_id
-            ), None)
-            revision_number = int((session or {}).get("revision") or 0)
-            brief = current.get("brief") if current and isinstance(current.get("brief"), dict) else {}
-            goal_text = " ".join(
-                str(message.get("text") or "")
-                for message in (current or {}).get("messages") or []
-                if isinstance(message, dict)
-            )
-        if autonomous:
-            cover_intro_requested = bool(brief.get("coverIntroRequested")) or AgentPlatform._cover_intro_requested(goal_text)
-            intro_duration = float(
-                brief.get("coverIntroDurationSeconds")
-                or AgentPlatform._cover_intro_duration(goal_text)
-            )
-            active_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
-            has_explicit_intro_step = any(
-                str(step.get("tool") or "") == "compose_cover_intro"
-                for step in active_plan.get("steps") or []
-                if isinstance(step, dict)
-            )
-            if cover_intro_requested and not has_explicit_intro_step and session_id and revision_number > 0:
-                def cover_intro_preview_worker() -> dict[str, Any]:
-                    with jobs_lock:
-                        current_job = jobs.get(job_id)
-                        if not current_job:
-                            raise RuntimeError("封面片头生成时任务已不存在")
-                        current_session = find_edit_session(current_job, session_id)
-                        preview_path = Path(str(current_session.get("previewPath") or ""))
-                        cover = current_cover_version(current_job)
-                        cover_path = cover_version_path(current_job, cover) if cover else None
-                        output_dir = Path(str(current_job.get("outputDirectory") or ""))
-                    if not preview_path.is_file():
-                        raise RuntimeError("当前审核样片不存在，无法合成封面片头")
-                    if not cover_path or not cover_path.is_file():
-                        raise RuntimeError("当前任务封面文件不存在，无法合成封面片头")
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    target_path = output_dir / f"agent-cover-intro-preview-{uuid.uuid4().hex[:8]}.mp4"
-                    rendered = render_cover_intro(
-                        preview_path, cover_path, target_path, duration=intro_duration,
-                        ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
-                    )
-                    output = {
-                        "filename": target_path.name,
-                        "title": "封面片头审核预览",
-                        "duration": round(float(rendered["duration"]), 3),
-                        "width": int(rendered["width"]),
-                        "height": int(rendered["height"]),
-                        "hasAudio": bool(rendered.get("hasAudio")),
-                        "previewOnly": True,
-                        "outputKind": "cover_intro_review_preview",
-                        "sourceOutputFilename": preview_path.name,
-                        "sourceEditSessionId": session_id,
-                        "overlayVerification": copy.deepcopy(
-                            current_session.get("previewOverlayVerification") or {}
-                        ),
-                        "subtitleMode": (
-                            "burn"
-                            if int((current_session.get("previewOverlayVerification") or {}).get("subtitleCueCount") or 0) > 0
-                            else "none"
-                        ),
-                        "coverIntro": {
-                            "enabled": True,
-                            "duration": float(rendered.get("introDuration") or intro_duration),
-                            "coverVersionId": str((cover or {}).get("id") or ""),
-                        },
-                    }
-                    with jobs_lock:
-                        current_job = jobs.get(job_id)
-                        if current_job:
-                            current_job.setdefault("agentPreviewOutputs", []).append(output)
-                            current_job["updatedAt"] = now_iso()
-                            save_job(current_job)
-                    return {
-                        "artifact": {
-                            "kind": "review_preview",
-                            "jobId": job_id,
-                            "output": copy.deepcopy(output),
-                            "message": "已生成带当前任务封面片头的审核预览。",
-                        },
-                    }
-                future = output_preview_executor.submit(cover_intro_preview_worker)
-                return {
-                    "operationId": f"{job_id}:cover_intro_preview:{session_id}:{revision_number}",
-                    "operation": "cover_intro_preview", "accepted": True,
-                    "future": future, "cancel": lambda: cancel_job(job_id),
-                }
-            return {
-                "artifact": {
-                    "kind": "current_cover", "jobId": job_id,
-                    "cover": public_version,
-                    "thumbnailUrl": f"/api/jobs/{job_id}/thumbnail?revision={revision}",
-                    "boundOutputs": bound_outputs,
-                    "message": copy_messages.COVER_SAVED_AUTO_REVIEW,
-                },
-            }
-        return {
-            "artifact": {
-                "kind": "current_cover", "jobId": job_id,
-                "cover": public_version,
-                "thumbnailUrl": f"/api/jobs/{job_id}/thumbnail?revision={revision}",
-                "boundOutputs": bound_outputs,
-                "message": copy_messages.cover_saved(len(bound_outputs)),
-            },
-        }
+        return _agent_tool_confirm_cover(workspace=workspace, tool_name=tool_name, job_id=job_id, autonomous=autonomous)
     if tool_name == "cancel_operation":
-        return {"cancelled": True, "job": cancel_job(job_id).get("job")}
+        return _agent_tool_cancel_operation(tool_name=tool_name, job_id=job_id)
     if tool_name in {"select_people", "select_speakers"}:
-        if autonomous:
-            search = snapshot.get("contentSearch") if isinstance(snapshot.get("contentSearch"), dict) else {}
-            if tool_name == "select_people":
-                target = (
-                    (snapshot.get("request") or {}).get("contentSearchPersonTarget")
-                    or snapshot.get("contentSearchPersonTarget")
-                    or (search.get("intent") or {}).get("personTarget")
-                    or {}
-                )
-                selected = [str(value) for value in target.get("personIds") or [] if str(value)]
-                label = "人物"
-                selection_source = "persisted_reliable_evidence"
-                description = str(arguments.get("description") or "").strip()
-                if not selected and description:
-                    index = _load_content_person_index(snapshot)
-                    catalog = _content_person_catalog(snapshot, index)
-                    try:
-                        matched, diagnostics = _match_person_catalog_by_visual_description(
-                            job_id, snapshot, f"agent_person_{uuid.uuid4().hex[:12]}",
-                            description, catalog,
-                            cancel_events.setdefault(job_id, threading.Event()),
-                            person_tracks=[
-                                item for item in index.get("personTracks") or []
-                                if isinstance(item, dict)
-                            ],
-                            require_reliable=True,
-                        )
-                    except Exception as error:
-                        return no_result(
-                            "identity_verification_unavailable",
-                            f"已完成人物识别，但暂时无法可靠核定“{description}”：{str(error)[:180]}",
-                            candidate_count=len(catalog), reliable_count=0,
-                        )
-                    reliable_ids = {
-                        str(value) for value in diagnostics.get("reliablePersonIds") or []
-                        if str(value)
-                    }
-                    selected_people = [
-                        item for item in matched
-                        if str(item.get("id") or "") in reliable_ids
-                    ]
-                    if selected_people:
-                        selected = [str(item.get("id") or "") for item in selected_people]
-                        selection_source = "visual_description_consensus"
-                        select_content_person_target(
-                            job_id,
-                            PersonTargetRequest(
-                                personIds=selected, matchMode="any", activity="appearance",
-                            ),
-                            display_text=f"根据外观描述选择人物：{description}",
-                        )
-                    else:
-                        possible_count = len(diagnostics.get("uncertainPersonIds") or [])
-                        return no_result(
-                            "ambiguous_identity" if possible_count else "no_match",
-                            (
-                                f"已识别画面人物，但“{description}”只有 {possible_count} 个待核对候选，"
-                                "没有足够可靠证据可自动选定。"
-                                if possible_count else
-                                f"已检查画面人物，没有找到可靠符合“{description}”的对象。"
-                            ),
-                            candidate_count=len(catalog), reliable_count=0,
-                        )
-            else:
-                intent = search.get("intent") if isinstance(search.get("intent"), dict) else {}
-                selected = list(dict.fromkeys(
-                    str(value) for value in [
-                        *(search.get("selectedSpeakerRefs") or []),
-                        *(intent.get("speakerRefs") or []),
-                    ] if str(value)
-                ))
-                label = "说话人"
-                selection_source = "persisted_reliable_evidence"
-                requested_label = str(arguments.get("label") or "").strip().casefold()
-                if not selected and requested_label:
-                    matching_voices = [
-                        voice for voice in _public_current_voice_catalog(snapshot)
-                        if requested_label in {
-                            str(voice.get("label") or "").strip().casefold(),
-                            str(voice.get("speakerRef") or "").strip().casefold(),
-                        }
-                    ]
-                    if len(matching_voices) == 1:
-                        selected = [str(matching_voices[0].get("speakerRef") or "")]
-                        selection_source = "explicit_anonymous_label"
-                # Speaker discovery deliberately precedes this step.  Do not
-                # discard that fresh evidence merely because no selection had
-                # existed before the plan started.  A single, high-confidence
-                # non-mixed candidate is safe to adopt; anything less certain
-                # must become a review checkpoint, never a misleading
-                # "no content" terminal result.
-                if not selected:
-                    reliable_voices = []
-                    for voice in _public_current_voice_catalog(snapshot):
-                        speaker_ref = str(voice.get("speakerRef") or "").strip()
-                        narration = voice.get("narration") if isinstance(voice.get("narration"), dict) else {}
-                        quality = voice.get("quality") if isinstance(voice.get("quality"), dict) else {}
-                        if (
-                            speaker_ref
-                            and not bool(voice.get("requiresReview"))
-                            and not bool(quality.get("suspectedMixed"))
-                            and str(narration.get("status") or "") in {"candidate", "confirmed"}
-                            and float(narration.get("score") or 0.0) >= 0.80
-                        ):
-                            reliable_voices.append((speaker_ref, narration))
-                    if len(reliable_voices) == 1:
-                        selected = [reliable_voices[0][0]]
-                        selection_source = "voice_timeline_heuristics"
-            if selected:
-                adopted_match_ids: list[str] = []
-                if tool_name == "select_people":
-                    # Selecting an appearance target synchronously materializes
-                    # a content-search result from the cached person tracks.
-                    # That helper normally exposes a human review checkpoint;
-                    # autonomous review has already resolved the identity, so
-                    # adopt only its reliable candidates here and immediately
-                    # return ownership of the job state to the Agent plan.
-                    with jobs_lock:
-                        current = jobs.get(job_id)
-                        current_search = (
-                            current.get("contentSearch")
-                            if current and isinstance(current.get("contentSearch"), dict)
-                            else {}
-                        )
-                        reliable_candidates = [
-                            item for item in current_search.get("candidates") or []
-                            if isinstance(item, dict)
-                            and item.get("reviewStatus") != "rejected"
-                            and float(item.get("end") or 0) > float(item.get("start") or 0)
-                            and (
-                                item.get("selected") is True
-                                or str(item.get("confidenceTier") or "") == "reliable"
-                                or (
-                                    not str(item.get("confidenceTier") or "")
-                                    and not bool(item.get("requiresReview"))
-                                )
-                            )
-                        ]
-                        adopted_match_ids = list(dict.fromkeys(
-                            str(item.get("id") or "") for item in reliable_candidates
-                            if str(item.get("id") or "")
-                        ))[:64]
-                        if current and str(current_search.get("id") or "") and adopted_match_ids:
-                            current_search["reviewDraft"] = {
-                                "schemaVersion": "content-review-draft-v1",
-                                "searchId": str(current_search["id"]),
-                                "selectedMatchIds": adopted_match_ids,
-                                "orderedMatchIds": adopted_match_ids,
-                                "source": "agent_autonomous_identity_selection",
-                                "updatedAt": now_iso(),
-                            }
-                            current_search["defaultSelectedIds"] = adopted_match_ids
-                            current.update({
-                                "status": AWAITING_AGENT_PLAN,
-                                "stage": "agent_plan_running",
-                                "actionRequired": None,
-                                "currentAction": "已自动采用人物出镜范围",
-                                "detail": (
-                                    f"已采用 {len(adopted_match_ids)} 个可靠出镜片段，"
-                                    "正在建立可审阅时间线。"
-                                ),
-                                "progressMode": "indeterminate",
-                                "etaSeconds": None,
-                                "etaMode": "unavailable",
-                                "updatedAt": now_iso(),
-                            })
-                            save_job(current)
-                if tool_name == "select_speakers" and selection_source in {
-                    "voice_timeline_heuristics", "explicit_anonymous_label",
-                }:
-                    # Persist the automatic identity decision through the
-                    # same path as the review panel.  The following semantic
-                    # search then inherits the selected speaker scope.
-                    select_current_voices(
-                        job_id,
-                        CurrentVoiceSelectionRequest(
-                            speakerRefs=selected,
-                            mode=str(arguments.get("mode") or "include"),
-                            query="",
-                        ),
-                    )
-                return {"artifact": {
-                    "kind": "identity_selection", "identityKind": tool_name,
-                    "selectedIds": selected, "source": selection_source,
-                    **({"matchIds": adopted_match_ids} if adopted_match_ids else {}),
-                    "message": (
-                        f"我已根据多帧可见外观证据采用符合“{str(arguments.get('description') or '')}”的{label}。"
-                        if selection_source == "visual_description_consensus"
-                        else
-                        f"我已采用用户指定的{str(arguments.get('label') or label)}。"
-                        if selection_source == "explicit_anonymous_label"
-                        else f"我已根据刚完成的说话人证据自动采用可靠{label}范围。"
-                        if selection_source == "voice_timeline_heuristics"
-                        else f"我已采用现有可靠{label}范围。"
-                    ),
-                }}
-            return {
-                "actionRequired": True,
-                "action": "identity_selection",
-                "message": (
-                    f"已完成{label}识别，但存在多个候选或证据不足。"
-                    f"请在{label}面板试听或核对后选择要保留的对象，再继续。"
-                ),
-            }
-        return {
-            "actionRequired": True,
-            "action": "identity_selection",
-            "message": "请在人物或说话人审核面板中完成结构化选择。",
-        }
+        return _agent_tool_select_people(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, autonomous=autonomous, snapshot=snapshot, no_result=no_result)
     if tool_name == "review_content_evidence":
-        if autonomous:
-            with jobs_lock:
-                current = jobs.get(job_id)
-                search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
-                candidates = [
-                    item for item in search.get("candidates") or []
-                    if isinstance(item, dict) and item.get("reviewStatus") != "rejected"
-                    and float(item.get("end") or 0) > float(item.get("start") or 0)
-                ]
-                allowed = {str(item.get("id") or "") for item in candidates if str(item.get("id") or "")}
-                if any(item.get("matchType") == "voice_identity" for item in candidates):
-                    contract = build_contract(search)
-                    review = search.get("reviewDraft") or {}
-                    reviewed_ids = set(review.get("orderedMatchIds") or review.get("selectedMatchIds") or [])
-                    selected_voice = [item for item in candidates if item.get("id") in reviewed_ids]
-                    if not selected_voice or any(not verification_current(item, contract) for item in selected_voice):
-                        return {"actionRequired": True, "action": "content_evidence_review",
-                                "message": "参考声纹仅提供疑似匹配。请试听并确认要保留的片段，再继续生成样片。"}
-                reliable_candidates = [
-                    item for item in candidates
-                    if (
-                        item.get("selected") is True
-                        or str(item.get("confidenceTier") or "") == "reliable"
-                        or (
-                            not str(item.get("confidenceTier") or "")
-                            and not bool(item.get("requiresReview"))
-                        )
-                    )
-                ]
-                reliable_ids = {
-                    str(item.get("id") or "") for item in reliable_candidates
-                    if str(item.get("id") or "")
-                }
-                # Required branch coverage is evaluated against the exact
-                # reliable set that autonomous mode is allowed to consume.
-                # A merely "possible" match must not make a required category
-                # look covered and then disappear from the resulting timeline.
-                assembly_spec = _content_assembly_spec(
-                    search, allowed_match_ids=reliable_ids,
-                )
-                existing = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
-                confirmed_ids = [
-                    str(value) for value in search.get("confirmedMatchIds") or []
-                    if str(value) in allowed
-                ]
-                existing_ids = [
-                    str(value)
-                    for value in (
-                        existing.get("orderedMatchIds")
-                        or existing.get("selectedMatchIds")
-                        or []
-                    )
-                    if str(value) in allowed
-                ]
-                existing_source = str(existing.get("source") or "")
-                # Search workers may preselect a single representative match
-                # for UI focus. In autonomous review that must not become the
-                # whole edit when the user asked for “所有/全部” content. Only
-                # user-confirmed selections constrain the timeline; otherwise
-                # consume the full reliable set.
-                manual_review_sources = {"user", "manual", "content_review_user", "user_review"}
-                selected_ids = confirmed_ids or (
-                    existing_ids if existing_source in manual_review_sources else []
-                )
-                selection_policy = str(arguments.get("selectionPolicy") or "all_reliable")
-                if selection_policy == "unique_or_review":
-                    # UI focus/preselection alone does not establish a reliable
-                    # semantic starting point.
-                    reliable_candidates = [item for item in candidates if (
-                        str(item.get("confidenceTier") or "") == "reliable"
-                        or (not item.get("confidenceTier") and not item.get("requiresReview"))
-                    )]
-                    reliable_ids = {str(item["id"]) for item in reliable_candidates if item.get("id")}
-                    reviewed_ids = [value for value in selected_ids if value in reliable_ids]
-                    if len(reviewed_ids) == 1:
-                        selected_ids = reviewed_ids
-                    elif len(reliable_ids) == 1:
-                        selected_ids = list(reliable_ids)
-                    elif len(reliable_ids) > 1:
-                        return {
-                            "actionRequired": True,
-                            "action": "structured_review",
-                            "message": (
-                                f"找到 {len(reliable_ids)} 个可靠的起剪位置。"
-                                "请在候选面板预览并仅保留一个作为新的开始位置。"
-                            ),
-                            "candidateCount": len(candidates),
-                            "reliableCandidateCount": len(reliable_candidates),
-                        }
-                    else:
-                        return no_result(
-                            "no_match",
-                            "没有找到可靠的起剪位置，未修改当前时间线。",
-                            query=str(arguments.get("query") or search.get("instruction") or ""),
-                            candidate_count=len(candidates), reliable_count=0,
-                        )
-                if selection_policy != "unique_or_review" and len(assembly_spec.get("predicateIds") or []) >= 2:
-                    if assembly_spec.get("missingPredicates"):
-                        return no_result(
-                            "missing_required_categories",
-                            "自动编排缺少必要类别的可靠候选："
-                            + "、".join(str(value) for value in assembly_spec["missingPredicates"]),
-                            query=str(arguments.get("query") or search.get("instruction") or ""),
-                            candidate_count=len(candidates), reliable_count=len(reliable_candidates),
-                        )
-                    selected_ids = [
-                        str(value) for value in assembly_spec.get("selectedMatchIds") or []
-                        if str(value) in reliable_ids
-                    ]
-                if not selected_ids:
-                    selected_ids = [
-                        str(item.get("id") or "") for item in candidates
-                        if str(item.get("id") or "") in reliable_ids
-                    ]
-                selected_ids = list(dict.fromkeys(value for value in selected_ids if value))[:64]
-                if not current or not str(search.get("id") or "") or not selected_ids:
-                    return no_result(
-                        "no_match",
-                        "内容检索没有生成可用于自动编排的可靠候选。",
-                        query=str(arguments.get("query") or search.get("instruction") or ""),
-                        candidate_count=len(candidates), reliable_count=len(reliable_candidates),
-                    )
-                selected_lookup = {
-                    str(item.get("id") or ""): item for item in candidates
-                    if str(item.get("id") or "") in set(selected_ids)
-                }
-                coverage_seconds = sum(
-                    max(0.0, float(item.get("end") or 0) - float(item.get("start") or 0))
-                    for item in selected_lookup.values()
-                )
-                search["reviewDraft"] = {
-                    "schemaVersion": "content-review-draft-v1",
-                    "searchId": str(search["id"]),
-                    "selectedMatchIds": selected_ids,
-                    "orderedMatchIds": selected_ids,
-                    "source": "agent_autonomous_review",
-                    "updatedAt": now_iso(),
-                }
-                search["defaultSelectedIds"] = selected_ids
-                if len(assembly_spec.get("predicateIds") or []) >= 2:
-                    search["agentAssemblySpec"] = copy.deepcopy(assembly_spec)
-                # The search worker deliberately stops at a review checkpoint.
-                # Autonomous review has resolved it, so the outer job must
-                # return to Agent-owned execution instead of advertising a
-                # user action while the timeline is already being applied.
-                current.update({
-                    "status": AWAITING_AGENT_PLAN,
-                    "stage": "agent_plan_running",
-                    "actionRequired": None,
-                    "currentAction": "已自动选定内容候选",
-                    "detail": f"已采用 {len(selected_ids)} 个可靠候选，正在建立可审阅时间线。",
-                    "progressMode": "indeterminate",
-                    "etaSeconds": None,
-                    "etaMode": "unavailable",
-                })
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "content_evidence_selection", "jobId": job_id,
-                    "searchId": str(search["id"]), "matchIds": selected_ids,
-                    "candidateCount": len(candidates),
-                    "reliableCandidateCount": len(reliable_candidates),
-                    "coverageSeconds": round(coverage_seconds, 3),
-                    "message": f"我已自动采用 {len(selected_ids)} 个有效内容候选。",
-                },
-            }
+        result = _agent_tool_review_content_evidence(tool_name=tool_name, arguments=arguments, job_id=job_id, autonomous=autonomous, no_result=no_result)
+        if result is not _AGENT_TOOL_FALLTHROUGH:
+            return result
     if tool_name == "compose_cover_intro":
-        duration = max(.5, min(5.0, float(arguments.get("duration") or 1.5)))
-        with jobs_lock:
-            current = jobs.get(job_id)
-            if not current:
-                raise RuntimeError("任务不存在")
-            cover_version = current_cover_version(current)
-            cover_path = cover_version_path(current, cover_version) if cover_version else None
-            if not cover_version or not cover_path or not cover_path.is_file():
-                raise RuntimeError("请先生成并确认当前任务封面")
-            normalize_output_versions(current)
-            output_dir = Path(str(current.get("outputDirectory") or ""))
-            source_filename = ""
-            source_output: dict[str, Any] | None = None
-            requested_filename = Path(str(arguments.get("filename") or "")).name
-            available = [
-                item for item in all_job_outputs(current)
-                if isinstance(item, dict) and str(item.get("filename") or "")
-            ]
-
-            def cover_intro_source_rank(item: dict[str, Any], index: int) -> tuple[int, int]:
-                kind = str(item.get("outputKind") or "")
-                if kind == "cover_intro_review_preview":
-                    return (-1, index)
-                if kind == "social_reframe_preview" or item.get("socialReframe"):
-                    return (5, index)
-                if item.get("previewOnly"):
-                    return (4, index)
-                return (3, index)
-
-            if requested_filename:
-                source_output = next((
-                    item for item in available
-                    if Path(str(item.get("filename") or "")).name == requested_filename
-                ), None)
-            else:
-                ranked = sorted(
-                    enumerate(available),
-                    key=lambda pair: cover_intro_source_rank(pair[1], pair[0]),
-                    reverse=True,
-                )
-                source_output = next((item for _index, item in ranked), None)
-            if source_output:
-                candidate = Path(str(source_output.get("filename") or "")).name
-                candidate_path = output_dir / candidate
-                if candidate and candidate_path.is_file():
-                    source_filename = candidate
-                    source_path = candidate_path
-                else:
-                    source_path = None
-            else:
-                source_path = None
-            if not source_filename:
-                raise RuntimeError("请先生成审核样片，再添加封面片头")
-            source_kind = "agent_preview" if bool((source_output or {}).get("previewOnly")) else "output"
-            current["coverIntroDraft"] = {
-                "schemaVersion": "cover-intro-timeline-v1", "enabled": True,
-                "duration": duration, "coverVersionId": str(cover_version.get("id") or ""),
-                "updatedAt": now_iso(),
-            }
-            current["coverIntroOperation"] = {
-                "status": "queued", "filename": source_filename,
-                "sourceKind": source_kind, "duration": duration, "queuedAt": now_iso(),
-            }
-            current.update({
-                "status": "running", "stage": "rendering", "progress": .9,
-                "stageProgress": 0.0, "progressMode": "indeterminate",
-                "detail": "正在生成封面片头审核样片", "currentAction": "正在把当前任务封面合入审核样片",
-                "model": "FFmpeg", "error": None, "updatedAt": now_iso(),
-            })
-            save_job(current)
-        target_name = f"agent-cover-intro-preview-{uuid.uuid4().hex[:8]}.mp4"
-        target_path = Path(str(snapshot.get("outputDirectory") or output_dir)) / target_name
-
-        def cover_intro_agent_worker() -> dict[str, Any]:
-            if source_path is None or not source_path.is_file():
-                raise RuntimeError("封面片头合成源样片不存在")
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            rendered = render_cover_intro(
-                source_path, cover_path, target_path, duration=duration,
-                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
-            )
-            output = copy.deepcopy(source_output or {})
-            output.update({
-                "filename": target_name,
-                "title": "带封面片头的审核样片",
-                "duration": round(float(rendered["duration"]), 3),
-                "width": int(rendered["width"]),
-                "height": int(rendered["height"]),
-                "hasAudio": bool(rendered.get("hasAudio")),
-                "previewOnly": True,
-                "outputKind": "cover_intro_review_preview",
-                "sourceOutputFilename": source_filename,
-                "coverIntro": {
-                    "enabled": True,
-                    "duration": float(rendered.get("introDuration") or duration),
-                    "coverVersionId": str(cover_version.get("id") or ""),
-                    "sourceFilename": source_filename,
-                    "sourceKind": source_kind,
-                },
-            })
-            with jobs_lock:
-                current_job = jobs.get(job_id)
-                if not current_job:
-                    target_path.unlink(missing_ok=True)
-                    raise RuntimeError("封面片头审核样片生成完成时任务已不存在")
-                current_job.setdefault("agentPreviewOutputs", []).append(output)
-                current_job["lastAgentCoverIntroPreviewFilename"] = target_name
-                current_job["coverIntroOperation"] = {
-                    "status": "completed",
-                    "filename": target_name,
-                    "sourceFilename": source_filename,
-                    "sourceKind": source_kind,
-                    "completedAt": now_iso(),
-                }
-                current_job["coverIntroDraft"] = {
-                    "schemaVersion": "cover-intro-timeline-v1",
-                    "enabled": True,
-                    "duration": float(rendered.get("introDuration") or duration),
-                    "coverVersionId": str(cover_version.get("id") or ""),
-                    "renderedFilename": target_name,
-                    "updatedAt": now_iso(),
-                }
-                current_job.update({
-                    "status": "completed", "stage": "completed", "progress": 1.0,
-                    "stageProgress": 1.0, "progressMode": "determinate",
-                    "detail": "封面片头审核样片已生成",
-                    "currentAction": "封面片头审核样片已生成",
-                    "model": "FFmpeg", "error": None, "updatedAt": now_iso(),
-                })
-                save_job(current_job)
-            public_output = {
-                **copy.deepcopy(output),
-                "videoUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
-                "previewUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
-            }
-            return {
-                "artifact": {
-                    "kind": "cover_intro_review_preview",
-                    "jobId": job_id,
-                    "output": public_output,
-                    "message": "已生成带当前任务封面片头的最终审核样片。",
-                },
-            }
-
-        future = output_preview_executor.submit(cover_intro_agent_worker)
-        return {
-            "operationId": f"{job_id}:cover_intro_preview:{source_filename}:{duration:.1f}",
-            "operation": "cover_intro_preview", "accepted": True,
-            "future": future, "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_compose_cover_intro(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "propose_timeline_edit":
-        approved_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
-        frozen_input = approved_plan.get("inputContext") or {}
-        validate_frozen(snapshot, frozen_input)
-        if arguments.get("anchorStartQuery") or arguments.get("durationSource") == "relative":
-            with jobs_lock:
-                current = jobs[job_id]
-                try:
-                    result = _conversational_timeline_proposal(
-                        current, arguments, frozen_input, str(approved_plan.get("id") or ""),
-                    )
-                except (ValueError, EditSessionError) as error:
-                    return no_result("revision_constraint_unmet", str(error))
-                save_job(current)
-            return {**result, "actionRequired": not autonomous}
-        contract_action = None if frozen_input.get("outputFilename") else _prepare_content_composition_contract(job_id)
-        if contract_action:
-            return contract_action
-        with jobs_lock:
-            snapshot = copy.deepcopy(jobs.get(job_id) or snapshot)
-        session_id = str(snapshot.get("activeEditSessionId") or "")
-        created = False
-        if frozen_input.get("outputFilename"):
-            with jobs_lock:
-                current = jobs.get(job_id)
-                validate_frozen(current or {}, frozen_input)
-                session = next((s for s in current.get("editSessions") or [] if s.get("agentInputPlanId") == approved_plan.get("id")), None)
-                if session is None:
-                    if frozen_input.get("outputVersionId"):
-                        base, _ = create_or_resume_edit_session(current, version_id=frozen_input["outputVersionId"], output_filename=frozen_input["outputFilename"])
-                    else:
-                        base = next((s for s in current.get("editSessions") or [] if s.get("id") == frozen_input.get("editSessionId")), None)
-                    if not base:
-                        raise RuntimeError("所引用的样片没有可编辑时间线，请先在精剪中建立草稿")
-                    session = copy.deepcopy(base)
-                    session.update({"id": f"edit_session_{uuid.uuid4().hex[:12]}", "agentInputPlanId": approved_plan["id"], "revision": 0, "status": "draft", "previewStatus": "idle", "undo": [], "redo": []})
-                    for key in ("previewPath", "previewUrl", "previewFingerprint", "pendingProposal", "contentVerification"):
-                        session.pop(key, None)
-                    current.setdefault("editSessions", []).append(session)
-                    created = True
-                session_id = session["id"]
-                current["activeEditSessionId"] = session_id
-                save_job(current)
-        duration_fit: dict[str, Any] = {}
-        requested_variants = max(1, min(4, int(arguments.get("variantCount") or 1)))
-        variant_directions = [
-            str(item).strip()[:160] for item in arguments.get("variantDirections") or []
-            if str(item).strip()
-        ][:requested_variants]
-        instruction = str(arguments.get("instruction") or "按已确认候选建立可审核时间线")[:500]
-        with jobs_lock:
-            current = jobs.get(job_id)
-            if current and session_id and not any(
-                str(item.get("id") or "") == session_id for item in current.get("editSessions") or []
-            ):
-                session_id = ""
-            search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
-            if frozen_input.get("outputFilename"):
-                search = {}
-            candidates = [item for item in search.get("candidates") or [] if isinstance(item, dict)]
-            candidates = [item for item in candidates if float(item.get("end") or 0) > float(item.get("start") or 0)]
-            review = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
-            saved_ids = review.get("orderedMatchIds") or review.get("selectedMatchIds") or search.get("confirmedMatchIds") or search.get("defaultSelectedIds") or []
-            if frozen_input.get("contentSelection"):
-                validate_frozen(current, frozen_input)
-                saved_ids = frozen_input["contentSelection"]["matchIds"]
-            allowed_ids = {str(item.get("id") or "") for item in candidates}
-            selected_ids = [str(value) for value in saved_ids if str(value) in allowed_ids]
-            if current and session_id and str(search.get("id") or ""):
-                active_session = find_edit_session(current, session_id)
-                if (
-                    str(active_session.get("sourceSearchId") or "") != str(search.get("id") or "")
-                    or list(active_session.get("sourceMatchIds") or []) != selected_ids
-                    or (active_session.get("contentBinding") or {}).get("selectionFingerprint") != selection_binding(
-                        search, [item for value in selected_ids for item in candidates if str(item.get("id")) == value]
-                    )["selectionFingerprint"]
-                ):
-                    # An edit session created by an earlier search or by the
-                    # candidate drawer is not the approved Agent selection.
-                    # Reusing it silently injected every candidate into the
-                    # new timeline.
-                    session_id = ""
-                elif autonomous:
-                    assembly_spec = (
-                        search.get("agentAssemblySpec")
-                        if isinstance(search.get("agentAssemblySpec"), dict)
-                        else _content_assembly_spec(search)
-                    )
-                    assembly_spec = {
-                        **assembly_spec, "searchId": str(search.get("id") or ""),
-                    }
-                    if (
-                        len(assembly_spec.get("predicateIds") or []) >= 2
-                        and _content_session_needs_assembly_fit(active_session, assembly_spec)
-                    ):
-                        _fit_content_session_to_assembly(
-                            current, active_session, search, assembly_spec,
-                        )
-                        current["updatedAt"] = now_iso()
-                        save_job(current)
-            if current and not session_id and str(search.get("id") or ""):
-                if selected_ids:
-                    try:
-                        session, created = create_or_resume_content_edit_session(
-                            current, search_id=str(search["id"]), selected_match_ids=selected_ids,
-                            order_mode="selection",
-                        )
-                        assembly_spec = (
-                            search.get("agentAssemblySpec")
-                            if isinstance(search.get("agentAssemblySpec"), dict)
-                            else _content_assembly_spec(search)
-                        )
-                        assembly_spec = {
-                            **assembly_spec, "searchId": str(search.get("id") or ""),
-                        }
-                        if (
-                            autonomous
-                            and len(assembly_spec.get("predicateIds") or []) >= 2
-                            and _content_session_needs_assembly_fit(session, assembly_spec)
-                        ):
-                            if not created:
-                                session = copy.deepcopy(session)
-                                session.update({
-                                    "id": f"edit_session_{uuid.uuid4().hex[:12]}",
-                                    "revision": 0, "undo": [], "redo": [],
-                                    "pendingProposal": None, "proposalVariants": [],
-                                    "createdAt": now_iso(), "updatedAt": now_iso(),
-                                })
-                                for key in (
-                                    "previewPath", "previewUrl", "previewFingerprint", "previewRevision",
-                                    "renderPlanFingerprint", "renderedVersionId",
-                                ):
-                                    session.pop(key, None)
-                                session["previewStatus"] = "idle"
-                                current.setdefault("editSessions", []).append(session)
-                                created = True
-                            _fit_content_session_to_assembly(current, session, search, assembly_spec)
-                        session["agentTimelineRequest"] = {
-                            "variantCount": requested_variants,
-                            "instruction": instruction,
-                            "source": "agent_plan",
-                        }
-                        session["title"] = (
-                            f"内容检索精剪 · {requested_variants} 个结构方向"
-                            if requested_variants > 1 else "内容检索精剪"
-                        )
-                        session_id = str(session.get("id") or "")
-                        current["activeEditSessionId"] = session_id
-                        current["updatedAt"] = now_iso()
-                        save_job(current)
-                    except EditSessionError:
-                        session_id = ""
-            if current and not session_id and not str(search.get("id") or ""):
-                highlight_candidates: list[tuple[str, dict[str, Any]]] = []
-                for index, item in enumerate(current.get("candidates") or []):
-                    if not isinstance(item, dict) or float(item.get("end") or 0) <= float(item.get("start") or 0):
-                        continue
-                    identity = item.get("id") or item.get("candidateId")
-                    if identity in (None, "") and item.get("index") is not None:
-                        identity = item.get("index")
-                    candidate_id = str(identity if identity not in (None, "") else f"candidate_{index}")
-                    highlight_candidates.append((candidate_id, item))
-                if highlight_candidates:
-                    allowed_ids = {candidate_id for candidate_id, _item in highlight_candidates}
-                    preferred_values = (
-                        current.get("confirmedIndices") or current.get("recommendedIndices") or []
-                    )
-                    selected_ids = [
-                        str(value) for value in preferred_values if str(value) in allowed_ids
-                    ]
-                    if not selected_ids:
-                        selected_group_ids = {
-                            str(value) for value in (
-                                current.get("confirmedGroupIds") or current.get("recommendedGroupIds") or []
-                            ) if str(value)
-                        }
-                        for group in current.get("eventGroups") or []:
-                            if selected_group_ids and str(group.get("id") or "") not in selected_group_ids:
-                                continue
-                            for segment in group.get("segments") or []:
-                                candidate_id = str(segment.get("candidateId") or segment.get("id") or "")
-                                if candidate_id in allowed_ids and candidate_id not in selected_ids:
-                                    selected_ids.append(candidate_id)
-                    if not selected_ids:
-                        ranked = sorted(
-                            highlight_candidates,
-                            key=lambda row: float(
-                                row[1].get("editorialScore") or row[1].get("score") or 0
-                            ),
-                            reverse=True,
-                        )
-                        selected_ids = [candidate_id for candidate_id, _item in ranked]
-                    selected_ids = list(dict.fromkeys(selected_ids))[:64]
-                    try:
-                        session, created = create_or_resume_candidate_edit_session(
-                            current, candidate_ids=selected_ids, order_mode="source",
-                        )
-                        session["agentTimelineRequest"] = {
-                            "variantCount": requested_variants,
-                            "instruction": instruction,
-                            "source": "agent_plan",
-                        }
-                        session["title"] = (
-                            f"高光候选精剪 · {requested_variants} 个结构方向"
-                            if requested_variants > 1 else "高光候选精剪"
-                        )
-                        session_id = str(session.get("id") or "")
-                        current["activeEditSessionId"] = session_id
-                        current["updatedAt"] = now_iso()
-                        save_job(current)
-                    except EditSessionError:
-                        session_id = ""
-            if current and not session_id and not str(search.get("id") or ""):
-                delivery = AgentPlatform._social_delivery(instruction)
-                retrieval_query = AgentPlatform._retrieval_query(instruction)
-                duration = float(
-                    (current.get("videoInfo") or {}).get("duration")
-                    or current.get("duration") or 0
-                )
-                request_state = (
-                    current.get("request") if isinstance(current.get("request"), dict) else {}
-                )
-                source_scope = (
-                    request_state.get("sourceScope")
-                    if isinstance(request_state.get("sourceScope"), dict) else {}
-                )
-                source_start = max(0.0, float(source_scope.get("start") or 0))
-                source_end = min(duration, float(source_scope.get("end") or duration))
-                if (
-                    bool(delivery.get("requested"))
-                    and not retrieval_query
-                    and source_end - source_start >= .25
-                ):
-                    # A format-only request means “keep the source and change
-                    # its canvas”, not “discover an arbitrary highlight”.
-                    # Materialize one full-scope candidate so the regular edit
-                    # and preview paths remain traceable without visual analysis.
-                    search_id = f"source_passthrough_{uuid.uuid4().hex[:12]}"
-                    match_id = f"source_match_{uuid.uuid4().hex[:12]}"
-                    passthrough_search = {
-                        "schemaVersion": CONTENT_SEARCH_VERSION,
-                        "id": search_id,
-                        "instruction": instruction,
-                        "status": "ready",
-                        "candidateCount": 1,
-                        "candidates": [{
-                            "id": match_id,
-                            "start": round(source_start, 3),
-                            "end": round(source_end, 3),
-                            "duration": round(source_end - source_start, 3),
-                            "title": "完整素材 · 画幅转换",
-                            "reason": "用户仅要求改变画幅，完整保留所选素材范围",
-                            "confidence": 1.0,
-                            "confidenceTier": "reliable",
-                            "requiresReview": False,
-                            "selected": True,
-                            "reviewStatus": "confirmed",
-                            "evidenceType": "source_scope",
-                            "matchedModalities": ["source"],
-                        }],
-                        "defaultSelectedIds": [match_id],
-                        "reviewDraft": {
-                            "schemaVersion": "content-review-draft-v1",
-                            "searchId": search_id,
-                            "selectedMatchIds": [match_id],
-                            "orderedMatchIds": [match_id],
-                            "source": "agent_source_passthrough",
-                            "updatedAt": now_iso(),
-                        },
-                        "createdAt": now_iso(),
-                    }
-                    current["contentSearch"] = passthrough_search
-                    try:
-                        session, created = create_or_resume_content_edit_session(
-                            current,
-                            search_id=search_id,
-                            selected_match_ids=[match_id],
-                            order_mode="source",
-                        )
-                        session["title"] = "完整素材画幅转换"
-                        session["agentTimelineRequest"] = {
-                            "variantCount": 1,
-                            "instruction": instruction,
-                            "source": "agent_source_passthrough",
-                        }
-                        session_id = str(session.get("id") or "")
-                        current["activeEditSessionId"] = session_id
-                        current["updatedAt"] = now_iso()
-                        save_job(current)
-                    except EditSessionError:
-                        session_id = ""
-        if autonomous and not session_id:
-            search_id = str((search or {}).get("id") or "")
-            if search_id and not candidates:
-                return no_result(
-                    "no_match",
-                    "内容检索没有生成可用于自动编排的可靠候选，已跳过后续时间线与渲染步骤。",
-                    query=str(arguments.get("instruction") or (search or {}).get("instruction") or ""),
-                    candidate_count=0,
-                    reliable_count=0,
-                )
-            if search_id and not selected_ids:
-                reliable_count = sum(
-                    1 for item in candidates
-                    if (
-                        item.get("selected") is True
-                        or str(item.get("confidenceTier") or "") == "reliable"
-                        or (
-                            not str(item.get("confidenceTier") or "")
-                            and not bool(item.get("requiresReview"))
-                        )
-                    )
-                )
-                return no_result(
-                    "content_candidates_not_selected",
-                    "内容检索存在候选，但没有形成可自动编排的确认选择，已跳过后续时间线与渲染步骤。",
-                    query=str(arguments.get("instruction") or (search or {}).get("instruction") or ""),
-                    candidate_count=len(candidates),
-                    reliable_count=reliable_count,
-                )
-        if autonomous and session_id and not frozen_input.get("outputFilename"):
-            with jobs_lock:
-                current = jobs.get(job_id)
-                session = find_edit_session(current, session_id) if current else None
-                search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
-                duration_fit = _fit_agent_session_to_target(current, session, search) if current and session else {}
-                if current:
-                    current["updatedAt"] = now_iso()
-                    save_job(current)
-            if str(duration_fit.get("status") or "") in {"insufficient_coverage", "over_target"}:
-                fit_status = str(duration_fit.get("status") or "")
-                message = (
-                    f"可靠候选最多只能组成约 {float(duration_fit.get('actualSeconds') or 0):.1f} 秒，"
-                    f"不足以达到 {float(duration_fit.get('targetSeconds') or 0):.1f} 秒目标。"
-                    if fit_status == "insufficient_coverage" else
-                    f"保留完整语义边界后时间线仍为 {float(duration_fit.get('actualSeconds') or 0):.1f} 秒，"
-                    f"无法收敛到 {float(duration_fit.get('targetSeconds') or 0):.1f} 秒目标范围。"
-                )
-                return no_result(
-                    "insufficient_coverage" if fit_status == "insufficient_coverage" else "duration_constraint_unmet",
-                    message,
-                    query=str(arguments.get("instruction") or ""),
-                    candidate_count=len((snapshot.get("contentSearch") or {}).get("candidates") or snapshot.get("candidates") or []),
-                    coverage_seconds=float(duration_fit.get("actualSeconds") or 0),
-                )
-        proposal: dict[str, Any] | None = None
-        proposal_variants: list[dict[str, Any]] = []
-        if session_id:
-            with jobs_lock:
-                current = jobs.get(job_id)
-                session = find_edit_session(current, session_id) if current else None
-                pending = session.get("pendingProposal") if isinstance(session, dict) else None
-                revision = int(session.get("revision") or 0) if isinstance(session, dict) else 0
-                clip_ids = [
-                    str(item.get("id") or "") for item in (session.get("clips") or [])
-                    if str(item.get("id") or "")
-                ][:64] if isinstance(session, dict) else []
-                if (isinstance(pending, dict) and str(pending.get("status") or "") == "pending"
-                        and not pending.get("plannerDegradedReason") and not pending.get("validationRejected")):
-                    proposal = copy.deepcopy(pending)
-                    proposal_variants = copy.deepcopy([
-                        item for item in session.get("proposalVariants") or [] if isinstance(item, dict)
-                    ])
-            if proposal is None:
-                with jobs_lock:
-                    current = jobs.get(job_id)
-                    session = find_edit_session(current, session_id) if current else None
-                    deterministic_assembly = bool(
-                        autonomous and requested_variants == 1
-                        and isinstance((session or {}).get("agentAssembly"), dict)
-                        and not variant_directions
-                    )
-                    if deterministic_assembly and current and session:
-                        proposal = build_secondary_edit_proposal(
-                            current, session, text=instruction,
-                            selected_clip_ids=clip_ids,
-                            model_result={
-                                "title": "Agent 均衡时间线草案",
-                                "summary": "按检索类别分组，并依据每类时长配额建立待审核时间线。",
-                                "operations": [{"type": "reorder_clips", "clipIds": clip_ids}],
-                            },
-                        )
-                        save_job(current)
-                try:
-                    if proposal is not None:
-                        pass
-                    elif requested_variants > 1:
-                        proposal_variants = create_agent_timeline_variant_proposals(
-                            job_id, session_id, revision=revision, instruction=instruction,
-                            selected_clip_ids=clip_ids, count=requested_variants,
-                            directions=variant_directions,
-                        )
-                        proposal = copy.deepcopy(proposal_variants[0])
-                    else:
-                        payload = create_edit_session_proposal(
-                            job_id, session_id,
-                            EditSessionProposalRequest(
-                                revision=revision, text=instruction, selectedClipIds=clip_ids,
-                            ),
-                        )
-                        proposal = copy.deepcopy(payload.get("proposal") or {})
-                except Exception as error:
-                    raise RuntimeError(
-                        f"剪辑编排未完成（{type(error).__name__}）。候选与草稿已保留，"
-                        "未用简单拼接替代原要求；请重试编排步骤。"
-                    ) from error
-            if autonomous and proposal and proposal.get("plannerDegradedReason"):
-                raise RuntimeError("剪辑规划模型不可用，当前仅有降级草稿；未自动应用或生成样片，请重试编排步骤。")
-        if session_id and requested_variants > 1:
-            if len(proposal_variants) != requested_variants:
-                return no_result(
-                    "variant_count_unmet",
-                    f"要求生成 {requested_variants} 版，但当前只得到 {len(proposal_variants) or int(bool(proposal))} 个有效方案；未自动应用或渲染。请调整要求后重新规划。",
-                )
-            if arguments.get("distinctSourceAcrossVariants"):
-                with jobs_lock:
-                    validation_job = copy.deepcopy(jobs[job_id])
-                base = find_edit_session(validation_job, session_id)
-                used_ranges: list[tuple[float, float]] = []
-                for variant in proposal_variants:
-                    branch = copy.deepcopy(base)
-                    branch["pendingProposal"] = copy.deepcopy(variant)
-                    try:
-                        apply_secondary_edit_proposal(validation_job, branch, str(variant.get("id") or ""))
-                    except EditSessionError as error:
-                        return no_result("variant_validation_failed", f"版本检查未通过：{error}")
-                    ranges = [(float(clip.get("sourceStart") or 0), float(clip.get("sourceEnd") or 0)) for clip in branch.get("clips") or []]
-                    if any(min(end, old_end) - max(start, old_start) > .001 for start, end in ranges for old_start, old_end in used_ranges):
-                        return no_result(
-                            "variant_source_overlap",
-                            "当前方案存在跨版本重复片段，无法满足“不要复用片段”；未自动应用或渲染。请减少版本数、缩短时长或补充素材后重新规划。",
-                        )
-                    used_ranges.extend(ranges)
-        if autonomous and session_id:
-            def proposal_is_safe(value: dict[str, Any]) -> bool:
-                preview = value.get("preview") if isinstance(value.get("preview"), dict) else None
-                # Third-party/legacy dispatch tests may not provide a preview;
-                # first-party proposals always do, and those are the values
-                # this safety gate is designed to validate.
-                if preview is None:
-                    return True
-                if int(preview.get("clipCountAfter") or 0) <= 0:
-                    return False
-                preflight = preview.get("preflight") if isinstance(preview.get("preflight"), dict) else {}
-                if int(preflight.get("errorCount") or 0) > 0:
-                    return False
-                target = float(duration_fit.get("targetSeconds") or 0)
-                tolerance = float(duration_fit.get("toleranceSeconds") or 0)
-                actual = float(preview.get("durationAfter") or 0)
-                return not target or target - tolerance <= actual <= target + tolerance
-
-            safe_variants = [
-                value for value in proposal_variants
-                if isinstance(value, dict) and proposal_is_safe(value)
-            ]
-            if requested_variants > 1 and len(safe_variants) != requested_variants:
-                return no_result(
-                    "insufficient_safe_variants",
-                    "通过时长与内容检查的方案不足请求版本数；请调整版本数、时长或素材后重新规划。",
-                )
-            if safe_variants:
-                proposal_variants = safe_variants
-                proposal = copy.deepcopy(safe_variants[0])
-            elif proposal and not proposal_is_safe(proposal):
-                with jobs_lock:
-                    current = jobs.get(job_id)
-                    current_session = find_edit_session(current, session_id) if current else None
-                    pending = (current_session or {}).get("pendingProposal") or {}
-                    if pending.get("id") == proposal.get("id"):
-                        pending["validationRejected"] = True
-                        save_job(current)
-                proposal = None
-                proposal_variants = []
-            if proposal is None:
-                raise RuntimeError("剪辑提案未通过内容或时长检查，未自动应用；已保留原草稿，请重试编排步骤。")
-        batch_entries: list[dict[str, Any]] = []
-        if autonomous:
-            if not session_id or not proposal:
-                raise RuntimeError("Agent 无法从当前候选生成有效时间线方案")
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    raise RuntimeError("素材任务不存在")
-                base_session = find_edit_session(current, session_id)
-                variants = proposal_variants or [proposal]
-                for index, variant in enumerate(variants):
-                    if index == 0:
-                        branch = base_session
-                    else:
-                        branch = copy.deepcopy(base_session)
-                        branch["id"] = f"edit_session_{uuid.uuid4().hex[:12]}"
-                        branch["createdAt"] = now_iso()
-                        current.setdefault("editSessions", []).append(branch)
-                    branch["title"] = str(variant.get("title") or f"Agent 结构方案 {index + 1}")[:100]
-                    branch["pendingProposal"] = copy.deepcopy(variant)
-                    branch["proposalVariants"] = [copy.deepcopy(variant)]
-                    branch["agentVariantIndex"] = index + 1
-                    branch["updatedAt"] = now_iso()
-                    batch_entries.append({
-                        "sessionId": str(branch["id"]),
-                        "proposalId": str(variant.get("id") or ""),
-                        "title": branch["title"],
-                        "direction": str(variant.get("direction") or ""),
-                    })
-                current["agentTimelineBatch"] = {
-                    "planId": str(workspace.get("activePlanId") or ""),
-                    "status": "proposed", "variants": batch_entries,
-                    "createdAt": now_iso(), "updatedAt": now_iso(),
-                }
-                current["activeEditSessionId"] = str(batch_entries[0]["sessionId"])
-                current["updatedAt"] = now_iso()
-                save_job(current)
-        return {
-            "actionRequired": not autonomous,
-            "action": "timeline_proposal",
-            "sessionId": session_id or None,
-            "proposalId": str((proposal or {}).get("id") or "") or None,
-            "proposalVariantCount": len(proposal_variants) or (1 if proposal else 0),
-            "proposalVariants": [{
-                "id": str(item.get("id") or ""), "title": str(item.get("title") or ""),
-                "summary": str(item.get("summary") or ""), "direction": str(item.get("direction") or ""),
-            } for item in proposal_variants],
-            "timelineBatch": copy.deepcopy(batch_entries),
-            "message": (
-                ((f"我已生成 {len(proposal_variants)} 个时间线结构方案，将自动验证并应用。"
-                  if autonomous and len(proposal_variants) > 1 else
-                  "我已生成时间线草案，将自动验证并应用。"
-                  if autonomous else
-                  f"我已生成 {len(proposal_variants)} 个可切换的时间线结构方案。" if len(proposal_variants) > 1 else
-                  f"我已生成待审核时间线草案“{str((proposal or {}).get('title') or '初始时间线草案')}”。")
-                 + ("" if autonomous else "请点击“打开精剪时间线”核对；在你应用前不会修改时间线。"))
-                if session_id else "当前任务还没有可用的高光或内容候选，请先完成素材分析。"
-            ),
-            "createdSession": created,
-        }
+        return _agent_tool_propose_timeline_edit(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, autonomous=autonomous, snapshot=snapshot, no_result=no_result)
     if tool_name == "confirm_timeline_edit":
-        if autonomous:
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    raise RuntimeError("素材任务不存在")
-                batch = current.get("agentTimelineBatch") if isinstance(current.get("agentTimelineBatch"), dict) else {}
-                entries = [item for item in batch.get("variants") or [] if isinstance(item, dict)]
-                if not entries:
-                    active_id = str(current.get("activeEditSessionId") or "")
-                    active = find_edit_session(current, active_id)
-                    pending = active.get("pendingProposal") if isinstance(active.get("pendingProposal"), dict) else {}
-                    entries = [{"sessionId": active_id, "proposalId": str(pending.get("id") or ""), "title": active.get("title")}]
-                # Validate the entire batch on a copy before changing any draft.
-                trial_job = copy.deepcopy(current)
-                for entry in entries:
-                    trial_session = find_edit_session(trial_job, str(entry.get("sessionId") or ""))
-                    apply_secondary_edit_proposal(trial_job, trial_session, str(entry.get("proposalId") or ""))
-                    content_report = timeline_content_report(trial_session, trial_job)
-                    if not content_report["passed"]:
-                        return {"actionRequired": True, "action": "timeline_confirmation",
-                                "sessionId": trial_session["id"], "contentVerification": content_report,
-                                "message": "草案超出已核验范围或包含未核验内容，请在精剪时间线修正后再继续。"}
-                applied: list[dict[str, Any]] = []
-                for entry in entries:
-                    session = find_edit_session(current, str(entry.get("sessionId") or ""))
-                    proposal_id = str(entry.get("proposalId") or "")
-                    if not proposal_id:
-                        raise RuntimeError("时间线方案缺少可应用的提案")
-                    apply_secondary_edit_proposal(current, session, proposal_id)
-                    applied.append({
-                        "sessionId": str(session["id"]), "revision": int(session.get("revision") or 0),
-                        "title": str(entry.get("title") or session.get("title") or "审核方案"),
-                    })
-                batch.update({"status": "applied", "variants": applied, "updatedAt": now_iso()})
-                current["agentTimelineBatch"] = batch
-                current["activeEditSessionId"] = str(applied[0]["sessionId"])
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "applied_timeline_batch", "jobId": job_id,
-                    "variants": applied,
-                    "message": f"我已验证并应用 {len(applied)} 个时间线方案。",
-                },
-                "sessionId": str(applied[0]["sessionId"]), "timelineBatch": applied,
-            }
-        return {
-            "actionRequired": True,
-            "action": "timeline_confirmation",
-            "sessionId": str(snapshot.get("activeEditSessionId") or "") or None,
-            "message": "请应用并保存已审核的时间线草案，再继续生成字幕。",
-        }
+        return _agent_tool_confirm_timeline_edit(tool_name=tool_name, job_id=job_id, autonomous=autonomous, snapshot=snapshot)
     if tool_name == "prepare_subtitle_review":
-        session_id = str(snapshot.get("activeEditSessionId") or "")
-        session = next((
-            item for item in snapshot.get("editSessions") or []
-            if str(item.get("id") or "") == session_id
-        ), None)
-        if autonomous:
-            if not session or not session.get("clips"):
-                raise RuntimeError("请先建立并应用时间线，再自动生成字幕草稿")
-            draft_id = str(session.get("subtitleDraftId") or "")
-            if session.get("subtitleEnabled") and draft_id:
-                try:
-                    existing_draft = _subtitle_draft_for_job(snapshot, draft_id)
-                except (HTTPException, OSError, ValueError):
-                    existing_draft = None
-                if existing_draft and str(existing_draft.get("status") or "") in {"confirmed", "auto_reviewed"}:
-                    return {"artifact": {
-                        "kind": "subtitle_review_draft", "mode": "reuse_reviewed",
-                        "sessionId": session_id, "subtitleDraftId": draft_id,
-                        "cueCount": len(existing_draft.get("cues") or []),
-                        "autoReviewed": str(existing_draft.get("status") or "") == "auto_reviewed",
-                        "message": "已复用当前时间线的字幕稿；审核样片生成后仍可继续修改。",
-                    }}
-            subtitle_style = normalize_subtitle_style(str(arguments.get("style") or "clean"))
-            future = output_preview_executor.submit(
-                run_agent_auto_subtitle_review, job_id, session_id, subtitle_style,
-            )
-            return {
-                "operationId": f"{job_id}:agent_subtitle_review:{session_id}:{uuid.uuid4().hex[:8]}",
-                "operation": "agent_subtitle_review",
-                "accepted": True,
-                "sessionId": session_id,
-                "future": future,
-                "cancel": lambda: cancel_job(job_id),
-            }
-        return {
-            "actionRequired": True,
-            "action": "subtitle_review",
-            "sessionId": session_id or None,
-            "message": (
-                "请在精剪时间线中建立并确认字幕草稿（文字、断句、说话人标签），再继续生成样片。"
-                if session and session.get("clips") else "请先建立并应用精剪时间线，再生成字幕审核稿。"
-            ),
-        }
+        return _agent_tool_prepare_subtitle_review(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, autonomous=autonomous, snapshot=snapshot)
+    if tool_name == "prepare_delivery_timeline":
+        return _agent_tool_prepare_delivery_timeline(workspace=workspace, tool_name=tool_name, snapshot=snapshot)
     if tool_name == "render_review_preview":
-        if autonomous:
-            batch = snapshot.get("agentTimelineBatch") if isinstance(snapshot.get("agentTimelineBatch"), dict) else {}
-            variants = [item for item in batch.get("variants") or [] if isinstance(item, dict)]
-            ready_variants: list[dict[str, Any]] = []
-            for item in variants:
-                session = next((
-                    value for value in snapshot.get("editSessions") or []
-                    if str(value.get("id") or "") == str(item.get("sessionId") or "")
-                ), None)
-                if session and int(session.get("revision") or 0) > 0 and not isinstance(session.get("pendingProposal"), dict):
-                    ready_variants.append({
-                        "sessionId": str(session["id"]),
-                        "revision": int(session.get("revision") or 0),
-                        "title": str(item.get("title") or session.get("title") or "审核方案"),
-                    })
-            if not ready_variants:
-                raise RuntimeError("自动时间线尚未应用，无法生成审核样片")
-            future = submit_render_task(job_id, run_agent_review_batch, ready_variants)
-            return {
-                "operationId": f"{job_id}:agent_review_batch:{uuid.uuid4().hex[:8]}",
-                "operation": "agent_review_batch", "accepted": True,
-                "variantCount": len(ready_variants), "future": future,
-                "cancel": lambda: cancel_job(job_id),
-            }
-        session_id = str(snapshot.get("activeEditSessionId") or "")
-        session = next((
-            item for item in snapshot.get("editSessions") or []
-            if str(item.get("id") or "") == session_id
-        ), None)
-        if session and int(session.get("revision") or 0) > 0 and not isinstance(session.get("pendingProposal"), dict):
-            revision = int(session.get("revision") or 0)
-            future = submit_render_task(job_id, run_agent_review_batch, [{
-                "sessionId": session_id, "revision": revision,
-                "title": str(session.get("title") or "审核方案"),
-            }])
-            return {
-                "operationId": f"{job_id}:agent_review_render:{session_id}:{revision}",
-                "operation": "agent_review_render", "accepted": True, "future": future,
-                "cancel": lambda: cancel_job(job_id),
-            }
-        outputs = public_job(snapshot).get("outputs") or []
-        if outputs:
-            return {"artifact": {"kind": "review_preview", "jobId": job_id, "outputs": outputs,
-                                 "message": "已复用当前审核输出。"}}
-        return {"actionRequired": True, "action": "preview_generation",
-                "message": "请先应用并保存时间线草案，再继续生成审核输出。"}
+        return _agent_tool_render_review_preview(tool_name=tool_name, job_id=job_id, autonomous=autonomous, snapshot=snapshot)
     if tool_name == "analyze_reframe_safe_areas":
-        aspect = str(arguments.get("aspect") or "9:16")
-        fit = str(arguments.get("fit") or "blur")
-        output, path = current_output_reference()
-        if path is None or not path.is_file():
-            return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于画幅分析的成片或审核样片。"}
-        info = probe_video(path, settings.ffprobe)
-        source_ratio = round(info.width / max(1, info.height), 4)
-        target_size = {"9:16": (1080, 1920), "4:5": (1080, 1350), "1:1": (1080, 1080), "16:9": (1920, 1080)}.get(aspect)
-        target_ratio = round(target_size[0] / target_size[1], 4) if target_size else source_ratio
-        recommended_fit = "blur" if abs(source_ratio - target_ratio) > .03 and fit != "crop" else fit
-        return {
-            "artifact": {
-                "kind": "reframe_safe_area_report", "jobId": job_id,
-                "sourceFilename": str((output or {}).get("filename") or path.name),
-                "source": {"width": info.width, "height": info.height, "ratio": source_ratio},
-                "target": {"aspect": aspect, "ratio": target_ratio},
-                "fit": recommended_fit,
-                "protections": ["complete_frame", "subtitles", "screen_text", "faces", "product_subject"],
-                "message": "建议完整保留原画面并使用同画面虚化背景补齐。" if recommended_fit == "blur" else "按用户指定方式进行画幅适配。",
-            },
-        }
+        return _agent_tool_analyze_reframe_safe_areas(tool_name=tool_name, arguments=arguments, job_id=job_id, current_output_reference=current_output_reference)
     if tool_name == "layout_subtitles":
-        position = str(arguments.get("position") or "bottom").strip().lower()
-        vertical = "top" if position in {"top", "顶部", "上方"} else "middle" if position in {"middle", "center", "居中"} else "bottom"
-        style = normalize_subtitle_style(str(arguments.get("style") or "clean"))
-        raw_size = arguments.get("fontSizeRatio")
-        layout_input: dict[str, Any] = {"preset": style, "vertical": vertical, "horizontal": "center"}
-        if raw_size is not None:
-            layout_input["fontSizeRatio"] = raw_size
-        layout = normalize_subtitle_layout(layout_input, style)
-        with jobs_lock:
-            current = jobs.get(job_id)
-            session_id = str((current or {}).get("activeEditSessionId") or "")
-            session = find_edit_session(current, session_id) if current and session_id else None
-            if not current or not session:
-                return {"actionRequired": True, "action": "subtitle_review", "message": "请先建立并应用精剪时间线，再进行字幕排版。"}
-            draft_id = str(session.get("subtitleDraftId") or "")
-            if not bool(session.get("subtitleEnabled")) or not draft_id:
-                return {
-                    "actionRequired": True, "action": "subtitle_review",
-                    "message": "请先生成并确认当前时间线的字幕草稿，再调整字幕排版。",
-                }
-            try:
-                draft = _subtitle_draft_for_job(current, draft_id)
-            except (HTTPException, OSError, ValueError):
-                return {
-                    "actionRequired": True, "action": "subtitle_review",
-                    "message": "当前字幕草稿不可用，请重新生成并确认后再调整排版。",
-                }
-            if str(draft.get("status") or "") not in {"confirmed", "auto_reviewed"}:
-                return {
-                    "actionRequired": True, "action": "subtitle_review",
-                    "message": "字幕文字与断句尚未确认；请先完成字幕审核，再调整排版。",
-                }
-            cues = [
-                copy.deepcopy(cue) for cue in draft.get("cues") or []
-                if isinstance(cue, dict) and str(cue.get("text") or "").strip()
-            ]
-            if not cues:
-                return {"actionRequired": True, "action": "subtitle_review", "message": "当前字幕草稿没有有效文字，请先补全并确认字幕。"}
-            draft["globalStyle"] = layout
-            draft["revision"] = int(draft.get("revision") or 0) + 1
-            draft["updatedAt"] = now_iso()
-            save_subtitle_draft_file(str(current.get("workDirectory") or ""), draft)
-            session.update({
-                "subtitleEnabled": True, "subtitleDraftId": draft_id,
-                "subtitleStyle": style, "agentSubtitleLayout": layout,
-                "revision": int(session.get("revision") or 0) + 1,
-                "renderedVersionId": None, "updatedAt": now_iso(),
-            })
-            current["updatedAt"] = now_iso()
-            save_job(current)
-        return {
-            "artifact": {
-                "kind": "subtitle_layout_applied", "jobId": job_id,
-                "sessionId": session_id, "subtitleDraftId": draft_id,
-                "layout": layout, "cueCount": len(cues),
-                "message": (
-                    f"已在自动校对稿上应用 {len(cues)} 条字幕的{vertical}部布局；成片阶段仍可修改。"
-                    if str(draft.get("status") or "") == "auto_reviewed" else
-                    f"已在确认稿上应用 {len(cues)} 条字幕的{vertical}部布局。"
-                ),
-            },
-        }
+        return _agent_tool_layout_subtitles(tool_name=tool_name, arguments=arguments, job_id=job_id)
     if tool_name == "propose_broll_overlay":
-        query = str(arguments.get("query") or "").strip()
-        max_overlays = max(1, min(12, int(arguments.get("maxOverlays") or 6)))
-        with jobs_lock:
-            current = jobs.get(job_id)
-            session_id = str((current or {}).get("activeEditSessionId") or "")
-            session = find_edit_session(current, session_id) if current and session_id else None
-            search = current.get("contentSearch") if current and isinstance(current.get("contentSearch"), dict) else {}
-            review = search.get("reviewDraft") if isinstance(search.get("reviewDraft"), dict) else {}
-            selected_ids = [str(value) for value in review.get("orderedMatchIds") or review.get("selectedMatchIds") or [] if str(value)]
-            candidates = {
-                str(item.get("id") or ""): item for item in search.get("candidates") or []
-                if isinstance(item, dict) and float(item.get("end") or 0) > float(item.get("start") or 0)
-            }
-            if not current or not session:
-                return {"actionRequired": True, "action": "timeline_confirmation", "message": "请先建立当前时间线，再添加辅助画面。"}
-            primary_clips = [item for item in session.get("clips") or [] if isinstance(item, dict)]
-            if not primary_clips:
-                return no_result("empty_timeline", "当前时间线为空，无法插入辅助画面。", query=query)
-            schedule = composition_schedule([
-                {"start": item.get("sourceStart"), "end": item.get("sourceEnd"), "playbackRate": item.get("playbackRate") or 1, "transitionIn": item.get("transitionIn") or {"type": "cut", "duration": 0}}
-                for item in primary_clips
-            ])
-            overlays = []
-            for index, match_id in enumerate(selected_ids[:max_overlays]):
-                candidate = candidates.get(match_id)
-                if not candidate:
-                    continue
-                primary_index = min(index, len(primary_clips) - 1)
-                primary_id = str(primary_clips[primary_index].get("id") or "")
-                overlay_start = float(schedule[primary_index].get("outputStart") or 0) + .2
-                duration = min(2.5, max(.2, float(candidate.get("end") or 0) - float(candidate.get("start") or 0)))
-                overlays.append({
-                    "id": f"broll_{uuid.uuid4().hex[:10]}", "primarySegmentId": primary_id,
-                    "sourceStart": round(float(candidate.get("start") or 0), 3),
-                    "sourceEnd": round(float(candidate.get("start") or 0) + duration, 3),
-                    "outputOffset": round(overlay_start - float(schedule[primary_index].get("outputStart") or 0), 3),
-                    "muted": True, "sourceRef": {"kind": "content_match", "id": match_id},
-                    "title": str(candidate.get("title") or candidate.get("summary") or "辅助画面")[:100],
-                })
-            if not overlays:
-                return no_result("no_broll_candidates", "没有可用于辅助画面插入的已确认候选。", query=query, candidate_count=len(candidates))
-            session.setdefault("cutaways", [])
-            session["cutaways"].extend(overlays)
-            session["revision"] = int(session.get("revision") or 0) + 1
-            session["renderedVersionId"] = None
-            session["updatedAt"] = now_iso()
-            current["updatedAt"] = now_iso()
-            save_job(current)
-        return {"artifact": {"kind": "broll_overlay_plan", "jobId": job_id, "sessionId": session_id, "cutaways": overlays, "message": f"已加入 {len(overlays)} 个辅助画面插入点。"}}
+        return _agent_tool_propose_broll_overlay(tool_name=tool_name, arguments=arguments, job_id=job_id, no_result=no_result)
     if tool_name == "render_graphics_package":
-        text = str(arguments.get("text") or "").strip()[:500]
-        placement = str(arguments.get("placement") or "top").strip().lower()
-        vertical = "bottom" if placement in {"bottom", "底部", "下方"} else "middle" if placement in {"middle", "center"} else "top"
-        if not text:
-            text = "视频重点"
-        with jobs_lock:
-            current = jobs.get(job_id)
-            session_id = str((current or {}).get("activeEditSessionId") or "")
-            session = find_edit_session(current, session_id) if current and session_id else None
-            if not current or not session:
-                return {"actionRequired": True, "action": "timeline_confirmation", "message": "请先建立当前时间线，再添加图文包装。"}
-            duration = max(.5, float(session.get("duration") or 0))
-            layer = {
-                "id": f"edit_text_{uuid.uuid4().hex[:12]}", "text": text,
-                "start": 0.0, "end": min(duration, 5.0),
-                "style": normalize_subtitle_layout({
-                    "preset": "bold", "vertical": vertical, "horizontal": "center",
-                    "fontSizeRatio": .052 if vertical != "middle" else .060,
-                }, "bold"),
-                "source": "agent_graphics_package",
-            }
-            session.setdefault("textLayers", []).append(layer)
-            session["revision"] = int(session.get("revision") or 0) + 1
-            session["renderedVersionId"] = None
-            session["updatedAt"] = now_iso()
-            current["updatedAt"] = now_iso()
-            save_job(current)
-        return {"artifact": {"kind": "graphics_package_layer", "jobId": job_id, "sessionId": session_id, "textLayer": layer, "message": "已添加当前任务图文包装层。"}}
+        return _agent_tool_render_graphics_package(tool_name=tool_name, arguments=arguments, job_id=job_id)
     if tool_name == "render_motion_graphics":
-        title = str(arguments.get("title") or "").strip()[:120] or "精彩内容"
-        subtitle = str(arguments.get("subtitle") or "").strip()[:220]
-        aspect = str(arguments.get("aspect") or "9:16").strip()
-        duration = max(0.5, min(8.0, float(arguments.get("duration") or 1.5)))
-        fps = 24
-        width, height = motion_canvas_size(aspect)
-        output_name = f"agent-motion-{aspect.replace(':', 'x')}-{uuid.uuid4().hex[:8]}.mp4"
-        work_root = Path(str(snapshot.get("workDirectory") or ""))
-        output_root = Path(str(snapshot.get("outputDirectory") or ""))
-        render_id = f"motion_{uuid.uuid4().hex[:12]}"
-        render_root = work_root / "local-motion" / render_id
-        html_path = render_root / "index.html"
-        frames_dir = render_root / "frames"
-        output_path = output_root / output_name
-        renderer_script = Path(__file__).resolve().parent.parent / "tools" / "render_html_motion.mjs"
-
-        def motion_worker() -> dict[str, Any]:
-            render_root.mkdir(parents=True, exist_ok=True)
-            html_path.write_text(
-                build_motion_graphics_html(
-                    title=title,
-                    subtitle=subtitle,
-                    label="ClipTalk",
-                    aspect=aspect,
-                    theme=str(arguments.get("theme") or "cliptalk"),
-                ),
-                encoding="utf-8",
-            )
-            render_html_motion_video(
-                html_path=html_path,
-                output_path=output_path,
-                frames_dir=frames_dir,
-                width=width,
-                height=height,
-                duration=duration,
-                fps=fps,
-                ffmpeg=settings.ffmpeg,
-                renderer_script=renderer_script,
-            )
-            rendered = probe_video(output_path, settings.ffprobe)
-            output = {
-                "filename": output_name,
-                "title": title,
-                "duration": round(rendered.duration, 3),
-                "width": rendered.width,
-                "height": rendered.height,
-                "hasAudio": rendered.has_audio,
-                "previewOnly": True,
-                "outputKind": "local_motion_graphics",
-                "motionGraphics": {
-                    "renderer": "html-playwright-ffmpeg",
-                    "aspect": aspect,
-                    "duration": duration,
-                    "title": title,
-                },
-            }
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    output_path.unlink(missing_ok=True)
-                    raise RuntimeError("本地图文动效生成完成时任务已不存在")
-                normalize_output_versions(current)
-                current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
-                if current_version:
-                    current_version.setdefault("previewOutputs", []).append(output)
-                else:
-                    current.setdefault("agentPreviewOutputs", []).append(output)
-                current["lastAgentMotionGraphicsFilename"] = output_name
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "local_motion_graphics",
-                    "jobId": job_id,
-                    "output": {
-                        **output,
-                        "videoUrl": f"/api/jobs/{job_id}/outputs/{output_name}",
-                        "previewUrl": f"/api/jobs/{job_id}/outputs/{output_name}",
-                    },
-                    "message": "本地图文动效视频已生成。",
-                },
-            }
-
-        future = output_preview_executor.submit(motion_worker)
-        return {
-            "operationId": f"{job_id}:local_motion:{output_name}",
-            "operation": "local_motion_graphics", "accepted": True,
-            "future": future, "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_render_motion_graphics(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "export_editing_draft":
-        export_format = str(arguments.get("format") or "cliptalk-json").strip().lower()
-        if export_format not in {"cliptalk-json", "jianying-bridge"}:
-            export_format = "cliptalk-json"
-        with jobs_lock:
-            current_snapshot = copy.deepcopy(jobs.get(job_id) or snapshot)
-        has_content = bool(
-            current_snapshot.get("activeEditSessionId")
-            or current_snapshot.get("editSessions")
-            or current_snapshot.get("outputVersions")
-            or current_snapshot.get("outputs")
-        )
-        draft_name = f"editing-draft-{export_format}-{uuid.uuid4().hex[:8]}.json"
-        draft_path = Path(str(current_snapshot.get("outputDirectory") or snapshot.get("outputDirectory") or "")) / draft_name
-        write_editing_draft_package(current_snapshot, draft_path)
-        artifact = {
-            "kind": "editing_draft_package",
-            "jobId": job_id,
-            "format": export_format,
-            "filename": draft_name,
-            "downloadUrl": f"/api/jobs/{job_id}/draft-exports/{draft_name}",
-            "mode": "timeline" if has_content else "source-only",
-            "message": (
-                "已导出 ClipTalk 本地草稿包；当前不会直接写入剪映目录。"
-                if has_content
-                else "当前还没有时间线或成片，已导出仅包含源素材与任务元数据的本地草稿包。"
-            ),
-        }
-        with jobs_lock:
-            current = jobs.get(job_id)
-            if current:
-                current.setdefault("draftExports", []).append({
-                    **artifact,
-                    "createdAt": now_iso(),
-                    "path": str(draft_path),
-                })
-                current["updatedAt"] = now_iso()
-                save_job(current)
-        return {"artifact": artifact}
+        return _agent_tool_export_editing_draft(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     if tool_name == "compose_motion_intro":
-        filename = str(arguments.get("filename") or "").strip()
-        intro_filename = str(arguments.get("introFilename") or snapshot.get("lastAgentMotionGraphicsFilename") or "").strip()
-        if Path(intro_filename).name != intro_filename or not intro_filename:
-            return {"actionRequired": True, "action": "preview_generation", "message": "请先生成本地图文动效片头。"}
-        output, source_path = current_output_reference(filename)
-        intro_path = Path(str(snapshot.get("outputDirectory") or "")) / intro_filename
-        if source_path is None or not source_path.is_file():
-            return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可合入动态图文片头的成片。"}
-        if not intro_path.is_file():
-            return {"actionRequired": True, "action": "preview_generation", "message": "本地图文动效片头文件不存在，请重新生成。"}
-        target_name = f"motion-intro-{uuid.uuid4().hex[:8]}.mp4"
-        target_path = Path(str(snapshot.get("outputDirectory") or "")) / target_name
-
-        def compose_motion_worker() -> dict[str, Any]:
-            media = compose_motion_intro_video(
-                intro_path=intro_path,
-                source_path=source_path,
-                output_path=target_path,
-                ffmpeg=settings.ffmpeg,
-                ffprobe=settings.ffprobe,
-            )
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    target_path.unlink(missing_ok=True)
-                    raise RuntimeError("动态图文片头合成完成时任务已不存在")
-                normalize_output_versions(current)
-                current_output, current_version, _position = output_download_context(current, str((output or {}).get("filename") or filename or source_path.name)) or ({}, {}, 0)
-                version_id, version_number = next_output_version(current)
-                new_output = copy.deepcopy(current_output or output or {})
-                new_output.update({
-                    "filename": target_name,
-                    "title": f"{str((current_output or output or {}).get('title') or '成片')}（动态图文片头）",
-                    "duration": float(media["duration"]),
-                    "width": int(media["width"]),
-                    "height": int(media["height"]),
-                    "hasAudio": bool(media["hasAudio"]),
-                    "previewOnly": False,
-                    "versionId": version_id,
-                    "versionNumber": version_number,
-                    "versionCreatedAt": now_iso(),
-                    "motionIntro": {
-                        "enabled": True,
-                        "introFilename": intro_filename,
-                        "introDuration": float(media["introDuration"]),
-                        "sourceFilename": str((current_output or output or {}).get("filename") or source_path.name),
-                    },
-                })
-                new_version = {
-                    "id": version_id,
-                    "number": version_number,
-                    "createdAt": now_iso(),
-                    "outputs": [new_output],
-                    "previewOnly": False,
-                    "variantKind": "motion_intro_export",
-                    "parentVersionId": str((current_version or {}).get("id") or current.get("currentOutputVersionId") or ""),
-                }
-                current.setdefault("outputVersions", []).append(new_version)
-                current["currentOutputVersionId"] = version_id
-                current["outputs"] = [new_output]
-                current.update({
-                    "status": "completed", "stage": "completed", "progress": 1.0,
-                    "stageProgress": 1.0, "progressMode": "completed",
-                    "detail": "动态图文片头成片已生成",
-                    "currentAction": "动态图文片头成片已生成",
-                    "error": None, "updatedAt": now_iso(),
-                })
-                _sync_output_manifest(current)
-                save_job(current)
-            return {
-                "artifact": {
-                    "kind": "motion_intro_output",
-                    "jobId": job_id,
-                    "output": {
-                        **new_output,
-                        "videoUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
-                        "previewUrl": f"/api/jobs/{job_id}/outputs/{target_name}",
-                    },
-                    "message": "已生成带本地图文动效片头的新成片版本。",
-                },
-            }
-
-        future = output_preview_executor.submit(compose_motion_worker)
-        return {
-            "operationId": f"{job_id}:compose_motion_intro:{target_name}",
-            "operation": "compose_motion_intro", "accepted": True,
-            "future": future, "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_compose_motion_intro(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot, current_output_reference=current_output_reference)
     if tool_name == "render_social_preview":
-        filename = str(arguments.get("filename") or "").strip()
-        aspect = str(arguments.get("aspect") or "9:16").strip()
-        fit = str(arguments.get("fit") or "blur").strip().lower()
-        focus_x = max(0.0, min(1.0, float(arguments.get("focusX", .5))))
-        focus_y = max(0.0, min(1.0, float(arguments.get("focusY", .5))))
-        available = [item for item in all_job_outputs(snapshot) if isinstance(item, dict) and item.get("filename")]
-        if filename:
-            source_output = next((item for item in available if str(item.get("filename")) == filename), None)
-            if not source_output:
-                raise RuntimeError("指定的审核样片或版本不存在，未改用其他视频")
-        else:
-            source_output = next((item for item in reversed(available) if not item.get("socialReframe")), None)
-        source_path: Path | None = None
-        source_session: dict[str, Any] | None = None
-        source_filename = ""
-        if source_output:
-            source_filename = str(source_output["filename"])
-            if Path(source_filename).name != source_filename:
-                raise RuntimeError("成片文件名无效")
-            source_path = Path(str(snapshot.get("outputDirectory") or "")) / source_filename
-            linked_session_id = str(
-                source_output.get("sourceEditSessionId")
-                or source_output.get("editSessionId")
-                or source_output.get("sessionId")
-                or ""
-            )
-            source_session = next((
-                item for item in snapshot.get("editSessions") or []
-                if str(item.get("id") or "") == linked_session_id
-            ), None)
-            if not source_path.is_file() and source_session and str(source_session.get("previewPath") or ""):
-                candidate_path = Path(source_session["previewPath"])
-                if candidate_path.name == source_filename and candidate_path.is_file():
-                    source_path = candidate_path
-        elif autonomous:
-            batch = snapshot.get("agentTimelineBatch") if isinstance(snapshot.get("agentTimelineBatch"), dict) else {}
-            first = next((item for item in batch.get("variants") or [] if isinstance(item, dict)), None)
-            source_session = next((
-                item for item in snapshot.get("editSessions") or []
-                if first and str(item.get("id") or "") == str(first.get("sessionId") or "")
-            ), None)
-            candidate_path = Path(str((source_session or {}).get("previewPath") or ""))
-            if candidate_path.is_file():
-                source_path = candidate_path
-                source_filename = candidate_path.name
-        if not source_output:
-            if source_path is None:
-                return {
-                    "actionRequired": True,
-                    "action": "preview_generation",
-                    "message": "当前没有可用于画幅重构的审核样片。",
-                }
-        if source_path is None or not source_path.is_file():
-            raise RuntimeError("画幅重构所需的成片文件不存在")
-        aspect_slug = aspect.replace(":", "x")
-        preview_filename = f"agent-social-{aspect_slug}-{uuid.uuid4().hex[:8]}.mp4"
-        preview_path = Path(str(snapshot.get("outputDirectory") or "")) / preview_filename
-        preview_path.parent.mkdir(parents=True, exist_ok=True)
-        source_session_id = str((source_session or {}).get("id") or "")
-        source_session_revision = int((source_session or {}).get("revision") or 0)
-        source_session_fingerprint = (
-            _edit_session_preview_fingerprint(snapshot, source_session)
-            if source_session else ""
-        )
-
-        def render_social_worker() -> dict[str, Any]:
-            source_info = probe_video(source_path, settings.ffprobe)
-            rendered = create_social_reframe_preview(
-                source_path, preview_path, aspect=aspect, fit=fit,
-                focus_x=focus_x, focus_y=focus_y, has_audio=source_info.has_audio,
-                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
-            )
-            fit_label = "虚化背景" if fit == "blur" else "留边" if fit == "pad" else "裁切"
-            output = {
-                "filename": preview_filename, "title": f"{aspect} {fit_label}审核预览",
-                "duration": round(rendered.duration, 3), "width": rendered.width,
-                "height": rendered.height, "previewOnly": True,
-                "outputKind": "social_reframe_preview", "socialReframe": True,
-                "sourceOutputFilename": source_filename,
-                "sourceEditSessionId": str((source_session or {}).get("id") or ""),
-                "reframe": {"aspect": aspect, "fit": fit, "focusX": focus_x, "focusY": focus_y},
-                "segments": copy.deepcopy(
-                    (source_output or {}).get("segments")
-                    or (source_session or {}).get("clips") or []
-                ),
-                "subtitleMode": (
-                    (source_output or {}).get("subtitleMode")
-                    or ("burn" if (source_session or {}).get("subtitleEnabled") else "none")
-                ),
-                "overlayVerification": copy.deepcopy(
-                    (source_output or {}).get("overlayVerification")
-                    or (source_session or {}).get("previewOverlayVerification")
-                    or {}
-                ),
-                "reason": (
-                    "完整保留原画面，并使用同画面虚化背景填充社媒画布。"
-                    if fit == "blur" else
-                    "完整保留原画面并使用留边填充社媒画布。"
-                    if fit == "pad" else
-                    "按指定焦点裁切为社媒画幅。"
-                ),
-            }
-            if isinstance((source_output or {}).get("coverIntro"), dict):
-                output["coverIntro"] = copy.deepcopy((source_output or {}).get("coverIntro"))
-            output["planId"] = workspace.get("activePlanId")
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    preview_path.unlink(missing_ok=True)
-                    raise RuntimeError("画幅预览完成时素材任务已不存在")
-                normalize_output_versions(current)
-                live_session = next((
-                    item for item in current.get("editSessions") or []
-                    if str(item.get("id") or "") == source_session_id
-                ), None)
-                session_is_current = bool(
-                    live_session
-                    and int(live_session.get("revision") or 0) == source_session_revision
-                    and _edit_session_preview_fingerprint(current, live_session) == source_session_fingerprint
-                )
-                current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
-                if current_version:
-                    current_version.setdefault("previewOutputs", []).append(output)
-                else:
-                    current.setdefault("agentPreviewOutputs", []).append(output)
-                current["lastAgentSocialPreviewFilename"] = preview_filename
-                if session_is_current and live_session:
-                    live_session["reframe"] = copy.deepcopy(output["reframe"])
-                    reframe_fingerprint = _edit_session_preview_fingerprint(current, live_session)
-                    live_session.update({
-                        "previewStatus": "ready",
-                        "previewRevision": source_session_revision,
-                        "previewFingerprint": reframe_fingerprint,
-                        "previewPath": str(preview_path),
-                        "previewUrl": f"/api/jobs/{job_id}/edit-sessions/{source_session_id}/preview?r={source_session_revision}",
-                        "previewError": None,
-                        "renderPlanFingerprint": reframe_fingerprint,
-                        "previewOverlayVerification": {
-                            **copy.deepcopy(output.get("overlayVerification") or {}),
-                            "renderPipelineVersion": 3,
-                            "reframe": copy.deepcopy(output["reframe"]),
-                        },
-                        "updatedAt": now_iso(),
-                    })
-                current["updatedAt"] = now_iso()
-                save_job(current)
-                public_output = {
-                    **copy.deepcopy(output),
-                    "videoUrl": f"/api/jobs/{job_id}/outputs/{preview_filename}",
-                    "previewUrl": f"/api/jobs/{job_id}/outputs/{preview_filename}",
-                }
-            return {
-                "artifact": {
-                    "kind": "social_reframe_preview", "jobId": job_id,
-                    "output": public_output,
-                    "message": "社媒画幅审核预览已生成。",
-                },
-            }
-
-        future = output_preview_executor.submit(render_social_worker)
-        return {
-            "operationId": f"{job_id}:social_reframe:{preview_filename}",
-            "operation": "social_reframe_preview", "accepted": True, "future": future,
-            "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_render_social_preview(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, autonomous=autonomous, snapshot=snapshot)
     if tool_name == "polish_audio_mix":
-        filename = str(arguments.get("filename") or "").strip()
-        noise_reduction = bool(arguments.get("noiseReduction", True))
-        output, source_path = current_output_reference(filename)
-        if source_path is None or not source_path.is_file():
-            return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于音频优化的成片或审核样片。"}
-        output_name = f"agent-audio-polish-{uuid.uuid4().hex[:8]}.mp4"
-        target_path = Path(str(snapshot.get("outputDirectory") or "")) / output_name
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        def audio_polish_worker() -> dict[str, Any]:
-            info = probe_video(source_path, settings.ffprobe)
-            if not info.has_audio:
-                return no_result("missing_audio", "当前输出没有音轨，无法进行音频优化。", candidate_count=1)
-            filters = []
-            if noise_reduction:
-                filters.append("afftdn")
-            filters.append("loudnorm=I=-16:LRA=11:TP=-1.5")
-            filters.append("alimiter=limit=0.95")
-            temporary = target_path.with_suffix(".tmp.mp4")
-            temporary.unlink(missing_ok=True)
-            subprocess.run([
-                settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(source_path), "-map", "0:v:0", "-map", "0:a:0",
-                "-c:v", "copy", "-af", ",".join(filters),
-                "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-                str(temporary),
-            ], check=True, timeout=max(180.0, info.duration * 3.0))
-            temporary.replace(target_path)
-            rendered = probe_video(target_path, settings.ffprobe)
-            public_output = {
-                **copy.deepcopy(output or {}),
-                "filename": output_name, "title": "音频优化审核版本",
-                "duration": round(rendered.duration, 3), "width": rendered.width,
-                "height": rendered.height, "hasAudio": rendered.has_audio,
-                "previewOnly": True, "outputKind": "audio_polish_preview",
-                "sourceOutputFilename": str((output or {}).get("filename") or source_path.name),
-                "audioPolish": {"noiseReduction": noise_reduction, "voiceFirst": bool(arguments.get("voiceFirst", True))},
-            }
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    target_path.unlink(missing_ok=True)
-                    raise RuntimeError("音频优化完成时任务已不存在")
-                normalize_output_versions(current)
-                current_version = find_output_version(current, str(current.get("currentOutputVersionId") or ""))
-                if current_version:
-                    current_version.setdefault("previewOutputs", []).append(public_output)
-                else:
-                    current.setdefault("agentPreviewOutputs", []).append(public_output)
-                current["lastAgentAudioPolishFilename"] = output_name
-                current["updatedAt"] = now_iso()
-                save_job(current)
-            return {"artifact": {"kind": "audio_polish_preview", "jobId": job_id, "output": {**public_output, "previewUrl": f"/api/jobs/{job_id}/outputs/{output_name}", "videoUrl": f"/api/jobs/{job_id}/outputs/{output_name}"}, "message": "音频优化审核版本已生成。"}}
-
-        future = output_preview_executor.submit(audio_polish_worker)
-        return {
-            "operationId": f"{job_id}:audio_polish:{output_name}",
-            "operation": "audio_polish_preview", "accepted": True,
-            "future": future, "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_polish_audio_mix(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot, no_result=no_result, current_output_reference=current_output_reference)
     if tool_name == "export_subtitles":
-        filename = str(arguments.get("filename") or "").strip()
-        fmt = str(arguments.get("format") or "srt").lower()
-        if fmt not in {"srt", "vtt"}:
-            raise RuntimeError("字幕格式仅支持 srt 或 vtt")
-        output, _source_path = current_output_reference(filename)
-        if not output or not output.get("filename"):
-            return {"actionRequired": True, "action": "select_output", "message": "当前没有可导出字幕的成片或审核样片。"}
-        output_filename = str(output.get("filename") or "")
-        with jobs_lock:
-            current = jobs.get(job_id)
-            if not current:
-                raise RuntimeError("任务不存在")
-            context = output_download_context(current, output_filename)
-            if not context:
-                return no_result("missing_output", "当前成片不存在，无法导出字幕。", artifact_kind="subtitle_export")
-            checked_output, version, position = context
-            frozen_cues = checked_output.get("subtitleCues") if isinstance(checked_output.get("subtitleCues"), list) else None
-            draft_id = str(checked_output.get("subtitleDraftId") or version.get("subtitleDraftId") or "")
-            draft = _subtitle_draft_for_job(current, draft_id) if draft_id and frozen_cues is None else None
-            cues = (
-                copy.deepcopy(frozen_cues) if frozen_cues is not None else ([
-                    copy.deepcopy(cue) for cue in (draft.get("cues") or [])
-                    if int(cue.get("outputIndex") or 0) == position - 1 and str(cue.get("text") or "").strip()
-                ] if draft else _subtitle_cues(current, checked_output))
-            )
-        if not cues:
-            return no_result("missing_subtitles", "当前成片没有可用对白字幕，无法导出字幕文件。", artifact_kind="subtitle_export")
-        download_url = f"/api/jobs/{job_id}/outputs/{quote(output_filename)}/subtitles?format={fmt}"
-        return {
-            "artifact": {
-                "kind": "subtitle_export",
-                "jobId": job_id,
-                "filename": output_filename,
-                "format": fmt,
-                "downloadUrl": download_url,
-                "cueCount": len(cues),
-                "message": f"已准备 {fmt.upper()} 字幕下载链接；没有生成或修改视频。",
-            },
-        }
+        return _agent_tool_export_subtitles(tool_name=tool_name, arguments=arguments, job_id=job_id, no_result=no_result, current_output_reference=current_output_reference)
+    if tool_name == "deliver_current_plan":
+        return _agent_tool_deliver_current_plan(workspace=workspace, tool_name=tool_name)
     if tool_name == "export_delivery_master":
-        filename = str(arguments.get("filename") or "").strip()
-        output, source_path = current_output_reference(filename)
-        if source_path is None or not source_path.is_file():
-            return {"actionRequired": True, "action": "preview_generation", "message": "当前没有可用于正式交付的成片或审核样片。"}
-        platform_name = re.sub(r"[^A-Za-z0-9_-]+", "-", str(arguments.get("platform") or "generic")).strip("-") or "generic"
-        export_name = f"delivery-{platform_name}-{uuid.uuid4().hex[:8]}.mp4"
-        target_path = Path(str(snapshot.get("outputDirectory") or "")) / export_name
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        def export_worker() -> dict[str, Any]:
-            shutil.copy2(source_path, target_path)
-            rendered = probe_video(target_path, settings.ffprobe)
-            with jobs_lock:
-                current = jobs.get(job_id)
-                if not current:
-                    target_path.unlink(missing_ok=True)
-                    raise RuntimeError("正式交付完成时任务已不存在")
-                version_id, version_number = next_output_version(current)
-                new_output = {
-                    **copy.deepcopy(output or {}),
-                    "filename": export_name, "title": f"{platform_name} 正式交付版",
-                    "duration": round(rendered.duration, 3), "width": rendered.width,
-                    "height": rendered.height, "hasAudio": rendered.has_audio,
-                    "previewOnly": False, "outputKind": "delivery_master",
-                    "sourceOutputFilename": str((output or {}).get("filename") or source_path.name),
-                    "versionId": version_id, "versionNumber": version_number,
-                    "versionCreatedAt": now_iso(),
-                    "delivery": {"platform": platform_name, "aspect": str(arguments.get("aspect") or "")},
-                }
-                new_version = {
-                    "id": version_id, "number": version_number, "createdAt": now_iso(),
-                    "outputs": [new_output], "previewOnly": False,
-                    "variantKind": "delivery_master",
-                    "parentVersionId": str((output or {}).get("versionId") or current.get("currentOutputVersionId") or ""),
-                }
-                current.setdefault("outputVersions", []).append(new_version)
-                current["currentOutputVersionId"] = version_id
-                current["outputs"] = [new_output]
-                current.update({
-                    "status": "completed", "stage": "completed", "progress": 1.0,
-                    "stageProgress": 1.0, "progressMode": "completed",
-                    "detail": "正式交付版本已生成", "currentAction": "正式交付版本已生成",
-                    "error": None, "updatedAt": now_iso(),
-                })
-                _sync_output_manifest(current)
-                save_job(current)
-            return {"artifact": {"kind": "delivery_master", "jobId": job_id, "output": {**new_output, "videoUrl": f"/api/jobs/{job_id}/outputs/{export_name}"}, "message": "正式交付版本已生成。"}}
-
-        future = output_preview_executor.submit(export_worker)
-        return {
-            "operationId": f"{job_id}:delivery_export:{export_name}",
-            "operation": "delivery_master_export", "accepted": True,
-            "future": future, "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_export_delivery_master(tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot, current_output_reference=current_output_reference)
     if tool_name == "run_delivery_qc":
-        filename = str(arguments.get("filename") or "").strip()
-        strict = bool(arguments.get("strict", False))
-        raw_target_seconds = arguments.get("targetSeconds")
-        expected_aspect = str(arguments.get("expectedAspect") or "")
-        brief = snapshot.get("brief") if isinstance(snapshot.get("brief"), dict) else {}
-        cover_intro_required = bool(arguments.get("requireCoverIntro") or brief.get("coverIntroRequested"))
-        target_seconds = (
-            max(0.0, float(raw_target_seconds))
-            if isinstance(raw_target_seconds, (int, float)) and not isinstance(raw_target_seconds, bool)
-            else None
-        )
-        tolerance_seconds = max(0.0, float(arguments.get("toleranceSeconds") or 0))
-        available = [item for item in all_job_outputs(snapshot) if isinstance(item, dict) and item.get("filename")]
-        if filename:
-            selected = [item for item in available if str(item.get("filename")) == filename]
-        else:
-            preferred_value = (
-                snapshot.get("lastAgentCoverIntroPreviewFilename")
-                if cover_intro_required else
-                snapshot.get("lastAgentSocialPreviewFilename")
-                or snapshot.get("lastAgentCoverIntroPreviewFilename")
-            )
-            preferred = str(preferred_value or "")
-            selected = [item for item in available if str(item.get("filename")) == preferred]
-            if not selected:
-                selected = available[-1:] if available else []
-        if not selected:
-            return {
-                "actionRequired": True,
-                "action": "preview_generation",
-                "message": "当前没有可检查的成片，请先完成一个审核样片或正式输出。",
-            }
-
-        subtitle_required = bool(
-            brief.get("subtitleRequested")
-            or str(brief.get("subtitlePreference") or "").strip().lower()
-            not in {"", "none", "off", "false"}
-        )
-        graphics_required = bool(brief.get("graphicsRequested"))
-        cover_required = bool(arguments.get("requireCover") or brief.get("coverRequested"))
-        current_cover_id = str(snapshot.get("currentCoverVersionId") or "")
-        current_cover = next((
-            value for value in snapshot.get("coverVersions") or []
-            if isinstance(value, dict) and str(value.get("id") or "") == current_cover_id
-        ), None)
-        cover_draft = snapshot.get("coverDraft") if isinstance(snapshot.get("coverDraft"), dict) else {}
-        required_cover_title = str(arguments.get("expectedCoverTitle") or brief.get("coverTitle") or cover_draft.get("titleText") or "").strip()
-
-        def deliverable_issue(code: str, message: str, evidence: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "severity": "error", "code": code, "message": message,
-                "evidence": copy.deepcopy(evidence),
-            }
-
-        def delivery_qc_worker() -> dict[str, Any]:
-            reports: list[dict[str, Any]] = []
-            for item in selected:
-                selected_filename = str(item["filename"])
-                if Path(selected_filename).name != selected_filename:
-                    raise RuntimeError("成片文件名无效")
-                media_path = Path(str(snapshot.get("outputDirectory") or "")) / selected_filename
-                if not media_path.is_file():
-                    raise RuntimeError(f"成片文件不存在：{selected_filename}")
-                expected = item.get("duration")
-                report = analyze_rendered_media(
-                    media_path, ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe,
-                    expected_duration=float(expected) if isinstance(expected, (int, float)) else None,
-                    expect_audio=None,
-                )
-                report["filename"] = selected_filename
-                report.pop("path", None)
-                aspect_issue = aspect_check((report.get("media") or {}).get("width"),
-                                            (report.get("media") or {}).get("height"), expected_aspect)
-                report["aspectCheck"] = {"expectedAspect": expected_aspect or None,
-                                         "status": aspect_issue["status"] if aspect_issue else "passed" if expected_aspect else "not_requested"}
-                if aspect_issue:
-                    report.setdefault("issues", []).append(aspect_issue)
-                    report["passed"] = False
-                source_session_id = str(item.get("sourceEditSessionId") or item.get("sessionId") or "")
-                source_session = next((s for s in snapshot.get("editSessions") or [] if str(s.get("id")) == source_session_id), None)
-                if source_session is None and any(s.get("sourceContentContract") for s in item.get("segments") or []):
-                    source_segments = copy.deepcopy(item["segments"])
-                    source_session = {
-                        "id": f"qc_{uuid.uuid4().hex[:12]}",
-                        "contentBinding": selection_binding({"id": selected_filename, "recordType": "assembly",
-                            "basketSnapshot": {"outputFilename": selected_filename}}, source_segments),
-                        "clips": [{"id": s["id"], "sourceRef": {"id": s["id"]},
-                                   "sourceStart": s["start"], "sourceEnd": s["end"],
-                                   "playbackRate": s.get("playbackRate", 1), "transitionIn": s.get("transitionIn")}
-                                  for s in source_segments],
-                    }
-                    refresh_edit_session(source_session, snapshot)
-                if source_session:
-                    content_report = _check_rendered_content(snapshot, source_session, media_path)
-                    report["contentVerification"] = content_report
-                    report.setdefault("issues", []).extend(content_report["issues"])
-                    if not content_report["passed"]:
-                        report["passed"] = False
-                overlay = item.get("overlayVerification") if isinstance(item.get("overlayVerification"), dict) else {}
-                overlay_verified = bool(
-                    overlay.get("applied")
-                    and int(overlay.get("renderPipelineVersion") or 0) >= 2
-                )
-                subtitle_ready = bool(overlay_verified and int(overlay.get("subtitleCueCount") or 0) > 0)
-                graphics_ready = bool(overlay_verified and int(overlay.get("textLayerCount") or 0) > 0)
-                cover_title_ready = bool(
-                    current_cover
-                    and (
-                        not required_cover_title
-                        or (
-                            str(current_cover.get("titleText") or "").strip() == required_cover_title
-                            and bool(current_cover.get("titleLines"))
-                        )
-                    )
-                )
-                cover_source = cover_draft.get("source") if isinstance(cover_draft.get("source"), dict) else {}
-                cover_source_ready = bool(
-                    current_cover
-                    and (
-                        str(cover_source.get("kind") or "") != "accepted_timeline"
-                        or (
-                            bool(str(cover_source.get("editSessionId") or ""))
-                            and bool(current_cover.get("evidenceRefs"))
-                        )
-                    )
-                )
-                cover_ready = bool(current_cover and cover_title_ready and cover_source_ready)
-                cover_intro = item.get("coverIntro") if isinstance(item.get("coverIntro"), dict) else {}
-                cover_intro_ready = bool(
-                    cover_intro.get("enabled")
-                    and current_cover_id
-                    and str(cover_intro.get("coverVersionId") or "") == current_cover_id
-                )
-                report["deliverables"] = {
-                    "subtitle": {"required": subtitle_required, "passed": subtitle_ready, "verification": copy.deepcopy(overlay)},
-                    "graphicsText": {"required": graphics_required, "passed": graphics_ready, "verification": copy.deepcopy(overlay)},
-                    "cover": {
-                        "required": cover_required, "passed": cover_ready,
-                        "currentCoverVersionId": current_cover_id or None,
-                        "requiredTitle": required_cover_title or None,
-                        "actualTitle": str((current_cover or {}).get("titleText") or "") or None,
-                        "sourceKind": str(cover_source.get("kind") or "") or None,
-                    },
-                    "coverIntro": {
-                        "required": cover_intro_required, "passed": cover_intro_ready,
-                        "currentCoverVersionId": current_cover_id or None,
-                        "outputCoverVersionId": str(cover_intro.get("coverVersionId") or "") or None,
-                    },
-                }
-                if subtitle_required and not subtitle_ready:
-                    report.setdefault("issues", []).append(deliverable_issue(
-                        "requested_subtitles_not_rendered",
-                        "任务要求字幕，但成片没有可验证的已烧录字幕。",
-                        report["deliverables"]["subtitle"],
-                    ))
-                    report["passed"] = False
-                if graphics_required and not graphics_ready:
-                    report.setdefault("issues", []).append(deliverable_issue(
-                        "requested_text_not_rendered",
-                        "任务要求添加文字，但成片没有可验证的已渲染文字图层。",
-                        report["deliverables"]["graphicsText"],
-                    ))
-                    report["passed"] = False
-                if cover_required and not cover_ready:
-                    report.setdefault("issues", []).append(deliverable_issue(
-                        "requested_cover_not_validated",
-                        "任务要求封面，但当前封面未通过标题、来源或版本校验。",
-                        report["deliverables"]["cover"],
-                    ))
-                    report["passed"] = False
-                if cover_intro_required and not cover_intro_ready:
-                    report.setdefault("issues", []).append(deliverable_issue(
-                        "requested_cover_intro_not_rendered",
-                        "任务要求把封面作为片头，但当前成片未绑定并合入本任务的封面版本。",
-                        report["deliverables"]["coverIntro"],
-                    ))
-                    report["passed"] = False
-                if target_seconds:
-                    actual_seconds = float((report.get("media") or {}).get("duration") or 0)
-                    minimum_seconds = max(0.0, target_seconds - tolerance_seconds)
-                    maximum_seconds = target_seconds + tolerance_seconds
-                    duration_passed = minimum_seconds <= actual_seconds <= maximum_seconds
-                    report["targetDuration"] = {
-                        "targetSeconds": round(target_seconds, 3),
-                        "toleranceSeconds": round(tolerance_seconds, 3),
-                        "minimumSeconds": round(minimum_seconds, 3),
-                        "maximumSeconds": round(maximum_seconds, 3),
-                        "actualSeconds": round(actual_seconds, 3),
-                        "passed": duration_passed,
-                    }
-                    if not duration_passed:
-                        report.setdefault("issues", []).append({
-                            "severity": "error",
-                            "code": "target_duration_mismatch",
-                            "message": (
-                                f"成片时长 {actual_seconds:.2f} 秒不在目标范围 "
-                                f"{minimum_seconds:.2f}–{maximum_seconds:.2f} 秒内。"
-                            ),
-                            "evidence": copy.deepcopy(report["targetDuration"]),
-                        })
-                        report["passed"] = False
-                report["strictPassed"] = bool(report["passed"]) and (
-                    not strict or not any(issue.get("severity") == "warning" for issue in report["issues"])
-                )
-                reports.append(report)
-            current_plan = agent_platform.store.get("plans", str(workspace.get("activePlanId") or "")) or {}
-            repair = quality_repair_plan({"reports": reports}, current_plan.get("steps") or [], current_plan.get("inputContext"))
-            return {
-                "artifact": {
-                    "kind": "delivery_qc_report", "jobId": job_id,
-                    "passed": all(report["strictPassed"] if strict else report["passed"] for report in reports),
-                    "strict": strict, "reports": reports, "repair": repair,
-                },
-            }
-
-        future = output_preview_executor.submit(delivery_qc_worker)
-        return {
-            "operationId": f"{job_id}:delivery_qc", "operation": "delivery_qc",
-            "accepted": True, "future": future,
-            "cancel": lambda: cancel_job(job_id),
-        }
+        return _agent_tool_run_delivery_qc(workspace=workspace, tool_name=tool_name, arguments=arguments, job_id=job_id, snapshot=snapshot)
     target_workflow = {
         "analyze_highlights": "highlight",
         "search_content": "content_search",
@@ -37411,9 +38078,13 @@ def dispatch_agent_tool(
             # Continue inside the selected speaker scope.  Routing the next
             # semantic query through generic chat could silently create a new
             # content-exploration task and lose the identity constraint.
-            result_job = _apply_current_speakers_search(
-                job_id, speaker_refs, query, selection_mode,
-            )
+            current_brief = snapshot.get("brief") or {}
+            semantic_query = query
+            if current_brief.get("speakerTargeted") and not str(current_brief.get("retrievalQuery") or "").strip():
+                # The compiler's "全部连续发言" describes a scope, not words
+                # to search for inside the transcript.
+                semantic_query = ""
+            result_job = _apply_current_speakers_search(job_id, speaker_refs, semantic_query, selection_mode)
             with jobs_lock:
                 current = jobs.get(job_id)
                 if current:

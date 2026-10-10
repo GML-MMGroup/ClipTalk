@@ -34,7 +34,7 @@ def _normalise_rows(values: Any) -> np.ndarray:
 
 
 class SiglipEncoder:
-    def __init__(self, model_id: str, *, device: str = "auto", cache_dir: Path | None = None) -> None:
+    def __init__(self, model_id: str, *, device: str = "auto", cache_dir: Path | None = None, local_files_only: bool = False) -> None:
         from transformers import AutoModel, AutoProcessor
 
         self.device = _torch_device(device)
@@ -42,8 +42,8 @@ class SiglipEncoder:
         with _model_lock:
             loaded = _models.get(key)
             if loaded is None:
-                processor = AutoProcessor.from_pretrained(model_id, cache_dir=str(cache_dir) if cache_dir else None)
-                model = AutoModel.from_pretrained(model_id, cache_dir=str(cache_dir) if cache_dir else None).eval().to(self.device)
+                processor = AutoProcessor.from_pretrained(model_id, cache_dir=str(cache_dir) if cache_dir else None, local_files_only=local_files_only)
+                model = AutoModel.from_pretrained(model_id, cache_dir=str(cache_dir) if cache_dir else None, local_files_only=local_files_only).eval().to(self.device)
                 loaded = (processor, model)
                 _models[key] = loaded
         self.processor, self.model = loaded

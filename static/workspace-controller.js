@@ -48,15 +48,7 @@
 
   function projectTitle() {
     if ($("#workspace")?.classList.contains("new-task-workbench")) return "新任务";
-    const storedTitle = projectPreferences().displayName;
-    if (storedTitle) return storedTitle;
-    const sourceTitle = cleanDisplayText(window.ClipTalkCurrentJobSnapshot?.()?.filename);
-    if (sourceTitle) return sourceTitle;
-    const reviewTitle = cleanDisplayText($("#reviewTitle")?.textContent);
-    const summaryTitle = cleanDisplayText($("#directorTaskSummary strong")?.textContent);
-    if (reviewTitle && !["源视频", "视频预览"].includes(reviewTitle)) return reviewTitle;
-    if (summaryTitle && !/等待|创建/.test(summaryTitle)) return summaryTitle;
-    return "未命名剪辑任务";
+    return window.ClipTalkCopy.taskTitle(window.ClipTalkCurrentJobSnapshot?.(), projectPreferences().displayName);
   }
 
   function projectPreferenceKey() {
@@ -168,11 +160,25 @@
   }
 
   function segmentRangeLabel(segment = {}) {
-    const start = Number(segment.sourceStart ?? segment.start ?? segment.startTime ?? 0);
-    const end = Number(segment.sourceEnd ?? segment.end ?? segment.endTime ?? 0);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return "";
-    return `${compactClock(start)}–${compactClock(end)}`;
+    const rawStart = segment.sourceStart ?? segment.start ?? segment.startTime;
+    const rawEnd = segment.sourceEnd ?? segment.end ?? segment.endTime;
+    if (rawStart == null || rawEnd == null || rawStart === "" || rawEnd === "") return "";
+    const start = Number(rawStart), end = Number(rawEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return "";
+    const clock = value => {
+      const ticks = Math.round(value * 100);
+      return `${Math.floor(ticks / 6000)}:${String(Math.floor(ticks / 100) % 60).padStart(2, "0")}.${String(ticks % 100).padStart(2, "0")}`;
+    };
+    return `${clock(start)}–${clock(end)} · ${(end - start).toFixed(2)} 秒`;
   }
+
+  function segmentDisplayTitle(segment, index) {
+    const values = [segment.title, segment.label, segment.transcript, segment.text, segment.description, segment.reason];
+    return values.map(value => typeof value === "string" ? cleanDisplayText(value) : "")
+      .find(value => value && !/^(匹配用户内容检索要求|匹配用户内容检索|相关片段|片段)$/.test(value)) || `片段 ${String(index + 1).padStart(2, "0")}`;
+  }
+
+  let sourceReturn = null;
 
   function currentTimelineAssets() {
     const snapshot = window.ClipTalkTimelineAssetsSnapshot?.();
@@ -689,8 +695,9 @@
         <header><span>3</span><strong>当前交付</strong><small id="ctV4VersionState">尚未生成</small></header>
         <div class="ct-v4-version-body"><figure class="ct-v4-version-preview is-placeholder"><img alt=""><span>${assistantModeIcons.sparkle}<em>尚无成片</em></span></figure><div><strong id="ctV4VersionName">等待生成版本</strong><small id="ctV4VersionMeta">确认候选后会保留可审看版本</small></div></div>
         <div id="ctV4DeliveryChecks" class="ct-v4-delivery-checks hidden" aria-label="当前版本交付检查"></div>
-        <div class="ct-v4-version-secondary-actions"><button id="ctV4GenerateAspect" class="hidden" type="button">生成新比例版本</button><button type="button" data-ct-version-edit>编辑此版本</button></div>
-        <footer><button type="button" data-ct-v4-preview-version>${icons.play}<span>播放</span></button><button type="button" data-ct-v4-open-versions aria-label="查看全部版本">全部版本</button></footer>
+        <details class="ct-v4-version-more"><summary>更多操作</summary><div class="ct-v4-version-secondary-actions"><button id="ctV4GenerateAspect" class="hidden" type="button">生成新比例版本</button><button type="button" data-ct-version-edit>编辑此版本</button></div></details>
+        <details class="ct-v4-quality-details" hidden><summary>查看本版本检查说明</summary><div></div></details>
+        <footer><button type="button" data-ct-version-deliver hidden>下载 MP4</button><button type="button" data-ct-v4-preview-version>${icons.play}<span>播放</span></button><button type="button" data-ct-v4-open-versions aria-label="查看全部版本">全部版本</button></footer>
       </article>
       <section id="ctV4VersionList" hidden aria-label="版本列表"><header><button type="button" data-ct-versions-back>返回概览</button><strong>全部版本</strong></header><div data-ct-versions-host></div></section>`;
     rail.insertBefore(section, tabs.nextSibling);
@@ -1340,6 +1347,23 @@
       || orderedOutputs.filter(({ item, version }) => !item.previewOnly && !version.previewOnly).at(-1) || orderedOutputs.at(-1) || null;
     const selectedOutput = selectedEntry?.item || currentOutput || null;
     const selectedVersion = selectedEntry?.version || null;
+    if (sourceReturn && (sourceReturn.jobId !== job?.id || (currentOutput && currentOutput.filename !== sourceReturn.filename))) sourceReturn = null;
+    let returnAction = $("#ctReturnToOutput");
+    const headerActions = $("#reviewView .asset-actions");
+    if (!returnAction && headerActions) {
+      returnAction = document.createElement("button"); returnAction.id = "ctReturnToOutput";
+      returnAction.type = "button"; returnAction.className = "download-button";
+      headerActions.prepend(returnAction);
+      returnAction.addEventListener("click", () => {
+        if (sourceReturn?.jobId !== currentJobId()) return;
+        window.ClipTalkVersionAction?.(sourceReturn.filename, "preview");
+      });
+    }
+    if (returnAction) {
+      returnAction.classList.toggle("hidden", !sourceReturn || Boolean(currentOutput));
+      setText(returnAction, sourceReturn?.label || "返回当前成片");
+    }
+
     const summary = $("#ctV4MaterialsSummary");
     if (summary) summary.dataset.outputFilename = selectedOutput?.filename || "";
     summary?.classList.toggle("cover-draft", coverDraft);
@@ -1385,9 +1409,9 @@
           candidateHost.classList.add("ct-v4-adopted-preview");
           candidateHost.classList.toggle("is-expanded", adoptedExpanded);
           candidateHost.innerHTML = visibleSegments.map((segment, index) => {
-            const label = cleanDisplayText(segment.title || segment.label || segment.reason, `片段 ${index + 1}`);
+            const label = segmentDisplayTitle(segment, index);
             const range = segmentRangeLabel(segment);
-            return `<button type="button" data-ct-v4-adopted-segment="${index}" aria-label="查看已采用片段 ${index + 1}：${escapeHtml(label)}"><span class="ct-v4-adopted-thumb is-loading"><b>P${String(index + 1).padStart(2, "0")}</b></span><span class="ct-v4-adopted-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(range || "源片位置")}</small></span></button>`;
+            return `<button type="button" data-ct-v4-adopted-segment="${index}" ${range ? "" : "disabled"} title="${escapeHtml(`${label} · ${range || '时间信息不可用'}`)}" aria-label="查看已采用片段 ${index + 1}：${escapeHtml(`${label}，${range || '时间信息不可用'}`)}"><span class="ct-v4-adopted-thumb is-loading"><b>P${String(index + 1).padStart(2, "0")}</b></span><span class="ct-v4-adopted-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(range || "时间信息不可用")}</small></span></button>`;
           }).join("");
           candidateHost.querySelectorAll("[data-ct-v4-adopted-segment]").forEach((button) => {
             const segment = visibleSegments[Number(button.dataset.ctV4AdoptedSegment || 0)] || {};
@@ -1398,7 +1422,10 @@
       candidateHost?.querySelectorAll("[data-ct-v4-adopted-segment]").forEach((button) => {
         button.onclick = () => {
           const segment = visibleSegments[Number(button.dataset.ctV4AdoptedSegment || 0)] || {};
-          const start = Number(segment.sourceStart ?? segment.start ?? segment.startTime ?? 0);
+          if (!segmentRangeLabel(segment)) return;
+          if (selectedOutput?.filename) sourceReturn = { jobId: job.id, filename: selectedOutput.filename,
+            label: selectedVersion?.number ? `返回 V${selectedVersion.number}` : "返回当前版本" };
+          const start = Number(segment.sourceStart ?? segment.start ?? segment.startTime);
           if (Number.isFinite(start) && typeof window.ClipTalkSeekSourceTime === "function") {
             window.ClipTalkSeekSourceTime(start);
             $("#mainVideo")?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -1436,7 +1463,8 @@
       String(version?.id || item?.versionId || item?.filename || "")
     )).filter(Boolean)).size;
     const previewCount = orderedOutputs.filter(({ item, version }) => item?.previewOnly || version?.previewOnly || String(item?.outputKind || "").includes("review_preview")).length;
-    const qualityStatus = String(selectedOutput?.qualityStatus || selectedVersion?.qualityStatus || "");
+    const quality = window.ClipTalkCopy.outputQuality(selectedVersion || {}, selectedOutput || {});
+    const qualityStatus = quality.status;
     const versionState = [
       formalVersionCount ? `${formalVersionCount} 个正式版本` : "",
       previewCount ? `${previewCount} 个审核样片` : "",
@@ -1532,10 +1560,10 @@
                 : coverReady ? "封面图片可用" : "待关联",
         ok: coverReady,
       });
-      if (previewOnly && ["passed", "warning", "failed"].includes(qualityStatus)) {
+      if (versionCount) {
         checks.unshift({
           label: "质检",
-          value: qualityStatus === "passed" ? "已通过" : qualityStatus === "warning" ? "待复核" : "未通过",
+          value: quality.label,
           ok: qualityStatus === "passed",
         });
       }
@@ -1562,6 +1590,34 @@
         versionImage.removeAttribute("src");
         versionImage.alt = "";
       }
+    }
+    const qualityDetails = $(".ct-v4-quality-details");
+    if (qualityDetails) {
+      qualityDetails.hidden = !versionCount;
+      const reports = [selectedOutput?.qualityReport, selectedOutput?.reviewReport, selectedOutput?.qualityGate,
+        selectedVersion?.qualityReport, selectedVersion?.reviewReport, selectedVersion?.qualityGate].filter(Boolean);
+      const issues = reports.flatMap(report => [report.issues, report.warnings, report.findings].flatMap(items => Array.isArray(items) ? items : []));
+      const notes = [...new Set(issues.map(issue => typeof issue === "string" ? issue : issue?.message).filter(Boolean))];
+      const text = notes.length ? notes.join("；") : quality.attention
+        ? "此版本有检查提醒，但历史记录未提供具体问题位置。请播放此版本人工核对。"
+        : quality.status === "passed" ? "已记录的检查通过；内容是否符合要求仍需预览确认。" : "此版本没有可用的检查通过记录，请播放核对。";
+      setText(qualityDetails.querySelector("summary"), `${quality.label} · 查看说明`);
+      setText(qualityDetails.querySelector("div"), text);
+      const identity = `${job?.id}:${selectedOutput?.filename}`;
+      if (qualityDetails.dataset.identity !== identity) { qualityDetails.open = false; qualityDetails.dataset.identity = identity; }
+    }
+    const deliver = $("[data-ct-version-deliver]");
+    if (deliver) {
+      deliver.hidden = !versionCount;
+      const url = String(selectedOutput?.downloadUrl || "").trim();
+      deliver.disabled = !selectedOutput?.filename || (!previewOnly && (!url || ["null", "undefined"].includes(url)));
+      setText(deliver, previewOnly ? "生成正式成片" : "下载 MP4");
+      deliver.title = deliver.disabled ? "当前版本文件暂不可用" : previewOnly ? "检查样片后生成正式成片" : `下载 ${selectedVersion?.number ? `V${selectedVersion.number}` : "当前版本"} MP4`;
+      const deliveryJobId = job?.id, filename = selectedOutput?.filename;
+      deliver.onclick = () => {
+        if (currentJobId() !== deliveryJobId) return;
+        Promise.resolve(window.ClipTalkVersionAction?.(filename, "export")).catch(error => window.showToast?.(error.message));
+      };
     }
     const previewAction = $("[data-ct-v4-preview-version]", $("#ctV4MaterialsSummary"));
     const versionSecondaryActions = $(".ct-v4-version-secondary-actions", $("#ctV4MaterialsSummary"));
@@ -1594,6 +1650,41 @@
       button.hidden = !versionCount;
     });
     syncReviewRailToggle();
+  }
+
+  function syncCompactTimeline() {
+    const panel = $("#timelinePanel"), header = panel?.querySelector(":scope > header");
+    if (!panel || !header) return;
+    const compact = window.matchMedia("(max-width: 900px)").matches;
+    const key = `cliptalk-timeline-open:${currentJobId()}:${compact ? "compact" : "desktop"}`;
+    let expanded = !compact;
+    try { const stored = sessionStorage.getItem(key); if (stored !== null) expanded = stored === "true"; } catch { /* Layout memory is optional. */ }
+    panel.dataset.compactFolded = String(compact && !expanded);
+    let toggle = $("#ctCompactTimelineToggle");
+    if (!toggle) {
+      toggle = document.createElement("button"); toggle.id = "ctCompactTimelineToggle"; toggle.type = "button";
+      toggle.setAttribute("aria-controls", "timelineViewport"); header.append(toggle);
+      toggle.addEventListener("click", () => {
+        const next = panel.dataset.compactFolded === "true";
+        try { sessionStorage.setItem(`cliptalk-timeline-open:${currentJobId()}:compact`, String(next)); } catch { /* Optional. */ }
+        panel.dataset.compactFolded = String(!next);
+        toggle.setAttribute("aria-expanded", String(next)); setText(toggle, next ? "收起源片时间线" : "展开源片时间线");
+        window.dispatchEvent(new Event("resize"));
+      });
+    }
+    toggle.hidden = !compact; toggle.setAttribute("aria-expanded", String(expanded));
+    setText(toggle, expanded ? "收起源片时间线" : "展开源片时间线");
+    const toolbar = panel.querySelector(".timeline-toolbar"), group = panel.querySelector('[aria-label="显示内容"]');
+    let settings = $("#ctTimelineDisplaySettings");
+    if (!settings && toolbar) {
+      settings = document.createElement("details"); settings.id = "ctTimelineDisplaySettings";
+      settings.innerHTML = '<summary>显示设置</summary>'; toolbar.prepend(settings);
+    }
+    if (group && settings) {
+      if (compact && group.parentElement !== settings) settings.append(group);
+      if (!compact && group.parentElement !== toolbar) toolbar.prepend(group);
+      settings.hidden = !compact;
+    }
   }
 
   function syncProjectControls() {
@@ -1753,6 +1844,7 @@
     syncTaskJourney();
     syncMaterialsSummary();
     syncProjectControls();
+    syncCompactTimeline();
     syncSelectedEntity();
     syncPropertiesPanel();
     window.ClipTalkTimelinePresentation?.sync?.();

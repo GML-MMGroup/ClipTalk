@@ -40,6 +40,10 @@ class JobStore:
                     raise ValueError("任务已被其他操作更新，请重新加载后重试")
                 if int(job.get("revision") or 0) < revision:
                     raise ValueError("不能用旧版本覆盖已保存的任务")
+            elif expected_revision:
+                # A non-zero expected revision proves the row existed before,
+                # so a missing row now means deletion rather than first insert.
+                raise ValueError("任务已被删除，无法继续保存")
             connection.execute(
                 "INSERT INTO jobs(id,payload,updated_at) VALUES(?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",

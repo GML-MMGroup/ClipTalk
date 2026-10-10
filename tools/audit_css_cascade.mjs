@@ -62,7 +62,9 @@ export function pruneCascade(files, supports = () => true) {
 
 export async function audit({ root, write = false, report = null }) {
   const html = fs.readFileSync(path.join(root, "static/index.html"), "utf8");
-  const names = [...html.matchAll(/href="\/static\/([^"?]+\.css)/g)].map(match => match[1]);
+  // The <noscript> fallback repeats the print-swapped stylesheets; the
+  // production cascade applies each file once, in document order.
+  const names = [...new Set([...html.matchAll(/href="\/static\/([^"?]+\.css)/g)].map(match => match[1]))];
   const files = names.map(name => {
     const source = fs.readFileSync(path.join(root, "static", name), "utf8");
     return { name, source, root: postcss.parse(source, { from: name }) };

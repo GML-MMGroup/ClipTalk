@@ -1951,10 +1951,7 @@ html body.ct-workbench-v4 #reviewRail .ct-v4-version-body small {
 }
 
 html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 10px;
-  gap: 6px;
 }
 
 html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer button {
@@ -3043,7 +3040,7 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewWorkbench :where(.
   html body.ct-workbench-v4 #ctV4ProjectButton { max-width: 100%; padding: 6px !important; }
   html body.ct-workbench-v4 #ctV4Topbar .ct-v4-global-state { gap: 2px; }
   html body.ct-workbench-v4 .ct-v4-save-state { padding: 0 6px; border: 0; font-size: 10px; }
-  html body.ct-workbench-v4 #reviewView .asset-actions > :not(#reviewMoreActions):not(#videoViewSelect):not(#downloadButton):not(#finalizePreviewButton):not(#finalizeOneOffButton):not(#portraitPrecisionToggle) { display: none !important; }
+  html body.ct-workbench-v4 #reviewView .asset-actions > :not(#reviewMoreActions):not(#videoViewSelect):not(#downloadButton):not(#ctReturnToOutput):not(#finalizePreviewButton):not(#finalizeOneOffButton):not(#portraitPrecisionToggle) { display: none !important; }
   html body.ct-workbench-v4 #reviewView #reviewTitle { max-width: 42vw !important; }
   html body.ct-workbench-v4 #ctEditorToolbar button span { display: none !important; }
   html body.ct-workbench-v4 #ctEditorToolbar button { min-width: 34px !important; justify-content: center !important; }
@@ -5106,10 +5103,12 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-pl
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-plan-drawer .agent-plan-step-list {
   display: grid !important;
+  counter-reset: plan-step;
   gap: 2px !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-plan-drawer .agent-plan-step-list li {
+  counter-increment: plan-step;
   grid-template-columns: 22px minmax(0, 1fr) !important;
   gap: 12px !important;
   padding: 13px 0 15px !important;
@@ -5118,14 +5117,19 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-pl
 html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-plan-drawer .agent-plan-step-list li::before {
   top: 29px !important;
   bottom: -10px !important;
-  left: 7px !important;
-  width: 2px !important;
+  left: 10px !important;
+  width: 1px !important;
   background: rgba(173, 197, 188, .32) !important;
 }
 
 html body.ct-workbench-v4[data-shell-mode="workspace"] #agentPlanDrawer.agent-plan-drawer .agent-step-marker {
-  width: 12px !important;
-  height: 12px !important;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  font: 500 11px/1 var(--font-ui, sans-serif);
+  color: var(--ct-text);
+  width: 20px !important;
+  height: 20px !important;
   margin-top: 4px !important;
   border-width: 2px !important;
   border-radius: 4px !important;
@@ -9286,7 +9290,8 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #ctV4
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatMessages#chatMessages .chat-message .avatar {
-  color: #27533b !important;
+  color: #f2f8f4 !important;
+  background: #355e4b !important;
 }
 
 html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"] #assistantPanel#assistantPanel #chatForm#chatForm > small {
@@ -11342,11 +11347,16 @@ html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView#reviewView[da
   html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
     #reviewView#reviewView.review-view[data-review-layout="portrait"]:not(.timeline-hidden) {
     grid-template-columns: minmax(0, 1fr) !important;
+    /* ux31: the old minimums (280 stage + 250 timeline + 62 chrome) exceeded
+       short containers, so the grid overflowed and reviewView's overflow:hidden
+       clipped the timeline panel (audio track + ruler hidden until the user
+       dragged the splitter). Stage minimum now scales with the container and
+       the timeline defaults to ~its content height (four tracks + chrome). */
     grid-template-rows:
       54px
-      minmax(280px, 1fr)
+      minmax(min(280px, 26%), 1fr)
       8px
-      minmax(250px, var(--review-timeline-height, clamp(280px, 34vh, 360px))) !important;
+      minmax(min(250px, 46%), var(--review-timeline-height, clamp(330px, 52%, 460px))) !important;
   }
 
   html body.ct-workbench-v4[data-shell-mode="workspace"][data-precision-editing="false"]
@@ -14496,6 +14506,22 @@ html body[data-shell-view="home"] #homeTaskGrid .home-shell-task .shell-task-ope
   position: relative !important;
   min-height: 82px !important;
   padding-left: 116px !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-heading {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-open > small,
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-detail {
+  grid-column: 1 / -1 !important;
+}
+
+html body[data-shell-view="home"] #homeTaskGrid .shell-task-foot {
+  grid-column: 2 !important;
+  grid-row: 1 !important;
 }
 
 html body[data-shell-view="home"] #homeTaskGrid .shell-task-media {
@@ -15104,6 +15130,8 @@ html[data-theme="light"] body.ct-workbench-v4[data-shell-mode="workspace"]
   ux24   :15246  审核样片结果卡统一为阶段结果语汇（对勾徽标+数量芯片+绿色染面+序号芯片+胶囊按钮）
   ux25   :15449  方案确认卡重构为剪辑结果确认卡（✓标题+待确认chip+结论句+折叠详情+淡绿胶囊操作区）
   ux26   :15573  时间轴可达性修复（封面复核轨限高内滚 + viewport 保底 232px + 面板可滚兜底）
+  ux28   :（文件末尾）矮屏时间轴压缩（窗口高 ≤ 920px：隐藏坐标提示 + toolbar 单行 + viewport 可收缩保底 132px），修复缩略图/footer 被面板裁掉
+
    规则：
      1. 本文件旧规则特异性极高（4-id 前缀 + !important），新补丁需同级或更高特异性；
      2. 不要移动既有规则的先后顺序——同特异性时后者胜，移动会引发级联回归；
@@ -16884,29 +16912,50 @@ html body.ct-workbench-v4 .content-drawer-batch .content-select-all { display: i
   html body.ct-workbench-v4 .content-match-main > .content-match-copy { grid-column: 2 !important; grid-row: 2 !important; }
 }
 
+html body.ct-workbench-v4 #agentPlanDrawer .agent-step-marker::after { content: counter(plan-step); }
+html body.ct-workbench-v4 #agentPlanDrawer [data-step-status="completed"] .agent-step-marker::after { content: "✓"; color: var(--ct-on-primary); }
+html body.ct-workbench-v4 #agentPlanDrawer [data-step-status="skipped"] .agent-step-marker::after { content: "–"; }
+html body.ct-workbench-v4 #agentPlanDrawer [data-step-status="failed"] .agent-step-marker::after { content: "!"; color: var(--ct-danger); }
+html body.ct-workbench-v4 #agentPlanDrawer :is([data-step-status="running"], [data-step-status="waiting_operation"], [data-step-status="action_required"]) .agent-step-marker::after { color: var(--ct-on-primary); }
 html body.ct-workbench-v4 .agent-execution-progress { color: var(--ct-text); padding: 4px 0; }
-html body.ct-workbench-v4 .agent-execution-heading { display: flex; align-items: center; gap: 12px; animation: ct-execution-stage-in 180ms ease-out both; }
+html body.ct-workbench-v4 .agent-execution-heading { display: flex; align-items: center; gap: 10px; animation: ct-execution-stage-in var(--ct-duration-panel) var(--ct-ease) both; }
 html body.ct-workbench-v4 .agent-execution-heading > strong { font-size: 15px; line-height: 1.7; }
-html body.ct-workbench-v4 .agent-execution-loader { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; color: var(--ct-primary); }
-html body.ct-workbench-v4 .agent-execution-loader:empty::before { content: ""; width: 20px; height: 20px; border: 2px solid currentColor; border-radius: 5px; animation: ct-execution-frame 2.4s ease-in-out infinite; }
+html body.ct-workbench-v4 .agent-execution-loader { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; color: var(--ct-primary); }
+html body.ct-workbench-v4 .agent-execution-loader:empty::before { content: ""; width: 8px; height: 8px; background: currentColor; border-radius: 50%; }
 html body.ct-workbench-v4 .agent-execution-track { height: 4px; margin-top: 14px; overflow: hidden; border-radius: 3px; background: var(--ct-control-border); }
-html body.ct-workbench-v4 .agent-execution-track > i { display: block; width: 100%; height: 100%; background: var(--ct-primary); transform-origin: left; transform: scaleX(var(--execution-fraction, 0)); transition: transform 350ms ease-out; }
-html body.ct-workbench-v4 .agent-execution-track[data-execution-mode="indeterminate"] > i { width: 28%; animation: ct-execution-scan 2.6s ease-in-out infinite alternate; transition: none; }
-html body.ct-workbench-v4 .agent-execution-progress:is([data-motion-state="stopping"], [data-motion-state="inactive"]) :is(.agent-execution-track > i, .agent-execution-loader::before) { animation-play-state: paused; opacity: .45; }
-@keyframes ct-execution-scan { from { transform: translateX(0); opacity: .45; } to { transform: translateX(257%); opacity: .85; } }
-@keyframes ct-execution-frame { 0%, 100% { transform: rotate(0) scale(.86); opacity: .55; } 50% { transform: rotate(90deg) scale(1); opacity: 1; } }
-@keyframes ct-execution-stage-in { from { opacity: .4; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+html body.ct-workbench-v4 .agent-execution-track > i { display: block; width: 100%; height: 100%; background: var(--ct-primary); transform-origin: left; transform: scaleX(var(--execution-fraction, 0)); transition: transform var(--ct-duration-state) var(--ct-ease); }
+html body.ct-workbench-v4 .agent-execution-track[data-execution-mode="indeterminate"] { display: none; }
+html body.ct-workbench-v4 .agent-execution-progress:is([data-motion-state="stopping"], [data-motion-state="inactive"]) :is(.agent-execution-track > i, .agent-execution-loader::before) { animation-play-state: paused; transition: none; opacity: .45; }
+@keyframes ct-execution-stage-in { from { opacity: .4; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   html body.ct-workbench-v4 :is(.agent-execution-heading, .agent-execution-loader::before, .agent-execution-track > i) { animation: none; transition: none; }
-  html body.ct-workbench-v4 .agent-execution-track[data-execution-mode="indeterminate"] > i { animation: none; transform: none; opacity: .55; }
   html body.ct-workbench-v4 .agent-execution-loader :is(*, *::before, *::after) { animation: none !important; transition: none !important; }
+  html body.ct-workbench-v4 .agent-execution-progress > footer button { transition: none !important; }
 }
 html body.ct-workbench-v4 .agent-execution-progress > p { margin: 8px 0; font-size: 13px; color: var(--ct-text-secondary); }
 html body.ct-workbench-v4 .agent-execution-progress > small { display: block; margin-top: 10px; color: var(--ct-text-secondary); font-size: 13px; }
 html body.ct-workbench-v4 .agent-execution-progress > progress { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 html body.ct-workbench-v4 .agent-execution-progress [hidden] { display: none !important; }
 html body.ct-workbench-v4 .agent-execution-progress > footer { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+html body.ct-workbench-v4 .agent-execution-progress > footer button { min-height: 36px; min-width: 6em; padding: 6px 10px; color: var(--ct-text); background: var(--ct-panel); border: 1px solid var(--ct-border); border-radius: var(--ct-radius-control); transition: background-color var(--ct-duration-hover) var(--ct-ease); }
+html body.ct-workbench-v4 .agent-execution-progress > footer button:hover:not(:disabled) { background: var(--ct-hover); }
+html body.ct-workbench-v4 .agent-execution-progress > footer button:focus-visible { outline: 2px solid var(--ct-focus); outline-offset: 2px; }
+html body.ct-workbench-v4 .agent-execution-progress > footer button:disabled { opacity: .65; }
 html body.ct-workbench-v4 .agent-execution-progress [data-agent-operation-message]:empty { display: none; }
+html body.ct-workbench-v4 .agent-execution-progress :is([data-agent-execution-elapsed], [data-agent-execution-count]) { font-variant-numeric: tabular-nums; }
+html body.ct-workbench-v4 .empty-state-symbol { display: grid; place-items: center; width: 48px; height: 48px; font-size: 28px; color: var(--ct-text-muted); }
+/* Chinese prose must wrap between characters, including inside a streamed word. */
+html body.ct-workbench-v4 .stream-text-loader .tl-word { display: contents; white-space: normal; }
+html body.ct-workbench-v4 .stream-text-loader { font: inherit; overflow-wrap: anywhere; }
+html body.ct-workbench-v4 .stream-text-loader .vp-text-loader { font: inherit; }
+html body.ct-workbench-v4 .agent-cover-generating { display: block; width: 54px; aspect-ratio: var(--cover-aspect, 16 / 9); max-height: 144px; color: var(--ct-text-muted); }
+html body.ct-workbench-v4 .agent-cover-generating .iml-loader { width: 100%; height: 100%; }
+html body.ct-workbench-v4 .agent-cover-status > button[data-cover-image-state] { position: relative; height: auto; min-height: 0; aspect-ratio: var(--cover-aspect, 16 / 9); }
+html body.ct-workbench-v4 .agent-cover-status > button[data-cover-image-state] img { object-fit: contain; }
+html body.ct-workbench-v4 [data-cover-image-state]:not([data-cover-image-state="ready"]) img { opacity: 0; }
+html body.ct-workbench-v4 [data-cover-image-state="error"]::after { content: "加载失败"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; color: var(--ct-text-secondary); }
+
+
 
 /* Preview-first creation: keep the original assistant and source workspace. */
 #ctAgentWelcome[hidden], #ctAgentEntryPrompts[hidden], #uploadRetry[hidden] { display: none !important; }
@@ -16955,4 +17004,271 @@ html body.ct-workbench-v4 #uploadForm #uploadRetry { margin-top: 12px; min-heigh
   html body.ct-workbench-v4 #workspace#workspace#workspace #assistantPanel#assistantPanel[data-agent-entry] > .panel-header {
     min-height: 44px !important; height: 44px !important; padding-block: 6px !important;
   }
+}
+
+/* Delivery and review: controls retain their style when moved between panels. */
+html body.ct-workbench-v4 #reviewMoreActions [data-ct-v4-replace] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+html body.ct-workbench-v4 #reviewMoreActions [data-ct-v4-replace] svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+}
+html body.ct-workbench-v4 #downloadButton:not(.hidden):not(.review-sample-download),
+html body.ct-workbench-v4 [data-ct-version-deliver]:not(:disabled) {
+  background: var(--ct-primary);
+  color: var(--ct-primary-ink, #fff);
+  border: 1px solid var(--ct-primary);
+}
+html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > footer > :first-child {
+  flex: 1 0 100%;
+}
+html body.ct-workbench-v4 .ct-v4-quality-details,
+html body.ct-workbench-v4 .ct-v4-version-more {
+  margin-block: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+html body.ct-workbench-v4 .ct-v4-quality-details > summary,
+html body.ct-workbench-v4 .ct-v4-version-more > summary {
+  cursor: pointer;
+  padding-block: 6px;
+}
+html body.ct-workbench-v4 .ct-v4-quality-details > div {
+  padding-block: 8px;
+  overflow-wrap: anywhere;
+}
+html body.ct-workbench-v4 .ct-v4-adopted-copy > strong {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+html body.ct-workbench-v4 .ct-v4-adopted-copy > small {
+  white-space: normal;
+  font-variant-numeric: tabular-nums;
+}
+html body.ct-workbench-v4 .content-output-download {
+  display: block;
+  padding: 9px 0;
+  color: var(--ct-text);
+  font-weight: 600;
+}
+html body.ct-workbench-v4 #ctComposerReadiness,
+html body.ct-workbench-v4 #ctEntrySequence {
+  margin: 6px 14px;
+  color: var(--ct-text-muted, var(--ct-text));
+  font-size: 12px;
+  line-height: 1.5;
+}
+html body.ct-workbench-v4 #ctTimelineDisplaySettings > summary {
+  cursor: pointer;
+  padding: 10px;
+}
+@layer interface-type {
+@media (max-width: 900px) {
+  html body.ct-workbench-v4:not([data-ct-cover-editor-open="true"]) #timelinePanel[data-compact-folded="true"] {
+    min-height: 0 !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+  html body.ct-workbench-v4:not([data-ct-cover-editor-open="true"]) #reviewView #timelinePanel#timelinePanel[data-compact-folded="true"] > :not(header) {
+    display: none !important;
+  }
+  html body.ct-workbench-v4:not([data-ct-cover-editor-open="true"]) #timelinePanel > header > :not(#ctCompactTimelineToggle) {
+    display: none !important;
+  }
+  html body.ct-workbench-v4 #ctCompactTimelineToggle {
+    min-height: 44px;
+    width: 100%;
+  }
+  html body.ct-workbench-v4 #ctV4MaterialsSummary {
+    display: flex;
+    flex-direction: column;
+  }
+  html body.ct-workbench-v4 #ctV4MaterialsSummary > .ct-v4-version-card { order: -1; }
+  html body.ct-workbench-v4 #reviewRail .ct-v4-version-card > header > span,
+  html body.ct-workbench-v4 #reviewRail .ct-v4-candidates-card > header > span { display: none !important; }
+  html body.ct-workbench-v4 :is(#reviewMoreActions, .ct-v4-version-card) :is(button, a, summary) {
+    min-height: 44px;
+  }
+  html body.ct-workbench-v4 #reviewView > .review-header .asset-actions {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  html body.ct-workbench-v4 #ctTimelineDisplaySettings[open] .timeline-tool-group {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 900px) {
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView.review-view {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  html body.ct-workbench-v4[data-shell-mode="workspace"] #reviewView > .review-header {
+    height: auto !important;
+    min-height: 104px !important;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+  }
+  html body.ct-workbench-v4 #reviewView#reviewView > .review-header .asset-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  html body.ct-workbench-v4 #ctCompactTimelineToggle {
+    background: var(--ct-panel) !important;
+    color: var(--ct-text) !important;
+    border: 1px solid var(--ct4-line);
+    border-radius: 8px;
+  }
+}
+
+}
+
+@layer interface-type {
+  @media (max-width: 900px) {
+    body.ct-workbench-v4 #reviewView > #reviewStage {
+      height: clamp(260px, calc(56.25vw + 64px), 500px) !important;
+      min-height: 0 !important;
+    }
+    body.ct-workbench-v4 #reviewView[data-review-layout="portrait"] > #reviewStage {
+      height: min(62dvh, 520px) !important;
+    }
+    body.ct-workbench-v4 #reviewView #viewerShell { height: 100% !important; }
+    body.ct-workbench-v4[data-ct-cover-editor-open="true"] #ctCompactTimelineToggle { display: none !important; }
+  }
+}
+
+@media (max-height: 600px) {
+  html body.ct-workbench-v4 #ctEntrySequence { display: none; }
+  html body.ct-workbench-v4 #ctComposerReadiness { margin-block: 0; line-height: 16px; }
+}
+
+@layer interface-type {
+  body.ct-workbench-v4 .content-output-quality {
+    padding: 8px 0 !important;
+    background: transparent !important;
+    color: var(--ct-text) !important;
+    border: 0 !important;
+    text-align: left;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  @media (max-width: 900px) {
+    body.ct-workbench-v4 #reviewRail :is(.ct-v4-version-card, .ct-v4-candidates-card) > header {
+      display: grid !important;
+      grid-template-columns: minmax(0, 1fr) auto !important;
+      gap: 8px !important;
+    }
+  }
+}
+
+/* ===== ux28: 矮屏时间轴完整可见（缩略图 / footer 不再被面板裁掉）=====
+   根因：#timelinePanel 高度按视口计算，1366x768 下只有约 320px，而
+   header(98) + toolbar(90) + overview(16) + viewport(220) + footer(30) ≈ 454px，
+   面板 overflow:hidden 把 footer 与缩略图行（viewport 内 top:102）裁到窗口外。
+   处理：窗口高度 ≤ 920px 时——header 改横向单行（省约 56px）、隐藏坐标提示行、
+   toolbar 改单行横向滚动且按钮降到 28px（省约 50px）、viewport 定高 168px，
+   使 header+toolbar+overview+viewport+footer 完整落在面板内。
+   ==================================================================== */
+@media (max-height: 920px) {
+  html body.ct-workbench-v4 #timelinePanel > header {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    column-gap: 10px !important;
+    padding-top: 5px !important;
+    padding-bottom: 5px !important;
+    row-gap: 0 !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel > header > .timeline-heading {
+    flex: 0 0 auto !important;
+    max-width: 260px !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel #timelineCoordinateHint {
+    display: none !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel > header > .timeline-review-controls {
+    flex: 0 0 auto !important;
+    row-gap: 0 !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel #portraitPrecisionToggle {
+    min-height: 26px !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel .timeline-toolbar {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    row-gap: 0 !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel .timeline-toolbar > * {
+    flex: 0 0 auto !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel .timeline-toolbar button,
+  html body.ct-workbench-v4 #timelinePanel .timeline-toolbar summary {
+    min-height: 28px !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel #timelineZoomOut,
+  html body.ct-workbench-v4 #timelinePanel #timelineZoomIn {
+    min-height: 28px !important;
+    width: 32px !important;
+  }
+  html body.ct-workbench-v4 #timelinePanel #timelineViewport {
+    flex: 0 0 auto !important;
+    height: 168px !important;
+    min-height: 0 !important;
+  }
+}
+/* ===== ux28 end ===== */
+
+/* Timeline header slimming: the heading row (title, hint, coordinate
+   hint) and the source clock are informational text.  Hiding them
+   reclaims the row height while the expand/locate buttons stay usable;
+   the elements remain in the DOM so app.js text updates keep working. */
+html body.ct-workbench-v4 #timelinePanel > header > .timeline-heading {
+  display: none !important;
+}
+html body.ct-workbench-v4 #timelinePanel > header > .timeline-review-controls > b {
+  display: none !important;
+}
+
+/* Timeline header slimming, part 2+3: the expand/locate buttons live in the
+   toolbar now and the heading text / source clock stay hidden, so the only
+   things the header can still show are the precision context and the event
+   summary -- both of which render only in specific modes.  Detecting those
+   modes from CSS was unreliable (the summary is hidden by a workspace mode
+   rule, not by .hidden), so the header no longer reserves any height of its
+   own: without min-height or vertical padding the row follows its content
+   and collapses to zero whenever every child is hidden.  Horizontal padding
+   is kept so visible content stays aligned with the toolbar above/below. */
+html body.ct-workbench-v4 #timelinePanel#timelinePanel > header {
+  min-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+/* The two rows that can still render inside the header bring their own top
+   offset, since the header itself reserves no padding anymore. */
+html body.ct-workbench-v4 #timelinePanel#timelinePanel > header > #timelineEventSummary,
+html body.ct-workbench-v4 #timelinePanel#timelinePanel > header > #timelinePrecisionContext {
+  margin-top: 7px !important;
+}
+html body.ct-workbench-v4 #timelinePanel .timeline-header-actions {
+  flex: 0 0 auto !important;
 }

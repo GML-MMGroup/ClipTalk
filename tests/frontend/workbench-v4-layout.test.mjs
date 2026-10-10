@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { chromium } from "playwright";
 
 const css = readFileSync(new URL("../../static/workbench.css", import.meta.url), "utf8");
-const runtime = readFileSync(new URL("../../static/workspace-controller.js", import.meta.url), "utf8");
+const runtime = readFileSync(new URL("../../static/ui-copy.js", import.meta.url), "utf8") + "\n"
+  + readFileSync(new URL("../../static/workspace-controller.js", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../../static/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../../static/index.html", import.meta.url), "utf8");
 const productionCss = [...html.matchAll(/href="\/static\/([^"?]+\.css)/g)]
@@ -119,6 +120,7 @@ test("journey and delivery keep actions bound to the displayed version", async (
     assert.ok(journeyGeometry.messagesTop + 1 >= journeyGeometry.headerBottom);
     await journeySummary.click();
     await page.evaluate(() => window.ClipTalkWorkspaceController.openRail('materials'));
+    await page.locator('.ct-v4-version-more > summary').click();
     await page.locator("[data-ct-version-edit]").click();
     const card = page.locator("#ctV4MaterialsSummary");
     assert.match(await card.textContent(), /V2.*1:27/s);
@@ -133,7 +135,7 @@ test("journey and delivery keep actions bound to the displayed version", async (
       await page.screenshot({ path: `/tmp/cliptalk-delivery-${theme}.png` });
     }
     assert.equal(await page.locator("[data-ct-v4-export]").count(), 0);
-    assert.deepEqual(await card.locator("footer button").allTextContents(), ["播放当前成片", "全部版本"]);
+    assert.deepEqual(await card.locator("footer button").allTextContents(), ["下载 MP4", "播放当前成片", "全部版本"]);
     await page.locator("#saveToLibraryButton").click();
     await page.evaluate(() => window.ClipTalkWorkspaceController.syncMaterialsSummary());
     assert.match(await card.textContent(), /已长期保留/);
@@ -1114,6 +1116,7 @@ test("v4 workbench owns the reference layout and contextual rail", async () => {
       window.ClipTalkWorkspaceController.syncProjectControls();
     });
     await page.locator('[data-ct-v4-rail="materials"]').click();
+    await page.locator('.ct-v4-version-more > summary').click();
     await page.locator("#ctV4GenerateAspect").waitFor({ state: "visible" });
     const aspectActionState = await page.locator("#ctV4GenerateAspect").evaluate((node) => ({
       visible: Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length),
@@ -1187,7 +1190,7 @@ test("delivery checks trust rendered overlays and nested cover intro state", asy
     assert.equal(await page.locator("#ctV4VersionState").textContent(), "1 个审核样片");
     assert.match(await page.locator("[data-ct-v4-preview-version]").textContent(), /播放审核样片/);
     assert.equal(await page.locator("[data-ct-v4-export]").count(), 0);
-    assert.equal(await page.locator(".ct-v4-version-card > footer button").count(), 2);
+    assert.equal(await page.locator(".ct-v4-version-card > footer button").count(), 3);
 
     await page.evaluate(() => {
       const output = {
@@ -1249,7 +1252,7 @@ test("delivery checks trust rendered overlays and nested cover intro state", asy
       window.ClipTalkCurrentJobSnapshot = () => ({ ...current, storageMode: "one_off" });
       window.ClipTalkWorkspaceController.syncMaterialsSummary();
     });
-    assert.deepEqual(await page.locator(".ct-v4-version-card > footer button").allTextContents(), ["播放当前成片", "全部版本"]);
+    assert.deepEqual(await page.locator(".ct-v4-version-card > footer button").allTextContents(), ["下载 MP4", "播放当前成片", "全部版本"]);
   } finally {
     await browser.close();
   }

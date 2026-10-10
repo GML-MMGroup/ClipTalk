@@ -43,9 +43,12 @@ def test_cover_profile_compiles_a_forced_review_plan(tmp_path: Path) -> None:
     assert plan["brief"]["socialDelivery"]["requested"] is False
 
 
-def test_cover_saved_copy_does_not_imply_hidden_video_render() -> None:
-    assert copy_messages.cover_saved() == "封面已保存；本次只更新封面，不修改视频画面"
-    assert copy_messages.cover_saved(1) == "封面已保存，并关联到 1 条当前成片；视频画面未改动"
+def test_cover_saved_copy_is_the_single_registry_sentence() -> None:
+    # 封面保存只播报一条结果消息；绑定数量/是否渲染/是否改动画面是界面约束，
+    # 不再写进消息（否则同一次保存会堆叠出多行近义长句）。
+    assert copy_messages.cover_saved() == copy_messages.MSG["cover_saved"]
+    assert copy_messages.cover_saved(1) == copy_messages.MSG["cover_saved"]
+    assert copy_messages.cover_saved(2, rendering=True) == copy_messages.MSG["cover_saved"]
 
 
 def test_cover_tools_generate_review_and_activate_a_version(
@@ -187,7 +190,7 @@ def test_cover_tools_generate_review_and_activate_a_version(
     assert job["coverIntroDraft"]["schemaVersion"] == "cover-intro-timeline-v1"
     assert job["coverIntroDraft"]["duration"] == 1.0
     assert job["messages"][-1]["kind"] == "result"
-    assert job["messages"][-1]["text"] == "封面已保存，并关联到 1 条当前成片；视频画面未改动"
+    assert job["messages"][-1]["text"] == copy_messages.MSG["cover_saved"]
 
 
 def test_review_render_gets_an_automatic_cover_without_user_selection(

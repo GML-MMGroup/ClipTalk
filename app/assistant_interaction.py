@@ -336,7 +336,10 @@ class AssistantInteraction:
                             execution_mode=request.get("executionMode") or "autonomous_review",
                             input_context=frozen, replaces_plan_id=replaces, message_id=message_id,
                         )
-                        response = {"action": "plan_confirmation", "plan": new_plan, "message": "已整理本次要求，请核对后开始执行。"}
+                        waiting = new_plan.get("status") == "awaiting_confirmation"
+                        response = {"action": "plan_confirmation" if waiting else "plan_started", "plan": new_plan,
+                                    "message": "已整理本次要求，请核对后开始执行。" if waiting else
+                                    "已开始按本次要求处理，完成后可查看结果。"}
             except (ValueError, RuntimeError) as error:
                 response = {"action": "clarification", "message": str(error), "retryable": True}
             message.update({"status": "completed", "response": response, "inputContext": locals().get("frozen", {})})

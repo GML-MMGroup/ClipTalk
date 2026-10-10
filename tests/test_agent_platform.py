@@ -313,7 +313,7 @@ def test_cover_text_and_compose_instruction_are_parsed_as_separate_requirements(
     assert brief["coverTitle"] == "小米牛逼！！！"
     assert brief["coverAspect"] == "9:16"
     assert brief["coverIntroRequested"] is True
-    assert brief["coverIntroDurationSeconds"] == 1.5
+    assert brief["coverIntroDurationSeconds"] == 1.0
 
     explicit = AgentPlatform._editing_brief(
         "封面上写：小米牛逼，雷军牛逼！！！，并将封面作为2秒片头合成到当前成片。",
@@ -1535,6 +1535,7 @@ def test_delivery_qc_accepts_verified_subtitles_text_and_current_cover_intro(
     from app import main
 
     job_id = "job_delivery_visual_verified"
+    monkeypatch.setattr(main, "verify_cover_intro_frame", lambda *_a, **_kw: {"status": "supported", "method": "test_actual_frame"})
     filename = "verified.mp4"
     (tmp_path / filename).write_bytes(b"not-read-because-probe-is-mocked")
     job = {
@@ -1592,6 +1593,7 @@ def test_delivery_qc_prefers_final_cover_intro_output_when_intermediate_social_p
     from app import main
 
     job_id = "job_delivery_prefers_cover_intro"
+    monkeypatch.setattr(main, "verify_cover_intro_frame", lambda *_a, **_kw: {"status": "supported", "method": "test_actual_frame"})
     social_filename = "social-preview.mp4"
     final_filename = "cover-intro-preview.mp4"
     (tmp_path / social_filename).write_bytes(b"social")
@@ -2596,8 +2598,9 @@ def test_autonomous_person_selection_model_failure_becomes_typed_no_result(
     assert "invalid JSON" in result["artifact"]["message"]
 
 
+@pytest.mark.parametrize("all_speech", [False, True])
 def test_agent_speaker_search_keeps_the_selected_voice_scope(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, all_speech: bool,
 ) -> None:
     from app import main
 
@@ -2616,6 +2619,8 @@ def test_agent_speaker_search_keeps_the_selected_voice_scope(
         },
     }
     monkeypatch.setitem(main.jobs, job_id, job)
+    if all_speech:
+        job["brief"] = {"speakerTargeted": True, "retrievalQuery": ""}
     monkeypatch.setattr(main, "save_job", lambda _job: None)
     calls: list[tuple[str, list[str], str, str]] = []
 
@@ -2632,7 +2637,7 @@ def test_agent_speaker_search_keeps_the_selected_voice_scope(
         "search_content", {"query": "最有冲击力的一句话"},
     )
 
-    assert calls == [(job_id, ["Speaker 2"], "最有冲击力的一句话", "include")]
+    assert calls == [(job_id, ["Speaker 2"], "" if all_speech else "最有冲击力的一句话", "include")]
     assert result["artifact"]["kind"] == "speaker_scoped_content_search"
     assert result["artifact"]["candidateCount"] == 1
     assert job["status"] == "awaiting_agent_plan"
@@ -3005,6 +3010,27 @@ def test_agent_duration_fit_ignores_auto_job_target_and_uses_timeline_instructio
     assert result["targetSeconds"] == 90.0
     assert result["actualSeconds"] == 90.0
     assert result["status"] == "on_target"
+
+
+@pytest.mark.parametrize("assembled", [False, True])
+def test_agent_duration_fit_honors_the_tolerance_shown_in_plan(assembled) -> None:
+    from app import main
+
+    job = {"videoInfo": {"duration": 35}, "speechAnalysis": {"segments": [
+        {"start": 18.06, "end": 30.10, "text": "完整发言"}]}}
+    session = {"clips": [{"id": "c1", "sourceStart": 18.06, "sourceEnd": 30.10}],
+               "duration": 12.04, "contentBinding": {"searchId": "search"},
+               "agentTimelineRequest": {"instruction": "目标 15 秒，允许浮动 ±5 秒"}}
+    if assembled:
+        session["agentAssembly"] = {"source": "verified"}
+    result = main._fit_agent_session_to_target(job, session)
+    assert result["status"] == "on_target"
+    assert result["toleranceSeconds"] == 5
+    assert result["actualSeconds"] == pytest.approx(12.04)
+    session["agentTimelineRequest"]["instruction"] = "目标 15 秒，允许浮动 ±0 秒"
+    result = main._fit_agent_session_to_target(job, session)
+    assert result["status"] == "insufficient_coverage"
+    assert result["toleranceSeconds"] == 0
 
 
 def test_agent_duration_fit_uses_subtle_speed_to_keep_complete_speech_in_tolerance() -> None:
@@ -4210,6 +4236,7 @@ def test_store_events_are_ordered_and_skill_frontmatter_is_strict() -> None:
 
 def test_agent_upload_entry_creates_a_source_workspace_without_enqueuing_analysis() -> None:
     from app import main
+    from app.job_creation_form import CreateJobForm
     from app.store import JobStore
 
     with tempfile.TemporaryDirectory() as directory:
@@ -4234,7 +4261,7 @@ def test_agent_upload_entry_creates_a_source_workspace_without_enqueuing_analysi
                 main, "validate_video_decodable_coverage", return_value={"status": "ready", "warnings": []},
             ), patch.object(main, "schedule_job_thumbnail"), patch.object(main, "enqueue_job") as enqueue:
                 result = asyncio.run(main.create_job(
-                    video=uploaded, upload_session_id="", expected_size_bytes="",
+                    video=uploaded, form=CreateJobForm(upload_session_id="", expected_size_bytes="",
                     task_mode="content_extract", intent_mode="content_extract",
                     parameter_context="adaptive_v1", storage_mode="editable",
                     instruction="剪成一段访谈精华", count="auto", target_seconds="auto",
@@ -4249,7 +4276,7 @@ def test_agent_upload_entry_creates_a_source_workspace_without_enqueuing_analysi
                     search_scope_end="", search_result_limit="12", search_boundary_mode="complete",
                     content_auto_generate="false", content_exclusions="", search_evidence_mode="",
                     search_allowed_capabilities="", entry_workflow="agent", workflow_kind="content_search",
-                ))
+                )))
             job = result["job"]
             assert job["status"] == "awaiting_agent_plan"
             assert job["stage"] == "agent_workspace_ready"
@@ -4266,6 +4293,7 @@ def test_agent_upload_entry_creates_a_source_workspace_without_enqueuing_analysi
 
 def test_agent_draft_idempotency_is_bound_to_draft_session_not_source_hash() -> None:
     from app import main
+    from app.job_creation_form import CreateJobForm
     from app.store import JobStore
 
     with tempfile.TemporaryDirectory() as directory:
@@ -4288,7 +4316,7 @@ def test_agent_draft_idempotency_is_bound_to_draft_session_not_source_hash() -> 
         def create_draft(draft_session_id: str) -> dict[str, Any]:
             return asyncio.run(main.create_job(
                 video=UploadFile(filename="same-video.mp4", file=io.BytesIO(b"same video bytes")),
-                upload_session_id="", expected_size_bytes="",
+                form=CreateJobForm(upload_session_id="", expected_size_bytes="",
                 task_mode="highlight", intent_mode="highlight",
                 parameter_context="adaptive_v1", storage_mode="editable",
                 instruction="", count="auto", target_seconds="auto",
@@ -4304,7 +4332,7 @@ def test_agent_draft_idempotency_is_bound_to_draft_session_not_source_hash() -> 
                 content_auto_generate="false", content_exclusions="", search_evidence_mode="",
                 search_allowed_capabilities="", entry_workflow="agent", workflow_kind="highlight",
                 agent_draft="true", draft_session_id=draft_session_id,
-            ))["job"]
+            )))["job"]
 
         try:
             with patch.object(main, "probe_video", return_value=video_info), patch.object(

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,6 +28,22 @@ import uuid
 import sys
 
 import httpx
+
+
+COVER_NEGATED = re.compile(
+    r"(?:不|无|没|别|不要|不用|不需要|去除|去掉|移除)\s*(?:加|要|用|添加|放)?\s*封面"
+    r"|封面\s*(?:也|都)?\s*不(?:加|要|用|放)"
+)
+
+
+def cover_requested(goal: str) -> bool:
+    """Whether the goal asks for a cover at all, ignoring negated phrasings.
+
+    Covers are composed into the opening by default, so every cover-bearing
+    request must end up with coverIntro enabled - not only the ones that say
+    "开头/片头" explicitly. Goals like "不加封面" must stay exempt.
+    """
+    return bool(re.search(r"封面|缩略图|海报帧", goal)) and not COVER_NEGATED.search(goal)
 
 
 def media_info(path: Path, ffprobe: str) -> dict:
@@ -75,6 +92,8 @@ class Runner:
             # No lifespan recovery: only jobs created by this process are run.
             self.client = TestClient(application.app, base_url="http://127.0.0.1", raise_server_exceptions=False)
         self.results = []
+        # Global wall-clock budget across all cases (0/unset = unlimited).
+        self.deadline = time.monotonic() + args.total_timeout if getattr(args, "total_timeout", 0) else None
 
     def request(self, method, route, **kwargs):
         response = self.client.request(method, route, **kwargs)
@@ -140,7 +159,22 @@ class Runner:
                                "selection": {"searchId": search["id"], "matchIds": ids}}})
         return True
 
-    def case(self, name, goal, previous=None, existing=None):
+    def case(self, name, goal, previous=None, existing=None, retry_plan_id=None):
+        # Speaker acceptance needs a real multi-speaker source. Without it the
+        # upload helper would silently fall back to the main video and could
+        # report render_passed for an unverifiable speaker workflow.
+        if name == "speaker" and not self.args.speaker_video:
+            blocked = {"case": name, "goal": goal, "status": "blocked",
+                       "reason": "Speaker acceptance requires a real multi-speaker video (--speaker-video)"}
+            self.results.append(blocked)
+            self.save()
+            return blocked
+        if self.deadline and time.monotonic() > self.deadline:
+            blocked = {"case": name, "goal": goal, "status": "blocked",
+                       "reason": "Global acceptance time budget exhausted"}
+            self.results.append(blocked)
+            self.save()
+            return blocked
         result = {"case": name, "goal": goal, "status": "running"}
         self.results.append(result)
         self.save()
@@ -154,9 +188,9 @@ class Runner:
                 current = self.request("GET", f"/api/jobs/{job_id}")["job"]
                 if current.get("activeEditSessionId") != previous.get("sessionId"):
                     raise ValueError("Active timeline differs from the previous test result")
-            reply = self.request("POST", f"/api/agent/workspaces/{workspace_id}/messages", json={
+            reply = self.request("POST", f"/api/agent/plans/{retry_plan_id}/actions/retry", json={}) if retry_plan_id else self.request("POST", f"/api/agent/workspaces/{workspace_id}/messages", json={
                 "text": goal, "clientMessageId": uuid.uuid4().hex,
-                "executionMode": "autonomous_review", "uiContext": ui,
+                "executionMode": getattr(self.args, "execution_mode", "autonomous_review"), "uiContext": ui,
             })
             plan = reply.get("plan")
             if not plan:
@@ -165,14 +199,19 @@ class Runner:
             plan_id = plan["id"]
             result["planId"] = plan_id
             result["tools"] = [s["tool"] for s in plan.get("steps", [])]
-            if any(s.get("sideEffect") == "export" for s in plan.get("steps", [])):
+            automatic = getattr(self.args, "execution_mode", "autonomous_review") == "automatic_delivery"
+            if not automatic and any(s.get("sideEffect") == "export" for s in plan.get("steps", [])):
                 raise ValueError("Unexpected formal export in review-only acceptance")
             required = {"highlight": "analyze_highlights", "topic": "search_content",
                         "anchor": "search_content", "shorter": "propose_timeline_edit",
-                        "speaker": "discover_speakers", "voice": "propose_timeline_edit"}[name]
+                        "speaker": "discover_speakers", "voice": "propose_timeline_edit",
+                        "audio": "deliver_current_plan", "motion": "deliver_current_plan", "cover": "deliver_current_plan"}[name]
             if required not in result["tools"]:
                 raise ValueError(f"Expected workflow tool missing: {required}")
-            self.request("POST", f"/api/agent/plans/{plan_id}/confirm", json={"planHash": plan["planHash"]})
+            if not automatic:
+                self.request("POST", f"/api/agent/plans/{plan_id}/confirm", json={"planHash": plan["planHash"]})
+            elif plan.get("status") == "awaiting_confirmation":
+                raise ValueError("Automatic task unexpectedly requested plan confirmation")
             deadline, last_print = time.monotonic() + self.args.timeout, 0
             while time.monotonic() < deadline:
                 plan = self.request("GET", f"/api/agent/plans/{plan_id}")["plan"]
@@ -208,7 +247,13 @@ class Runner:
             previews = []
             for step in plan.get("steps", []):
                 artifact = (step.get("result") or {}).get("artifact") or {}
-                if artifact.get("kind") == "review_preview_batch":
+                if automatic:
+                    if step.get("tool") == "deliver_current_plan" and step.get("status") == "completed":
+                        for item in artifact.get("outputs") or []:
+                            if item.get("previewOnly") is not False or item.get("planId") != plan_id:
+                                raise ValueError("Delivery is not a formal output from this plan")
+                            previews.append({**item, "previewUrl": f"/api/jobs/{artifact.get('jobId') or job_id}/outputs/{item['filename']}"})
+                elif artifact.get("kind") == "review_preview_batch":
                     previews.extend(artifact.get("previews") or [])
                 elif artifact.get("kind") == "review_preview":
                     previews.append(artifact)
@@ -233,9 +278,18 @@ class Runner:
                     raise ValueError("Source audio was lost")
                 result["media"].append(media)
             first = previews[0]
+            if "添加对白字幕" in goal and int((first.get("overlayVerification") or {}).get("subtitleCueCount") or 0) <= 0:
+                raise ValueError("Requested dialogue subtitles were not rendered")
+            if cover_requested(goal) and not (first.get("coverIntro") or {}).get("enabled"):
+                raise ValueError("Cover intro was not composed; covers are composed into the opening by default")
             result["filename"] = first.get("filename") or ""
             result["sessionId"] = first.get("sessionId")
             result["duration"] = result["media"][0]["duration"]
+            result["deliveryMetadata"] = {k: first.get(k) for k in ("previewOnly", "planId", "audioPolish", "motionIntro", "motionGraphics", "coverIntro", "subtitleMode", "overlayVerification")}
+            if name == "audio" and not first.get("audioPolish"):
+                raise ValueError("Requested audio optimization was not delivered")
+            if name == "motion" and (not first.get("motionIntro") or (first.get("motionGraphics") or {}).get("title") != "新品发布"):
+                raise ValueError("Requested motion intro/title was not delivered")
             if name == "shorter":
                 target = max(4, round(previous["duration"] * .8))
                 if not result["duration"] < previous["duration"] or abs(result["duration"] - target) > max(5, target * .1):
@@ -267,10 +321,17 @@ def main():
     parser.add_argument("--anchor", default="从讲价格的地方开始")
     parser.add_argument("--speaker", default="识别视频中的说话人，只保留说话人 B 的发言，生成审核样片")
     parser.add_argument("--speaker-video", type=Path, help="A real multi-speaker video for speaker acceptance")
+    parser.add_argument("--execution-mode", choices=["autonomous_review", "automatic_delivery"], default="autonomous_review")
+    parser.add_argument("--highlight-goal", default="把最精彩的部分剪成一个高光视频")
     parser.add_argument("--review-input", type=Path, help="Explicit reviewed checkpoint JSON; waits until the plan deadline, never auto-approves")
-    parser.add_argument("--cases", nargs="+", choices=["highlight", "topic", "shorter", "anchor", "speaker"],
-                        default=["highlight", "topic", "shorter", "anchor", "speaker"])
+    parser.add_argument("--cases", nargs="+",
+                        choices=["highlight", "topic", "shorter", "anchor", "speaker",
+                                 "audio", "motion", "cover", "cover_default"],
+                        default=["highlight", "topic", "shorter", "anchor", "speaker"],
+                        help="audio/motion/cover/cover_default are executed by tests/real_automatic_followup_acceptance.py")
     parser.add_argument("--timeout", type=int, default=1800, help="Per-plan timeout seconds")
+    parser.add_argument("--total-timeout", type=int, default=0,
+                        help="Global wall-clock budget in seconds across all cases (0 = unlimited)")
     parser.add_argument("--in-process", action="store_true", help="Run current application code in-process with real model/render calls and isolated job storage")
     parser.add_argument("--config-root", type=Path, default=Path("data"), help="Read existing model configuration in place for --in-process")
     parser.add_argument("--output", type=Path, default=Path("local-artifacts"))
@@ -279,6 +340,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="Read-only local checks; no upload or model calls")
     group.add_argument("--run", action="store_true", help="Create real jobs and invoke configured models")
+    group.add_argument("--dry-run", action="store_true", help="Print the planned cases and goals; creates no jobs and calls no models")
     args = parser.parse_args()
     if urlparse(args.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}:
         parser.error("Use a loopback development server")
@@ -286,6 +348,9 @@ def main():
         parser.error("A real video and positive timeout are required")
     if args.speaker_video and not args.speaker_video.is_file():
         parser.error("Speaker video does not exist")
+    if set(args.cases) & {"audio", "motion", "cover", "cover_default"}:
+        parser.error("audio/motion/cover/cover_default need --execution-mode automatic_delivery on an existing preview; "
+                     "run tests/real_automatic_followup_acceptance.py --report <isolated>/report.json --run --cases ...")
     for binary in (args.ffmpeg, args.ffprobe):
         if not shutil.which(binary):
             parser.error(f"Missing binary: {binary}")
@@ -294,8 +359,33 @@ def main():
         parser.error("FFmpeg requires libx264")
     source = media_info(args.video, args.ffprobe)
     print("Video:", args.video, "duration:", source["format"]["duration"], flush=True)
+    if "speaker" in args.cases and not args.speaker_video:
+        print("Warning: the speaker case will be blocked without --speaker-video", file=sys.stderr, flush=True)
     if args.check:
-        print("Local checks passed. Server/model readiness is checked during --run.")
+        if args.in_process:
+            print("Local checks passed. --in-process runs current code directly, so no external service is probed.")
+            return 0
+        token = os.environ.get("CLIPTALK_TEST_TOKEN", "")
+        try:
+            with httpx.Client(base_url=args.base_url.rstrip("/"), timeout=5,
+                              headers={"Authorization": f"Bearer {token}"} if token else {}) as probe_client:
+                probe = probe_client.get("/api/health")
+                probe.raise_for_status()
+                status_code = probe.status_code
+        except Exception as error:
+            print(f"Service probe failed for {args.base_url}: {type(error).__name__}", file=sys.stderr, flush=True)
+            print("Start the local development service, or pass --in-process to exercise current code directly.",
+                  file=sys.stderr, flush=True)
+            return 1
+        print(f"Local checks passed. Service at {args.base_url} responded {status_code}.")
+        return 0
+    if args.dry_run:
+        planned = {"highlight": args.highlight_goal, "topic": args.topic, "shorter": "再短一点",
+                   "anchor": args.anchor, "speaker": args.speaker}
+        for name in args.cases:
+            goal = planned.get(name, "")
+            print(f"[dry-run] {name}: {goal or 'handled by tests/real_automatic_followup_acceptance.py'}", flush=True)
+        print("Dry run only: no jobs created and no model calls.", flush=True)
         return 0
     args.output.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="live-video-acceptance-", dir=args.output)).resolve()
@@ -303,7 +393,7 @@ def main():
     print("Report directory:", directory, flush=True)
     try:
         needs_highlight = bool(set(args.cases) & {"highlight", "shorter", "anchor"})
-        highlight = runner.case("highlight", "把最精彩的部分剪成一个高光视频") if needs_highlight else {}
+        highlight = runner.case("highlight", args.highlight_goal) if needs_highlight else {}
         if "topic" in args.cases:
             runner.case("topic", args.topic)
         if set(args.cases) & {"shorter", "anchor"} and highlight.get("status") == "render_passed" and highlight.get("sessionId"):

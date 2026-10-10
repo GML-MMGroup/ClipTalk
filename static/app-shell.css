@@ -376,7 +376,7 @@ body[data-shell-view="home"] .home-view {
 .home-view .home-heading p {
   max-width: 56ch !important;
   margin: 18px 0 0 !important;
-  color: #696d64 !important;
+  color: var(--ct-text-secondary) !important;
   font-size: 14px !important;
   line-height: 1.8 !important;
   text-wrap: pretty;
@@ -727,7 +727,7 @@ body[data-shell-mode="workspace"] .workspace-flow-mount .director-stage-flow li.
   margin-top: 4px;
   padding: 7px 0;
   border: 0;
-  color: var(--ct-theme-primary, #355d48);
+  color: var(--ct-primary);
   background: transparent;
   font-size: 12px;
   font-weight: 650;
@@ -2110,7 +2110,6 @@ body[data-sidebar-overlay="true"] .app-sidebar-drawer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
 }
 .shell-task-foot time { color: #6f8088; font: 500 9px/1 var(--font-mono, ui-monospace, monospace); }
 .shell-task-progress { min-width: 92px; display: flex; align-items: center; gap: 6px; }
@@ -2202,4 +2201,18 @@ body[data-shell-view="settings"] .topbar .settings-button { display: none !impor
 @media (prefers-reduced-motion: reduce) {
   .ct-loading__bar { animation: none; opacity: .5; }
   .ct-empty__action { transition: none; }
+}
+
+/* Task objectives remain readable when several jobs share one source file. */
+.shell-task-heading strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.shell-task-foot {
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }

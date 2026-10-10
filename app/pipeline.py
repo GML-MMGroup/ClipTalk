@@ -1809,7 +1809,7 @@ class HighlightPipeline:
 
                     embedding_encoder = SiglipEncoder(
                         self.visual_embedding_model, device=self.embedding_device,
-                        cache_dir=self.model_cache,
+                        cache_dir=self.model_cache, local_files_only=True,
                     )
                     embedding_batch_size = 16
                     embeddings = embedding_encoder.encode_images(

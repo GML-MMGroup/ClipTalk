@@ -33,7 +33,7 @@ def test_clean_checkout_needs_no_machine_paths(clean_settings):
     settings = config.Settings.from_environment()
     assert settings.host == "127.0.0.1"
     assert settings.port == 5180 and settings.maximum_workers == 1
-    assert settings.allow_unauthenticated_remote is False
+    assert not hasattr(settings, "allow_unauthenticated_remote")
     assert settings.talknet_worker_python == str(clean_settings / "data/models/talknet/venv/bin/python")
     assert settings.talknet_repository == str(clean_settings / "data/models/talknet/repository")
     assert settings.talknet_checkpoint == str(clean_settings / "data/models/talknet/pretrain_TalkSet.model")

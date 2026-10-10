@@ -299,6 +299,25 @@ def test_legacy_composition_rechecks_selected_ranges_and_archives_without_overwr
     assert job["contentSearch"]["id"] == revision_id
 
 
+@pytest.mark.parametrize("automatic,trim,expected_gate", [(True, .2, False), (False, .2, True), (True, 2, True)])
+def test_automatic_minor_verified_boundary_trims_avoid_unnecessary_gate(monkeypatch, automatic, trim, expected_gate):
+    from app import main
+    record = search("speech.semantic")
+    record.update(candidates=[candidate()], reviewDraft={"selectedMatchIds": ["m1"]})
+    job = {"id": "minor_contract_test", "contentSearch": record, "videoInfo": {"duration": 10}}
+    monkeypatch.setitem(main.jobs, job["id"], job)
+    monkeypatch.setattr(main, "save_job", lambda _: None)
+    def verify(job, revised, matches, event, stats):
+        revised["contentContract"] = build_contract(revised)
+        def inspect(contract, match, times, mode):
+            return {"allowedBoundaryTimes": [1+trim, 8-trim], "intervals": [
+                {"start": 1+trim, "end": 8-trim, "wholeIntervalSupported": True, "predicates": {"p1": True}}]}
+        return refine_matches(matches, revised["contentContract"], inspect, duration=10)
+    monkeypatch.setattr(main, "_verify_content_contract_matches", verify)
+    result = main._prepare_content_composition_contract(job["id"], automatic_minor_refinement=automatic)
+    assert bool(result and result.get("actionRequired")) == expected_gate
+
+
 def test_pending_results_never_fall_back_to_highlights_or_full_video(monkeypatch):
     from app import main
     record = search()

@@ -23,6 +23,7 @@ function harness() {
     setSecondaryEditorBusy: (...args) => busy.push(args), showToast: message => toasts.push(message),
     $: () => ({ value: "new version", checked: false }),
     syncSecondaryEditorSessionToJob() {}, secondaryEditorMarkPreviewStale() {}, renderSecondaryEditorProposal() {}, renderSecondaryEditor() {},
+    document: { querySelectorAll: () => [] },
     apiJson: (path, options) => { requests.push({ path, options }); return new Promise(resolve => { resolveRequest = resolve; }); },
     requestActionConfirmation: async () => true, closeSecondaryEditor() {}, renderJob() {}, clearTimeout() {}, pollJob() {}, pollTimer: 0,
   };

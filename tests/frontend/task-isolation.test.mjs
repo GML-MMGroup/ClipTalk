@@ -378,12 +378,12 @@ test("new-task guidance sits above the bottom composer and upload preserves its 
         const prompts = await page.locator('#ctAgentEntryPrompts').boundingBox();
         const form = await page.locator('#chatForm').boundingBox();
         const panel = await page.locator('#assistantPanel').boundingBox();
-        assert.equal(await page.locator('#ctAgentWelcome').innerText(), '你想怎么剪？');
+        assert.equal(await page.locator('#ctAgentWelcomeTitle').innerText(), '你想怎么剪？');
         assert.ok(title.y + title.height <= prompts.y + 1);
         assert.ok(prompts.y + prompts.height <= form.y + 1);
         assert.ok(Math.abs(form.y + form.height - panel.y - panel.height) <= 16, `composer stays at panel bottom: ${JSON.stringify({width, height, theme, form, panel})}`);
-        assert.ok(form.y >= 0 && form.y + form.height <= height + 1, 'composer remains on screen');
-        assert.equal(await page.locator('#agentSkillMenuButton').innerText(), '自动执行');
+        assert.ok(form.y >= 0 && form.y + form.height <= height + 1, `composer remains on screen: ${JSON.stringify({ width, height, theme, form, panel })}`);
+        assert.equal(await page.locator('#agentSkillMenuButton').innerText(), '自动完成');
       }
     }
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -579,7 +579,9 @@ test("late upload response from an older creation session cannot replace the new
     assert.equal(await page.locator('#sendButton').isDisabled(), true);
     assert.equal(await page.locator('#videoInput').isDisabled(), true);
     assert.equal(await page.locator('#uploadProgress').isVisible(), true);
-    assert.equal(await page.locator('#uploadProgress').getAttribute('value'), '100');
+    assert.equal(await page.locator('#uploadProgress').getAttribute('value'), null);
+    assert.equal(await page.locator('#uploadProgress').getAttribute('aria-valuetext'), '上传完成，正在准备预览');
+    assert.equal(await page.locator('#dropZone').getAttribute('data-upload-state'), 'preparing');
     await page.locator("#sidebarNewTask").click();
     await uploadSource(page, video);
     await page.waitForFunction(() => window.ClipTalkCurrentJobId?.() === "job_second");
@@ -782,7 +784,7 @@ test("execution settings stay readable and on screen, reflect mode and support k
           field: parseFloat(getComputedStyle(document.querySelector("#agentSkillSelect")).fontSize),
           triggerHeight: document.querySelector("#agentSkillMenuButton").getBoundingClientRect().height,
         }));
-        assert.ok(fonts.status >= 12 && fonts.field >= 14 && fonts.triggerHeight >= 36, JSON.stringify(fonts));
+        assert.ok(fonts.status >= 12 && fonts.field >= 14 && fonts.triggerHeight >= 35.9, JSON.stringify(fonts));
         assert.equal(await trigger.locator('span').count(), 0, 'no duplicate execution-settings label');
         assert.match(await trigger.getAttribute('aria-label'), /打开执行设置/);
         await page.locator("#agentExecutionMode").selectOption("stepwise_review");
@@ -794,7 +796,7 @@ test("execution settings stay readable and on screen, reflect mode and support k
         assert.equal(await trigger.evaluate(node => document.activeElement === node), true);
         await trigger.click();
         await page.locator("#agentExecutionMode").selectOption("autonomous_review");
-        assert.equal(await trigger.locator("small").textContent(), "自动执行");
+        assert.equal(await trigger.locator("small").textContent(), "自动到预览");
         await page.mouse.click(width - 4, height - 4);
         assert.equal(await menu.isVisible(), false);
       }

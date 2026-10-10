@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+RENDER_WATCHDOG_SECONDS = float(os.environ.get('HIGHLIGHT_RENDER_WATCHDOG_SECONDS', '3600'))
+
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 from .config import resolve_subtitle_font
@@ -193,6 +195,10 @@ def _run_cancellable(
             raise MediaError((result.stderr or result.stdout or "媒体命令执行失败")[-2000:])
         return result
     finally:
+        # A cancellation callback can raise on a stale plan/version as well
+        # as return True. Do not leave that child computing in the background.
+        if process.poll() is None:
+            process_supervisor.terminate(process)
         process_supervisor.forget(process)
 
 
@@ -1302,6 +1308,7 @@ def render_clip(
         command.extend(["-c:a", "aac", "-b:a", "160k"])
     command.extend(["-movflags", "+faststart", "-avoid_negative_ts", "make_zero", "-y", str(temporary)])
     process = process_supervisor.start(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    render_deadline = time.monotonic() + RENDER_WATCHDOG_SECONDS
     while process.poll() is None:
         if cancelled and cancelled():
             process.terminate()
@@ -1310,12 +1317,88 @@ def render_clip(
             except subprocess.TimeoutExpired:
                 process.kill()
             raise MediaError("任务已取消")
+        if time.monotonic() > render_deadline:
+            process_supervisor.terminate(process)
+            temporary.unlink(missing_ok=True)
+            raise MediaError(
+                f"渲染超过 {RENDER_WATCHDOG_SECONDS:.0f} 秒仍未完成，已终止以避免长期占用渲染线程"
+            )
         time.sleep(0.2)
     stdout, stderr = process.communicate()
     if process.returncode != 0:
         temporary.unlink(missing_ok=True)
         raise MediaError((stderr or stdout or "高光视频渲染失败")[-2000:])
     temporary.replace(output)
+
+
+def _image_asset_for_segment(segment: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the still-image asset behind an image segment, if any."""
+    if str(segment.get("assetKind") or "").strip().lower() != "image":
+        return None
+    path = str(segment.get("assetPath") or "").strip()
+    if not path:
+        return None
+    try:
+        duration = float(segment.get("assetDuration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        duration = max(0.0, float(segment.get("end") or 0) - float(segment.get("start") or 0))
+    if duration <= 0:
+        return None
+    return {"path": path, "duration": duration}
+
+
+COVER_CLIP_ANIMATIONS = {"none", "fade", "zoom"}
+
+
+def _normalize_cover_animation(value: Any) -> str:
+    animation = str(value or "").strip().lower()
+    return animation if animation in COVER_CLIP_ANIMATIONS else "none"
+
+
+def _image_canvas(segment: dict[str, Any]) -> tuple[int, int]:
+    """The delivery canvas recorded for a still, or (0, 0) when unknown."""
+    try:
+        width = int(segment.get("canvasWidth") or 0)
+        height = int(segment.get("canvasHeight") or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if width < 2 or height < 2:
+        return 0, 0
+    return width // 2 * 2, height // 2 * 2
+
+
+def _image_canvas_filter(segment: dict[str, Any]) -> str:
+    """Fit a still onto the delivery canvas so concat never sees mixed sizes."""
+    if _image_asset_for_segment(segment) is None:
+        return ""
+    width, height = _image_canvas(segment)
+    if not width or not height:
+        return ""
+    return (
+        f",scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+    )
+
+
+def _image_animation_filter(segment: dict[str, Any], duration: float) -> str:
+    """Optional intro motion for a still: a fade from black or a slow push-in."""
+    if _image_asset_for_segment(segment) is None or duration <= 0:
+        return ""
+    animation = _normalize_cover_animation(segment.get("coverAnimation"))
+    if animation == "none":
+        return ""
+    if animation == "fade":
+        return f",fade=t=in:st=0:d={min(.8, max(.1, duration / 3)):.3f}"
+    width, height = _image_canvas(segment)
+    if not width or not height:
+        # A push-in must land on a fixed canvas; skip it rather than guess one.
+        return ""
+    return (
+        f",zoompan=z='min(1+0.0008*on,1.12)':d=1:"
+        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={CONTENT_RENDER_FPS:.3f}"
+    )
 
 
 def render_composition(
@@ -1367,7 +1450,11 @@ def render_composition(
     for logical_index, segment in enumerate(valid):
         segment_id = str(segment.get("id") or f"segment_{logical_index}")
         rate = normalize_playback_rate(segment.get("playbackRate"))
-        pieces = source_pieces(segment)
+        image_asset = _image_asset_for_segment(segment)
+        pieces = (
+            [{"start": 0.0, "end": round(float(image_asset["duration"]), 3)}]
+            if image_asset is not None else source_pieces(segment)
+        )
         for piece_index, piece in enumerate(pieces):
             item = {
                 **segment,
@@ -1413,6 +1500,13 @@ def render_composition(
     filters: list[str] = []
     input_arguments: list[str] = []
     durations: list[float] = []
+    # A still image has no audio track of its own.  Each image piece gets a
+    # dedicated silent input so the shared atrim/afade/adelay chain keeps working.
+    image_audio_inputs: dict[int, int] = {}
+    for piece_index, piece in enumerate(expanded):
+        if _image_asset_for_segment(piece) is None:
+            continue
+        image_audio_inputs[piece_index] = count + len(image_audio_inputs)
     # L-cut extends the previous source audio past its picture end.  Track that
     # separately so the corresponding video stays at its original duration.
     audio_extensions = [0.0 for _ in expanded]
@@ -1446,7 +1540,15 @@ def render_composition(
         input_start = max(0.0, start - audio_pre_extensions[index])
         video_trim_start = start - input_start
         input_duration = audio_pre_extensions[index] + render_source_duration + audio_extensions[index]
-        input_arguments.extend(["-ss", f"{input_start:.3f}", "-t", f"{input_duration:.3f}", "-i", str(source)])
+        piece_image = _image_asset_for_segment(segment)
+        if piece_image is not None:
+            # A still image has no timeline, so -ss/-t would be meaningless.
+            input_arguments.extend([
+                "-loop", "1", "-framerate", f"{CONTENT_RENDER_FPS:.3f}",
+                "-t", f"{input_duration:.3f}", "-i", piece_image["path"],
+            ])
+        else:
+            input_arguments.extend(["-ss", f"{input_start:.3f}", "-t", f"{input_duration:.3f}", "-i", str(source)])
         video_source = f"[{index}:v]"
         scale = (
             f",scale='if(gte(iw,ih),min({int(preview_width)},iw),-2)':"
@@ -1455,10 +1557,12 @@ def render_composition(
         )
         filters.append(
             f"{video_source}trim=start={video_trim_start:.3f}:duration={render_source_duration:.3f},setpts=(PTS-STARTPTS)/{rate:.3f}"
-            f"{letterbox_filter}{scale},fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[v{index}]"
+            f"{letterbox_filter}{scale}{_image_canvas_filter(segment)}"
+            f"{_image_animation_filter(segment, render_source_duration / rate)},"
+            f"fps={CONTENT_RENDER_FPS:.3f},settb=AVTB,format=yuv420p[v{index}]"
         )
         if has_audio:
-            audio_source = f"[{index}:a]"
+            audio_source = f"[{image_audio_inputs.get(index, index)}:a]"
             output_start = float(schedule[index]["outputStart"])
             logical_index = int(segment.get("logicalIndex") or 0)
             bridge = normalize_audio_bridge(valid[logical_index].get("audioBridge"), first=logical_index == 0)
@@ -1487,6 +1591,12 @@ def render_composition(
                 f"{fade_filters}"
                 f"adelay={delay_ms}|{delay_ms}[a{index}]"
             )
+    if has_audio:
+        for piece_index in sorted(image_audio_inputs):
+            input_arguments.extend([
+                "-f", "lavfi", "-t", f"{max(0.2, float(durations[piece_index])):.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
     video_current = "v0"
     composed_duration = durations[0]
     for index in range(1, count):
@@ -1530,7 +1640,7 @@ def render_composition(
         duration = min(source_end - source_start, max(.2, composed_duration - cutaway_start))
         if duration + 1e-6 < .2:
             continue
-        input_index = count + cutaway_input_count
+        input_index = count + len(image_audio_inputs) + cutaway_input_count
         cutaway_input_count += 1
         input_arguments.extend(["-ss", f"{source_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)])
         scale = (

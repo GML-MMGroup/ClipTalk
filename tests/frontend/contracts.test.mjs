@@ -44,6 +44,27 @@ test("review-sample timing accepts edit-session source ranges", () => {
   assert.ok(Math.abs(context.compositionSourceTimeAtOutputTime(sample, 5) - 82) < .001);
 });
 
+test("final timeline shares the frozen body offset with QC after multiple intros", () => {
+  const app = read("static/app.js");
+  const start = app.indexOf("function compositionTransitionOverlap");
+  const end = app.indexOf("function seekCurrentMediaTime", start);
+  const context = {};
+  vm.runInNewContext(app.slice(start, end), context);
+  const output = {
+    coverIntro: { enabled: true, duration: 1 },
+    motionIntro: { enabled: true, introDuration: 2 },
+    deliveryTimeMap: { schemaVersion: 1, bodyOffsetSeconds: 3 },
+    segments: [{ start: 10, end: 15, playbackRate: 1 }],
+  };
+  assert.equal(context.compositionSchedule(output)[0].outputStart, 3);
+  assert.equal(context.compositionSourceFrameAtOutputTime(output, 2), null);
+  assert.ok(Math.abs(context.compositionSourceTimeAtOutputTime(output, 4) - 11) < .001);
+  output.deliveryTimeMap.bodyOffsetSeconds = 0;
+  assert.equal(context.compositionSchedule(output)[0].outputStart, 0);
+  delete output.deliveryTimeMap;
+  assert.equal(context.compositionSchedule(output)[0].outputStart, 3);
+});
+
 test("workflow copy uses one four-mode terminology contract", () => {
   const context = { window: {} };
   vm.runInNewContext(read("static/ui-copy.js"), context);
@@ -201,6 +222,7 @@ test("subtitle review conflicts tell users to complete review instead of refresh
   assert.match(app, /async function ensureSecondaryEditorSubtitleReadyForBurn/);
   assert.match(app, /ensureSecondaryEditorSubtitleReadyForBurn\(\)/);
   assert.match(app, /source_subtitle_ack_required/);
+  assert.match(app, /async function acknowledgeSourceSubtitleOverlap/);
 });
 
 test("agent execution events refresh the current job and player without manual reload", () => {
@@ -256,7 +278,7 @@ test("completed cover plans show the generated image instead of only step progre
   assert.match(app, /function renderTimelineCoverTrack/);
   assert.match(app, /data-cover-timeline-duration/);
   assert.match(app, /cover-timeline\/activate/);
-  assert.match(workspace, /只有明确要求片头时才合入视频/);
+  assert.match(workspace, /审核样片与导出成片都默认把封面加为片头/);
   assert.match(workspace, /预览视频已生成，确认无误后即可导出成片/);
   assert.match(workspace, /return "待确认"/);
   assert.match(workspace, /"预览视频"/);
@@ -430,7 +452,7 @@ test("v4 output preview suppresses legacy result panels and evidence strip", () 
   assert.match(read("static/workspace-controller.js"), /ct-v4-adopted-preview/);
   assert.match(read("static/workspace-controller.js"), /竖屏/);
   assert.match(read("static/workspace-controller.js"), /root\?\.querySelector\?\.\(selector\) \|\| null/);
-  assert.match(read("static/workspace-controller.js"), /sourceTitle = cleanDisplayText\(window\.ClipTalkCurrentJobSnapshot\?\.\(\)\?\.filename\)/);
+  assert.match(read("static/workspace-controller.js"), /ClipTalkCopy.taskTitle\(window\.ClipTalkCurrentJobSnapshot\?\.\(\), projectPreferences\(\).displayName\)/);
   assert.match(html, /workbench\.css\?v=[0-9]{8}-[\w-]+/);
   assert.match(html, /app\.js\?v=[0-9]{8}-[\w-]+/);
   assert.match(html, /timeline-presentation\.js\?v=[0-9]{8}-[\w-]+/);

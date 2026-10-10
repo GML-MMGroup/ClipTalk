@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import logging
+
+LEASE_LOGGER = logging.getLogger("cliptalk")
+MAX_RECOVERY_ATTEMPTS = 3
+
 
 TaskTarget = Callable[..., Any]
 _task_context = threading.local()
@@ -166,8 +171,14 @@ class DurableTaskStore:
         with self.lock, self._connect() as connection:
             connection.execute(
                 "UPDATE tasks SET status='queued',updated_at=?,owner_id=NULL,lease_until=NULL "
-                "WHERE status='running' AND COALESCE(lease_until,0) < ?",
-                (_now_iso(), time.time()),
+                "WHERE status='running' AND COALESCE(lease_until,0) < ? "
+                "AND COALESCE(attempts,0) < ?",
+                (_now_iso(), time.time(), MAX_RECOVERY_ATTEMPTS),
+            )
+            connection.execute(
+                "UPDATE tasks SET status='failed',updated_at=?,error=? "
+                "WHERE status='running' AND COALESCE(attempts,0) >= ?",
+                (_now_iso(), "任务重试次数超过上限，已停止自动恢复", MAX_RECOVERY_ATTEMPTS),
             )
             rows = connection.execute(
                 "SELECT id,job_id,kind,payload,status,attempts,created_at,updated_at "
@@ -232,8 +243,15 @@ class DurableTaskExecutor:
         stopped = threading.Event()
 
         def renew() -> None:
+            missed = 0
             while not stopped.wait(self.store.lease_seconds / 3):
-                if not self.store.heartbeat(task_id):
+                if self.store.heartbeat(task_id):
+                    missed = 0
+                    continue
+                missed += 1
+                LEASE_LOGGER.warning("任务租约心跳失败 %s（第 %s 次）", task_id, missed)
+                if missed >= 3:
+                    LEASE_LOGGER.error("任务租约心跳连续失败 3 次，停止续期：%s", task_id)
                     return
 
         heartbeat = threading.Thread(target=renew, daemon=True, name=f"lease-{task_id}")

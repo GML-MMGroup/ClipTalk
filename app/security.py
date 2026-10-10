@@ -21,12 +21,28 @@ def is_loopback_bind_host(host: str) -> bool:
         return False
 
 
+def is_loopback_client_address(host: object) -> bool:
+    """True only for the real TCP peer address.
+
+    Derived from ``request.client.host`` exclusively. Forwarded headers such as
+    ``X-Forwarded-For`` are attacker-controlled and must never be consulted here.
+    """
+    value = str(host or "").strip().lower().strip("[]")
+    if not value:
+        return False
+    if value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_deployment_access(
-    host: str, access_token: str, *, allow_unauthenticated_remote: bool = False,
-    setting_name: str = "HIGHLIGHT_HOST",
+    host: str, access_token: str, *, setting_name: str = "HIGHLIGHT_HOST",
 ) -> None:
     """Refuse an externally reachable bind without a meaningful bearer token."""
-    if is_loopback_bind_host(host) or allow_unauthenticated_remote:
+    if is_loopback_bind_host(host):
         return
     token = str(access_token or "").strip()
     if len(token) < 16:

@@ -1,6 +1,59 @@
 from __future__ import annotations
 
 from typing import Any
+from . import copy_messages
+
+
+def plan_terminal_reason(plan: dict[str, Any] | None) -> dict[str, str] | None:
+    """Explain terminal outcomes without conflating prerequisites with search misses.
+
+    Also derives presentation for old records; never mutates the stored plan.
+    """
+    if not isinstance(plan, dict) or plan.get("status") not in {"no_result", "failed"}:
+        return None
+    def is_terminal(step: Any) -> bool:
+        if not isinstance(step, dict):
+            return False
+        if plan.get("status") == "failed":
+            return step.get("status") == "failed"
+        outcome = step.get("result") if isinstance(step.get("result"), dict) else {}
+        return step.get("outcome") == "no_result" or outcome.get("terminalStatus") == "no_result"
+
+    terminal = next((step for step in plan.get("steps") or [] if is_terminal(step)), {})
+    result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
+    artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+    arguments = terminal.get("arguments") if isinstance(terminal.get("arguments"), dict) else {}
+    code = str(artifact.get("reasonCode") or "")
+    message = str(artifact.get("message") or result.get("message")
+                  or terminal.get("outcomeMessage") or terminal.get("error") or "")[:1000]
+    reason, label, action, action_label = "unknown", "本次任务未完成", "view_details", copy_messages.ACTION["view_detail"]
+    hint = "请查看未完成原因；已有素材和结果仍保留。"
+    if code in {"missing_output", "missing_current_output"} or (
+        artifact.get("kind") == "precondition_missing" and (
+            arguments.get("requiredState") == "current_output"
+            or "动态图文片头合成需要当前任务已有成片" in message
+        )
+    ):
+        reason, label, action, action_label = "missing_base_output", "需要先生成基础成片", "revise_instruction", "补充基础成片要求"
+        hint = "先描述基础成片要保留的内容并提交剪辑，再继续当前操作。不会自动提交。"
+    elif artifact.get("kind") == "precondition_missing" or code.startswith("missing_"):
+        reason, label, action, action_label = "missing_precondition", "缺少处理前提", "revise_instruction", "调整要求"
+        hint = "请根据缺失条件补充要求；已有素材和结果仍保留。"
+    elif code in {"cover_mismatch", "cover_requirement_mismatch", "cover_compliance_failed"}:
+        reason, label, action, action_label = "cover_mismatch", "封面需要调整", "revise_instruction", "修改封面要求"
+        hint = "查看封面不符合项，修改要求后再生成。"
+    elif code in {"no_match", "no_reliable_candidates", "no_candidates", "empty_candidates", "no_broll_candidates"}:
+        reason, label, action, action_label = "no_match", "未找到匹配内容", "revise_instruction", "修改剪辑要求"
+        hint = "素材已保留，可以放宽条件或换一种描述重新查找。"
+    elif plan.get("status") == "failed":
+        reason, label = "processing_failed", "本次处理失败"
+        hint = "请查看失败步骤；确认支持恢复后可重试，已有结果仍保留。"
+    return {"code": reason, "label": label, "message": message or hint,
+            "hint": hint, "actionKey": action, "actionLabel": action_label}
+
+
+def plan_with_presentation(plan: dict[str, Any]) -> dict[str, Any]:
+    return {**plan, "terminalReason": plan_terminal_reason(plan)}
 
 
 def _review_preview_count(job: dict[str, Any]) -> int:
@@ -86,7 +139,7 @@ def ui_presentation_snapshot(
             attention.append({"label": values.get("headline"), "actionKey": action,
                               "tab": "materials" if journey == 3 else None, "target": "#agentPlanDock"})
         if quality.get("status") in {"warning", "failed"}:
-            attention.append({"label": "查看质量提醒并定位问题片段", "actionKey": "review_quality",
+            attention.append({"label": copy_messages.ACTION["view_quality"], "actionKey": "review_quality",
                               "target": ".agent-qc-summary, .quality-gate-result-card, #agentPlanDock", "tab": None})
         return {
             "schemaVersion": 4,
@@ -152,7 +205,18 @@ def ui_presentation_snapshot(
             primaryActionKey="export_formal",
         )
 
-    if not active_export and (delivered_plan or delivered_lineage):
+    if agent.get("executionMode") == "automatic_delivery":
+        if agent_status in {"approved", "running"}:
+            return result("running", group="active", label="正在自动完成", running=True,
+                          headline=str(agent.get("currentStepTitle") or "正在处理视频"),
+                          detail="完成后可直接下载，无需停留在此页面。", railTitle="处理进度",
+                          tone="active", primaryActionKey="view_activity")
+        if agent_status == "completed":
+            return result("exported", group="completed", label="已完成", headline="本次要求已完成",
+                          detail="可以查看结果，或继续提出修改要求。", railTitle="本次结果", running=False,
+                          tone="success", primaryActionKey="download" if formal_outputs else "view_outputs")
+
+    if not active_export and (delivered_plan or delivered_lineage) and agent_status not in {"failed", "cancelled", "running", "action_required"}:
         return result("exported", group="completed", label="成片已生成", headline="成片已生成",
                       detail="成片已就绪，可以预览或下载。", railTitle="成片已就绪",
                       running=False, tone="success", primaryActionKey="download")
@@ -196,10 +260,15 @@ def ui_presentation_snapshot(
             railTitle="任务未完成", running=False, tone="danger", primaryActionKey="retry",
         )
     if agent_status == "no_result" or stage == "agent_no_result" or execution.get("outcome") == "no_result":
+        reason = agent.get("terminalReason") or {
+            "code": "unknown", "label": "本次任务未完成",
+            "message": str(job.get("detail") or "请查看未完成原因；已有素材和结果仍保留。"),
+            "actionKey": "view_details", "actionLabel": copy_messages.ACTION["view_detail"],
+        }
         return result(
-            "no_result", group="no_result", label="未找到内容", headline="没有找到可靠匹配",
-            detail=str(job.get("detail") or "素材已保留。可以放宽条件、换一种描述或选择其他剪辑方式。"),
-            railTitle="没有匹配结果", running=False, tone="neutral", primaryActionKey="revise_instruction",
+            "no_result", group="no_result", label=reason["label"], headline=reason["label"],
+            detail=reason["message"], terminalReason=reason,
+            railTitle=reason["label"], running=False, tone="attention", primaryActionKey=reason["actionKey"],
         )
     if raw_status == "awaiting_agent_instruction" or (job.get("agentDraft") and not job.get("instructionSubmitted")):
         return result(

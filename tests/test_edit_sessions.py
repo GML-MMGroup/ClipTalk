@@ -317,6 +317,18 @@ def test_v2_structured_model_proposal_uses_allowlisted_operations_only() -> None
     assert proposal["preview"]["operationCount"] == 2
 
 
+def test_named_nested_model_operations_use_same_validation_as_typed_operations() -> None:
+    job = _job()
+    session, _ = create_or_resume_edit_session(job, version_id="version-1", output_filename="version-1.mp4")
+    clip_id = session["clips"][0]["id"]
+    proposal = build_edit_proposal(job, session, text="调整开场", selected_clip_ids=[clip_id], model_result={
+        "operations": [{"trim_clip": {"clipId": clip_id, "sourceStart": 11, "sourceEnd": 17}},
+                       {"run_shell": {"command": "not allowed"}},
+                       {"trim_clip": {"clipId": "invented", "sourceStart": 1, "sourceEnd": 2}}],
+    })
+    assert proposal["operations"] == [{"type": "trim_clip", "clipId": clip_id, "sourceStart": 11, "sourceEnd": 17}]
+
+
 def test_semantic_preflight_warns_for_speech_cut_duplicate_and_audio_jump() -> None:
     job = _job()
     job["speechAnalysis"] = {"segments": [{"start": 10, "end": 13, "text": "一句完整的话"}]}

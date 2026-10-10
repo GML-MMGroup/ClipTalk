@@ -63,6 +63,39 @@ def can_delete(job: dict[str, Any]) -> bool:
     return not has_active_execution(job)
 
 
+_STATUS_MEMORY: dict[str, str] = {}
+
+
+def audit_status_transition(job: dict[str, Any], *, logger: object = None) -> None:
+    """Report undeclared statuses and terminal-state resurrections.
+
+    Advisory only. An unexpected transition is logged so it can be found, never
+    blocked, because this table cannot be assumed complete.
+    """
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return
+    new_status = job_status(job)
+    declared = (
+        new_status in TERMINAL_STATUSES
+        or new_status in ACTIVE_EXECUTION_STATUSES
+        or new_status in WAITING_USER_STATUSES
+    )
+    if not declared and logger is not None:
+        logger.warning("任务 %s 的状态 %r 不在声明的状态表中", job_id, new_status)
+    old_status = _STATUS_MEMORY.get(job_id)
+    if old_status in TERMINAL_STATUSES and new_status not in TERMINAL_STATUSES:
+        if logger is not None:
+            logger.warning(
+                "任务 %s 从终态 %s 回到了非终态 %s", job_id, old_status, new_status,
+            )
+    _STATUS_MEMORY[job_id] = new_status
+
+
+def forget_status_memory(job_id: str) -> None:
+    _STATUS_MEMORY.pop(str(job_id or ""), None)
+
+
 def interrupted_job_patch(*, checkpoint_available: bool, now: str) -> dict[str, Any]:
     return {
         "status": FAILED,

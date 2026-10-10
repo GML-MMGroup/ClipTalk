@@ -1108,7 +1108,7 @@ body[data-shell-mode="workspace"] #timelinePanel :is(.timeline-label, .timeline-
 }
 .studio.director-merged:not(.home-mode) #timelinePanel .timeline-heading strong { color: #344148 !important; }
 .studio.director-merged:not(.home-mode) #timelinePanel .timeline-heading span { color: #748188 !important; }
-.studio.director-merged:not(.home-mode) #timelinePanel .timeline-precision-output-meta { color: #718087 !important; }
+.studio.director-merged:not(.home-mode) #timelinePanel .timeline-precision-output-meta { color: var(--ct-text-muted, #596c61) !important; }
 .studio.director-merged:not(.home-mode) #timelinePanel #timelineViewport,
 .studio.director-merged:not(.home-mode) #timelinePanel .timeline-viewport {
   border-color: #d4dee2 !important;

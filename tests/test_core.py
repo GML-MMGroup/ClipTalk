@@ -119,7 +119,7 @@ from app.prompts import (
     llm_edit_plan_prompt,
 )
 from app.store import JobStore
-from app.event_groups import allocate_event_group_budget, build_event_groups, build_final_reel, composition_duration, event_groups_total, normalize_output_event_hierarchy, split_event_groups_at_scene_cuts
+from app.event_groups import allocate_event_group_budget, build_event_groups, composition_duration, event_groups_total, normalize_output_event_hierarchy, split_event_groups_at_scene_cuts
 from app.edit_boundaries import annotate_candidate_boundaries, semantic_safe_range
 from app.edl_optimizer import optimize_edl
 from app.speech import (

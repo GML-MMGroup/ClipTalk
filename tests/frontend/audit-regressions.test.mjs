@@ -311,6 +311,7 @@ test('Escape settles authentication and permits a fresh attempt', async () => {
     const page = await browser.newPage();
     await page.route('http://auth.test/**', r => r.fulfill({ contentType: 'text/html; charset=utf-8', body: '<dialog id="accessTokenDialog"><form><input><button>确定</button><button type="button" data-auth-cancel>取消</button></form></dialog>' }));
     await page.goto('http://auth.test');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => { window.fetch = async () => new Response('{"detail":"unauthorized"}', { status: 401 }); });
     await page.addScriptTag({ content: apiSource });
     await page.evaluate(() => { window.settled = false; window.ClipTalkApi.request('/api/test').catch(() => { window.settled = true; }); });
@@ -362,6 +363,7 @@ test('streamed confirmation overrides lagging planning chrome in the real worksp
       ] }],
     } }));
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => openHomeTask('job_A'));
     await page.waitForFunction(() => document.querySelector('#ctTaskJourney .ct-journey-summary strong')?.textContent === '等待确认计划');
     for (const theme of ['light', 'dark']) {
@@ -439,6 +441,7 @@ test('running Agent owns one honest progress card and stops the whole plan with 
       return route.continue();
     });
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => openHomeTask('job_A'));
     const card = page.locator('#csStreamHost [data-agent-execution]');
     await card.waitFor();
@@ -452,10 +455,10 @@ test('running Agent owns one honest progress card and stops the whole plan with 
     assert.equal(await card.locator('progress').isVisible(), false);
     const track = card.locator('.agent-execution-track');
     await card.locator('.agent-execution-loader .il-loader').waitFor();
-    assert.equal(await track.isVisible(), true);
+    assert.equal(await track.isVisible(), false);
     assert.equal(await track.getAttribute('data-execution-mode'), 'indeterminate');
-    assert.equal(await track.locator('i').evaluate(el => getComputedStyle(el).animationName), 'ct-execution-scan');
-    assert.equal(await track.locator('i').evaluate(el => el.getBoundingClientRect().height >= 4 && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)'), true);
+    assert.equal(await track.locator('i').evaluate(el => getComputedStyle(el).animationName), 'none');
+    assert.equal(await card.locator('.agent-execution-loader').getAttribute('data-loader-size'), '20px');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.equal(await track.locator('i').evaluate(el => getComputedStyle(el).animationName), 'none');
     assert.equal(await card.locator('.agent-execution-loader').evaluate(el => [...el.querySelectorAll('*')].every(node => getComputedStyle(node).animationName === 'none')), true);
@@ -481,6 +484,8 @@ test('running Agent owns one honest progress card and stops the whole plan with 
     await page.waitForFunction(() => document.querySelector('[data-agent-execution-count]')?.textContent.includes('12/40'));
     assert.equal(await card.locator('progress').getAttribute('value'), '0.3');
     assert.equal(await track.getAttribute('data-execution-mode'), 'determinate');
+    assert.equal(await track.isVisible(), true);
+    await page.waitForFunction(() => document.querySelector('#csStreamHost .agent-execution-loader .il-loader')?.dataset.paused === 'true');
     assert.equal(await track.evaluate(el => el.style.getPropertyValue('--execution-fraction')), '0.3');
     assert.equal(await track.locator('i').evaluate(el => getComputedStyle(el).transitionProperty), 'transform');
     assert.equal(await track.locator('i').evaluate(el => getComputedStyle(el).animationName), 'none');
@@ -557,6 +562,7 @@ test('candidate select-all is a leading tri-state checkbox, preserves failures a
       return route.continue();
     });
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => openHomeTask('job_selection'));
     // Exercise the same conversation review card used by the Agent. Legacy
     // task opening otherwise moves this card into the separate review rail.
@@ -675,6 +681,7 @@ test('Agent content review separates selection, explicit range confirmation and 
       return route.continue();
     });
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => openHomeTask('review_job'));
     await page.waitForFunction(() => !!window.ClipTalkAgentWorkspace.contentReviewContext());
     await page.evaluate(value => { currentJob = value; renderConversation(value); }, job);
@@ -787,6 +794,7 @@ test('filtered drawer selection preserves other clips and independent generation
       return route.continue();
     });
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.evaluate(() => openHomeTask('drawer_job'));
     await page.evaluate(value => { currentJob = value; renderConversation(value); openCandidateDrawer(); }, job);
     await page.locator('#candidateDrawerSearch').fill('空调');
@@ -829,16 +837,17 @@ test('home groups never leak overflow tasks into recent and group links filter t
     await page.route('**/api/jobs?*', route => route.fulfill({ json: { jobs } }));
     await page.route('**/api/jobs', route => route.fulfill({ json: { jobs } }));
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => document.querySelectorAll('[data-home-group]').length === 3);
-    for (const [key, count] of [['attention', 5], ['running', 5], ['recent', 3]]) {
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
+    await page.waitForFunction(() => document.querySelectorAll('[data-home-group]').length === 4);
+    for (const [key, count] of [['attention', 2], ['unfinished', 3], ['running', 5], ['recent', 3]]) {
       const group = page.locator(`[data-home-group="${key}"]`);
       assert.equal(await group.locator('.shell-task-card').count(), Math.min(4, count));
       assert.match(await group.locator('header').textContent(), new RegExp(`· ${count}`));
     }
     assert.deepEqual(await page.locator('[data-home-group="recent"] .shell-task-card').evaluateAll(nodes => nodes.map(n => n.dataset.shellJob)), ['group_12', 'group_11', 'group_10']);
     await page.locator('[data-home-history="attention"]').click();
-    await page.waitForFunction(() => document.querySelectorAll('#sidebarHistoryList .shell-task-card').length === 5);
-    assert.deepEqual(new Set(await page.locator('#sidebarHistoryList .shell-task-card').evaluateAll(nodes => nodes.map(n => n.dataset.statusGroup))), new Set(['action_required', 'failed', 'no_result']));
+    await page.waitForFunction(() => document.querySelectorAll('#sidebarHistoryList .shell-task-card').length === 2);
+    assert.deepEqual(new Set(await page.locator('#sidebarHistoryList .shell-task-card').evaluateAll(nodes => nodes.map(n => n.dataset.statusGroup))), new Set(['action_required']));
     await page.locator('#sidebarGroupNotice').click();
     await page.waitForFunction(() => document.querySelectorAll('#sidebarHistoryList .shell-task-card').length === 13);
   } finally { await browser.close(); await server.close(); }
@@ -850,6 +859,7 @@ test('long clip titles and thumbnail columns fit their container in both themes'
   try {
     const page = await browser.newPage();
     await page.goto(server.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => typeof contentSearchReviewMarkup === 'function');
     await page.evaluate(async () => {
       const title = '介绍产品价格并比较不同配置的使用场景与选择建议，同时保留讲解者完整观点和前后文';
@@ -928,6 +938,7 @@ test('reused Agent model has a direct shared probe, retry and dirty-configuratio
       return r.fulfill({ json: { toolCalling: true, piVersion: 'test' } });
     });
     await page.goto(server.url + '/#view=settings');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('[data-model-role="agent"]').click();
     await page.waitForFunction(() => document.querySelector('#agentEffectiveModel').textContent.includes('shared-model'));
     assert.equal(attempt, 0, 'Loading settings never calls the model');
@@ -977,6 +988,7 @@ test('late model discovery never overwrites a different connection configuration
   try {
     const page = await browser.newPage();
     await page.goto(server.url + '/#view=settings');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     for (const role of ['vision', 'llm']) for (const status of [200, 400]) {
       let release;
       await page.route(`**/api/settings/${role}/discover`, async r => {
@@ -1023,6 +1035,7 @@ test('default TalkNet capability is explicit, retryable and readable in both the
       }
     });
     await page.goto(server.url);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('#settingsButton').click();
     await page.locator('[data-model-role="system"]').click();
     await page.locator('#checkLocalCapabilities').waitFor({ state: 'visible' });
@@ -1059,6 +1072,7 @@ test('settings capabilities have a stable dedicated tab at wide and narrow width
   try {
     const page = await browser.newPage();
     await page.goto(server.url + '/#view=settings');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('[data-model-role="system"]').click();
     await page.locator('#localCapabilities').waitFor({ state: 'visible' });
     for (const width of [1920, 1440, 1280, 760, 390]) {
@@ -1109,6 +1123,7 @@ test('global sidebar controls keep the same geometry across task, library and se
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto(server.url);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     const geometry = () => page.evaluate(() => {
       const bounds = (selector) => {
         const rect = document.querySelector(selector).getBoundingClientRect();
@@ -1152,6 +1167,7 @@ test('settings toast clears the dirty save bar instead of covering it', async ()
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto(server.url + '/#view=settings');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     const overlap = await page.evaluate(() => {
       const bar = document.querySelector('#visionSettingsForm .settings-save-bar');
       bar.classList.remove('hidden');
@@ -1189,6 +1205,7 @@ test('cover review focuses the editor and disables every source-mismatched candi
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto(`${server.url}/#job=${job.id}`);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => window.ClipTalkCurrentJobId?.() === 'cover_focus');
     assert.equal(await page.evaluate(() => window.ClipTalkOpenCoverTimeline()), true);
     await page.waitForFunction(() => document.body.dataset.ctCoverEditorOpen === 'true');
@@ -1271,10 +1288,16 @@ test('opening a legacy landscape sample shows real tracks and a reachable toggle
       await page.route('**/fixture-sprite.svg', r => r.fulfill({ contentType: 'image/svg+xml',
         body: '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="#637f6b"/></svg>' }));
       await page.goto(`${server.url}/#job=${job.id}`);
+      await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
       if (width < 900) await page.locator('#ctCompactWorkspaceNav [data-ct-compact-view="preview"]').click();
       await page.waitForFunction(() => document.querySelectorAll('#timelineThumbnails [data-source-frame-time]').length > 0 && waveformData?.rms?.length);
       assert.equal(await page.locator('#timelinePanel').isVisible(), true);
-      assert.equal(await page.locator('#portraitPrecisionToggle').isVisible(), true);
+      assert.equal(await page.locator(width <= 900 ? '#ctCompactTimelineToggle' : '#portraitPrecisionToggle').isVisible(), true);
+      if (width <= 900) {
+        assert.equal(await page.locator('#timelineViewport').isVisible(), false);
+        await page.locator('#ctCompactTimelineToggle').click();
+        await page.locator('#ctTimelineDisplaySettings > summary').click();
+      }
       assert.equal(await page.locator('#portraitPrecisionToggle').evaluate(node => node.parentElement?.classList.contains('timeline-review-controls')), true);
       const playerFit = await page.evaluate(() => {
         const stage = document.querySelector('#reviewStage').getBoundingClientRect();
@@ -1356,12 +1379,14 @@ test('opening a legacy landscape sample shows real tracks and a reachable toggle
         await page.locator('#reviewTimelineResizer').dblclick();
         assert.equal(await page.locator('#reviewView').evaluate(node => node.style.getPropertyValue('--review-timeline-height')), '');
       }
-      await page.locator('#portraitPrecisionToggle').click();
-      assert.equal(await page.locator('#timelinePanel').isVisible(), false);
+      const foldToggle = width <= 900 ? '#ctCompactTimelineToggle' : '#portraitPrecisionToggle';
+      const foldTarget = width <= 900 ? '#timelineViewport' : '#timelinePanel';
+      await page.locator(foldToggle).click();
+      assert.equal(await page.locator(foldTarget).isVisible(), false);
       await page.evaluate(async () => { renderJob(currentJob); await ClipTalkAgentWorkspace.resumeForJob(currentJob); });
-      assert.equal(await page.locator('#timelinePanel').isVisible(), false, 'Polling preserves a deliberate collapse');
-      await page.locator('#portraitPrecisionToggle').click();
-      assert.equal(await page.locator('#timelinePanel').isVisible(), true);
+      assert.equal(await page.locator(foldTarget).isVisible(), false, 'Polling preserves a deliberate collapse');
+      await page.locator(foldToggle).click();
+      assert.equal(await page.locator(foldTarget).isVisible(), true);
       // An older preview must not use a newer, edited session's source ranges.
       await page.evaluate(async preview => {
         currentJob.editSessions[0].revision = 2;
@@ -1394,10 +1419,12 @@ test('pending covers never hide the ordinary timeline and closing cover review r
     await page.route('**/fixture-sprite.svg', r => r.fulfill({ contentType: 'image/svg+xml',
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="#637f6b"/></svg>' }));
     await page.goto(`${server.url}/#job=${job.id}`);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => window.ClipTalkCurrentJobId?.() === 'cover_timeline_modes' && waveformData?.rms?.length && timelineAssets?.sprite?.items?.length);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       if (width === 390) await page.locator('#ctCompactWorkspaceNav [data-ct-compact-view="preview"]').click();
+      if (width <= 900) await page.locator('#ctCompactTimelineToggle').click();
       for (const theme of ['light', 'dark']) {
         await page.evaluate(t => window.ClipTalkTheme.apply(t), theme);
         for (const status of ['review_ready', 'auto_selected', 'candidates_ready', 'approved']) {
@@ -1457,6 +1484,7 @@ test('unified library displays all finals, keeps copies explicitly and confirms 
       await r.fulfill({ json: { ok: true } });
     });
     await page.goto(server.url + '/#view=library');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('.app-library-item').first().waitFor();
     assert.equal(await page.locator('.app-library-item').count(), 2);
     assert.equal(await page.locator('#sidebarOutputCount').innerText(), '2');
@@ -1493,6 +1521,7 @@ test('long output libraries scroll inside the viewport and keep service status o
     }));
     await page.route('**/api/library/outputs', route => route.fulfill({ json: { outputs } }));
     await page.goto(server.url + '/#view=library');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('.app-library-item').last().waitFor();
 
     const before = await page.locator('#libraryView').evaluate(node => ({
@@ -1547,6 +1576,7 @@ test('new-task intro and upload target share one balanced visual group', async (
   try {
     const page = await browser.newPage({ viewport: { width: 1912, height: 948 } });
     await page.goto(server.url);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('#sidebarNewTask').click();
     await page.locator('#uploadView.new-task-upload').waitFor({ state: 'visible' });
 
@@ -1620,6 +1650,7 @@ test('review entry selects the sample, honors explicit versions and preserves ma
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto(server.url + '/#job=' + job.id);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => window.ClipTalkCurrentOutputSnapshot?.().output?.filename === 'sample.mp4');
     assert.equal(await page.locator('#mainVideo').evaluate(v => v.paused), true);
     await page.evaluate(() => window.showSource({ autoplay: false }));
@@ -1631,6 +1662,7 @@ test('review entry selects the sample, honors explicit versions and preserves ma
       assert.equal(badge, 'rgb(245, 247, 244)', 'On-media labels must not inherit light-theme body text');
     }
     await page.goto(server.url + '/#job=' + job.id + '&output=final.mp4');
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => window.ClipTalkCurrentOutputSnapshot?.().output?.filename === 'final.mp4');
   } finally { await browser.close(); await server.close(); }
 });
@@ -1641,6 +1673,7 @@ test('unknown readiness blocks new AI actions and distinguishes old backend from
     const page = await browser.newPage(); let checks = 0;
     await page.route('**/api/setup/status', r => { checks++; return r.fulfill({ status: 404, json: { detail: 'Not Found' } }); });
     await page.goto(server.url);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.locator('#settingsButton').click();
     await page.waitForFunction(() => document.querySelector('#setupReadinessTitle').textContent === '服务需更新');
     assert.equal(await page.evaluate(() => window.requireSetupCapability('agent')), false);
@@ -1672,6 +1705,7 @@ test('subtitle review preserves edits, binds source time, and gates confirmation
       return r.fulfill({ json: { draft: { ...draft, ...body, revision: saves + 1, status: body.confirmed ? 'confirmed' : 'draft' } } });
     });
     await page.goto(server.url + '/#job=' + job.id);
+    await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
     await page.waitForFunction(() => window.ClipTalkCurrentJobId?.() === 'subtitle_journey');
     await page.evaluate(() => { window.reviewResult = 'pending'; reviewSubtitlesBeforeRender([{ segments: [{ start: 54, end: 62, playbackRate: 2 }] }], 'clean', { purpose: 'edit' }).then(r => { window.reviewResult = r; }); });
     await page.waitForSelector('#subtitleReview:not(.hidden)');
@@ -1752,10 +1786,13 @@ test('full application keeps output selection, readable themes and usable mobile
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       await page.goto(`${server.url}/#job=${job.id}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
       await page.waitForFunction(() => window.ClipTalkCurrentJobId?.());
       await page.waitForTimeout(350);
       assert.equal(await page.locator('#timelinePanel').isVisible(), true, 'Ready source tracks stay visible beside generated versions');
-      assert.equal(await page.locator('#timelineTitle').innerText(), '源片时间轴');
+      // The title is intentionally hidden (header slimming); assert the copy,
+      // not its visibility.
+      assert.equal((await page.locator('#timelineTitle').textContent())?.trim(), '源片时间轴');
       assert.equal(await page.locator('body').getAttribute('data-precision-editing'), 'false');
       await page.evaluate(() => window.ClipTalkWorkspaceController.openRail('materials'));
       await page.waitForFunction(() => document.querySelector('#ctV4MaterialsSummary')?.dataset.outputFilename === 'v2.mp4');
@@ -1777,7 +1814,9 @@ test('full application keeps output selection, readable themes and usable mobile
       for (const theme of ['light', 'dark']) {
         await page.evaluate(value => { window.ClipTalkTheme.apply(value); window.ClipTalkWorkspaceController.openRail('project'); }, theme);
         await page.waitForTimeout(650);
-        const colors = await page.evaluate(() => ['#timelineTitle', '#playerRate', '#ctV4ProjectPanel > header strong', '#ctV4ReframeFit', '#legacyResultContrast strong', '#legacyResultContrast p', '#agentSkillMenuButton small', '#secondaryEditCurrentButton', '#sidebarHistoryToggle', '[data-ct-source-expand]', '[data-ct-v4-open-versions]', '#ctV4GenerateAspect', '[data-ct-v4-replace]'].map(selector => {
+        // #timelineTitle is hidden by the header slimming, so it has no
+        // visible contrast to measure anymore.
+        const colors = await page.evaluate(() => ['#playerRate', '#ctV4ProjectPanel > header strong', '#ctV4ReframeFit', '#legacyResultContrast strong', '#legacyResultContrast p', '#agentSkillMenuButton small', '#secondaryEditCurrentButton', '#sidebarHistoryToggle', '[data-ct-source-expand]', '[data-ct-v4-open-versions]', '#ctV4GenerateAspect', '[data-ct-v4-replace]'].map(selector => {
           const node = document.querySelector(selector), style = getComputedStyle(node);
           let parent = node, background;
           while (parent) { background = getComputedStyle(parent).backgroundColor; if (/rgb\(/.test(background)) break; parent = parent.parentElement; }
@@ -1857,6 +1896,7 @@ test('fresh entry uses the real stylesheet chain without clipping or leaked navi
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
       await page.goto(server.url);
+      await page.waitForFunction(() => document.querySelectorAll('link[rel="stylesheet"][media="print"]').length === 0);
       await page.waitForFunction(() => document.querySelector('#homeView').dataset.homeState === 'ready');
       assert.equal(await page.locator('#ctCompactWorkspaceNav').isVisible(), false);
       assert.equal(await page.locator('#sidebarHistoryList .shell-task-card[data-status-group="cancelled"]').count(), 1, 'Cancelled tasks remain accessible in recent history');
@@ -1867,14 +1907,14 @@ test('fresh entry uses the real stylesheet chain without clipping or leaked navi
       await page.waitForFunction(() => document.body.classList.contains('ct-workbench-v4'));
       if (width >= 1280) {
         const assistant = page.locator('#assistantPanel');
-        assert.equal(Math.round((await assistant.boundingBox()).width), 430);
+        assert.equal(Math.round((await assistant.boundingBox()).width), 360);
         const handle = page.locator('.panel-resizer-left');
         await handle.focus();
         await page.keyboard.press('ArrowRight');
-        assert.equal(Math.round((await assistant.boundingBox()).width), 446);
-        assert.equal(await page.evaluate(() => localStorage.getItem('cliptalk-new-task-assistant-width:v1')), '446');
+        assert.equal(Math.round((await assistant.boundingBox()).width), 376);
+        assert.equal(await page.evaluate(() => localStorage.getItem('cliptalk-new-task-assistant-width:v1')), '376');
         await page.keyboard.press('Home');
-        assert.equal(Math.round((await assistant.boundingBox()).width), 380);
+        assert.equal(Math.round((await assistant.boundingBox()).width), 320);
       }
       const bounds = await page.locator('#uploadView, #uploadView>.intro, #uploadForm').evaluateAll(es => es.map(e => e.getBoundingClientRect().toJSON()));
       assert.ok(bounds[1].left >= bounds[0].left && bounds[2].right <= bounds[0].right + 1, JSON.stringify({ width, bounds }));

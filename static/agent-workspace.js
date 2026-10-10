@@ -357,10 +357,15 @@
     )) || null;
   }
 
+  // 存量消息与步骤结果里的旧说法归一（表见 static/ui-copy.js）。
+  function legacyCopyText(value) {
+    return global.ClipTalkCopy?.normalizeLegacyCopy?.(value) ?? value;
+  }
+
   function noResultMessageFromStep(step) {
     const result = step?.result && typeof step.result === "object" ? step.result : {};
     const artifact = result.artifact && typeof result.artifact === "object" ? result.artifact : {};
-    return String(step?.outcomeMessage || artifact.message || result.message || "");
+    return String(legacyCopyText(step?.outcomeMessage || artifact.message || result.message || ""));
   }
 
   function stepDisplayStatus(step) {
@@ -434,7 +439,7 @@
           title: hasLaterDelivery ? "保存当前任务封面" : "最后确认并保存封面",
           expectedOutput: hasLaterDelivery
             ? "保存当前任务封面后，继续合成片头或目标画幅审核样片。"
-            : "保存后立即更新当前成片的预览封面；只有明确要求片头时才合入视频。",
+            : "保存后立即更新当前成片的预览封面；审核样片与导出成片都默认把封面加为片头，时长计入总时长。",
           status: reviewFinished ? next.status : step.status,
           error: reviewFinished ? next.error : step.error,
           result: reviewFinished ? next.result : step.result,
@@ -461,7 +466,8 @@
 
   function isAutomaticSubtitleRecovery(plan, progress = planProgress(plan)) {
     return String(plan?.status || "") === "action_required"
-      && String(plan?.executionMode || "") === "autonomous_review"
+      && progress?.current?.result?.action !== "subtitle_overlap"
+      && ["autonomous_review", "automatic_delivery"].includes(String(plan?.executionMode || ""))
       && ["prepare_subtitle_review", "layout_subtitles"].includes(String(progress?.current?.tool || ""));
   }
 
@@ -477,7 +483,7 @@
     }
     if (String(plan?.status || "") === "no_result") {
       const terminal = noResultStep(plan);
-      const message = noResultMessageFromStep(terminal) || result.message;
+      const message = legacyCopyText(noResultMessageFromStep(terminal) || result.message);
       return String(message || "未形成足以自动编排的可靠结果。");
     }
     if (String(plan?.status || "") === "failed") {
@@ -487,12 +493,11 @@
       }
       return failure;
     }
-    return String(result.message || current.expectedOutput || plan?.summary || "等待下一步执行");
+    return String(legacyCopyText(result.message || current.expectedOutput || plan?.summary) || "等待下一步执行");
   }
 
   function executionModeLabel(plan) {
-    return String(plan?.executionMode || "stepwise_review") === "autonomous_review"
-      ? "自动剪辑并预览" : "分步审核";
+    return { automatic_delivery: "自动完成", autonomous_review: "自动到预览", stepwise_review: "分步审核" }[plan?.executionMode] || "分步审核";
   }
 
   function planReviewPreviews(plan) {
@@ -623,7 +628,11 @@
   }
 
   function planDisplayStatus(plan) {
+    if (["no_result", "failed"].includes(plan?.status) && plan.terminalReason) return plan.terminalReason.label;
     if (isAutomaticSubtitleRecovery(plan)) return "自动恢复中";
+    if (plan?.executionMode === "automatic_delivery" && plan.status === "completed") {
+      return planQcState(plan).status === "warning" ? "已完成 · 有检查提醒" : "已完成";
+    }
     if (["preview_ready", "completed"].includes(String(plan?.status || ""))) {
       if (coverCompliance(plan).issues.length) return "封面需要处理";
       const quality = planQcState(plan).status;
@@ -842,10 +851,16 @@
     const detail = displayIssues.length
       ? [...new Set(displayIssues)].join("；")
       : requirement.title ? `封面文字：${requirement.title}` : "不添加封面文字";
+    const step = planProgress(plan).current;
+    const generating = plan.status === "running" && ["running", "waiting_operation"].includes(step?.status) && /cover/.test(step.tool) && !/review|qc/.test(step.tool);
+    const aspect = String(cover?.aspectRatio || plan.brief?.coverAspect || "16:9");
+    const ratio = ["16:9", "9:16", "1:1", "4:3", "3:4"].includes(aspect) ? aspect.replace(":", " / ") : "16 / 9";
     const preview = cover?.previewUrl
-      ? `<button type="button" data-agent-cover-open data-cover-url="${escapeHtml(cover.previewUrl)}"><img src="${escapeHtml(cover.previewUrl)}" alt="当前任务封面预览"></button>`
-      : `<span class="agent-cover-status-placeholder" aria-hidden="true">封面</span>`;
-    const label = displayIssues.length
+      ? `<button type="button" data-agent-cover-open data-cover-url="${escapeHtml(cover.previewUrl)}" style="--cover-aspect:${ratio}" data-cover-image-state="loading"><img data-cover-image src="${escapeHtml(cover.previewUrl)}" alt="当前任务封面预览"></button>`
+      : generating
+        ? `<span class="agent-cover-generating" style="--cover-aspect:${ratio}" data-generative-loader="image" data-loader-variant="resolution" data-loader-size="100%" data-loader-radius="6px" data-loader-label="正在制作封面"></span>`
+        : `<span class="agent-cover-status-placeholder" aria-hidden="true">封面</span>`;
+    const label = generating && !cover?.previewUrl ? "正在制作封面" : displayIssues.length
       ? "封面候选不符合要求"
       : cover?.previewUrl
         ? requirement.introRequested && !planReviewPreviews(plan).some((item) => previewKind(item) === "cover_intro_review_preview")
@@ -904,6 +919,7 @@
 
   function planCurrentTitle(plan, progress) {
     if (plan.status === "awaiting_confirmation") return `确认这份 ${progress.total} 步计划`;
+    if (plan.executionMode === "automatic_delivery" && plan.status === "completed") return "本次要求已完成";
     if (["preview_ready", "completed"].includes(plan.status)) {
       const quality = planQcState(plan).status;
       if (quality === "failed") return "执行完成 · 质检未通过";
@@ -912,6 +928,7 @@
     }
     if (plan.status === "failed") return `${progress.current?.title || "执行步骤"}未完成`;
     if (plan.status === "no_result") {
+      if (plan.terminalReason) return plan.terminalReason.label;
       const terminal = noResultStep(plan);
       return String(terminal?.tool || "") === "propose_timeline_edit"
         ? "时间线未形成" : "未形成可用结果";
@@ -926,6 +943,7 @@
 
   function currentStageText(plan, progress) {
     const status = String(plan?.status || "");
+    if (plan?.executionMode === "automatic_delivery" && status === "completed") return "结果已就绪，可以下载或继续提出修改要求";
     if (status === "awaiting_confirmation") return "等待确认计划";
     if (isAutomaticSubtitleRecovery(plan, progress)) {
       return `正在恢复：${progress.current?.title || toolLabel(progress.current?.tool)}`;
@@ -933,6 +951,7 @@
     if (status === "action_required") return `需要确认：${progress.current?.title || toolLabel(progress.current?.tool)}`;
     if (status === "failed") return `未完成：${progress.current?.title || toolLabel(progress.current?.tool)}`;
     if (status === "no_result") {
+      if (plan.terminalReason) return `${plan.terminalReason.label}：${plan.terminalReason.message}`;
       const terminal = noResultStep(plan);
       const message = noResultMessageFromStep(terminal);
       if (message) return `${String(terminal?.tool || "") === "propose_timeline_edit" ? "时间线未形成" : "未形成可用结果"}：${message}`;
@@ -957,6 +976,7 @@
     const tool = String(step.tool || "");
     let stage = "分析素材", detail = "正在分析素材，准备剪辑", journeyStage = 2;
     if (tool === "search_content") detail = /hook/i.test(step.title || "") ? "正在寻找适合开场的片段" : "正在寻找符合要求的片段";
+    else if (tool === "deliver_current_plan") { stage = "生成成片"; detail = "正在生成可下载的正式视频"; journeyStage = 4; }
     else if (/subtitle/.test(tool)) { stage = "制作字幕"; detail = "正在整理对白和字幕"; }
     else if (/cover/.test(tool)) { stage = "制作封面"; detail = "正在制作封面"; journeyStage = 3; }
     else if (/render|compose/.test(tool)) { stage = "生成样片"; detail = "正在生成可预览的视频"; journeyStage = 3; }
@@ -972,16 +992,16 @@
     const pending = (plan.steps || []).filter(step => step.status === "pending");
     const upcoming = [pending.some(step => /render.*preview/.test(step.tool)) ? "生成样片" : "",
       pending.some(step => /cover/.test(step.tool)) && !/cover/.test(view.tool) ? "制作封面" : ""].filter(Boolean);
-    return `<section class="agent-execution-progress" data-agent-execution data-execution-step="${escapeHtml(view.stepId)}" data-motion-state="${view.stopping ? "stopping" : "running"}" aria-label="任务进度" aria-busy="true">
-      <div class="agent-execution-heading"><span class="agent-execution-loader" data-generative-loader="inline" data-loader-variant="aperture" data-loader-size="32px" data-loader-active="${!view.stopping}" aria-hidden="true"></span><strong data-agent-execution-detail>${escapeHtml(view.stopping ? "正在停止任务…" : view.detail)}</strong></div>
+    return `<section class="agent-execution-progress" data-agent-execution data-execution-job="${escapeHtml(view.jobId)}" data-execution-plan="${escapeHtml(view.planId)}" data-execution-step="${escapeHtml(view.stepId)}" data-motion-state="${view.stopping ? "stopping" : "running"}" aria-label="任务进度" aria-busy="true">
+      <div class="agent-execution-heading"><span class="agent-execution-loader" data-generative-loader="inline" data-loader-variant="aperture" data-loader-size="20px" data-loader-active="${!view.stopping}" aria-hidden="true"></span><strong data-agent-execution-detail role="status">${escapeHtml(view.stopping ? "正在停止任务…" : view.detail)}</strong></div>
       <p data-agent-execution-elapsed></p>
       <p data-agent-execution-count hidden></p>
-      <div class="agent-execution-track" data-execution-mode="indeterminate" aria-hidden="true"><i></i></div>
+      <div class="agent-execution-track" data-execution-mode="indeterminate" aria-hidden="true" hidden><i></i></div>
       <progress data-agent-execution-meter aria-label="当前步骤进度" max="1" hidden></progress>
       ${/cover/.test(view.tool) ? coverStatusMarkup(plan) : ""}
       ${upcoming.length ? `<small>后续：${escapeHtml(upcoming.join("、"))}</small>` : ""}
       ${view.stopping ? "<small>正在停止当前处理，后续步骤不会继续；已完成的结果会保留。</small>" : ""}
-      <footer><button type="button" class="agent-plan-text-action" data-agent-plan-open>查看处理详情</button><button type="button" data-agent-plan-cancel ${view.stopping ? "disabled" : ""}>${view.stopping ? "正在停止…" : "停止任务"}</button></footer>
+      <footer><button type="button" class="agent-plan-text-action" data-agent-plan-open>查看方案</button><button type="button" data-agent-plan-cancel ${view.stopping ? "disabled" : ""}>${view.stopping ? "正在停止…" : "停止任务"}</button></footer>
       <p role="status" data-agent-operation-message>${escapeHtml(planMessages.get(plan.id) || "")}</p>
     </section>`;
   }
@@ -993,7 +1013,8 @@
     const fraction = typeof facts.fraction === "number" && Number.isFinite(facts.fraction)
       ? Math.max(0, Math.min(1, facts.fraction)) : null;
     document.querySelectorAll("[data-agent-execution]").forEach(panel => {
-      if (panel.dataset.motionState === "inactive" || panel.dataset.executionStep !== String(view.stepId)) return;
+      if (panel.dataset.motionState === "inactive" || panel.dataset.executionStep !== String(view.stepId)
+        || panel.dataset.executionJob !== String(view.jobId) || panel.dataset.executionPlan !== String(view.planId)) return;
       const write = (selector, text) => {
         const node = panel.querySelector(selector);
         if (node && node.textContent !== text) node.textContent = text;
@@ -1010,9 +1031,12 @@
       }
       const track = panel.querySelector(".agent-execution-track");
       if (track) {
+        track.hidden = fraction == null;
         track.dataset.executionMode = fraction == null ? "indeterminate" : "determinate";
         track.style.setProperty("--execution-fraction", String(fraction ?? 0));
       }
+      const loader = panel.querySelector(".agent-execution-loader");
+      if (loader) loader.dataset.loaderPaused = String(view.stopping || fraction != null || /cover/.test(view.tool));
     });
   }
 
@@ -1027,15 +1051,17 @@
     if (status === "action_required") {
       const result = progress.current?.result && typeof progress.current.result === "object"
         ? progress.current.result : {};
-      return String(result.message || progress.current?.expectedOutput || "完成当前选择后继续执行");
+      return String(legacyCopyText(result.message || progress.current?.expectedOutput) || "完成当前选择后继续执行");
     }
     if (status === "failed") return "查看失败原因或重新执行失败链路";
     if (status === "no_result") {
+      if (plan.terminalReason) return plan.terminalReason.hint;
       const message = noResultMessageFromStep(noResultStep(plan));
       if (/不足以达到|目标/.test(message)) return "移除或放宽目标时长后重新执行；也可以改为使用全部已命中片段。";
-      return "调整目标或重新检索内容";
+      return "查看未完成原因，补充要求后继续；已有结果仍保留";
     }
     if (status === "cancelled") return "输入新目标可重新规划";
+    if (plan?.executionMode === "automatic_delivery" && status === "completed") return "查看结果；如需调整，直接描述想改的地方";
     if (["preview_ready", "completed"].includes(status)) {
       if (coverCompliance(plan).issues.length) return "修改封面要求后重新规划；当前样片和已有结果会保留";
       const quality = planQcState(plan).status;
@@ -1166,8 +1192,7 @@
     const label = phases[activeIndex]?.[1] || String(title || "正在生成计划");
     const phaseCount = `${activeIndex + 1}/${phases.length}`;
     return `<section class="agent-planning-live-track${expanded ? " expanded" : ""}" aria-label="当前规划阶段" data-active-index="${activeIndex}">
-      <header><span>当前阶段</span><strong>${escapeHtml(label)}</strong><b>阶段 ${phaseCount}</b></header>
-      <div class="agent-planning-live-bar" role="progressbar" aria-label="正在生成计划" aria-valuetext="${escapeHtml(label)}"><i></i></div>
+      <header><span class="agent-planning-loader" data-generative-loader="inline" data-loader-variant="aperture" data-loader-size="20px" data-loader-active="${phaseId !== "plan_ready"}" aria-hidden="true"></span><strong role="status">${escapeHtml(label)}</strong><b>阶段 ${phaseCount}</b></header>
       <p>${escapeHtml(detail || title || "正在整理可确认的执行步骤")}</p>
     </section>`;
   }
@@ -1175,6 +1200,7 @@
   function planIsHistorical(plan) {
     if (!["completed", "preview_ready", "cancelled", "no_result"].includes(plan?.status)) return false;
     const job = global.ClipTalkCurrentJobSnapshot?.();
+    if (plan.executionMode === "automatic_delivery" && job?.agent?.planId === plan.id) return false;
     const key = job?.presentation?.key;
     return Boolean(job && (["content_review", "exported", "export_running"].includes(key)
       || (job.agent?.planId && job.agent.planId !== plan.id)));
@@ -1189,10 +1215,12 @@
   }
 
   function planActionMarkup(plan, progress, shortLabel = false) {
-    const impact = ["failed", "no_result"].includes(plan.status)
+    const impact = plan.status === "no_result" && plan.terminalReason
+      ? plan.terminalReason.hint
+      : ["failed", "no_result"].includes(plan.status)
       ? "重试会重新执行相关步骤，后续预览可能重新生成；不会保证问题自动修复。"
       : ["preview_ready", "completed"].includes(plan.status)
-        ? "修改后将重新生成方案，原方案不会立即覆盖。"
+        ? ""
         : ["cancelled"].includes(plan.status)
           ? "修改要求会填入输入框；发送后重新规划，确认新方案后才开始执行。" : "";
     const buttons = planActionButtonsMarkup(plan, progress, shortLabel);
@@ -1204,6 +1232,15 @@
       && ["awaiting_confirmation", "action_required", "preview_ready"].includes(plan.status);
     const detail = shortLabel || hasDetailsShortcut ? "" : `<button type="button" class="agent-plan-text-action agent-plan-view-action" data-agent-plan-open>方案详情</button>`;
     if (planIsHistorical(plan)) return shortLabel ? "" : detail;
+    if (plan.executionMode === "automatic_delivery" && plan.status === "completed") {
+      const delivery = (plan.steps || []).find(step => step.tool === "deliver_current_plan" && step.status === "completed");
+      const artifact = delivery?.result?.artifact || {};
+      const outputs = artifact.outputs || (artifact.output ? [artifact.output] : []);
+      if (outputs.length) return `${detail}${outputs.map((output, index) => {
+        const url = `/api/jobs/${encodeURIComponent(artifact.jobId || currentJobId())}/outputs/${encodeURIComponent(output.filename)}?download=1`;
+        return `<a class="primary" href="${escapeHtml(url)}" download>下载视频${outputs.length > 1 ? ` ${index + 1}` : ""}</a>`;
+      }).join("")}`;
+    }
     if (plan.status === "cancelled") return `${detail}<button type="button" class="primary" data-agent-replan>修改要求重新规划</button>`;
     if (plan.status === "failed" && progress.current?.result?.retryable !== false && !progress.current?.result?.operationId) {
       return `${detail}<button type="button" data-agent-replan>修改要求</button><button type="button" class="primary" data-agent-plan-retry-failed>重试失败步骤</button>`;
@@ -1223,7 +1260,10 @@
       if (progress.current?.result?.retryable === false && progress.current?.result?.operationId) {
         return `${detail}<button type="button" class="agent-plan-text-action" data-agent-action-reject>停止计划</button><button type="button" class="primary" data-agent-action-retry>核实操作状态</button>`;
       }
-      if (currentTool === "prepare_subtitle_review" && String(plan.executionMode || "") === "autonomous_review") {
+      if (currentTool === "prepare_subtitle_review" && progress.current?.result?.action === "subtitle_overlap") {
+        return `${detail}<button type="button" class="primary" data-agent-action-open-timeline>查看画面并确认字幕</button>`;
+      }
+      if (currentTool === "prepare_subtitle_review" && ["autonomous_review", "automatic_delivery"].includes(String(plan.executionMode || ""))) {
         return `${detail}<button type="button" class="agent-plan-text-action" data-agent-plan-cancel>停止计划</button><button type="button" class="primary" disabled>正在自动生成字幕…</button>`;
       }
       if (currentTool === "review_cover_variants") {
@@ -1240,6 +1280,12 @@
       if (currentTool === "layout_subtitles") {
         return `${detail}<button type="button" class="agent-plan-text-action" data-agent-action-reject>停止</button><button type="button" class="primary" data-agent-action-retry>恢复字幕并应用顶部排版</button>`;
       }
+      if (["select_people", "select_speakers"].includes(currentTool)) {
+        let selected = false;
+        try { actionResolutionValue(); selected = true; } catch { /* A real selection is required. */ }
+        const label = currentTool === "select_people" ? "人物" : "声音";
+        return `${detail}<button type="button" class="${selected ? "agent-plan-text-action" : "primary"}" data-agent-identity-open>${selected ? "重新选择" : "选择要保留的"}${label}</button>${selected ? '<button type="button" class="primary" data-agent-action-resolve>按此选择继续</button>' : ""}`;
+      }
       const hasTimeline = Boolean(progress.current?.result?.sessionId);
       const timelineLabel = progress.current?.result?.action === "content_evidence_review" ? "" : currentTool === "propose_timeline_edit"
         ? hasTimeline ? "打开精剪时间线" : "重新生成草案"
@@ -1252,6 +1298,11 @@
     }
     if (["running", "approved"].includes(plan.status)) return `${detail}<button type="button" class="agent-plan-text-action" data-agent-plan-cancel>${planOperations.has(plan.id) ? "正在停止…" : "停止任务"}</button>`;
     if (plan.status === "no_result") {
+      if (plan.terminalReason && plan.terminalReason.code !== "no_match") {
+        return plan.terminalReason.actionKey === "revise_instruction"
+          ? `${detail}<button type="button" class="primary" data-agent-replan>${escapeHtml(plan.terminalReason.actionLabel)}</button>`
+          : detail || '<button type="button" data-agent-plan-open>查看详情</button>';
+      }
       const terminal = noResultStep(plan);
       const artifact = terminal?.result?.artifact && typeof terminal.result.artifact === "object"
         ? terminal.result.artifact : {};
@@ -1321,7 +1372,36 @@
     return detail;
   }
 
+  const revealedCoverUrls = new Set();
+  const boundCoverImages = new WeakSet();
+  function bindCoverImages(root) {
+    root?.querySelectorAll("img[data-cover-image]").forEach(image => {
+      if (boundCoverImages.has(image)) return;
+      boundCoverImages.add(image);
+      const source = image.src;
+      const button = image.parentElement;
+      const fail = () => {
+        if (!image.isConnected || image.src !== source) return;
+        button.dataset.coverImageState = "error";
+        button.setAttribute("aria-label", "封面图片加载失败");
+      };
+      const ready = async () => {
+        try { await image.decode(); } catch { fail(); return; }
+        if (!image.isConnected || image.src !== source) return;
+        button.dataset.coverImageState = "ready";
+        if (!revealedCoverUrls.has(source) && !document.hidden && !global.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+          image.animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 240 });
+        }
+        revealedCoverUrls.add(source);
+      };
+      image.addEventListener("load", ready, { once: true });
+      image.addEventListener("error", fail, { once: true });
+      if (image.complete) { if (image.naturalWidth) ready(); else fail(); }
+    });
+  }
+
   function bindPlanActions(root, plan = activePlan, boundJobId = currentJobId()) {
+    bindCoverImages(root);
     const boundPlanId = plan?.id || "";
     if (root) {
       root.dataset.agentJobId = boundJobId || "";
@@ -1349,6 +1429,10 @@
       else reviseActivePlanGoal();
     }));
     root?.querySelectorAll("[data-agent-evidence-open]").forEach((button) => button.addEventListener("click", () => global.ClipTalkOpenContentEvidence?.()));
+    root?.querySelectorAll("[data-agent-identity-open]").forEach((button) => button.addEventListener("click", () => {
+      const tool = planProgress(activePlan).current?.tool;
+      global.ClipTalkOpenIdentitySelection?.(tool === "select_people" ? "person" : "voice");
+    }));
     root?.querySelectorAll("[data-plan-output-settings]").forEach((button) => button.addEventListener("click", () => global.ClipTalkWorkspaceController?.openRail?.("project")));
     root?.querySelectorAll("[data-plan-revise-goal]").forEach((button) => button.addEventListener("click", openPlanRevision));
     root?.querySelectorAll("[data-agent-plan-open]").forEach((button) => button.addEventListener("click", () => {
@@ -1379,7 +1463,9 @@
 
   function reviseActivePlanGoal() {
     if (!activePlan) return false;
-    global.setChatInputDraft?.(activePlan.goal || "");
+    const input = document.querySelector('#chatInput');
+    if (!input?.value.trim()) global.setChatInputDraft?.(activePlan.goal || "");
+    if (activePlan.terminalReason?.hint) global.showToast?.(activePlan.terminalReason.hint);
     closePlanDrawer();
     document.querySelector('#chatInput')?.focus();
     return true;
@@ -1422,7 +1508,7 @@
     const dialog = document.createElement("dialog");
     dialog.className = "cover-requirement-dialog";
     dialog.setAttribute("aria-labelledby", "coverRevisionTitle");
-    dialog.innerHTML = `<form><h2 id="coverRevisionTitle">修改封面要求</h2><p>只重新生成封面及相关预览，保留已确认的剪辑和字幕。</p><label>画面来源<select name="source"><option value="source_frame">当前视频画面</option value="external_image" disabled>外部图片（需先在任务中提供素材）</option></select></label><label>来源时间（秒，可留空自动选择）<input name="time" type="number" min="0" step="0.1" value="${Number.isFinite(requirement.sourceTime) ? requirement.sourceTime : ""}"></label><label>画面人物<input name="subject" maxlength="120" value="${escapeHtml(requirement.subject || "")}" placeholder="不指定可留空"></label><label>封面文字<input name="title" maxlength="200" value="${escapeHtml(requirement.title || "")}" placeholder="留空则不添加文字"></label><label>封面比例<select name="aspect"><option>16:9</option><option>9:16</option><option>1:1</option></select></label><p>${requirement.introRequested ? "当前任务包含封面片头，新封面将用于更新片头预览。片头时长可在封面审核中调整。" : "当前生成封面图片，不添加到视频片头。"}</p><p data-cover-revision-error role="alert"></p><footer><button type="button" data-cover-revision-cancel>取消</button><button type="submit" class="primary">按新要求生成封面</button></footer></form>`;
+    dialog.innerHTML = `<form><h2 id="coverRevisionTitle">修改封面要求</h2><p>只重新生成封面及相关预览，保留已确认的剪辑和字幕。</p><label>画面来源<select name="source"><option value="source_frame">当前视频画面</option value="external_image" disabled>外部图片（需先在任务中提供素材）</option></select></label><label>来源时间（秒，可留空自动选择）<input name="time" type="number" min="0" step="0.1" value="${Number.isFinite(requirement.sourceTime) ? requirement.sourceTime : ""}"></label><label>画面人物<input name="subject" maxlength="120" value="${escapeHtml(requirement.subject || "")}" placeholder="不指定可留空"></label><label>封面文字<input name="title" maxlength="200" value="${escapeHtml(requirement.title || "")}" placeholder="留空则不添加文字"></label><label>封面比例<select name="aspect"><option>16:9</option><option>9:16</option><option>1:1</option></select></label><p>${requirement.introRequested ? "当前任务包含封面片头，新封面将用于更新片头预览。片头时长可在封面审核中调整。" : "当前生成封面图片；审核样片与导出成片都默认加为片头，时长计入总时长。"}</p><p data-cover-revision-error role="alert"></p><footer><button type="button" data-cover-revision-cancel>取消</button><button type="submit" class="primary">按新要求生成封面</button></footer></form>`;
     document.body.append(dialog);
     dialog.querySelector('[name="aspect"]').value = activePlan.brief?.coverAspect || "16:9";
     const trigger = document.activeElement;
@@ -1630,7 +1716,7 @@
     if (readOnly) {
       $("#agentPlanDrawerKicker").textContent = "历史方案 · 只读";
       $("#agentPlanDrawerTitle").textContent = skillLabel(plan.skillId);
-      panel.innerHTML = `<section class="agent-plan-drawer-summary"><p>${escapeHtml(plan.summary || plan.goal || "历史剪辑方案")}</p><small>仅查看这份方案的记录，不影响当前方案。</small></section><ol class="agent-plan-step-list">${(plan.steps || []).map(step => `<li data-step-status="${escapeHtml(step.status || "")}"><span class="agent-step-marker" aria-hidden="true"></span><div><header><strong>${escapeHtml(step.title || toolLabel(step.tool))}</strong><b>${escapeHtml(stepDisplayStatus(step))}</b></header><p>${escapeHtml(step.error || step.result?.message || step.expectedOutput || "")}</p></div></li>`).join("")}</ol>`;
+      panel.innerHTML = `<section class="agent-plan-drawer-summary"><p>${escapeHtml(plan.summary || plan.goal || "历史剪辑方案")}</p><small>仅查看这份方案的记录，不影响当前方案。</small></section><ol class="agent-plan-step-list">${(plan.steps || []).map(step => `<li data-step-status="${escapeHtml(step.status || "")}"><span class="agent-step-marker" aria-hidden="true"></span><div><header><strong>${escapeHtml(step.title || toolLabel(step.tool))}</strong><b>${escapeHtml(stepDisplayStatus(step))}</b></header><p>${escapeHtml(legacyCopyText(step.error || step.result?.message || step.expectedOutput || ""))}</p></div></li>`).join("")}</ol>`;
       $("#agentPlanDrawerFooter").textContent = "历史记录不能确认、重试或修改当前方案。";
       $("#agentPlanDrawerActivity").textContent = "历史方案的步骤记录见“计划”页。";
       return;
@@ -1656,8 +1742,8 @@
         : "";
       const result = step.result && typeof step.result === "object" ? step.result : {};
       const stepDetail = status === "action_required"
-        ? String(result.message || step.expectedOutput || "等待你完成当前操作")
-        : String(stepStatusDetail(step) || step.expectedOutput || "等待执行");
+        ? String(legacyCopyText(result.message || step.expectedOutput) || "等待你完成当前操作")
+        : String(stepStatusDetail(step) || (["running", "waiting_operation"].includes(status) ? "正在处理，完成后将继续下一步" : status === "completed" ? "此步骤已完成" : step.expectedOutput || "等待执行"));
       const statusText = status === "action_required" && isAutomaticSubtitleRecovery(plan, progress)
         && String(step.id || "") === String(progress.current?.id || "")
         ? "自动恢复中" : stepDisplayStatus(step);
@@ -1754,7 +1840,8 @@
         if (!button.closest("footer") && button.textContent.trim() === primary.textContent.trim()) button.remove();
       });
     }
-    if (primary && !stickyConfirmation) {
+    const hasStickyAction = !planIsHistorical(plan) && ["awaiting_confirmation", "action_required", "preview_ready"].includes(status);
+    if (primary && !stickyConfirmation && hasStickyAction) {
       const cardPrimary = card.querySelector("footer button.primary");
       if (cardPrimary) {
         cardPrimary.hidden = true;
@@ -1793,7 +1880,7 @@
       const confirmationDetails = stickyConfirmation ? el?.querySelector(".assistant-plan-summary") : null;
       const action = {
         id: id,
-        eyebrow: stickyConfirmation ? "" : "待确认事项",
+        eyebrow: stickyConfirmation ? "" : "待你确认",
         summary: stickyConfirmation ? "方案待确认"
           : missingPreview ? "预览暂不可用"
           : incompleteCoverIntro ? "封面片头待生成"
@@ -1841,13 +1928,19 @@
     var cs = global.ClipTalkChatStream;
     if (!cs) return null;
     var id = `planning:${String(workspace?.id || "")}`;
+    const card = dock.cloneNode(true);
+    const elapsed = card.querySelector("[data-planning-elapsed]");
+    const elapsedText = elapsed?.textContent || "";
+    if (elapsed) elapsed.textContent = "";
     const el = cs.emit({
       id: id,
       kind: "planning",
-      html: dock?.innerHTML || "",
+      html: card.innerHTML || "",
       tone: "running",
       onRender: (node) => { bindPlanActions(node); },
     });
+    const liveElapsed = el?.querySelector("[data-planning-elapsed]");
+    if (liveElapsed) liveElapsed.textContent = elapsedText;
     moveStreamHostToConversationEnd(cs);
     return el;
   }
@@ -1888,7 +1981,7 @@
         : previews.length
           ? "审核样片已生成，可以在下方预览。"
           : cover
-            ? "封面已生成并保存为当前任务封面。点击下方按钮即可查看或下载。"
+            ? "封面已保存。"
           : `全部 ${progress.total} 个步骤均已完成，可在当前任务中查看结果。`
       : plan.status === "awaiting_confirmation" ? String(plan.summary || "检查计划范围后再开始分析或剪辑。")
         : plan.status === "failed" && hasPreservedOutput
@@ -1923,14 +2016,16 @@
     const statusHead = confirmCard
       ? `<header class="agent-plan-status-head agent-plan-result-head"><b><span class="result-check" aria-hidden="true">✓</span>剪辑方案已生成</b><em class="agent-plan-chip">${escapeHtml(chipText)}</em></header>`
       : `<header class="agent-plan-status-head"><small>${historical ? "上次剪辑方案" : "当前剪辑方案"}</small><b>${historical ? "历史记录" : escapeHtml(planDisplayStatus(plan))}</b></header>`;
-    const resultLead = resultStage && !planReviewPreviews(plan).length && !completedCover(plan)
+    const resultLead = plan.executionMode === "automatic_delivery" && plan.status === "completed"
+      ? "本次处理已完成。可以下载结果，或直接描述想调整的地方。"
+      : resultStage && !planReviewPreviews(plan).length && !completedCover(plan)
       ? "缺少可播放的预览数据，请查看方案记录或刷新任务。"
-      : resultHealthy ? "预览成片效果。确认无误后即可导出；如需调整，可继续输入修改要求。" : "";
+      : resultHealthy ? "" : "";
     const leadMarkup = awaitingConfirmation
       ? `<p class="agent-plan-lead">${escapeHtml(compactPlanText(planLead, 80))}</p>`
       : resultLead ? `<p class="agent-plan-lead">${escapeHtml(resultLead)}</p>` : "";
     const progressLine = `<p class="agent-plan-progress-summary">本次计划 · ${escapeHtml(planProgressLabel(progress))}</p>`;
-    const summaryText = historical ? "查看上次处理结果" : confirmCard && !awaitingConfirmation ? "查看处理详情" : escapeHtml(currentStageText(plan, progress));
+    const summaryText = historical ? "查看上次处理结果" : confirmCard && !awaitingConfirmation ? "方案详情" : escapeHtml(currentStageText(plan, progress));
     dock.innerHTML = `${statusHead}${leadMarkup}<div class="agent-plan-body">${resultStage ? qcSummaryMarkup(plan) : ""}<details class="assistant-plan-summary" ${awaitingConfirmation ? "open" : ""}><summary>${summaryText}</summary>${deliveryChecklistMarkup(plan)}${understandingMarkup}${controlMarkup}${progressLine}</details>${coverStatusMarkup(plan)}</div><footer class="${confirmCard ? "agent-plan-confirm-footer" : ""}">${planActionMarkup(plan, progress)}</footer>`;
     if (!historical && executionView(plan)) dock.innerHTML = executionProgressMarkup(plan);
     const formal = global.ClipTalkOrderedJobOutputs?.(job)?.filter(({ item, version }) => !item.previewOnly && !version.previewOnly).at(-1);
@@ -1958,7 +2053,8 @@
     const currentTool = String(progress?.current?.tool || "");
     if (
       String(plan?.status || "") !== "action_required"
-      || String(plan?.executionMode || "") !== "autonomous_review"
+      || progress?.current?.result?.action === "subtitle_overlap"
+      || !["autonomous_review", "automatic_delivery"].includes(String(plan?.executionMode || ""))
       || !["prepare_subtitle_review", "layout_subtitles"].includes(currentTool)
     ) return;
     const planId = String(plan.id || "");
@@ -2007,7 +2103,7 @@
     if (type === "step.started") return [step.title || toolLabel(step.tool), "开始执行"];
     if (type === "step.completed") return [step.title || toolLabel(step.tool), "执行完成"];
     if (type === "step.failed") return [step.title || toolLabel(step.tool), step.error || "执行失败"];
-    if (type === "action.required") return [step.title || "需要你处理", step.result?.message || "等待人工确认"];
+    if (type === "action.required") return [step.title || "需要你处理", legacyCopyText(step.result?.message) || "等待人工确认"];
     if (type === "action.resolved") return ["人工确认已保存", "计划继续执行"];
     if (type === "plan.replanned") return payload.material
       ? ["计划已重新整理", "调整后的步骤需要重新确认"]
@@ -2360,12 +2456,11 @@
       validating_plan: "确认执行依赖",
       plan_ready: "等待确认计划",
     };
-    dock.innerHTML = `<header><div class="agent-plan-dock-brand"><img src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><small>剪辑计划</small><strong>正在生成计划</strong><span><i aria-hidden="true"></i>确认前不会分析或渲染</span></div></div><b class="agent-planning-live"><i aria-hidden="true"></i>正在生成</b></header>${planControlMarkup({
+    dock.innerHTML = `<header><div class="agent-plan-dock-brand"><img src="/static/assets/cliptalk-director-icon.png?v=20260812-1" alt="" aria-hidden="true" /><div><small>剪辑计划</small><strong>正在生成计划</strong><span><i aria-hidden="true"></i>确认前不会分析或渲染</span></div></div><b class="agent-planning-live">正在生成</b></header>${planControlMarkup({
       goal: "等待确认剪辑目标",
       stage: phaseLabels[phase] || title,
       next: detail,
-      meta: elapsedLabel,
-    })}${planningFlowMarkup(phase, false, title, detail)}<footer><span>计划生成中</span><button type="button" class="agent-plan-text-action" data-agent-plan-open="activity">查看活动</button></footer>`;
+    })}${planningFlowMarkup(phase, false, title, detail)}<footer><time data-planning-elapsed>${escapeHtml(elapsedLabel)}</time><button type="button" class="agent-plan-text-action" data-agent-plan-open="activity">查看活动</button></footer>`;
     bindPlanActions(dock);
     if (streamActive()) {
       streamPlanningCard(workspace, dock);
@@ -2879,7 +2974,7 @@
     try {
       const workspace = await ensureWorkspace();
       const skillId = String(options.skillId ?? $("#agentSkillSelect")?.value ?? "") || null;
-      const executionMode = String(options.executionMode ?? $("#agentExecutionMode")?.value ?? "autonomous_review");
+      const executionMode = String(options.executionMode ?? $("#agentExecutionMode")?.value ?? "automatic_delivery");
       const uiContext = capturedContext;
       const signature = JSON.stringify({ goal, uiContext, workspaceId: workspace.id });
       const clientMessageId = retrySubmission?.signature === signature ? retrySubmission.id : (global.crypto?.randomUUID?.() || `message_${Date.now()}_${Math.random().toString(36).slice(2)}`);
@@ -3044,7 +3139,7 @@
     const select = $("#agentSkillSelect");
     const button = $("#agentSkillMenuButton");
     if (!select || !button) return;
-    const meta = $("#agentExecutionMode")?.value === "stepwise_review" ? "分步审核" : "自动执行";
+    const meta = { automatic_delivery: "自动完成", autonomous_review: "自动到预览", stepwise_review: "分步审核" }[$("#agentExecutionMode")?.value] || "自动完成";
     button.innerHTML = `<small>${escapeHtml(meta)}</small>`;
     button.setAttribute("aria-label", `${meta}，打开执行设置`);
     const skill = select.value ? String(select.selectedOptions?.[0]?.textContent || "已指定").trim() : "自动选择技能";

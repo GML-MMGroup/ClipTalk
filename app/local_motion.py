@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .media import probe_video
+from .media import probe_video, _run_cancellable
 
 
 ASPECT_SIZES: dict[str, tuple[int, int]] = {
@@ -34,7 +34,8 @@ def build_motion_graphics_html(
     width, height = motion_canvas_size(aspect)
     safe_title = html.escape(title.strip()[:120] or "精彩内容")
     safe_subtitle = html.escape(subtitle.strip()[:220])
-    safe_label = html.escape(label.strip()[:60] or "ClipTalk")
+    safe_label = html.escape(label.strip()[:60])
+    font_root = Path(__file__).resolve().parents[1] / "static/fonts"
     warm = theme == "warm"
     accent = "#ff965d" if not warm else "#f0b15f"
     green = "#9fd3b0" if not warm else "#6a9f73"
@@ -46,12 +47,12 @@ def build_motion_graphics_html(
 <style>
 @font-face {{
   font-family: "NotoSC";
-  src: url("../../static/fonts/noto-sans-sc-zh-700.woff2") format("woff2");
+  src: url("{(font_root / 'noto-sans-sc-zh-700.woff2').as_uri()}") format("woff2");
   font-weight: 700;
 }}
 @font-face {{
   font-family: "Inter";
-  src: url("../../static/fonts/inter-variable.woff2") format("woff2");
+  src: url("{(font_root / 'inter-variable.woff2').as_uri()}") format("woff2");
 }}
 :root {{
   --progress: 0;
@@ -112,6 +113,8 @@ html, body {{
   letter-spacing: .06em;
   text-transform: uppercase;
 }}
+.label:empty {{ display: none; }}
+.canvas > section {{ margin-top: auto; }}
 .title {{
   position: relative;
   max-width: 92%;
@@ -178,13 +181,14 @@ def render_html_motion_video(
     fps: int,
     ffmpeg: str,
     renderer_script: Path,
+    cancelled=None,
 ) -> Path:
     node = shutil.which("node")
     if not node:
         raise RuntimeError("Node.js 不可用，无法执行本地 HTML 动效渲染")
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    _run_cancellable(
         [
             node,
             str(renderer_script),
@@ -201,7 +205,7 @@ def render_html_motion_video(
             "--fps",
             str(fps),
         ],
-        check=True,
+        cancelled=cancelled,
         timeout=max(120.0, duration * fps * 4.0),
     )
     temporary = output_path.with_suffix(".tmp.mp4")
@@ -214,7 +218,7 @@ def render_html_motion_video(
         timeout=30,
     )
     encoder = "libx264" if " libx264 " in encoders.stdout else "mpeg4"
-    subprocess.run(
+    _run_cancellable(
         [
             ffmpeg,
             "-hide_banner",
@@ -237,7 +241,7 @@ def render_html_motion_video(
             "+faststart",
             str(temporary),
         ],
-        check=True,
+        cancelled=cancelled,
         timeout=max(120.0, duration * 20.0),
     )
     temporary.replace(output_path)
@@ -262,6 +266,7 @@ def compose_motion_intro_video(
     output_path: Path,
     ffmpeg: str,
     ffprobe: str,
+    cancelled=None,
 ) -> dict[str, Any]:
     """Prepend a local motion clip to a video without mutating the source."""
     intro = probe_video(intro_path, ffprobe)
@@ -302,7 +307,7 @@ def compose_motion_intro_video(
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
     ])
     try:
-        subprocess.run(command, check=True, timeout=max(300.0, (source.duration + intro.duration) * 10.0))
+        _run_cancellable(command, cancelled=cancelled, timeout=max(300.0, (source.duration + intro.duration) * 10.0))
         rendered = probe_video(temporary, ffprobe)
         if rendered.duration < source.duration + intro.duration - .45:
             raise RuntimeError("动态图文片头成片时长校验失败")

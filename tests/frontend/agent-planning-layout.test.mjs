@@ -15,6 +15,70 @@ const appSource = readFileSync(new URL("../../static/app.js", import.meta.url), 
 const timelinePresentationJs = readFileSync(new URL("../../static/timeline-presentation.js", import.meta.url), "utf8");
 const agent = readFileSync(new URL("../../static/agent-workspace.js", import.meta.url), "utf8");
 
+test("ambiguous identity opens the matching chooser and only offers continue after selection", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  try {
+    await page.setContent('<section id="agentPlanDock"></section><textarea id="chatInput"></textarea>');
+    await page.evaluate(() => {
+      window.__job = { id: "job_identity", revision: 1, request: {}, agent: { workspaceId: "ws_identity", planId: "plan_identity", status: "action_required" } };
+      window.__plan = { id: "plan_identity", workspaceId: "ws_identity", status: "action_required", executionMode: "automatic_delivery",
+        steps: [{ id: "choose", tool: "select_people", status: "action_required", result: { actionRequired: true, action: "identity_selection" } }] };
+      window.ClipTalkCurrentJobId = () => window.__job.id;
+      window.ClipTalkCurrentJobSnapshot = () => window.__job;
+      window.ClipTalkOpenIdentitySelection = kind => { window.__opened = kind; };
+      window.EventSource = class { addEventListener() {} close() {} };
+      window.ClipTalkApi = { requestJson: async () => ({ workspace: { id: "ws_identity", jobId: "job_identity", activePlanId: "plan_identity" }, plans: [window.__plan] }) };
+    });
+    await page.addScriptTag({ content: agent });
+    await page.evaluate(() => window.ClipTalkAgentWorkspace.resumeForJob(window.__job));
+    assert.equal(await page.locator('#agentPlanDock [data-agent-action-resolve]').count(), 0);
+    await page.locator('#agentPlanDock [data-agent-identity-open]').click();
+    assert.equal(await page.evaluate(() => window.__opened), "person");
+    await page.evaluate(async () => {
+      window.__job.request.contentSearchPersonTarget = { personIds: ["p1"] };
+      window.__job.revision = 2;
+      await window.ClipTalkAgentWorkspace.resumeForJob(window.__job);
+    });
+    assert.equal(await page.locator('#agentPlanDock [data-agent-action-resolve]').textContent(), "按此选择继续");
+  } finally { await browser.close(); }
+});
+
+test("current automatic delivery offers the final download without asking to export again", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<section id="agentPlanDock"></section><textarea id="chatInput"></textarea>');
+    await page.evaluate(() => {
+      const plan = { id: "plan_final", workspaceId: "ws_final", status: "completed", executionMode: "automatic_delivery",
+        goal: "剪辑视频", steps: [
+          { id: "preview", tool: "render_review_preview", status: "completed", result: { artifact: {
+            kind: "review_preview_batch", previews: [{ filename: "review.mp4", previewUrl: "/review.mp4" }],
+          } } },
+          { id: "delivery", tool: "deliver_current_plan", status: "completed", result: { artifact: {
+            kind: "delivery_master", outputs: [{ filename: "final.mp4" }],
+          } } },
+        ] };
+      window.__job = { id: "job_final", presentation: { key: "exported" }, agent: { workspaceId: "ws_final", planId: plan.id, status: "completed" } };
+      window.ClipTalkCurrentJobId = () => "job_final";
+      window.ClipTalkCurrentJobSnapshot = () => window.__job;
+      window.EventSource = class { addEventListener() {} close() {} };
+      window.ClipTalkApi = { requestJson: async () => ({ workspace: {
+        id: "ws_final", jobId: "job_final", status: "completed", activePlanId: plan.id,
+      }, plans: [plan] }) };
+    });
+    await page.addScriptTag({ content: agent });
+    await page.evaluate(() => window.ClipTalkAgentWorkspace.resumeForJob(window.__job));
+    const dock = page.locator("#agentPlanDock");
+    assert.equal(await dock.locator('a[download]').count(), 1);
+    assert.match(await dock.locator('a[download]').getAttribute("href"), /job_final\/outputs\/final\.mp4\?download=1/);
+    assert.doesNotMatch(await dock.textContent(), /等待人工复核样片|确认无误后即可导出|缺少可播放/);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("generated segment thumbnails remain visible while the player shows the source video", () => {
   assert.match(workbenchV4Source, /const adoptedMode = Boolean\(adoptedSegments\.length\)/);
   assert.doesNotMatch(
@@ -1439,7 +1503,7 @@ test("completed composite plan opens final cover-intro vertical preview before c
     assert.match(dockText, /播放带封面片头的9:16预览视频/);
     assert.match(dockText, /导出成片/);
     assert.match(dockText, /待确认/);
-    assert.match(dockText, /预览成片效果。确认无误后即可导出/);
+    assert.match(dockText, /剪辑方案已生成/);
     assert.doesNotMatch(dockText, /审核样片待确认生成成片/);
     assert.match(dockText, /查看封面/);
     assert.doesNotMatch(dockText, /打开封面时间轴/);
